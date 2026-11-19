@@ -194,6 +194,23 @@ func _apply_route(t: float) -> void:
 	camera.look_at(look)
 	camera.fov = lerpf(float(left.get("fov", 70.0)), float(right.get("fov", 70.0)), f)
 
+func _hardware_info() -> Dictionary:
+	var info := {
+		"os": OS.get_name(),
+		"os_version": OS.get_version(),
+		"processor": OS.get_processor_name(),
+		"processor_count": OS.get_processor_count(),
+		"display_driver": DisplayServer.get_name(),
+		"rendering_method": str(ProjectSettings.get_setting("rendering/renderer/rendering_method", "unknown")),
+	}
+	if RenderingServer.has_method("get_video_adapter_name"):
+		info["video_adapter"] = RenderingServer.get_video_adapter_name()
+	if RenderingServer.has_method("get_video_adapter_vendor"):
+		info["video_vendor"] = RenderingServer.get_video_adapter_vendor()
+	if RenderingServer.has_method("get_video_adapter_api_version"):
+		info["video_api"] = RenderingServer.get_video_adapter_api_version()
+	return info
+
 func _percentile(sorted_values: Array[float], fraction: float) -> float:
 	if sorted_values.is_empty():
 		return 0.0
@@ -234,6 +251,7 @@ func _finish() -> void:
 		"warmup_s": warmup_s,
 		"headless": DisplayServer.get_name() == "headless",
 		"engine": Engine.get_version_info(),
+		"hardware": _hardware_info(),
 		"frames": sorted.size(),
 		"results": {
 			"fps_avg": 1000.0 / maxf(frame_avg, 0.001),

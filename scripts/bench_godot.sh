@@ -103,6 +103,7 @@ result = {
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "runs": runs,
     "headless": records[0].get("headless", False),
+    "hardware": records[0].get("hardware", {}),
     "route": records[0].get("route"),
     "results": {
         "fps_avg": med("fps_avg"),

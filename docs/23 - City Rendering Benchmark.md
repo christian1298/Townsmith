@@ -47,6 +47,9 @@ CITY_TIER=late GODOT=/path/to/godot ./scripts/bench_godot.sh 1 5 \
 
 # Fast structural smoke
 GODOT=/path/to/godot ./scripts/smoke_city.sh
+
+# Full Phase 0 target run: core + streaming + all city tiers
+GODOT=/path/to/godot ./scripts/bench_phase0.sh
 ```
 
 `bench_godot.sh` writes `benchmarks/results/godot_<route>_summary.json` and includes city build/layout/buffer times plus the full city stats.
