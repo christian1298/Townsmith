@@ -67,7 +67,8 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 - Deltas survive chunk unload/reload and a binary round trip.
 - Negative chunk coordinates use floor division and are tested at the seam.
 - The Godot preview streams multiple 256 m chunks; the water plane is a placeholder.
-- Multi-chunk meshing uses a neighbor-agnostic LOD sampler. Chunk-boundary faces are still treated as exposed.
+- Multi-chunk meshing uses a seam-aware world-height sampler. Matching boundary faces are culled even when the neighbor chunk has not been loaded.
+- Headless streaming route p99 is ~16.2 ms after boundary culling (not render-representative).
 
 ### Active agents
 
@@ -122,15 +123,15 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 | Terrain LOD 2, 256 m chunk | 65,536 cells | — | 25,327 quads | ~0.39 ms |
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **98 tests**: 24 voxel, 44 world, 26 simulation, and 4 bridge tests.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **101 tests**: 24 voxel, 47 world, 26 simulation, and 4 bridge tests.
 
 ## 3. Known limitations
 
 - Chunk boundaries are treated as exposed; adjacent chunks will show internal faces until a neighbor sampler or multi-chunk mesher exists.
 - The Godot preview uses one material override; per-material surfaces/UV atlas mapping is not implemented.
 - Chunk generation and meshing run on a fixed Rust worker pool (up to 4 threads). The Godot main thread converts finished `TerrainMesh` values into packed `ArrayMesh` resources; uploads no longer call `SurfaceTool` per vertex, but large meshes still enter the renderer on the main thread.
-- Adjacent chunks emit coplanar boundary walls at equal heights, causing z-fighting and doubled geometry until neighbor-aware culling lands.
-- LOD is distance-based (mesh stride), not a full imposter/HLOD pipeline; chunk-boundary faces are still not culled against neighbors.
+- LOD is distance-based (mesh stride), not a full imposter/HLOD pipeline. Adjacent chunks at different LOD steps can still show small cracks or z-fighting at the seam.
+- Boundary culling samples the deterministic generator, not live edited heights; edits at a chunk edge require a neighbor remesh to update the seam.
 - No water shader yet; the water plane is a placeholder.
 - No binary save format; palette/RLE and terrain deltas exist only as in-memory structs and a phase 0 blob.
 - The Godot benchmark has single-chunk and multi-chunk terrain routes; it is not the Early/Mid/Late city benchmark yet, and headless frame times are not render measurements.
@@ -140,7 +141,7 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 
 ## 4. Next steps
 
-1. Add neighbor-aware chunk-boundary culling and a real water shader.
+1. Add a real water shader and stitch LOD seams.
 2. Build the Early/Mid/Late city benchmark scenes and routes.
 3. Measure the 30 FPS 1M rendering target on 8-core/16-thread + RTX 3060-class hardware.
 4. Decide D-003 (Godot + Rust) from measured results.

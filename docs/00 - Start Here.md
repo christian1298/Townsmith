@@ -31,7 +31,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Item | State |
 |---|---|
 | Phase | Phase 0 spike in progress |
-| Code | **Phase 0 in progress:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, 24 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, terrain mesh + LOD, 44 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, and a Godot 4.7 GDExtension bridge that streams terrain chunks on Rust worker threads with distance LOD (4 bridge tests). Headless smoke passes. |
+| Code | **Phase 0 in progress:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, 24 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, seam-aware terrain mesh + LOD, 47 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, and a Godot 4.7 GDExtension bridge that streams terrain chunks on Rust worker threads with distance LOD (4 bridge tests). Headless smoke passes. |
 | Engine | **Proposed:** Godot 4 shell + Rust core. Pending a 3–4 week Phase 0 spike covering voxels, world streaming, and 1M cohorts. See [[04 - Engine and Stack]] and [[10 - Decisions]]. |
 | Team | **Accepted:** 2–3 full-time generalists; Rust/Godot experience or willingness to learn. |
 | Language | **Accepted:** Rust is the primary implementation language from Phase 0; GDScript is shell/UI only; C++ is the fallback. See D-011. |
@@ -47,7 +47,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with 10 cm building detail is tractable. The cohort model and world streaming must be proven in Phase 0. See [[03 - Voxel and Scale]], [[07 - Simulation and AI]], and [[09 - Open Questions]]. |
-| Next action | Add neighbor-aware chunk-boundary culling, then build the Early/Mid/Late city scenes and measure the 30 FPS 1M rendering target. See [[08 - Roadmap]]. |
+| Next action | Add a real water shader, then build the Early/Mid/Late city scenes and measure the 30 FPS 1M rendering target. See [[08 - Roadmap]]. |
 
 > [!warning] This is a plan, not a commitment
 > Numbers in these docs are **planning targets**, not measured results. Anything marked *Assumption* or *Proposed* must be validated before it becomes an accepted decision.
@@ -153,7 +153,7 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 ## Next actions
 
-1. Add neighbor-aware chunk-boundary culling and a real water shader.
+1. Add a real water shader and stitch LOD seams.
 2. Reduce main-thread mesh upload cost (array meshes instead of per-vertex SurfaceTool).
 3. Build the Early/Mid/Late city benchmark scenes and routes.
 4. Measure the 30 FPS 1M rendering target on 8-core/16-thread + RTX 3060-class hardware.

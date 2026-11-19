@@ -61,7 +61,27 @@ pub fn terrain_mesh(chunk: &WorldChunk) -> TerrainMesh {
 /// border and never place a vertex outside the 256 m chunk.
 #[must_use]
 pub fn terrain_mesh_lod(chunk: &WorldChunk, step: usize) -> TerrainMesh {
+    terrain_mesh_lod_with_height(chunk, step, |_, _| 0)
+}
+
+/// Build a terrain mesh and sample out-of-chunk heights from a world sampler.
+///
+/// This is the seam-aware variant used by the streaming shell. The sampler is
+/// called only for neighbor samples outside the chunk; inside the chunk the
+/// chunk's own heights are used. Pass the deterministic world generator's
+/// `height_at` so adjacent chunks agree at the seam even when the neighbor
+/// chunk has not been loaded into memory yet.
+#[must_use]
+pub fn terrain_mesh_lod_with_height<F>(
+    chunk: &WorldChunk,
+    step: usize,
+    outside_height: F,
+) -> TerrainMesh
+where
+    F: Fn(i64, i64) -> u16,
+{
     let step = step.clamp(1, WORLD_CHUNK_SIZE);
+    let origin = chunk.coord().origin_m();
     let mut mesh = TerrainMesh::default();
 
     for z in (0..WORLD_CHUNK_SIZE).step_by(step) {
@@ -110,7 +130,7 @@ pub fn terrain_mesh_lod(chunk: &WorldChunk, step: usize) -> TerrainMesh {
             ];
 
             for (nx, nz, normal, wx, wz, span) in neighbors {
-                let neighbor_height = neighbor_height(chunk, nx, nz);
+                let neighbor_height = sample_height(chunk, origin, &outside_height, nx, nz);
                 if neighbor_height < height {
                     push_wall_span(
                         &mut mesh,
@@ -146,9 +166,18 @@ fn dim(color: [f32; 3]) -> [f32; 3] {
     [color[0] * 0.72, color[1] * 0.72, color[2] * 0.72]
 }
 
-fn neighbor_height(chunk: &WorldChunk, x: isize, z: isize) -> u16 {
+fn sample_height<F>(
+    chunk: &WorldChunk,
+    origin: crate::coords::TerrainPos,
+    outside_height: &F,
+    x: isize,
+    z: isize,
+) -> u16
+where
+    F: Fn(i64, i64) -> u16,
+{
     if x < 0 || z < 0 || x >= WORLD_CHUNK_SIZE as isize || z >= WORLD_CHUNK_SIZE as isize {
-        0
+        outside_height(origin.x + x as i64, origin.z + z as i64)
     } else {
         chunk.height(x as usize, z as usize).unwrap_or(0)
     }
@@ -377,6 +406,27 @@ mod tests {
             assert_eq!(vertex.position[0] as usize % step, 0);
             assert_eq!(vertex.position[2] as usize % step, 0);
         }
+    }
+
+    #[test]
+    fn seam_sampler_culls_matching_neighbor_walls() {
+        let chunk = flat_chunk(24);
+        let mesh = terrain_mesh_lod_with_height(&chunk, 1, |_, _| 24);
+        assert_eq!(mesh.quad_count(), WORLD_CHUNK_CELLS);
+    }
+
+    #[test]
+    fn seam_sampler_keeps_lower_neighbor_walls() {
+        let chunk = flat_chunk(24);
+        let mesh = terrain_mesh_lod_with_height(&chunk, 1, |x, _| if x >= 256 { 20 } else { 24 });
+        assert_eq!(mesh.quad_count(), WORLD_CHUNK_CELLS + WORLD_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn seam_sampler_is_used_for_lod_perimeter() {
+        let chunk = flat_chunk(24);
+        let mesh = terrain_mesh_lod_with_height(&chunk, 2, |_, _| 24);
+        assert_eq!(mesh.quad_count(), 128 * 128);
     }
 
     fn expected_flat_quads(step: usize) -> usize {
