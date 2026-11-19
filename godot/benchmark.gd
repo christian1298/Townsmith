@@ -1,8 +1,15 @@
 extends Node3D
 
 const TerrainStreamer = preload("res://terrain_streamer.gd")
+const CityRenderer = preload("res://city_renderer.gd")
+
+const CITY_TIERS := {"early": 0, "mid": 1, "late": 2}
+const CITY_SEED := 2026
 
 var streamer
+var city
+var city_tier := ""
+var city_tier_index := -1
 var route: Dictionary = {}
 var waypoints: Array = []
 var route_id := "unknown"
@@ -23,6 +30,13 @@ func _ready() -> void:
 	output_path = _arg(args, "--output", _project_root().path_join("benchmarks/results/godot_phase0_latest.json"))
 	var duration_override := _arg(args, "--duration", "")
 	var warmup_override := _arg(args, "--warmup", "")
+	city_tier = _arg(args, "--city-tier", "")
+	if city_tier != "":
+		if not CITY_TIERS.has(city_tier):
+			push_error("Unknown --city-tier '%s'; expected early, mid, or late" % city_tier)
+			get_tree().quit(2)
+			return
+		city_tier_index = int(CITY_TIERS[city_tier])
 
 	if not _load_route(route_path):
 		get_tree().quit(1)
@@ -37,6 +51,9 @@ func _ready() -> void:
 		warmup_s = float(route.get("warmup_seconds", 3.0))
 
 	_build_world()
+	if city != null and city.stats().has("error"):
+		get_tree().quit(1)
+		return
 	last_usec = Time.get_ticks_usec()
 
 func _arg(args: PackedStringArray, name: String, fallback: String) -> String:
@@ -66,6 +83,13 @@ func _load_route(path: String) -> bool:
 	return true
 
 func _build_world() -> void:
+	if city_tier != "":
+		_build_city()
+	else:
+		_build_terrain()
+	_add_environment()
+
+func _build_terrain() -> void:
 	streamer = TerrainStreamer.new()
 	streamer.seed = 2026
 	streamer.view_radius = 2
@@ -80,6 +104,36 @@ func _build_world() -> void:
 	_apply_route(0.0)
 	streamer.bind_camera(camera)
 
+func _build_city() -> void:
+	city = CityRenderer.new()
+	city.name = "CityRenderer"
+	add_child(city)
+	city.build(city_tier_index, CITY_SEED)
+
+	camera = Camera3D.new()
+	camera.current = true
+	camera.near = 1.0
+	# Cover the whole city plus the route's outside-in approach. The Late tier
+	# is 8 km across, so the corner-to-corner view is ~11 km.
+	camera.far = maxf(1500.0, city.extent_m() * 2.5)
+	add_child(camera)
+	_apply_route(0.0)
+
+	var stats: Dictionary = city.stats()
+	if stats.has("error"):
+		push_error("City benchmark build failed: " + str(stats["error"]))
+		return
+	print("CITY tier=%s seed=%d buildings=%d population=%d build_ms=%.1f layout_ms=%.1f buffer_ms=%.1f" % [
+		stats.get("tier", city_tier),
+		int(stats.get("seed", CITY_SEED)),
+		int(stats.get("buildings", 0)),
+		int(stats.get("population", 0)),
+		float(stats.get("build_ms", 0.0)),
+		float(stats.get("layout_ms", 0.0)),
+		float(stats.get("buffer_ms", 0.0)),
+	])
+
+func _add_environment() -> void:
 	var light := DirectionalLight3D.new()
 	light.rotation_degrees = Vector3(-50.0, -30.0, 0.0)
 	light.light_energy = 1.2
@@ -170,7 +224,8 @@ func _finish() -> void:
 	var result := {
 		"format_version": 1,
 		"suite": "godot_route",
-		"scene": "phase0_terrain",
+		"scene": "phase0_city" if city != null else "phase0_terrain",
+		"city": city.stats() if city != null else null,
 		"chunks_loaded": streamer.chunk_count() if streamer != null else 0,
 		"streaming": streamer.stats() if streamer != null else {},
 		"route": route_id,

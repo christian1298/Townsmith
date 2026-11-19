@@ -110,6 +110,15 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 - The smoke builds the Late layout and asserts 100,000 buildings, every packed array length, bounds, tier, and the seed-2026 checksum.
 - This is a rendering stress fixture, not voxel geometry or simulated occupancy. See [[22 - Synthetic City Layout]].
 
+### City MultiMesh rendering
+
+- `godot/city_renderer.gd` builds one `MultiMeshInstance3D` from the bridge arrays; no per-building nodes.
+- Instance buffer: row-major 3 × 4 transform + RGBA color, 16 floats per building.
+- One opaque vertex-colored material, no shadows, no GI, no LOD.
+- Early/Mid/Late routes; `CITY_TIER` selects the layout in `bench_godot.sh`.
+- Debug-build headless build times: Early ~0.9 ms, Mid ~12.4 ms, Late ~111.8 ms (layout ~84 ms + buffer ~25 ms). 100k instances use 6.4 MB.
+- Headless FPS is not render-representative. See [[23 - City Rendering Benchmark]].
+
 ### Benchmark harness v0
 
 - `scripts/bench_core.sh` runs meshing, worldgen, terrain, and cohort benchmarks three times and writes a median JSON summary.
@@ -160,8 +169,8 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 ## 4. Next steps
 
 1. Add a depth-based shoreline/foam pass on top of the water shader.
-2. Build the Early/Mid/Late city benchmark scenes and routes.
-3. Measure the 30 FPS 1M rendering target on 8-core/16-thread + RTX 3060-class hardware.
+2. Run the Early/Mid/Late city routes on the 8-core/16-thread + RTX 3060-class target with a display.
+3. Measure the 30 FPS 1M-population (100k-building) rendering target and record FPS/1% lows/hitches.
 4. Decide D-003 (Godot + Rust) from measured results.
 
 ## 5. Commands
@@ -173,6 +182,8 @@ cargo test -p core_voxel
 GODOT=/path/to/godot ./scripts/run_godot.sh
 GODOT=/path/to/godot ./scripts/smoke_godot.sh
 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_streaming_flyover.json
+CITY_TIER=late GODOT=/path/to/godot ./scripts/bench_godot.sh 1 5 benchmarks/routes/phase0_city_late.json
+GODOT=/path/to/godot ./scripts/smoke_city.sh
 cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort

@@ -1,0 +1,13 @@
+{
+  "id": "phase0_city_early_v1",
+  "description": "Phase 0 synthetic Early settlement flyover: 600 m city, 200 buildings.",
+  "duration_seconds": 30,
+  "warmup_seconds": 3,
+  "waypoints": [
+    { "t": 0.0, "position": [0, 90, 520], "look_at": [0, 25, 0], "fov": 70 },
+    { "t": 0.25, "position": [220, 110, 320], "look_at": [0, 30, 0], "fov": 68 },
+    { "t": 0.5, "position": [300, 140, 0], "look_at": [0, 35, 0], "fov": 65 },
+    { "t": 0.75, "position": [120, 115, -300], "look_at": [0, 30, 0], "fov": 72 },
+    { "t": 1.0, "position": [0, 150, -520], "look_at": [0, 20, 0], "fov": 70 }
+  ]
+}

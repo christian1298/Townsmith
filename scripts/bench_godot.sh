@@ -6,12 +6,23 @@ GODOT_BIN="${GODOT:-godot}"
 RUNS="${1:-3}"
 DURATION="${2:-5}"
 ROUTE="${3:-$ROOT/benchmarks/routes/phase0_flyover.json}"
+CITY_TIER="${CITY_TIER:-}"
 if [[ "$ROUTE" != /* ]]; then
 	ROUTE="$ROOT/$ROUTE"
 fi
 if [[ ! -f "$ROUTE" ]]; then
 	echo "Benchmark route not found: $ROUTE" >&2
 	exit 2
+fi
+CITY_ARGS=()
+if [[ -n "$CITY_TIER" ]]; then
+	case "$CITY_TIER" in
+		early|mid|late) CITY_ARGS+=(--city-tier "$CITY_TIER") ;;
+		*)
+			echo "CITY_TIER must be early, mid, or late (got '$CITY_TIER')" >&2
+			exit 2
+			;;
+	esac
 fi
 OUT_DIR="$ROOT/benchmarks/results"
 mkdir -p "$OUT_DIR"
@@ -36,7 +47,7 @@ for run in $(seq 1 "$RUNS"); do
 	OUT="$TMP/run_$run.json"
 	"$GODOT_BIN" "${GODOT_FLAGS[@]}" --path "$ROOT/godot" res://benchmark.tscn -- \
 		--route "$ROUTE" \
-		--output "$OUT" --duration "$DURATION" --warmup 1 >/dev/null
+		--output "$OUT" --duration "$DURATION" --warmup 1 "${CITY_ARGS[@]}" >/dev/null
 done
 
 if [[ "$(basename "$ROUTE")" == "phase0_flyover.json" ]]; then
@@ -64,6 +75,7 @@ def med_stream(key):
     return statistics.median(record.get("streaming", {}).get(key, 0) for record in records)
 
 chunks = [int(record.get("chunks_loaded", 0)) for record in records]
+city_records = [record.get("city") for record in records if record.get("city")]
 
 result = {
     "format_version": 1,
@@ -88,6 +100,14 @@ result = {
         "chunks_dropped_median": med_stream("chunks_dropped"),
     },
 }
+if city_records:
+    city = city_records[0]
+    result["city"] = city
+    result["results"].update({
+        "city_build_ms": statistics.median(float(item.get("build_ms", 0.0)) for item in city_records),
+        "city_layout_ms": statistics.median(float(item.get("layout_ms", 0.0)) for item in city_records),
+        "city_buffer_ms": statistics.median(float(item.get("buffer_ms", 0.0)) for item in city_records),
+    })
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps(result, indent=2) + "\n")
 print(json.dumps(result, indent=2))

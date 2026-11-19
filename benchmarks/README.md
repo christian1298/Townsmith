@@ -25,6 +25,9 @@ Routes:
   distance-based mesh LOD (1/2/4). Its summary is
   `results/godot_phase0_streaming_flyover_summary.json` and includes
   `chunks_loaded_min/median/max`.
+- `phase0_city_early.json` / `_mid` / `_late` — synthetic MultiMesh cities with
+  200 / 10,000 / 100,000 buildings. Set `CITY_TIER` when running the Godot
+  benchmark; see `docs/23 - City Rendering Benchmark.md`.
 
 The routes are deterministic and frame-rate independent: the camera advances by
 elapsed time, not frame count. Headless runs validate the route and JSON shape,
