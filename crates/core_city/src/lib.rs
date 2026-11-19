@@ -692,17 +692,26 @@ mod tests {
     const CELL_M: f32 = 32.0;
 
     #[test]
-    fn counts_are_within_ten_percent_of_targets() {
+    fn counts_match_tier_targets_exactly() {
         for tier in CityTier::ALL {
             let layout = CityLayout::generate(tier, SEED).expect("layout generates");
             let target = tier.target_buildings();
-            let tolerance = target / 10;
             let actual = layout.building_count() as u32;
-            assert!(
-                actual.abs_diff(target) <= tolerance,
-                "{tier}: {actual} buildings, target {target} ± {tolerance}"
-            );
+            assert_eq!(actual, target, "{tier}: building count");
             assert_eq!(layout.population, tier.target_population());
+        }
+    }
+
+    #[test]
+    fn golden_checksums_pin_the_fixture_layouts() {
+        let expected = [
+            (CityTier::Early, 16_539_281_832_476_610_770_u64),
+            (CityTier::Mid, 1_997_117_545_588_945_985_u64),
+            (CityTier::Late, 13_094_279_148_273_860_104_u64),
+        ];
+        for (tier, checksum) in expected {
+            let layout = CityLayout::generate(tier, SEED).expect("layout generates");
+            assert_eq!(layout.checksum(), checksum, "{tier}: checksum drifted");
         }
     }
 

@@ -72,15 +72,15 @@ Current local generation medians:
 
 | Tier | Buildings | Generation |
 |---|---:|---:|
-| Early | 200 | ~0.01 ms |
-| Mid | 10,000 | ~0.57 ms |
-| Late | 100,000 | ~4.63 ms |
+| Early | 200 | ~0.004 ms |
+| Mid | 10,000 | ~0.52 ms |
+| Late | 100,000 | ~5.13 ms |
 
-These are layout-generation times only. Rendering performance is measured in the Godot route benchmark.
+These are warm-up + five-iteration medians; rendering performance is measured in the Godot route benchmark.
 
 ## 6. Tests
 
-`core_city` has 8 tests:
+`core_city` has 9 tests:
 
 - counts within 10% of targets;
 - same seed → identical layout;
@@ -103,5 +103,5 @@ These are layout-generation times only. Rendering performance is measured in the
 
 1. Godot MultiMesh renderer fed by the layout.
 2. Early/Mid/Late camera routes.
-3. Measure 1M building rendering on the RTX 3060-class target.
+3. Measure the 1M-population (100,000-building) city on the RTX 3060-class target.
 4. Replace the synthetic boxes with blueprint/LOD meshes as the real city pipeline lands.
