@@ -10,11 +10,14 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-use godot::builtin::{PackedColorArray, PackedInt32Array, PackedVector3Array, VarArray, Variant};
+use godot::builtin::{
+    PackedColorArray, PackedFloat32Array, PackedInt32Array, PackedVector3Array, VarArray, Variant,
+};
 use godot::classes::mesh::{ArrayType, PrimitiveType};
 use godot::classes::{ArrayMesh, SurfaceTool};
 use godot::prelude::*;
 
+use core_city::{CityLayout, CityTier};
 use core_voxel::demo;
 use core_voxel::mesh::greedy_mesh;
 use core_world::{
@@ -204,6 +207,29 @@ impl TownsmithCore {
         GString::from(env!("CARGO_PKG_VERSION"))
     }
 
+    /// Generate a synthetic city layout for the rendering benchmark.
+    ///
+    /// `tier` is `0` = Early, `1` = Mid, `2` = Late. Returns parallel packed
+    /// arrays for a MultiMesh: positions (box centers), sizes (full extents),
+    /// colors, and building kinds. On failure, returns an `error` string.
+    #[func]
+    fn build_city_layout(&self, tier: i64, seed: i64) -> VarDictionary {
+        let tier = match tier {
+            0 => CityTier::Early,
+            1 => CityTier::Mid,
+            _ => CityTier::Late,
+        };
+        match CityLayout::generate(tier, seed as u64) {
+            Ok(layout) => city_layout_to_dictionary(&layout),
+            Err(error) => {
+                let message = error.to_string();
+                let mut result = VarDictionary::new();
+                result.set("error", &GString::from(&message).to_variant());
+                result
+            }
+        }
+    }
+
     /// Build the deterministic Phase 0 hut and return it as a Godot mesh.
     #[func]
     fn build_demo_mesh(&self) -> Gd<ArrayMesh> {
@@ -382,6 +408,48 @@ fn terrain_mesh_to_godot(buffers: &TerrainMesh) -> Gd<ArrayMesh> {
     let mut mesh = ArrayMesh::new_gd();
     mesh.add_surface_from_arrays(PrimitiveType::TRIANGLES, &arrays);
     mesh
+}
+
+fn city_layout_to_dictionary(layout: &CityLayout) -> VarDictionary {
+    let mut positions = PackedVector3Array::new();
+    let mut sizes = PackedVector3Array::new();
+    let mut colors = PackedColorArray::new();
+    let mut kinds = PackedInt32Array::new();
+    for building in &layout.buildings {
+        positions.push(Vector3::new(
+            building.position[0],
+            building.position[1],
+            building.position[2],
+        ));
+        sizes.push(Vector3::new(
+            building.size[0],
+            building.size[1],
+            building.size[2],
+        ));
+        colors.push(Color::from_rgb(
+            building.color[0],
+            building.color[1],
+            building.color[2],
+        ));
+        kinds.push(building.kind as i32);
+    }
+
+    let mut bounds = PackedFloat32Array::new();
+    for component in layout.bounds_m {
+        bounds.push(component);
+    }
+
+    let mut result = VarDictionary::new();
+    result.set("tier", &GString::from(layout.tier.as_str()).to_variant());
+    result.set("seed", layout.seed as i64);
+    result.set("population", layout.population as i64);
+    result.set("buildings", layout.building_count() as i64);
+    result.set("bounds", &bounds.to_variant());
+    result.set("positions", &positions.to_variant());
+    result.set("sizes", &sizes.to_variant());
+    result.set("colors", &colors.to_variant());
+    result.set("kinds", &kinds.to_variant());
+    result
 }
 
 #[cfg(test)]
