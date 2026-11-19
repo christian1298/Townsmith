@@ -1,0 +1,11 @@
+[package]
+name = "core_world"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Deterministic worldgen, terrain chunks, edit deltas, and streaming for Townsmith"
+
+[lib]
+name = "core_world"
+path = "src/lib.rs"

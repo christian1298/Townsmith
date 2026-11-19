@@ -12,3 +12,4 @@ path = "src/main.rs"
 
 [dependencies]
 core_voxel.workspace = true
+core_world.workspace = true

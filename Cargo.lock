@@ -7,6 +7,10 @@ name = "core_voxel"
 version = "0.1.0"
 
 [[package]]
+name = "core_world"
+version = "0.1.0"
+
+[[package]]
 name = "gdextension-api"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -150,6 +154,7 @@ name = "townsmith-bench"
 version = "0.1.0"
 dependencies = [
  "core_voxel",
+ "core_world",
 ]
 
 [[package]]
