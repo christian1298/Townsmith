@@ -73,12 +73,12 @@ Layout is slower than the release-mode `city_layout` microbenchmark because the 
 
 A display-backed run on a developer machine (RTX 4080, Ryzen 9 7950X, 1920×1080, vsync off, GL Compatibility, 3 runs × 5 s) produced:
 
-| Route | Avg FPS | 1% low | 16 ms hitches |
+| Route | Median FPS | 1% low | 16 ms hitches |
 |---|---:|---:|---:|
 | Terrain streaming | 2,841 | 415 | 4 |
 | City Early (200) | 4,619 | 478 | 0 |
 | City Mid (10k) | 3,046 | 376 | 0 |
-| City Late (100k) | 585 | 300 | 0 |
+| City Late (100k) | 766 | 435 | 0 |
 
 The baseline is stored in `benchmarks/baselines/rtx4080_1080p_gl_compatibility.json`. It is **not** the target 3060-class result, and the boxes are the best case: no voxel geometry, shadows, GI, or LOD. It proves the MultiMesh path and the benchmark harness, not the final city renderer.
 
