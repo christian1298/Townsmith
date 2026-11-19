@@ -44,7 +44,7 @@ func _ready() -> void:
 
 func _process(_delta: float) -> void:
 	smoke_frames += 1
-	if smoke_reported or smoke_frames < 6:
+	if smoke_reported or smoke_frames < 30:
 		return
 	smoke_reported = true
 	var lods: Array[int] = streamer.loaded_lods()

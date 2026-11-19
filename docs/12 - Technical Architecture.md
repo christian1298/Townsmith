@@ -210,6 +210,7 @@ pub enum Event {
 
 - **No Godot API calls from worker threads or the sim thread.** Only the main thread touches `Node`, `Resource`, `SceneTree`, and the rendering server.
 - **Mesh pipeline:** core worker builds vertex/index buffers → main thread creates `ArrayMesh` (or `RenderingServer` mesh) → scene assigns it. Budget uploads per frame.
+- **Phase 0 implementation:** `godot_ext` keeps a fixed pool of up to 4 Rust terrain workers. `request_terrain_chunk` queues work; `poll_terrain_chunk` converts finished `TerrainMesh` values to `ArrayMesh` on the main thread. No Godot type crosses the thread boundary.
 - **Snapshots:** double-buffer; the render thread reads the latest completed snapshot while the sim writes the next.
 - **Command queue:** bounded; backpressure to the client; never unbounded growth.
 - **Shutdown:** stop accepting commands, drain the queue, flush the journal, then join threads.

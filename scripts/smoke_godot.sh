@@ -12,7 +12,7 @@ if ! "$GODOT_BIN" --headless --path "$ROOT/godot" --import >/dev/null 2>&1; then
 	"$GODOT_BIN" --headless --path "$ROOT/godot" --import >/dev/null
 fi
 
-OUTPUT="$("$GODOT_BIN" --headless --path "$ROOT/godot" --quit-after 8 2>&1)"
+OUTPUT="$("$GODOT_BIN" --headless --path "$ROOT/godot" --quit-after 45 2>&1)"
 printf '%s\n' "$OUTPUT"
 
 if ! grep -q "SMOKE chunks=" <<<"$OUTPUT"; then

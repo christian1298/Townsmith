@@ -62,7 +62,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 
 - 256 × 256 terrain chunks at 1 m (65,536 cells per chunk).
 - Deterministic value-noise terrain with continents, hills, forests, coasts, and river valleys.
-- A 3 × 3 chunk view (589,824 cells) loads in ~131 ms; generation is CPU-bound and must move to worker threads before it can stream without hitches.
+- A 3 × 3 chunk view (589,824 cells) takes ~131 ms of CPU generation on one core; this now runs on Rust worker threads in the Godot bridge.
 - Sparse height-edit deltas, grouped by chunk; 2,000 edits encode to 8,030 bytes.
 - Deltas survive chunk unload/reload and a binary round trip.
 - Negative chunk coordinates use floor division and are tested at the seam.
@@ -76,6 +76,15 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 - Sparse 128 m world: **~0.19 ms median** tick (p95 ~0.23 ms), ~1.9% of the 10 ms budget.
 - Dense 32 m stress world: **~0.90 ms median** tick (p95 ~1.03 ms), ~9% of the budget; 1,575 agents hit the neighbor cap.
 - No pathfinding, collision, schedules, or rendering yet. See [[19 - Active Agent Benchmark]].
+
+### Worker-thread terrain streaming
+
+- `TownsmithCore.request_terrain_chunk` queues a chunk on a fixed Rust worker pool (up to 4 threads).
+- Workers run `WorldGenerator::generate` and `terrain_mesh_lod`; no Godot API is touched off the main thread.
+- `poll_terrain_chunk` drains finished results on the main thread and converts `TerrainMesh` into `ArrayMesh`.
+- The Godot streamer keeps up to 4 requests in flight, applies LOD, drops stale results, and rebuilds chunks when the desired LOD changes.
+- Headless smoke loads 9 chunks at LOD 1 and 2. The multi-chunk route loads 25 chunks (view radius 2).
+- Main-thread mesh upload is still visible in headless frame-time spikes; headless numbers are not render measurements.
 
 ### Cohort simulation
 
@@ -115,7 +124,7 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 
 - Chunk boundaries are treated as exposed; adjacent chunks will show internal faces until a neighbor sampler or multi-chunk mesher exists.
 - The Godot preview uses one material override; per-material surfaces/UV atlas mapping is not implemented.
-- Multi-chunk streaming exists, but chunk generation and meshing are still synchronous and CPU-bound; they must move to worker threads.
+- Chunk generation and meshing run on a fixed Rust worker pool (up to 4 threads). The Godot main thread only converts finished `TerrainMesh` values into `ArrayMesh` resources; large mesh uploads can still cause frame spikes.
 - Adjacent chunks emit coplanar boundary walls at equal heights, causing z-fighting and doubled geometry until neighbor-aware culling lands.
 - LOD is distance-based (mesh stride), not a full imposter/HLOD pipeline; chunk-boundary faces are still not culled against neighbors.
 - No water shader yet; the water plane is a placeholder.
@@ -126,8 +135,8 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 
 ## 4. Next steps
 
-1. Move terrain generation and meshing to worker threads; remove streaming hitches.
-2. Add neighbor-aware chunk-boundary culling and a real water shader.
+1. Add neighbor-aware chunk-boundary culling and a real water shader.
+2. Reduce main-thread mesh upload cost (array meshes instead of per-vertex SurfaceTool).
 3. Build the Early/Mid/Late city benchmark scenes and routes.
 4. Measure the 30 FPS 1M rendering target on 8-core/16-thread + RTX 3060-class hardware.
 5. Decide D-003 (Godot + Rust) from measured results.
