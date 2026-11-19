@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GODOT_BIN="${GODOT:-godot}"
 
-CITY_TIER=late GODOT="$GODOT_BIN" "$ROOT/scripts/bench_godot.sh" 1 1 \
-	"$ROOT/benchmarks/routes/phase0_city_late.json" >/dev/null
+timeout 120s env -u DISPLAY -u WAYLAND_DISPLAY CITY_TIER=late GODOT="$GODOT_BIN" \
+	"$ROOT/scripts/bench_godot.sh" 1 1 "$ROOT/benchmarks/routes/phase0_city_late.json" >/dev/null
 
 SUMMARY="$ROOT/benchmarks/results/godot_phase0_city_late_summary.json"
 python3 - "$SUMMARY" <<'PY'

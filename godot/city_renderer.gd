@@ -20,7 +20,7 @@ const TIER_NAMES := ["early", "mid", "late"]
 const DEFAULT_SEED := 2026
 const FLOATS_PER_INSTANCE := 16  # 12 transform + 4 color
 const GROUND_COLOR := Color(0.26, 0.30, 0.26)
-const GROUND_MARGIN := 2.0
+const GROUND_SIZE_FACTOR := 2.0
 
 var multimesh: MultiMesh
 var multimesh_instance: MultiMeshInstance3D
@@ -83,6 +83,7 @@ func build(tier: int, seed: int) -> void:
 	var data := PackedFloat32Array()
 	data.resize(count * FLOATS_PER_INSTANCE)
 	var max_height := 0.0
+	var max_half_footprint := 0.0
 	for index in count:
 		var position := positions[index]
 		var size := sizes[index]
@@ -109,6 +110,7 @@ func build(tier: int, seed: int) -> void:
 		data[offset + 15] = 1.0
 		if position.y + size.y * 0.5 > max_height:
 			max_height = position.y + size.y * 0.5
+		max_half_footprint = maxf(max_half_footprint, maxf(size.x, size.z) * 0.5)
 
 	var box := BoxMesh.new()
 	box.size = Vector3.ONE
@@ -120,12 +122,17 @@ func build(tier: int, seed: int) -> void:
 	multimesh.transform_format = MultiMesh.TRANSFORM_3D
 	multimesh.use_colors = true
 	multimesh.instance_count = count
-	multimesh.buffer = data
 	var width := maxf(max_x - min_x, 0.0)
 	var depth := maxf(max_z - min_z, 0.0)
+	# Set the AABB before the bulk upload so Godot skips its own 100k-instance
+	# scan. Pad by half the largest footprint so edge buildings cannot be culled.
 	multimesh.custom_aabb = AABB(
-		Vector3(min_x, 0.0, min_z),
-		Vector3(width, maxf(max_height, 1.0), depth))
+		Vector3(min_x - max_half_footprint, 0.0, min_z - max_half_footprint),
+		Vector3(
+			width + 2.0 * max_half_footprint,
+			maxf(max_height, 1.0),
+			depth + 2.0 * max_half_footprint))
+	multimesh.buffer = data
 
 	multimesh_instance = MultiMeshInstance3D.new()
 	multimesh_instance.name = "CityBuildings"
@@ -199,13 +206,15 @@ func _create_ground(extent: float, center_x: float, center_z: float) -> MeshInst
 	return instance
 
 func _ground_size(extent: float) -> float:
-	return maxf(extent * GROUND_MARGIN, 128.0)
+	return maxf(extent * GROUND_SIZE_FACTOR, 128.0)
 
 func _clear() -> void:
 	if multimesh_instance != null:
+		remove_child(multimesh_instance)
 		multimesh_instance.queue_free()
 		multimesh_instance = null
 	if ground != null:
+		remove_child(ground)
 		ground.queue_free()
 		ground = null
 	multimesh = null
@@ -215,7 +224,7 @@ func _clear() -> void:
 func _tier_name(tier: int) -> String:
 	if tier >= 0 and tier < TIER_NAMES.size():
 		return TIER_NAMES[tier]
-	return "late"
+	return "unknown"
 
 func _ms_between(start_usec: int, end_usec: int) -> float:
 	return float(end_usec - start_usec) / 1000.0

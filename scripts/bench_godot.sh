@@ -7,6 +7,10 @@ RUNS="${1:-3}"
 DURATION="${2:-5}"
 ROUTE="${3:-$ROOT/benchmarks/routes/phase0_flyover.json}"
 CITY_TIER="${CITY_TIER:-}"
+ROUTE_IS_CITY=false
+case "$(basename "$ROUTE")" in
+	*_city_*) ROUTE_IS_CITY=true ;;
+esac
 if [[ "$ROUTE" != /* ]]; then
 	ROUTE="$ROOT/$ROUTE"
 fi
@@ -17,12 +21,24 @@ fi
 CITY_ARGS=()
 if [[ -n "$CITY_TIER" ]]; then
 	case "$CITY_TIER" in
-		early|mid|late) CITY_ARGS+=(--city-tier "$CITY_TIER") ;;
+		early|mid|late) ;;
 		*)
 			echo "CITY_TIER must be early, mid, or late (got '$CITY_TIER')" >&2
 			exit 2
 			;;
 	esac
+	if [[ "$ROUTE_IS_CITY" != true ]]; then
+		echo "CITY_TIER=$CITY_TIER requires a phase0_city_*.json route" >&2
+		exit 2
+	fi
+	if [[ "$(basename "$ROUTE")" != *_${CITY_TIER}.json ]]; then
+		echo "CITY_TIER=$CITY_TIER does not match route $(basename "$ROUTE")" >&2
+		exit 2
+	fi
+	CITY_ARGS+=(--city-tier "$CITY_TIER")
+elif [[ "$ROUTE_IS_CITY" == true ]]; then
+	echo "City route $(basename "$ROUTE") requires CITY_TIER=early|mid|late" >&2
+	exit 2
 fi
 OUT_DIR="$ROOT/benchmarks/results"
 mkdir -p "$OUT_DIR"
@@ -47,7 +63,7 @@ for run in $(seq 1 "$RUNS"); do
 	OUT="$TMP/run_$run.json"
 	"$GODOT_BIN" "${GODOT_FLAGS[@]}" --path "$ROOT/godot" res://benchmark.tscn -- \
 		--route "$ROUTE" \
-		--output "$OUT" --duration "$DURATION" --warmup 1 "${CITY_ARGS[@]}" >/dev/null
+		--output "$OUT" --duration "$DURATION" --warmup 1 ${CITY_ARGS[@]+"${CITY_ARGS[@]}"} >/dev/null
 done
 
 if [[ "$(basename "$ROUTE")" == "phase0_flyover.json" ]]; then
@@ -72,9 +88,13 @@ def med(key):
     return statistics.median(record["results"][key] for record in records)
 
 def med_stream(key):
-    return statistics.median(record.get("streaming", {}).get(key, 0) for record in records)
+    return statistics.median((record.get("streaming") or {}).get(key, 0) for record in records)
 
-chunks = [int(record.get("chunks_loaded", 0)) for record in records]
+chunks = [
+    int(value)
+    for record in records
+    if (value := record.get("chunks_loaded")) is not None
+]
 city_records = [record.get("city") for record in records if record.get("city")]
 
 result = {
@@ -92,21 +112,23 @@ result = {
         "frametime_ms_p95": med("frametime_ms_p95"),
         "frametime_ms_p99": med("frametime_ms_p99"),
         "hitches_16ms": med("hitches_16ms"),
-        "chunks_loaded_min": min(chunks),
-        "chunks_loaded_median": statistics.median(chunks),
-        "chunks_loaded_max": max(chunks),
-        "chunks_requested_median": med_stream("chunks_requested"),
-        "chunks_applied_median": med_stream("chunks_applied"),
-        "chunks_dropped_median": med_stream("chunks_dropped"),
+        "chunks_loaded_min": min(chunks) if chunks else None,
+        "chunks_loaded_median": statistics.median(chunks) if chunks else None,
+        "chunks_loaded_max": max(chunks) if chunks else None,
+        "chunks_requested_median": med_stream("chunks_requested") if chunks else None,
+        "chunks_applied_median": med_stream("chunks_applied") if chunks else None,
+        "chunks_dropped_median": med_stream("chunks_dropped") if chunks else None,
     },
 }
 if city_records:
-    city = city_records[0]
+    city = dict(city_records[0])
+    for key in ("build_ms", "layout_ms", "buffer_ms"):
+        city[key] = statistics.median(float(item.get(key, 0.0)) for item in city_records)
     result["city"] = city
     result["results"].update({
-        "city_build_ms": statistics.median(float(item.get("build_ms", 0.0)) for item in city_records),
-        "city_layout_ms": statistics.median(float(item.get("layout_ms", 0.0)) for item in city_records),
-        "city_buffer_ms": statistics.median(float(item.get("buffer_ms", 0.0)) for item in city_records),
+        "city_build_ms": city["build_ms"],
+        "city_layout_ms": city["layout_ms"],
+        "city_buffer_ms": city["buffer_ms"],
     })
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps(result, indent=2) + "\n")

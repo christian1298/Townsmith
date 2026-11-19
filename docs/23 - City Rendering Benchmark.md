@@ -57,9 +57,9 @@ Built with the debug GDExtension and run headless:
 
 | Tier | Buildings | Layout | Buffer | Total build | Buffer bytes |
 |---|---:|---:|---:|---:|---:|
-| Early | 200 | <1 ms | <1 ms | ~0.9 ms | 12.8 KB |
-| Mid | 10,000 | ~11 ms | ~1 ms | ~12.4 ms | 640 KB |
-| Late | 100,000 | ~84 ms | ~25 ms | ~111.8 ms | 6.4 MB |
+| Early | 200 | <1 ms | <1 ms | ~1 ms | 12.8 KB |
+| Mid | 10,000 | ~8–12 ms | ~1–4 ms | ~12–16 ms | 640 KB |
+| Late | 100,000 | ~80–85 ms | ~25–30 ms | ~110–115 ms | 6.4 MB |
 
 Layout is slower than the release-mode `city_layout` microbenchmark because the Godot extension is built in debug mode. Build cost is one-time at scene load, not per frame.
 
@@ -89,10 +89,10 @@ The general `smoke_godot.sh` also asserts the raw bridge contract: all four pack
 ## 7. Limitations
 
 - Boxes only; no voxel geometry, roofs, windows, or interiors.
-- One material and one draw call; this is the best case for instancing, not the final building renderer.
+- One building material and one building draw call (plus the ground plane); this is the best case for instancing, not the final building renderer.
 - No LOD/impostors; every building is a full box at every distance.
 - No shadows/GI; those will materially change the frame cost.
-- Headless runs cannot measure GPU fill, vertex, or upload cost.
+- Headless runs cannot measure GPU fill, vertex, or GPU upload cost; CPU-side buffer packing is measured.
 - The city is placed on a flat plane, not streamed terrain.
 - 1M population is metadata; only 100k buildings are rendered.
 
