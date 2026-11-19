@@ -402,6 +402,9 @@ impl VoxelVolume {
     /// UVs stay slice-local in meters.
     #[must_use]
     pub fn mesh(&self) -> MeshBuffers {
+        if self.is_empty() {
+            return MeshBuffers::default();
+        }
         greedy_mesh_grid(self.config.voxels(), [0.0; 3], |coord| {
             if coord.iter().any(|&value| value < 0) {
                 AIR
@@ -762,6 +765,44 @@ mod tests {
         assert_eq!(first_mesh, second_mesh);
         assert_eq!(first_mesh.checksum(), second_mesh.checksum());
         assert_eq!(first_mesh, first.mesh());
+    }
+
+    #[test]
+    fn fill_box_accepts_exclusive_max_at_volume_edge() {
+        let mut volume = volume(1, 1, 1);
+        volume
+            .fill_box(VolumePos::new(0, 0, 0), VolumePos::new(32, 32, 32), 1)
+            .unwrap();
+        assert_eq!(volume.solid_count(), 32 * 32 * 32);
+        assert_eq!(volume.chunks_allocated(), 1);
+    }
+
+    #[test]
+    fn air_write_keeps_allocated_chunk() {
+        let mut volume = volume(1, 1, 1);
+        volume.set_voxel(VolumePos::new(1, 1, 1), 1).unwrap();
+        assert_eq!(volume.chunks_allocated(), 1);
+        volume.set_voxel(VolumePos::new(1, 1, 1), AIR).unwrap();
+        assert_eq!(volume.chunks_allocated(), 1);
+        assert_eq!(volume.solid_count(), 0);
+    }
+
+    #[test]
+    fn config_at_total_chunk_cap_is_accepted() {
+        let config = VolumeConfig::new(16, 16, 16).expect("4096 chunks is the cap");
+        assert_eq!(config.chunk_count(), 4096);
+    }
+
+    #[test]
+    fn config_above_total_chunk_cap_is_rejected() {
+        assert!(matches!(
+            VolumeConfig::new(17, 16, 16),
+            Err(VolumeConfigError::TooManyChunks { .. })
+        ));
+        assert!(matches!(
+            VolumeConfig::new(32, 32, 32),
+            Err(VolumeConfigError::TooManyChunks { .. })
+        ));
     }
 
     #[test]

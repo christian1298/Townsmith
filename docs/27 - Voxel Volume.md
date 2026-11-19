@@ -53,10 +53,10 @@ Key methods:
 | Default chunks | 5 × 3 × 5 |
 | Default voxels | 160 × 96 × 160 |
 | Default meters | 16 m × 9.6 m × 16 m |
-| Max chunks per axis | 32 (102.4 m) |
+| Max chunks per axis | 32 (102.4 m), but the total cap is 4,096 chunks (for example 16 × 16 × 16) |
 | Max total chunks | 4,096 |
 | Worst-case dense memory | ~256 MiB |
-| Default dense memory | ~4.9 MiB |
+| Default dense memory | ~4.69 MiB (75 × 32,768 × 2 bytes) |
 
 Chunk storage is lazy, so an empty editor volume does not pay the dense cost.
 
@@ -86,15 +86,15 @@ Current release numbers on this machine:
 | Quads | 293 |
 | Triangles | 586 |
 | Vertices | 1,172 |
-| Median mesh | **~76.8 ms** |
+| Median mesh | **~75.5–76.8 ms** |
 | Min / max | ~73.7 / ~79.6 ms |
 | Checksum | `29805bfe94ec4467` |
 
-The whole-volume mesh is intentionally a correctness-first implementation. It is acceptable for load/save and room-detection refreshes, but **not** for remeshing after every voxel click.
+The whole-volume mesh is intentionally a correctness-first implementation. Empty volumes short-circuit immediately, but a **non-empty** volume still scans the full grid: the default house is ~75 ms, and a populated 16 × 16 × 16-chunk volume would be seconds. It is acceptable for load/save and room-detection refreshes, but **not** for remeshing after every voxel click.
 
 ## 6. Tests
 
-`core_voxel` now has **44 tests**, including:
+`core_voxel` now has **49 tests**, including:
 
 - cross-chunk set/get and fill;
 - typed out-of-bounds errors and all-or-nothing fill;
@@ -105,11 +105,16 @@ The whole-volume mesh is intentionally a correctness-first implementation. It is
 - different materials do not merge;
 - mesh positions in volume meters and inside bounds;
 - deterministic mesh/checksum;
-- chunk mutation changes the mesh.
+- chunk mutation changes the mesh;
+- negative-axis sampler culling;
+- fill at the exclusive volume edge;
+- air writes keep an allocated chunk;
+- total-chunk-cap acceptance/rejection.
 
 ## 7. Limitations
 
-- Whole-volume meshing is **O(volume)** and currently ~77 ms for the test house; per-click use would hitch.
+- Whole-volume meshing is **O(volume)** and currently ~75 ms for the test house; per-click use would hitch.
+- Empty-volume meshing is short-circuited, but a populated maximum 16 × 16 × 16-chunk volume is seconds, not milliseconds.
 - No dirty-chunk/region remeshing yet.
 - No undo/redo, selection, copy/paste, or blueprint serialization yet.
 - No room detection, props, or material registry yet.

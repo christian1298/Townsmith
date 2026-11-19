@@ -88,8 +88,9 @@ pub fn greedy_mesh(chunk: &VoxelChunk) -> MeshBuffers {
 /// `sampler` receives chunk-local voxel coordinates. Coordinates may be `-1` or
 /// [`CHUNK_SIZE`] on exactly one axis when a face lies on the chunk boundary;
 /// a value of `32` means the first voxel of the positive neighbor and `-1` the
-/// last voxel of the negative neighbor. Callers can map an out-of-range axis
-/// with `rem_euclid(CHUNK_SIZE)` after selecting the adjacent chunk. Return
+/// last voxel of the negative neighbor. To resolve an out-of-range axis,
+/// first shift to the adjacent chunk, then map the coordinate with
+/// `(coord as usize).rem_euclid(CHUNK_SIZE)` (`CHUNK_SIZE` is `usize`). Return
 /// [`AIR`] for unloaded or empty neighbors. Faces whose outside neighbor is
 /// solid are culled, but coplanar quads are only merged within this chunk;
 /// [`crate::volume::VoxelVolume::mesh`] meshes the whole volume at once so
@@ -424,6 +425,27 @@ mod tests {
 
         assert_eq!(mesh.quad_count(), 5);
         assert_indices_in_bounds(&mesh);
+    }
+
+    #[test]
+    fn sampler_culls_negative_axis_faces() {
+        for (dx, dy, dz) in [(-1, 0, 0), (0, -1, 0), (0, 0, -1)] {
+            let mut chunk = VoxelChunk::new();
+            chunk.set(0, 0, 0, 1).unwrap();
+            let mesh =
+                greedy_mesh_with_sampler(
+                    &chunk,
+                    |x, y, z| {
+                        if (x, y, z) == (dx, dy, dz) {
+                            1
+                        } else {
+                            AIR
+                        }
+                    },
+                );
+            assert_eq!(mesh.quad_count(), 5, "neighbor {dx},{dy},{dz}");
+            assert_indices_in_bounds(&mesh);
+        }
     }
 
     #[test]

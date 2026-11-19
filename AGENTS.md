@@ -237,6 +237,9 @@ cargo run --release -p townsmith-bench --bin agents
 # Terrain mesh microbenchmark
 cargo run --release -p townsmith-bench --bin terrain
 
+# Chunked 2-story volume mesh microbenchmark
+cargo run --release -p townsmith-bench --bin volume
+
 # Headless server tick harness (no GPU, no socket yet)
 cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
 
