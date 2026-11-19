@@ -20,18 +20,22 @@ These are not decisions. They are the defaults the plan currently uses. If an as
 
 | ID | Assumption | Affects |
 |---|---|---|
-| A-001 | Small team: 1–5 people, PC-first, premium game, no publisher mandates | Engine, roadmap |
+| A-001 | Small team: **2–3 full-time generalists**, PC-first, premium game, no publisher mandates; Rust/Godot experience or willingness to learn | Engine, roadmap |
 | A-002 | Co-op scale: 2–8 players per server, dedicated servers supported | Multiplayer, simulation |
-| A-003 | Population scale: **1M+ citizens** in a late-game metropolis; 100k+ buildings; cohort simulation with ~2k active agents | Voxel, simulation, rendering |
+| A-003 | Population scale: **1M+ citizens** as a late-game target on 8-core/16-thread + RTX 3060-class hardware; 100k+ buildings; cohort simulation with ~2k active agents | Voxel, simulation, rendering |
 | A-004 | Real-time with pause and speed controls (not turn-based) | Simulation, UX |
-| A-005 | Multi-scale, chunked world: 1 m terrain + 10 cm buildings + LOD + streaming; build anywhere | Voxel, worldgen, rendering |
+| A-005 | Multi-scale, chunked, **effectively infinite** world: 1 m terrain + 10 cm buildings + LOD + streaming; build anywhere | Voxel, worldgen, rendering |
 | A-006 | No destruction physics in v1; structural validation only | Voxel, simulation |
 | A-007 | Direct placement and zoning both exist; zoning grows from the library | Design |
 | A-008 | Data-first modding; sandboxed scripting added after the core loop | Modding |
 | A-009 | Steam is the likely launch platform; Workshop is desirable but not required at launch | Distribution |
-| A-010 | English at launch; all strings externalized for localization | Production |
+| A-010 | **English + German at launch**; all strings externalized; language packs moddable later | Production |
 | A-011 | Citizens are NPCs only; a playable citizen mode is post-launch | Design |
-| A-012 | Day/night at launch; seasons are under review because farming and hunting may need them at launch | Simulation, art |
+| A-012 | Day/night at launch; **seasons at launch with an on/off toggle** (farming and hunting depend on them) | Simulation, art |
+| A-013 | Time control: single-player Mode B auto-pauses; multiplayer uses admin `time.control` or a simple-majority online vote; pause is a shared design freeze (simulation stops, editing continues, no auto-resume) | Simulation, multiplayer, UX |
+| A-014 | Construction is a phased, crew-driven process with trade jobs; placement creates a site, not a finished building; crews auto-assign with player-set priority | Simulation, jobs, UX |
+| A-015 | Materials/structural systems have readable max stories/height/span; composite construction allowed; glass is non-structural cladding; rule-based validator; materials have maximums, not minimums | Building, simulation, UX |
+| A-016 | Service gates: water/wastewater/egress/fire/elevators/water pressure/structural are hard for occupancy; telecom, parking, HVAC efficiency, backup power are soft; basements supported with depth/groundwater limits | Building, simulation, UX |
 
 ## Blocking questions
 
@@ -51,9 +55,9 @@ These must be answered before or during Phase 0. They change the architecture, t
 - 4–5 with funding: parallelize art, simulation, and networking; still scope-controlled.
 - Contractor-heavy: strong production and documentation requirements.
 
-**Current assumption:** A-001 (1–5 people).
-**Recommendation:** Plan for 2–3 full-time. If solo, keep the architecture but cut the launch scope to single-player + data modding.
-**Status:** Open
+**Current assumption:** A-001 (2–3 full-time generalists).
+**Recommendation:** Plan for 2–3 full-time generalists with Rust/Godot experience or willingness to learn. If solo, keep the architecture but cut the launch scope to single-player + data modding.
+**Status:** **Answered 2026-11-19** — 2–3 full-time generalists.
 
 ### Q-002 — Target multiplayer scale
 
@@ -89,7 +93,7 @@ These must be answered before or during Phase 0. They change the architecture, t
 
 **Current assumption:** A-003 (1M+ target).
 **Recommendation:** Treat 1M+ as the **late-game** target on recommended hardware. At 10k–20k people/km², 1M citizens occupy 50–100 km². Build the vertical slice at 200 m × 200 m / 300 citizens, prove the loop, then scale through 100k to 1M. Do not simulate 1M individuals; use cohorts (Q-064).
-**Status:** Open — population target set to 1M+; area and target hardware need confirmation (Q-062, Q-063).
+**Status:** **Answered 2026-11-19** — 1M+ is the late-game target; target hardware is 8-core/16-thread + RTX 3060-class; world is effectively infinite; cohorts are the intended simulation model (Q-064 explanation in [[07 - Simulation and AI]] §3).
 
 ### Q-004 — Terrain resolution: 1 m or 10 cm?
 
@@ -107,7 +111,7 @@ These must be answered before or during Phase 0. They change the architecture, t
 
 **Current assumption:** A-005 (1 m terrain).
 **Recommendation:** Start with 1 m terrain. Test the visual mix in the Phase 0 spike. If it looks wrong, revisit before Phase 1, not after. At 1M+ scale, 10 cm terrain is not viable; do not design around it.
-**Status:** Open — leaning strongly to 1 m terrain.
+**Status:** **Answered 2026-11-19** — 1 m terrain + 10 cm buildings accepted. Phase 0 validates the visual mix and performance; 10 cm terrain is out.
 
 ### Q-005 — Where does Architect Mode building happen?
 
@@ -125,7 +129,7 @@ These must be answered before or during Phase 0. They change the architecture, t
 
 **Current assumption:** Build anywhere; workshop + permissioned live editing.
 **Recommendation:** Support placement anywhere from the start. Ship the workshop + blueprint placement first. Add live in-world editing after multiplayer is stable. This preserves the fantasy without betting the architecture on it.
-**Status:** Open
+**Status:** **Answered 2026-11-19** — workshop/creative authoring first; build anywhere for placement; permissioned live editing after multiplayer stabilizes (D-026).
 
 ### Q-006 — Is destruction required?
 
@@ -142,8 +146,8 @@ These must be answered before or during Phase 0. They change the architecture, t
 - **Full physics:** Teardown-style debris and collapse; a different project.
 
 **Current assumption:** A-006 (none in v1).
-**Recommendation:** No destruction in v1. Add cosmetic damage and repair later. If destruction is a core pillar, stop and re-plan the voxel architecture before Phase 1.
-**Status:** Open
+**Recommendation:** No destruction in v1. Add cosmetic damage and repair later. If destruction becomes a core pillar, re-open before Phase 3.
+**Status:** **Answered 2026-11-19** — none in v1; cosmetic damage and repair later (D-008 accepted).
 
 ## Design questions
 
@@ -152,20 +156,20 @@ These must be answered before or during Phase 0. They change the architecture, t
 | **Q-007** | Campaign, sandbox, or both at launch? | Sandbox + one tutorial scenario; campaign later | Normal |
 | **Q-008** | Visual target: per-voxel textures, flat colors, or a mix? How important are resource packs? | 16×16 textures per face, flat-color fallback, resource packs first-class | High |
 | **Q-009** | Furniture: voxel-built, props, or both? | Both: voxels for structure, props for function | High |
-| **Q-010** | Final blueprint size limits? | 2M solid voxels, 32×32 m footprint, 128 m height | Normal |
+| **Q-010** | Final blueprint size limits? | Initial: 8M solid voxels, 48×48 m footprint, 512 m height, 32 m depth; tune | Normal |
 | **Q-011** | Global grid or local grid with rotation? How are slopes handled? | Local 10 cm grid, 90° rotation, foundation cut/fill; no arbitrary rotation v1 | High |
 | **Q-012** | Setting and biomes? | Temperate river valley; one map for v1; moddable biomes later | Normal |
 | **Q-013** | Are building interiors enterable? | Yes in Architect Mode; NPCs abstracted at the door; no interior navigation v1 | High |
 | **Q-014** | Is the mayor a visible avatar? | Abstract camera; optional airship/drone cosmetic later | Low |
 | **Q-015** | Playable citizens later? | Post-launch; keep the architecture open | Low |
-| **Q-016** | Localization at launch? | English at launch; externalize all strings; community translations | Normal |
+| **Q-016** | Localization at launch? | **Answered:** English + German at launch; all strings externalized; moddable language packs later | Normal |
 | **Q-017** | Windows dedicated server? | Linux first; Windows if cheap | Low |
 | **Q-018** | Save compatibility across game and mod updates? | Saves survive game updates; mods may break; migrate where possible | High |
 | **Q-019** | Monetization? | Premium + cosmetic/DLC later; no paid mods; no live service | Normal |
 | **Q-020** | Accessibility baseline? | Colorblind overlays, remapping, text scale, pause, subtitles | High |
 | **Q-021** | Direct placement, zoning, or both? | Both; zoning grows from the enabled blueprint library | High |
 | **Q-022** | Real-time or turn-based? | Real-time with pause and speed | High |
-| **Q-023** | Day/night cycle at launch? | Yes; affects sleep, power, crime; seasons are Q-048 | Normal |
+| **Q-023** | Day/night cycle at launch? | Yes; affects sleep, power, crime; seasons are at launch with a toggle | Normal |
 | **Q-024** | Disasters at launch? | Risk stats only; fires/floods post-launch | Normal |
 | **Q-025** | Distant visual fidelity? | Impostors/merged LOD beyond ~500 m; test in spike | Normal |
 | **Q-026** | Texture resolution per voxel face? | 16×16 with mipmaps; 8×8 for low-end; flat-color fallback | High |
@@ -180,6 +184,7 @@ These must be answered before or during Phase 0. They change the architecture, t
 | **Q-030** | Host migration? | No; dedicated servers are the durable option | Low |
 | **Q-031** | Voice chat at launch? | Text + pings first; voice later | Low |
 | **Q-032** | Steam networking/lobbies, or direct IP first? | Direct IP + invite codes first; Steam later | Normal |
+| **Q-078** | Time-vote tuning: duration, cooldown, and quorum? | 60 s vote, 5 min failed-vote cooldown, 2 min success cooldown; simple majority of online players; tune in playtests | Normal |
 
 ## Modding questions
 
@@ -193,6 +198,33 @@ These must be answered before or during Phase 0. They change the architecture, t
 | **Q-038** | Shader support in resource packs? | Yes with compatibility warnings; vanilla must not depend on it | Low |
 | **Q-039** | How are modded blueprints shared? | Bundled with the mod or published separately; hash in the manifest | Normal |
 
+## Construction questions
+
+| ID | Question | Current assumption / recommendation | Priority |
+|---|---|---|---|
+| **Q-083** | How much construction management? | Auto-assign crews; player sets priority/budget; no individual worker micromanagement | High |
+| **Q-084** | Public works or private contractors? | Public works crews + outside contractors at a premium; private construction companies later | High |
+| **Q-085** | Can buildings be partially occupied during construction? | No; occupancy starts after commissioning/inspection | High |
+| **Q-086** | Do roads and utilities use the same crew/trade system? | Yes, simplified crews/phases with the same blocker model | Normal |
+| **Q-087** | How visible is material delivery? | Trucks/workers near the camera; aggregate flow off-screen | Normal |
+| **Q-088** | Construction time scale? | Hours/days at 1×; small house days, factory weeks/months; fast-forward | High |
+| **Q-089** | Can the player pay extra to expedite? | Overtime/contractor premium; worker fatigue later | Normal |
+
+## Materials and structure questions
+
+| ID | Question | Current assumption / recommendation | Priority |
+|---|---|---|---|
+| **Q-090** | Structural validation depth: rule-based limits or stress simulation? | Rule-based limits for v1; stress simulation later, if ever | High |
+| **Q-092** | Does a roof count as a story? | No; roof adds height/load but not a story | Normal |
+| **Q-093** | Can players mix materials per floor/wall? | Yes, with load-path and weakest-link rules | High |
+| **Q-094** | Are glass facades cosmetic or functional? | Functional (energy/comfort/class) but non-structural | Normal |
+| **Q-095** | Which service gates are hard blocks vs penalties? | Hard for water/wastewater/egress/fire/elevators/water pressure/structural; soft for telecom, parking, HVAC efficiency, backup power | High |
+| **Q-096** | How do modded material changes migrate existing blueprints? | Revalidate and mark “needs review”; never silently break | High |
+| **Q-097** | Basement launch scope? | Cellars and utility basements first; habitable basements/parking later | High |
+| **Q-098** | Maximum basement depth and groundwater/flood model? | 32 m blueprint cap; practical 1–2 levels; deeper needs engineering | Normal |
+| **Q-099** | When do underground parking and vehicle ramps arrive? | After traffic; parking as capacity + visible ramps near camera | Normal |
+| **Q-100** | Underground tunnels/transit between buildings? | Post-launch; keep building basements separate at first | Low |
+
 ## Simulation questions
 
 | ID | Question | Current assumption / recommendation | Priority |
@@ -205,7 +237,16 @@ These must be answered before or during Phase 0. They change the architecture, t
 | **Q-045** | Crime and health depth? | Basic service coverage + stat effects; no full crime simulation v1 | Normal |
 | **Q-046** | Interior pathfinding for NPCs? | No v1; room-level graph later if citizen mode happens | Low |
 | **Q-047** | Individual citizens visible at mayor altitude? | Dots/massing only beyond ~300 m | Low |
-| **Q-048** | Seasons and weather? | Farming/hunting make seasons valuable; likely launch scope (Q-069) | High |
+| **Q-048** | Seasons and weather? | **Answered:** seasons at launch with an on/off toggle; weather later | High |
+
+## Localization questions
+
+| ID | Question | Current assumption / recommendation | Priority |
+|---|---|---|---|
+| **Q-079** | Which additional languages after German, and in what order? | English + German at launch; add by demand; language packs | Low |
+| **Q-080** | Voiceover later, or subtitles only? | Subtitles only in v1; voice later | Low |
+| **Q-081** | Community translation workflow? | In-repo PRs first; translation platform or mod packs later | Normal |
+| **Q-082** | Should server logs/admin messages be localized? | Server logs stay English; player-facing messages use keys | Normal |
 
 ## Production and business questions
 
@@ -239,23 +280,40 @@ These must be answered before or during Phase 0. They change the architecture, t
 
 | ID | Question | Current assumption / recommendation | Priority |
 |---|---|---|---|
-| **Q-062** | Is 1M a late-game target or a typical city? What is the target hardware? | Late-game on recommended hardware; 100k on minimum; define exact CPU/GPU/RAM in Phase 0 | Blocking |
-| **Q-063** | World extent: finite large region or effectively infinite? Where can the player build? | Large finite region (e.g., 16 km × 16 km) with soft edges; build anywhere inside; infinite streaming later | Blocking |
-| **Q-064** | Is cohort/statistical simulation acceptable for most of the 1M population? | Yes; individual records for identity/selection, cohorts for tick updates. Without this, 1M is not feasible | Blocking |
-| **Q-065** | How deep is the living world: trees, crops, and animals as entities or aggregates? | Hybrid: individual near camera, aggregate populations/resources elsewhere | High |
-| **Q-066** | One continuous metropolis or multiple settlements? | Multiple settlements connected by roads; one continuous metropolis at late game | High |
 | **Q-067** | Ecosystem balance: overhunting, deforestation, predators, pests? | Light ecosystem: population pressure and regrowth, not a full ecology sim | High |
 | **Q-068** | Visible transport for lumber, crops, and hunted goods? | Visible vehicles/workers near camera; abstract off-screen flow | Normal |
-| **Q-069** | Seasons at launch? | Yes: 4 seasons with simple growth/migration effects; core to farming and hunting | High |
 | **Q-070** | 1M multiplayer: players per server and server hardware? | 8 players, cap active regions (e.g., 4), 4–8 CPU cores, 16 GB RAM; measure | High |
 | **Q-071** | Terrain editing resolution: 1 m or 10 cm? | 1 m terrain edits; 10 cm building detail; local foundation edits only | High |
 | **Q-072** | How moddable is worldgen (biomes, features, resources)? Can mods replace the generator? | Data-driven additive biomes/features; sandboxed generators; no full replacement at launch | High |
+
+## Benchmark questions
+
+| ID | Question | Current assumption / recommendation | Priority |
+|---|---|---|---|
+| **Q-073** | Are Early/Mid/Late scenes enough, or do we need day/night, winter, rain, and heavy-traffic variants? | Three scenes + optional stress at launch; variants later | Normal |
+| **Q-074** | Should players be able to share/upload benchmark results? | Local-only at launch; opt-in share code later | Low |
+| **Q-075** | Should the default benchmark use a standard preset or the player's current settings? | Both; standard preset is the comparable one | Normal |
+| **Q-076** | How long should benchmark routes be? | 90–180 s measured + 10–15 s warm-up | Normal |
+| **Q-077** | Should modded benchmark scenes be supported at launch? | Base-only at launch; modded runs marked non-comparable | Normal |
 
 ## Answered
 
 | ID | Question | Answer | Date | ADR |
 |---|---|---|---|---|
-| — | — | No questions answered yet. | — | — |
+| **Q-003** | City size and population target? | 1M+ is the late-game target; at 10k–20k people/km² a metropolis occupies 50–100 km²; world is effectively infinite. | 2026-11-19 | D-017 |
+| **Q-091** | Are the initial story/height targets right? | Yes for now: wood 2–3, half-timber 3–4, concrete 20–30, steel 40–80; tune later if needed. | 2026-11-19 | D-024 |
+| **Q-016** | Localization at launch? | English + German at launch; all strings externalized; moddable language packs later. | 2026-11-19 | D-022 |
+| **Q-048** | Seasons and weather? | Seasons at launch with an on/off toggle; weather later. | 2026-11-19 | D-018 |
+| **Q-062** | 1M target and hardware? | Late-game target; 8-core/16-thread CPU, RTX 3060-class GPU, 16–32 GB RAM. Performance expectation is **~30 FPS at 1080p** for a 1M city on that hardware; 60 FPS for ~100k. Dedicated server recommended for simulation. Benchmark in Phase 0/5. | 2026-11-19 | D-017 |
+| **Q-063** | Finite world or effectively infinite? | Effectively infinite; seed + edit deltas; no hard edge. | 2026-11-19 | D-016 |
+| **Q-064** | Is cohort simulation acceptable for most of the 1M population? | **Yes.** Individual records for identity/selection; cohorts for tick updates; individual agents near camera/selection. This is the model that makes 1M feasible. | 2026-11-19 | D-017 |
+| **Q-065** | Living world depth? | Hybrid: individual trees/animals/workers near the camera; aggregate populations/resources elsewhere. | 2026-11-19 | D-018 |
+| **Q-066** | One metropolis or multiple settlements? | Multiple settlements; each player may manage their own, and one player may manage several. | 2026-11-19 | D-019 |
+| **Q-069** | Seasons at launch? | Yes, with an on/off toggle; four seasons with simple growth/migration effects. | 2026-11-19 | D-018 |
+| **Q-001** | Team size and skills? | 2–3 full-time generalists with Rust/Godot experience or willingness to learn. | 2026-11-19 | — |
+| **Q-004** | Terrain resolution? | 1 m terrain + 10 cm buildings; 10 cm terrain is out. | 2026-11-19 | D-002 |
+| **Q-005** | Where does blueprint authoring happen? | Workshop/creative authoring first; build anywhere for placement; permissioned live editing after multiplayer stabilizes. | 2026-11-19 | D-026 |
+| **Q-006** | Is destruction required? | None in v1; cosmetic damage and repair later. | 2026-11-19 | D-008 |
 
 ## How to answer a question
 
@@ -278,3 +336,8 @@ These must be answered before or during Phase 0. They change the architecture, t
 | Q-053–Q-058 | Technical |
 | Q-059–Q-061 | Art and content |
 | Q-062–Q-072 | Scale, living world, and worldgen |
+| Q-073–Q-077 | Benchmarks |
+| Q-078 | Multiplayer time-vote tuning |
+| Q-079–Q-082 | Localization |
+| Q-083–Q-089 | Construction |
+| Q-090–Q-100 | Materials, structure, and basements |

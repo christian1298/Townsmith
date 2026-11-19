@@ -63,47 +63,105 @@ The client never simulates the authoritative city. It predicts local movement an
 
 ## 3. Roles and permissions
 
-| Role | Budget | Roads/zones | Place buildings | Bulldoze | Architect edit | Save blueprint | Mods/admin |
-|---|---|---|---|---|---|---|---|
-| **Admin** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Mayor** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
-| **Architect** | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ |
-| **Builder** | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
-| **Viewer** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Role | Budget | Roads/zones | Place buildings | Bulldoze | Architect edit | Save blueprint | Time control | Mods/admin |
+|---|---|---|---|---|---|---|---|---|
+| **Admin** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Mayor** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚙️ | ❌ |
+| **Architect** | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
+| **Builder (role)** | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| **Viewer** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+
+⚙️ = configurable; admin-only by default. All players can start a time vote by default (`time.vote`). The **Builder** role is a player permission role, not the NPC construction trade; construction crews are simulation jobs.
 
 - Permissions are configurable per player and per role.
 - The server owner can disable roles entirely for a "everyone is mayor" casual server.
 - **Blueprint locks:** only one player can edit a given blueprint at a time. Others can view it read-only. The lock is released on save, cancel, or timeout.
+- **Authoring:** workshop/creative authoring is the launch default. Live in-world editing requires an explicit server edit lock and permission; it ships after the multiplayer foundation (D-026).
 - **Lot claims:** a player can claim a lot for a planned building; others see the claim. Claims expire.
 - **Shared treasury** by default. Separate personal budgets are a server option (later).
+
+### Settlement ownership
+
+- Every settlement has an **owner**: a player, a group, or the server (shared).
+- The owner can set local policies, taxes, building permissions, and blueprint allowlists.
+- A player may own **multiple settlements**; a settlement may have multiple managers with roles.
+- Admins can override ownership, transfer it, or resolve disputes.
+- Shared services (highways, regional rail, power) are managed at the world/server level; local services at the settlement level.
 
 ## 4. Time and ticks
 
 | System | Rate | Notes |
 |---|---:|---|
-| Simulation tick | 10 Hz | Agents, movement, utilities, construction |
+| Active simulation | 10 Hz | Nearby agents, movement, construction |
+| Cohort/region aggregate | 1 Hz | Population cohorts, buildings, utilities |
 | Economy tick | 1 Hz | Taxes, upkeep, production, trade |
 | Snapshot send | 10–20 Hz | Per-client, interest-filtered, delta-compressed |
 | Client render | 60+ FPS | Interpolates between snapshots |
 | Autosave | 5–10 min | Atomic writes, rotating backups |
 
 - Server time is authoritative. Clients display server time; day/night and seasons follow it.
-- **Pause is disabled in multiplayer.** The admin can set speed (1×/2×/4×); a vote system is a later feature.
-- Time scale affects simulation and economy ticks proportionally, not network rates.
+- Time state is one of `paused`, `1×`, `2×`, or `4×`. Time scale affects simulation and economy ticks proportionally, not network rates.
+- **Single-player:** entering Architect Mode pauses the local server automatically. Leaving restores the previous state (paused stays paused; otherwise the previous speed resumes).
+- **Multiplayer:** time never auto-pauses for one player's Mode B. It changes only through an admin with `time.control`, or a successful time vote.
+
+### Time control and votes
+
+| Action | Who | Notes |
+|---|---|---|
+| Pause / resume | Admin with `time.control` | Immediate; server-authoritative |
+| Set speed 1×/2×/4× | Admin with `time.control` | Immediate |
+| Start a time vote | Any player with `time.vote` (default: all) | One active vote at a time |
+| Cancel a vote | Admin | Logged |
+| Vote options | Pause, resume, 2×, 4× | “Fast-forward” is a speed vote |
+
+**Vote rules**
+
+- A vote lasts **60 seconds** (configurable).
+- A vote passes when **yes votes are a simple majority of the players online at vote start** (`yes > online / 2`).
+- Abstentions and non-votes count as **no**.
+- The online count is snapshotted at vote start; players who leave are removed from the tally. If fewer than 2 players remain online, the vote cancels.
+- Cooldown: 5 minutes after a failed vote, 2 minutes after a successful vote.
+- The result is broadcast to all players and logged for server admins.
+- In a single-player or one-player server, time votes are disabled; use direct control.
+
+**Pause semantics**
+
+- Pausing stops simulation ticks (cohorts, buildings, agents, economy, day/night) but **not** editing. It is a shared **design freeze**, not a menu overlay.
+- While paused, every player can fly, inspect, place/remove buildings, edit blueprints, and plan. Players get as much design time as they want.
+- Construction progress, production, and needs are frozen until time resumes. Placement and blueprint edits are still accepted while paused.
+- There is **no auto-resume timer**. The pause lasts until an admin resumes or a resume vote passes.
+- A player entering Mode B does not pause the server by itself; if the server is already paused, that player gets the same unlimited design time as everyone else.
+- Network snapshots and command processing continue so the UI stays responsive.
+
+**Fast-forward limits**
+
+- The server simulates faster only if it can hold the tick budget. If it cannot, the effective speed is capped and players are notified; never silently run slower than the displayed speed.
+
+**Configuration**
+
+- `server.toml`: `allow_time_votes`, `time_vote_duration_seconds`, `time_vote_cooldown_seconds`, `time_control_role`, `time_vote_role`.
+- Defaults: votes enabled, 60 s duration, 5 min failed-vote cooldown, admin-only direct control, all players can start a vote.
 
 ## 5. Commands and validation
 
 Clients send **commands**, not state.
 
 ```text
-PlaceBuilding { blueprint_hash, transform, lot_id }
-Bulldoze { instance_id }
+PlaceBuilding { blueprint_hash, transform, lot_id }   # creates a construction site
+SetConstructionPriority { site_id, priority }
+CancelConstruction { site_id }
+Bulldoze { instance_id | site_id }
 DrawRoad { points[], road_type }
 PaintZone { cells[], zone_type }
 SetTaxRate { zone, rate }
 ApplyVoxelEdits { blueprint_id, base_version, edits[] }
 SaveBlueprint { blueprint_id, metadata }
+SetTimeState { paused | speed_1x | speed_2x | speed_4x }
+StartTimeVote { pauses | resumes | speed_2x | speed_4x }
+CastTimeVote { vote_id, yes | no }
 ```
+
+Player-facing messages are **keys + parameters**, not pre-localized strings. Each client resolves them in its own locale; server logs stay English. See [[16 - Localization]].
 
 The server validates every command:
 
@@ -113,8 +171,10 @@ The server validates every command:
 4. **Cost:** can the treasury afford it? Are materials available?
 5. **Rules:** age tier, structural validity, utility connections.
 6. **Version:** is the blueprint edit based on the current version? (Optimistic concurrency.)
+7. **Time:** does the player have `time.control`, or is a valid time vote passing? Time commands are never accepted from an unprivileged client.
+8. **Construction:** `PlaceBuilding` creates a **construction site**, not a finished instance. The server reserves/consumes materials, validates access, and assigns crews; the site is saved and synced like any other entity.
 
-Accepted commands produce **events** (building placed, tax changed, blueprint updated) that are broadcast to interested clients. Rejected commands return a reason for UI feedback.
+Accepted commands produce **events** (construction site created, phase changed, building completed, tax changed, blueprint updated) that are broadcast to interested clients. Rejected commands return a reason for UI feedback.
 
 ## 6. Voxel editing and blueprint sync
 
@@ -122,7 +182,7 @@ Voxel editing is the hardest sync problem because edits are frequent and fine-gr
 
 ### Strategy
 
-- **Blueprint-scoped editing:** a player edits a blueprint, not arbitrary voxels in the live city (unless Q-005 chooses live-city editing).
+- **Blueprint-scoped editing:** at launch, a player edits a blueprint in the workshop, not arbitrary voxels in the live city. Permissioned live-city editing ships later (D-026).
 - **Locking:** the server grants an edit lock for a blueprint. Only the lock holder can send edits.
 - **Batched edits:** the client sends `VoxelEditBatch` messages (up to N edits or M milliseconds), not one message per voxel.
 - **Versioned blueprints:** each save creates a new version. The edit lock is tied to the base version; stale edits are rejected.
@@ -145,14 +205,14 @@ Voxel editing is the hardest sync problem because edits are frequent and fine-gr
 
 ## 7. World streaming and interest management
 
-Open-world multiplayer is mostly a **chunk streaming** problem, not an entity replication problem.
+Open-world multiplayer is mostly a **chunk streaming** problem, not an entity replication problem. The world is effectively infinite; there is no fixed map edge.
 
-- **World seed + deltas:** the server owns the seed and all edits. Clients generate the procedural base locally and apply deltas received from the server.
+- **World seed + deltas:** the server owns the seed and all edits. Clients generate the procedural base locally and apply deltas received from the server. Only visited/edited chunks are persisted.
 - **Chunk requests:** clients request **world chunks** (256 m) and **building chunks** (32³ voxels) around their camera; the server prioritizes nearby, visible, and recently edited chunks.
 - **Region activation:** the server simulates **active regions** (512 m) around players at full detail. Regions with no players are aggregate or dormant; when a player enters, the server advances them statistically and activates them.
 - **Active-region cap:** limit the number of simultaneously active regions (e.g., 4) so 8 players spread across the map do not multiply the simulation cost. Distant players get aggregate updates.
 - **Static data:** roads, building instances, and blueprint metadata are sent as deltas as they change.
-- **Dynamic data:** citizens, vehicles, and construction effects are filtered by each client's **area of interest (AOI)**.
+- **Dynamic data:** citizens, vehicles, construction sites, crews, and effects are filtered by each client's **area of interest (AOI)**.
 - **LOD-aware:** a client at mayor altitude receives aggregate/visual data for many buildings but few individual agents; a client on the ground receives detailed nearby agents.
 - **Prioritization:** nearby, visible, and recently changed entities are sent first; distant entities are throttled.
 - **Quantization:** positions and rotations are quantized; animations are driven by state, not per-frame transforms.
@@ -213,6 +273,8 @@ Multiplayer + modding is a trust problem. The server is the authority.
 
 - **Platform:** Linux x86_64 first; Windows server build optional (Q-017).
 - **Process:** headless, no GPU, no audio; simulation only.
+- **What it offloads:** the dedicated server removes cohort/building/agent simulation from the client CPU. It does **not** render the city; client GPU performance is unchanged. A 1M city is expected to be ~30 FPS at 1080p on an RTX 3060-class client even with a dedicated server.
+- **Why it helps:** lower-end clients can join without running the full simulation; multiplayer servers can persist the world; the client CPU is free for meshing, UI, and render submission.
 - **Configuration:** `server.toml` (world name, seed, max players, port, password, mod manifest, autosave interval, role defaults).
 - **Admin:** console commands + a local admin file; RCON/web panel later.
 - **Discovery:** direct IP, invite code; Steam server browser later.
@@ -227,14 +289,18 @@ Multiplayer + modding is a trust problem. The server is the authority.
 - **Reconnect tests:** drop a client mid-edit, reconnect, verify lock/version recovery.
 - **Mod mismatch tests:** missing mod, extra mod, wrong version, resource pack difference.
 - **Save/load tests:** crash during autosave, journal replay, schema migration.
-- **Security tests:** malformed commands, oversized blueprints, permission bypass attempts.
+- **Time-control tests:** SP Mode B auto-pause; MP pause/resume/speed by admin; vote pass/fail with online/offline changes; pause allows edits; construction resumes correctly.
+- **Security tests:** malformed commands, oversized blueprints, permission bypass attempts, unprivileged time-control attempts.
 
 ## 13. Open questions
 
 - **Q-002:** Target player count and server type? Affects bandwidth, AOI, and simulation budgets.
-- **Q-005:** Can players build and edit anywhere in the world, or only in a workshop? Affects locks, griefing, and sync.
-- **Q-063:** World extent and streaming limits.
+- **Q-066:** Settlement ownership: how are permissions, shared services, and transfers handled?
 - **Q-070:** 1M multiplayer: players per server, active-region cap, server hardware.
+- **Q-078:** Time-vote duration, cooldown, and quorum tuning.
+- **Q-083:** Construction management depth: auto-assign crews vs player priority.
+- **Q-084:** Public works crews vs private contractors.
+- **Q-085:** Partial occupancy during construction: assumed no.
 - **Q-017:** Windows dedicated server support, or Linux only?
 - **Q-028:** Shared treasury or personal budgets? Default is shared.
 - **Q-029:** Should clients auto-download resource packs from the server?

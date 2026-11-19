@@ -14,7 +14,7 @@ tags:
 
 **Townsmith** is a voxel city-builder about authorship, set in an open world you can build anywhere.
 
-You start with a handful of settlers in a procedurally generated wilderness. From above, you shape the settlement: roads, homes, workshops, water, power, taxes, and the hundred small decisions that make a place livable. But you are also the architect. You can drop into first person, walk through the city, and build the buildings yourself — voxel by voxel, room by room — then save them to a library that the city actually uses.
+You start with a handful of settlers in an effectively infinite, procedurally generated wilderness. From above, you shape the settlement: roads, homes, workshops, water, power, taxes, and the hundred small decisions that make a place livable. But you are also the architect. You can drop into first person, walk through the city, and build the buildings yourself — voxel by voxel, room by room — then save them to a library that the city actually uses.
 
 The world is alive: forests can be logged and replanted, fields planted and harvested, wildlife hunted or protected. Those primary industries feed the first village and, eventually, a metropolis of **over a million people**.
 
@@ -24,22 +24,24 @@ The result is a city that looks like it was made by its inhabitants, because it 
 
 > *"I built that house. I know why it has two bedrooms and a north-facing kitchen. And now a family lives there, complains about the noise from my factory, and pays rent that funds the tram line I am about to build."*
 
-The fantasy has three parts:
+The fantasy has five parts:
 
 1. **Omnipotence:** the mayor's god's-eye view, the ability to see systems, move money, and reshape a district — or a whole region.
 2. **Craft:** the intimate, first-person satisfaction of placing a wall, a window, a bed, a chimney.
 3. **Consequence:** the city notices. A building's layout becomes population, income, happiness, pollution, and stories.
 4. **Frontier:** the world is open. You can start a settlement anywhere, harvest the land, and watch a forest become a suburb.
+5. **Work:** buildings are built by people. A site becomes a home through crews, materials, trades, and inspections — not a pop-in.
 
 ## What a session looks like
 
 1. You fly over a river valley. A few wood huts cluster around a well.
 2. You open the blueprint library, filter to *residential / wood age / 2–4 residents*, and place a player-made cottage on a lot.
-3. The cottage's stats show: 2 beds, 1 kitchen, 1 bathroom, lower-middle class, 4 L/s water demand, 600 L of timber to build.
-4. You realize the bakery next door has no storage. You switch to Architect Mode, walk in, add a storeroom, and save a new version of the blueprint.
-5. The bakery's bread output rises. The neighborhood's food satisfaction rises. Rents rise. Some residents are priced out.
-6. You raise taxes on the industrial district to fund a school. The factory owners complain. The next generation gets better jobs.
-7. You time-skip a month and watch the city change.
+3. The cottage's stats show: 2 beds, 1 kitchen, 1 bathroom, lower-middle class, 4 L/s water demand, 600 L of timber to build. A construction crew breaks ground.
+4. Over the next days the site moves through foundation, frame, roof, and utility rough-in. Carpenters, roofers, and a plumber cycle through. The cottage is not occupied until inspection passes.
+5. You realize the bakery next door has no storage. You switch to Architect Mode, walk in, add a storeroom, and save a new version of the blueprint.
+6. The bakery's bread output rises. The neighborhood's food satisfaction rises. Rents rise. Some residents are priced out.
+7. You raise taxes on the industrial district to fund a school. The factory owners complain. The next generation gets better jobs.
+8. You time-skip a month and watch the city change.
 
 ### The early game
 
@@ -88,9 +90,10 @@ The city is not a bubble. Forests, fields, and wildlife are simulated resources 
 | Technology tiers unlock items | Technology tiers unlock materials, structural limits, and building types |
 | Mods are an afterthought | Data-first content, namespaced IDs, full modding API |
 | Official servers or nothing | Self-hosted co-op and dedicated servers |
-| A fixed city plot | An open, procedurally generated world you can build anywhere |
+| A fixed city plot | An open, effectively infinite, procedurally generated world you can build anywhere |
 | A few thousand citizens, fully simulated | A metropolis of 1M+ via cohorts, with individual agents where you look |
 | Resources appear from a menu | Lumberjacks, farmers, and hunters harvest a living region |
+| Buildings appear instantly | Buildings are built over time by crews and trades, from materials delivered to the site |
 
 ## Inspirations
 
@@ -143,8 +146,9 @@ The vertical slice is successful when:
 6. The city feels alive: citizens move, work, complain, and improve their lives in ways the player can trace back to spatial decisions.
 7. A player can start a settlement **anywhere** in the procedural world and connect it to the road/utility network.
 8. A lumberjack, farmer, and hunter each have a visible, understandable work loop that produces real resources.
-9. A **1M+ citizen** metropolis runs at the target frame rate on recommended hardware, with district-level simulation and 2,000 active agents.
+9. A **1M+ citizen** metropolis runs at **~30 FPS at 1080p** on 8-core/16-thread + RTX 3060-class hardware, with district-level simulation and 2,000 active agents; a dedicated server can run the simulation separately.
 10. The world persists: terrain edits, harvested forests, buildings, and wildlife changes survive save/load and reconnect.
+11. The **Benchmark mode** produces repeatable early/mid/late results on the reference machine and shows the player how their PC should run at each stage.
 
 ## Tone and identity
 

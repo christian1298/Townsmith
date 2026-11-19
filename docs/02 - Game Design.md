@@ -29,7 +29,10 @@ You are the mayor: a flying camera with authority. You see the city as a system.
 
 **Time**
 - Pause, 1×, 2×, 4×. Day/night cycle. Months and years for the economy.
-- In multiplayer, only the host/admin can pause; speed is a vote or admin setting.
+- **Single-player:** entering **Architect Mode** automatically pauses game time. Leaving Architect Mode restores the previous speed (or stays paused if it was paused before).
+- **Multiplayer:** time is server-authoritative and never auto-pauses for one player's Mode B. An admin with `time.control`, or a vote of the online players, can pause, resume, or fast-forward. See [[05 - Multiplayer]] and D-021.
+- **Pause is a design freeze, not a menu.** It stops simulation progress only: citizens, construction, production, needs, economy, and day/night freeze. Players can still fly, inspect, place/remove buildings, edit blueprints, and plan for as long as they want. Construction progress starts when time resumes.
+- **No auto-resume timer.** In single-player, the pause lasts until you leave Architect Mode (or manually resume); in multiplayer, until an admin resumes or a resume vote passes.
 
 **Tools**
 - **Select / inspect:** buildings, citizens, vehicles, tiles.
@@ -62,7 +65,7 @@ You are the architect: a first-person builder in a creative-mode-like space. You
 - First-person walk, jump, crouch; creative flight toggle.
 - No survival constraints. No fall damage. No inventory limits while authoring.
 - "Enter building" from Mayor Mode drops you at the building's door.
-- A dedicated **Workshop** map (optional) for building without touching the live city. See Q-005.
+- The **Workshop/creative editor is the default authoring space** at launch. Placement is build-anywhere; permissioned live editing of placed buildings comes later (D-026).
 
 **Building tools**
 - **Place voxel** with the selected material; brush sizes 1×1×1, 2×2×2, 3×3×3, and a line/box/plane mode.
@@ -119,12 +122,12 @@ The blueprint library is the memory of the loop. It is also the multiplayer and 
 
 ### World and terrain
 
-The world is not a fixed city tile. It is a large, procedurally generated region that the player can build anywhere in. This is the Minecraft fantasy applied to a city builder.
+The world is not a fixed city tile. It is an **effectively infinite**, procedurally generated world that the player can build anywhere in. This is the Minecraft fantasy applied to a city builder.
 
 | Property | v1 target |
 |---|---|
 | World | Procedurally generated from a seed; chunked and streamed |
-| Extent | Large finite region, target **16 km × 16 km (256 km²)**, soft edges (Q-063) |
+| Extent | **Effectively infinite**; no hard map edge; practical limits are streaming radius, save size, and server resources (Q-063 answered) |
 | Terrain | Heightmap at **1 m** resolution; slopes, water, cliffs |
 | Biomes | Forest, plains, hills, coast, river valley (3–4 at launch) |
 | Resources | Forests, stone, coal, iron, farmland, wildlife |
@@ -132,16 +135,17 @@ The world is not a fixed city tile. It is a large, procedurally generated region
 | Regions | 512 m × 512 m simulation units; active, aggregate, or dormant |
 | Chunks | 256 m world chunks; 32³ voxel building chunks |
 | Population | **1M+** late-game across settlements; cohort simulation |
-| Outside connections | Highway, rail, river port at region edges |
+| Target hardware | 8-core/16-thread CPU + RTX 3060-class GPU; 16–32 GB RAM; **~30 FPS at 1080p for 1M**; dedicated server recommended |
+| Outside connections | Highway, rail, river port at settlement edges; imports/exports |
 | Expansion | The world is the map; new settlements can be founded anywhere |
 
-> [!question] Terrain resolution
-> The 1 m terrain grid is a proposal, not a decision. It keeps the world tractable while buildings use 10 cm detail. At 1M+ scale, 10 cm terrain is effectively impossible. Confirm in Q-004 and Q-071.
+> [!decision] Terrain resolution
+> The 1 m terrain grid is confirmed (Q-004). It keeps the world tractable while buildings use 10 cm detail. At 1M+ scale, 10 cm terrain is effectively impossible.
 
 ### Settlements, regions, and chunks
 
 - **Regions** are 512 m × 512 m simulation units. A region near a player is **active** and ticks at full detail; a region outside the active set is **aggregate** (slower statistics) or **dormant** (no ticks, advanced when the player returns).
-- **Settlements** are player-named clusters of buildings and roads. Boundaries are soft, derived from density and service coverage, not fixed walls. A player can found multiple settlements; at late game they can merge into one continuous metropolis.
+- **Settlements** are player-named clusters of buildings and roads. Boundaries are soft, derived from density and service coverage, not fixed walls. A player can found multiple settlements; at late game they can merge into one continuous metropolis. In multiplayer, each player may manage their own settlement(s), and one player may manage several.
 - **Districts** are sub-areas within a settlement for statistics, policies, and overlays.
 - **World chunks** (256 m) are the streaming unit for terrain, vegetation, and resources. **Building chunks** (32³ voxels) store 10 cm building data where the player has built.
 - Only player edits and dynamic state are persisted: terrain deltas, roads, buildings, harvested resources, and wildlife changes. The procedural base is regenerated from the seed.
@@ -198,11 +202,19 @@ Two instances of the same blueprint can diverge through upgrades, damage, and oc
 
 ### Construction and demolition
 
-- **Cost:** material liters + labor + permits. The cost is computed from the blueprint and scaled by age/quality.
-- **Time:** based on volume, complexity, and available construction labor. A small house takes days; a factory takes months.
-- **Phasing:** foundation, structure, envelope, interiors. Scaffolding visuals; partial buildings are not occupied.
-- **Demolition:** refund a fraction (e.g., 50%) of materials; hazardous materials cost extra to remove (later).
-- **Upgrades:** renovate a building to a new blueprint version, add a floor, replace a roof, install insulation. Temporary closure and cost.
+- **No instant pop-in.** Placing a building creates a **construction site**, not a finished building. The site is built over game time by NPC crews, with materials, phases, and inspections.
+- **Cost:** material liters + labor + permits. The cost is computed from the blueprint and scaled by age/quality. The project budget is committed at placement; materials and wages draw down as phases progress, and delays/contractor premiums can cause overruns.
+- **Time:** based on volume, complexity, trade availability, materials, weather, and site access. A small house takes days; a factory takes months.
+- **Phasing:** survey/site prep → foundation → structure → envelope → utility rough-in → interior finish → commissioning/inspection. Scaffolding, cranes, material piles, and partial buildings are visible; the building is not occupied until it passes inspection.
+- **Jobs:** each phase creates temporary job slots for the relevant trades — laborers, carpenters, masons, steelworkers, roofers, glaziers, electricians, plumbers, HVAC technicians, painters, surveyors, and inspectors. The exact mix depends on the blueprint, materials, age, and installed systems.
+- **Crews:** construction offices/public works provide crew capacity and vehicles. If no crew or trade is available, the site stalls with a visible reason; the player can build more capacity, train workers, or pay for expensive outside contractors.
+- **Materials:** deliveries are progressive. A site has a stockpile; missing materials stall the phase. This connects construction to the forestry, mining, manufacturing, and freight chains.
+- **Demolition:** refund a fraction (e.g., 50%) of materials; demolition also requires crews and time. Hazardous materials cost extra to remove (later).
+- **Upgrades:** renovate a building to a new blueprint version, add a floor, replace a roof, install insulation. Temporary closure, crews, and cost. Editing a blueprint in the library is design work; applying it to a placed building is a renovation project, not an instant swap.
+- **Pause:** construction progress freezes while paused, but players can still place/design. See [[05 - Multiplayer]] and D-021.
+
+> [!note] Design goal
+> Construction should make the city feel built by people, not spawned by the player. It also creates a visible demand for trades, training, and logistics — and a reason to care about the construction sector.
 
 ## 4. Blueprints
 
@@ -271,8 +283,8 @@ The full system design is in [[07 - Simulation and AI]]. At the design level:
 ### Population scale: 1M+
 
 - A **town** is a few hundred to a few thousand people. A **city** is 100k. A **metropolis** is 1M+.
-- 1M+ is a **late-game target** on recommended hardware. It is not the starting scale, and it is not a promise on minimum hardware.
-- Every citizen has a record and a household, but the population is simulated in **cohorts** grouped by district, building type, and needs band. Individual agents are used near the camera and for selected citizens.
+- 1M+ is a **late-game target** on 8-core/16-thread + RTX 3060-class hardware, with an expected **~30 FPS at 1080p**; a dedicated server can run the simulation and free the client CPU. It is not the starting scale, and it is not a promise on minimum hardware.
+- Every citizen has a record and a household, but the population is simulated in **cohorts** grouped by district, building type, and needs band. Individual agents are used near the camera and for selected citizens. The full model is in [[07 - Simulation and AI]] §3.
 - The player manages **districts and systems**, not a million individual people: heatmaps, statistics, policies, service coverage, and sampled citizen stories.
 - The city's UI scales from a village dashboard to a metropolitan region dashboard. The same panels work at every size; the aggregation changes.
 
@@ -308,7 +320,7 @@ The first economy is built on the land around the settlement. These jobs are not
 | **Hunter** | Hunting lodge | Patrol → track → hunt → carry meat/hide home | Meat, hides, fur, pest control | Wildlife populations; overhunting depletes; predators and pests affect farms |
 
 - **Forestry:** trees are entities with species, growth stage, and wood volume. A lumberjack replants; a managed forest is sustainable; clear-cutting is fast but depletes the land.
-- **Agriculture:** fields are plots with crop type, soil quality, water, growth stage, and pests. Farmers plant, tend, and harvest; livestock (cows, chickens, sheep) are a later sub-system. Seasons matter (Q-069).
+- **Agriculture:** fields are plots with crop type, soil quality, water, growth stage, and pests. Farmers plant, tend, and harvest; livestock (cows, chickens, sheep) are a later sub-system. Seasons are at launch with a toggle and matter for growth.
 - **Hunting:** wildlife lives in populations per region, with habitat, food, predators, and migration. A hunter can take a contract to thin rabbits or boars that damage crops, or to cull predators threatening livestock.
 - **Early loop:** wood + food + hides → houses, a sawmill, a market, a well → a village that can survive winter.
 - **Late loop:** primary industries move outward, become specialized, and feed a metropolis through freight and trade. The player can choose sustainable forestry, intensive agriculture, or import-dependent growth.
@@ -341,7 +353,7 @@ The living-world layer is intentionally **light**: regrowth, depletion, pests, a
 - **Taxes:** residential/commercial/industrial/office rates; happiness and growth effects.
 - **Trade:** import/export at the map edge; prices fluctuate; contracts later.
 - **Loans:** bonds with interest; bankruptcy triggers emergency measures, not a game-over screen.
-- **Construction:** paid up front or financed over time (later).
+- **Construction:** project budget committed at placement; materials/wages draw down as work progresses; financing later.
 - **Balance goal:** the player should feel pressure but always have a lever to pull.
 
 ## 6. Progression and ages
@@ -352,11 +364,11 @@ Ages are the long-term arc. They change materials, structural limits, building t
 
 | Age | Unlock trigger | Materials | Typical max stories | Signature buildings | New systems |
 |---|---|---|---|---|---|
-| **Wood** | Start | Timber, thatch, stone, clay, lime | 2 | Hut, lumber camp, farm, hunting lodge, well, market stall | Forestry, agriculture, hunting, water, food, basic housing |
-| **Masonry** | 250 population + research | Brick, stone, glass, mortar | 4 | Town hall, bakery, school, sawmill, aqueduct, chapel | Education, sanitation, fire risk, masonry construction |
-| **Industrial** | 20,000 population + coal | Steel, concrete, coal, iron | 8 | Factory, refinery, rail depot, power plant, tenement | Power, rail, heavy pollution, mass housing |
-| **Modern** | 150,000 population + electricity | Reinforced concrete, steel, glass, aluminum | 20+ | Office tower, apartment block, hospital, subway | Density, transit, health, high-rise construction |
-| **Information** | 750,000 population + research | Composites, electronics, solar | 40+ | Data center, solar farm, monorail, university | High-tech jobs, sustainability, 1M+ metropolis |
+| **Wood** | Start | Timber, thatch, stone, clay, lime | 3 | Tent, shed, hut, timber house, lumber camp, farm, hunting lodge, well, market stall | Forestry, agriculture, hunting, water, food, basic housing |
+| **Masonry** | 250 population + research | Brick, stone, glass, mortar | 6 | Stone house, half-timber house, town hall, bakery, school, sawmill, aqueduct, chapel | Education, sanitation, fire risk, masonry construction |
+| **Industrial** | 20,000 population + coal | Steel, concrete, coal, iron | 12 | Factory, refinery, rail depot, power plant, tenement | Power, rail, heavy pollution, mass housing |
+| **Modern** | 150,000 population + electricity | Reinforced concrete, steel, glass, aluminum | 30 | Office tower, apartment block, hospital, subway | Density, transit, health, high-rise construction |
+| **Information** | 750,000 population + research | Composites, electronics, solar | 80+ | Data center, solar farm, monorail, university, supertall | High-tech jobs, sustainability, 1M+ metropolis |
 
 > [!warning] Draft numbers
 > Population thresholds, story limits, and building names are placeholders. They exist to test the progression curve and the structural-rule system, not to lock the design. The 1M+ target means the late ages must support a very long campaign or a very large sandbox city.
@@ -420,11 +432,31 @@ class_score =
 ### Structure
 
 - Every solid voxel must be connected to the ground through a support path, or be within a material's cantilever limit.
-- Materials have strength, weight, and maximum unsupported span.
-- Height limits by material (see ages).
-- Load-bearing walls and columns can be marked explicitly for clarity; the validator can also infer them.
-- The validator highlights problems in Architect Mode and blocks saving a structurally invalid blueprint (with an override for sandbox/testing).
+- Materials have strength, weight, maximum unsupported span, fire rating, and foundation/bracing requirements.
+- **Height is set by the structural system**, not just the material:
+
+| System | Initial max |
+|---|---|
+| Tent / lean-to | 1 temporary level |
+| Timber shed | 1 story |
+| Timber house | **2–3 stories + roof** |
+| Load-bearing stone | 2–3 stories + roof |
+| Half-timber with stone ground floor | **3–4 stories + roof** |
+| Brick masonry | 4–6 stories |
+| Reinforced concrete | **20–30 stories** |
+| Steel frame | 40–80 stories |
+| Composite steel/concrete | 80+ stories |
+| Glass curtain wall | Non-structural; height set by the frame |
+
+- **Composite construction is allowed**: stone ground floor + timber upper, concrete podium + steel tower, etc. The weakest support in the load path sets the limit.
+- **Glass facades are cladding, not structure.** They can improve light, prestige, energy, and class, but do not add height.
+- Tall buildings also need service gates: elevators, water pressure, fire suppression, wind bracing, structural engineering, and HVAC.
+- Load-bearing walls and columns can be marked explicitly; the validator can also infer them.
+- The validator highlights problems in Architect Mode and blocks placing a structurally invalid blueprint (with a sandbox override).
 - Advanced structural simulation (stress, buckling, settlement) is out of scope for v1.
+- **No material minimum height:** a one-story concrete or stone building is valid. Materials have maximums, not minimums; service gates are separate.
+- **Basements:** cellars and utility basements are supported from the start; habitable basements and underground parking come later. Basements do not count toward above-ground stories but add load, depth, and excavation cost. See D-025.
+- Full details: [[17 - Materials and Structure]].
 
 ### Interior access
 
@@ -446,16 +478,17 @@ Full architecture: [[05 - Multiplayer]].
 
 | Role | Can do |
 |---|---|
-| **Host / Admin** | Everything: pause, speed, permissions, mods, save management |
+| **Host / Admin** | Everything: time control, speed, permissions, mods, save management |
 | **Mayor** | Budget, taxes, policies, place/demolish buildings, roads, zones, services |
 | **Architect** | Architect Mode building, save blueprints, edit unlocked blueprints |
-| **Builder** | Place/remove voxels in Architect Mode but cannot save to the shared library |
+| **Builder (player role)** | Place/remove voxels in Architect Mode but cannot save to the shared library; not an NPC construction trade |
 | **Viewer** | Fly/walk, inspect, chat; no edits |
 
 - Permissions are configurable per player or per role.
 - Shared treasury by default; separate treasuries are a server option (later).
 - Blueprint editing uses a lock/claim to avoid simultaneous conflicting edits.
-- Pause is disabled in multiplayer; the host can set speed, or players vote.
+- **Time control:** an admin with `time.control` can pause, resume, or set speed directly. Other players can start a time vote; a simple majority of online players passes it. One vote at a time, with a cooldown.
+- `time.control` is admin-only by default and can be granted to other roles.
 - Text chat and ping system at launch; voice later.
 
 ## 9. Sandbox vs campaign
@@ -479,21 +512,18 @@ Full architecture: [[05 - Multiplayer]].
 8. **Colorblind-safe overlays.** Never rely on red/green alone.
 9. **Tutorial by doing.** The first scenario teaches by placing a lumber camp, a farm, a well, and a house.
 10. **Respect the player's time.** Fast-forward, blueprints, copy/paste, and templates.
+11. **Localize from day one.** English + German at launch; all user-facing strings are keys; each player picks their own language, including in multiplayer. See [[16 - Localization]].
 
 ## 11. Open design questions
 
 These are tracked formally in [[09 - Open Questions]]. The design-critical ones:
 
-- **Q-005:** Can players build anywhere in the world, and does blueprint authoring happen live, in a workshop, or both? This affects permissions, griefing, and the core fantasy.
-- **Q-062:** Is 1M a late-game target or a typical city, and on what hardware?
-- **Q-063:** Is the world a large finite region or effectively infinite?
-- **Q-064:** Is cohort/statistical simulation acceptable for most of the population?
-- **Q-065:** How deep is the living world (trees, crops, animals)?
-- **Q-069:** Are seasons at launch? Farming and hunting suggest yes.
+- **Q-002:** Target multiplayer scale: 8-player co-op, or public servers with more players?
+- **Q-066:** Multiple settlements with per-player ownership; how are permissions and shared services handled?
 - **Q-007:** Campaign, sandbox, or both at launch?
 - **Q-009:** Furniture as props, voxels, or both? The current proposal is both: voxels for structure, props for function.
 - **Q-011:** Global grid vs local grid with rotation? Sloped terrain?
 - **Q-021:** Direct placement only, zoning only, or both? The current proposal is both, with zoning growing from the library.
 - **Q-022:** Real-time with pause, or turn-based? The current assumption is real-time.
-- **Q-023:** Day/night cycle? v1 has it; seasons and weather are Q-048.
+- **Q-023:** Day/night cycle? v1 has it; seasons are accepted with a toggle, weather is later.
 - **Q-024:** Disasters? v1 has risk stats but not active disasters.
