@@ -2,6 +2,10 @@ extends Node3D
 
 const TerrainStreamer = preload("res://terrain_streamer.gd")
 
+var streamer
+var smoke_frames := 0
+var smoke_reported := false
+
 func _ready() -> void:
 	var core = TownsmithCore.new()
 	print("Townsmith core version: ", core.version())
@@ -9,7 +13,7 @@ func _ready() -> void:
 	var demo: ArrayMesh = core.build_demo_mesh()
 	print("Demo mesh surfaces: ", demo.get_surface_count())
 
-	var streamer = TerrainStreamer.new()
+	streamer = TerrainStreamer.new()
 	streamer.seed = 2026
 	streamer.view_radius = 1
 	streamer.keep_radius = 2
@@ -37,3 +41,16 @@ func _ready() -> void:
 	environment.ambient_light_energy = 0.55
 	world_environment.environment = environment
 	add_child(world_environment)
+
+func _process(_delta: float) -> void:
+	smoke_frames += 1
+	if smoke_reported or smoke_frames < 6:
+		return
+	smoke_reported = true
+	var lods: Array[int] = streamer.loaded_lods()
+	var lod_text := ""
+	for lod in lods:
+		if lod_text != "":
+			lod_text += ","
+		lod_text += str(lod)
+	print("SMOKE chunks=%d lods=%s" % [streamer.chunk_count(), lod_text])

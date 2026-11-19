@@ -29,8 +29,12 @@ func _ready() -> void:
 		return
 	if duration_override != "":
 		duration_s = float(duration_override)
+	else:
+		duration_s = float(route.get("duration_seconds", 30.0))
 	if warmup_override != "":
 		warmup_s = float(warmup_override)
+	else:
+		warmup_s = float(route.get("warmup_seconds", 3.0))
 
 	_build_world()
 	last_usec = Time.get_ticks_usec()
@@ -59,17 +63,13 @@ func _load_route(path: String) -> bool:
 		push_error("Benchmark route needs at least two waypoints")
 		return false
 	route_id = str(route.get("id", "unknown"))
-	if duration_s <= 0.0:
-		duration_s = float(route.get("duration_seconds", 30.0))
-	if warmup_s < 0.0:
-		warmup_s = float(route.get("warmup_seconds", 3.0))
 	return true
 
 func _build_world() -> void:
 	streamer = TerrainStreamer.new()
 	streamer.seed = 2026
-	streamer.view_radius = 1
-	streamer.keep_radius = 2
+	streamer.view_radius = 2
+	streamer.keep_radius = 3
 	streamer.builds_per_frame = 2
 	add_child(streamer)
 

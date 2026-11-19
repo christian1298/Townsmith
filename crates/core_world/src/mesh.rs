@@ -55,18 +55,24 @@ pub fn terrain_mesh(chunk: &WorldChunk) -> TerrainMesh {
 /// Heights are sampled at the top-left of each span, and walls are emitted
 /// against the neighboring samples. This is deliberately approximate: LOD
 /// chunks are only used beyond the near view distance.
+///
+/// `step` is clamped to `1..=WORLD_CHUNK_SIZE`. The final span on each axis is
+/// shortened so non-divisor steps (for example `3`) still end at the chunk
+/// border and never place a vertex outside the 256 m chunk.
 #[must_use]
 pub fn terrain_mesh_lod(chunk: &WorldChunk, step: usize) -> TerrainMesh {
-    let step = step.max(1);
+    let step = step.clamp(1, WORLD_CHUNK_SIZE);
     let mut mesh = TerrainMesh::default();
 
     for z in (0..WORLD_CHUNK_SIZE).step_by(step) {
+        let span_z = step.min(WORLD_CHUNK_SIZE - z);
         for x in (0..WORLD_CHUNK_SIZE).step_by(step) {
+            let span_x = step.min(WORLD_CHUNK_SIZE - x);
             let Some(height) = chunk.height(x, z) else {
                 continue;
             };
             let color = cell_color(chunk, x, z, height);
-            push_top_span(&mut mesh, x, z, height, color, step);
+            push_top_span(&mut mesh, x, z, height, color, span_x, span_z);
 
             let neighbors = [
                 (
@@ -75,15 +81,15 @@ pub fn terrain_mesh_lod(chunk: &WorldChunk, step: usize) -> TerrainMesh {
                     [-1.0, 0.0, 0.0],
                     x as f32,
                     z as f32,
-                    step,
+                    span_z,
                 ),
                 (
                     x as isize + step as isize,
                     z as isize,
                     [1.0, 0.0, 0.0],
-                    (x + step) as f32,
+                    (x + span_x) as f32,
                     z as f32,
-                    step,
+                    span_z,
                 ),
                 (
                     x as isize,
@@ -91,15 +97,15 @@ pub fn terrain_mesh_lod(chunk: &WorldChunk, step: usize) -> TerrainMesh {
                     [0.0, 0.0, -1.0],
                     x as f32,
                     z as f32,
-                    step,
+                    span_x,
                 ),
                 (
                     x as isize,
                     z as isize + step as isize,
                     [0.0, 0.0, 1.0],
                     x as f32,
-                    (z + step) as f32,
-                    step,
+                    (z + span_z) as f32,
+                    span_x,
                 ),
             ];
 
@@ -154,13 +160,14 @@ fn push_top_span(
     z: usize,
     height: u16,
     color: [f32; 3],
-    span: usize,
+    span_x: usize,
+    span_z: usize,
 ) {
     let y = f32::from(height);
     let x0 = x as f32;
-    let x1 = (x + span) as f32;
+    let x1 = (x + span_x) as f32;
     let z0 = z as f32;
-    let z1 = (z + span) as f32;
+    let z1 = (z + span_z) as f32;
     push_quad(
         mesh,
         [[x0, y, z0], [x0, y, z1], [x1, y, z1], [x1, y, z0]],
@@ -236,6 +243,7 @@ mod tests {
         assert_eq!(mesh.quad_count(), WORLD_CHUNK_CELLS + 4 * WORLD_CHUNK_SIZE);
         assert_eq!(mesh.vertices.len(), mesh.quad_count() * 4);
         assert_eq!(mesh.indices.len(), mesh.quad_count() * 6);
+        assert_eq!(mesh, terrain_mesh_lod(&flat_chunk(24), 1));
     }
 
     #[test]
@@ -274,13 +282,14 @@ mod tests {
 
         assert!(half.quad_count() < full.quad_count());
         assert!(quarter.quad_count() < half.quad_count());
-        assert_eq!(half.quad_count(), 128 * 128 + 4 * 128);
-        assert_eq!(quarter.quad_count(), 64 * 64 + 4 * 64);
+        assert_eq!(half.quad_count(), expected_flat_quads(2));
+        assert_eq!(quarter.quad_count(), expected_flat_quads(4));
 
         for mesh in [&half, &quarter] {
             let vertex_count = mesh.vertices.len() as u32;
             assert!(mesh.indices.iter().all(|&index| index < vertex_count));
             assert!(mesh.vertices.iter().all(|v| v.position[1] >= 0.0));
+            assert_footprint(mesh);
         }
     }
 
@@ -294,11 +303,124 @@ mod tests {
     }
 
     #[test]
-    fn lod_vertices_stay_on_the_sample_grid() {
-        let mesh = terrain_mesh_lod(&flat_chunk(24), 4);
+    fn lod_non_divisor_step_stays_inside_the_chunk() {
+        let chunk = flat_chunk(24);
+        let mesh = terrain_mesh_lod(&chunk, 3);
+
+        // 86 samples per axis (0, 3, ..., 255); the last span is 1 m wide.
+        assert_eq!(mesh.quad_count(), expected_flat_quads(3));
+        assert_footprint(&mesh);
         for vertex in &mesh.vertices {
-            assert_eq!(vertex.position[0] % 4.0, 0.0);
-            assert_eq!(vertex.position[2] % 4.0, 0.0);
+            assert!(vertex.position[0] <= WORLD_CHUNK_SIZE as f32);
+            assert!(vertex.position[2] <= WORLD_CHUNK_SIZE as f32);
         }
+    }
+
+    #[test]
+    fn lod_step_larger_than_the_chunk_is_clamped() {
+        let chunk = flat_chunk(24);
+        let mesh = terrain_mesh_lod(&chunk, 300);
+        let full_stride = terrain_mesh_lod(&chunk, WORLD_CHUNK_SIZE);
+
+        assert_eq!(mesh, full_stride);
+        assert_eq!(mesh.quad_count(), 1 + 4);
+        assert_footprint(&mesh);
+        for vertex in &mesh.vertices {
+            assert!(vertex.position[0] <= WORLD_CHUNK_SIZE as f32);
+            assert!(vertex.position[2] <= WORLD_CHUNK_SIZE as f32);
+        }
+    }
+
+    #[test]
+    fn lod_raised_cell_walls_span_two_cells() {
+        let mut chunk = flat_chunk(24);
+        chunk.set_height(10, 10, 30).expect("valid cell");
+        let mesh = terrain_mesh_lod(&chunk, 2);
+
+        assert_eq!(mesh.quad_count(), expected_flat_quads(2) + 4);
+        assert_footprint(&mesh);
+
+        let walls: Vec<[TerrainVertex; 4]> = mesh
+            .indices
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .map(|indices| quad_vertices(&mesh, indices[0] as usize))
+            .filter(|quad| {
+                quad[0].normal[1] == 0.0
+                    && quad
+                        .iter()
+                        .all(|vertex| vertex.position[1] >= 24.0 && vertex.position[1] <= 30.0)
+                    && quad.iter().any(|vertex| vertex.position[1] == 30.0)
+            })
+            .collect();
+        assert_eq!(walls.len(), 4);
+
+        for wall in walls {
+            let span_x = axis_span(&wall, 0);
+            let span_z = axis_span(&wall, 2);
+            if wall[0].normal[0] != 0.0 {
+                assert_eq!(span_x, 0.0);
+                assert_eq!(span_z, 2.0);
+            } else {
+                assert_eq!(span_x, 2.0);
+                assert_eq!(span_z, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn lod_vertices_stay_on_the_sample_grid() {
+        let step = 4;
+        let mesh = terrain_mesh_lod(&flat_chunk(24), step);
+        for vertex in &mesh.vertices {
+            assert_eq!(vertex.position[0] as usize % step, 0);
+            assert_eq!(vertex.position[2] as usize % step, 0);
+        }
+    }
+
+    fn expected_flat_quads(step: usize) -> usize {
+        let samples = WORLD_CHUNK_SIZE.div_ceil(step);
+        samples * samples + 4 * samples
+    }
+
+    fn quad_vertices(mesh: &TerrainMesh, base: usize) -> [TerrainVertex; 4] {
+        [
+            mesh.vertices[base],
+            mesh.vertices[base + 1],
+            mesh.vertices[base + 2],
+            mesh.vertices[base + 3],
+        ]
+    }
+
+    fn axis_span(quad: &[TerrainVertex; 4], axis: usize) -> f32 {
+        let min = quad
+            .iter()
+            .map(|vertex| vertex.position[axis])
+            .reduce(f32::min)
+            .unwrap_or(0.0);
+        let max = quad
+            .iter()
+            .map(|vertex| vertex.position[axis])
+            .reduce(f32::max)
+            .unwrap_or(0.0);
+        max - min
+    }
+
+    fn assert_footprint(mesh: &TerrainMesh) {
+        let max_x = mesh
+            .vertices
+            .iter()
+            .map(|vertex| vertex.position[0])
+            .reduce(f32::max)
+            .unwrap_or(0.0);
+        let max_z = mesh
+            .vertices
+            .iter()
+            .map(|vertex| vertex.position[2])
+            .reduce(f32::max)
+            .unwrap_or(0.0);
+        assert_eq!(max_x, WORLD_CHUNK_SIZE as f32);
+        assert_eq!(max_z, WORLD_CHUNK_SIZE as f32);
     }
 }

@@ -20,7 +20,7 @@ tags:
 | Path | Purpose | Status |
 |---|---|---|
 | `crates/core_voxel` | 32³ chunk, palette/RLE, greedy mesher, demo hut | Working, 24 tests |
-| `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming, terrain mesh + LOD | Working, 41 tests |
+| `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming, terrain mesh + LOD | Working, 44 tests |
 | `crates/core_sim` | 1M-scale cohort simulation: needs, happiness, employment, district services | Working, 11 tests |
 | `crates/server` | Headless cohort tick harness (no GPU, no socket yet) | Working |
 | `crates/bench` | Voxel meshing, worldgen streaming, terrain, and 1M cohort microbenchmarks | Working |
@@ -55,7 +55,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 - `build_demo_mesh()` runs the Rust voxel mesher and returns an `ArrayMesh`.
 - `build_terrain_mesh(seed, chunk_x, chunk_z)` generates and meshes one 256 m terrain chunk with biome vertex colors.
 - `build_terrain_mesh_lod(seed, chunk_x, chunk_z, step)` samples the terrain mesh at a coarser stride for distant chunks.
-- The preview scene streams a 3 × 3 ring of chunks around the camera, with LOD step 1 in the center and step 2 on the ring.
+- The preview scene streams a 3 × 3 ring of chunks around the camera, with LOD step 1 in the center and step 2 on the ring. The benchmark scene uses a 5 × 5 ring so LOD 4 is exercised at distance 2.
 - Headless smoke prints the version, demo surface count, and loaded terrain chunks.
 
 ### Worldgen and streaming
@@ -95,7 +95,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 | Demo hut | 3,931 | 1,867 | 56 | ~0.5 ms |
 | Worldgen, 3 × 3 chunks | 589,824 cells | — | — | ~131 ms load / ~128 ms reload |
 | Cohort, 1M citizens | — | — | — | ~0.21 ms/tick |
-| Terrain mesh, 256 m chunk | 65,536 cells | — | 83,994 quads | ~1.55 ms |
+| Terrain mesh, 256 m chunk | 65,536 cells | — | 83,994 quads | ~1.41 ms |
 | Terrain LOD 2, 256 m chunk | 65,536 cells | — | 25,327 quads | ~0.39 ms |
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
 
@@ -106,6 +106,7 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 - Chunk boundaries are treated as exposed; adjacent chunks will show internal faces until a neighbor sampler or multi-chunk mesher exists.
 - The Godot preview uses one material override; per-material surfaces/UV atlas mapping is not implemented.
 - Multi-chunk streaming exists, but chunk generation and meshing are still synchronous and CPU-bound; they must move to worker threads.
+- Adjacent chunks emit coplanar boundary walls at equal heights, causing z-fighting and doubled geometry until neighbor-aware culling lands.
 - LOD is distance-based (mesh stride), not a full imposter/HLOD pipeline; chunk-boundary faces are still not culled against neighbors.
 - No water shader yet; the water plane is a placeholder.
 - No binary save format; palette/RLE and terrain deltas exist only as in-memory structs and a phase 0 blob.

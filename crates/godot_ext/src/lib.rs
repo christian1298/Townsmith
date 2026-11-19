@@ -10,7 +10,9 @@ use godot::prelude::*;
 
 use core_voxel::demo;
 use core_voxel::mesh::greedy_mesh;
-use core_world::{terrain_mesh_lod, TerrainMesh, WorldChunkCoord, WorldGenerator};
+use core_world::{
+    terrain_mesh_lod, TerrainMesh, WorldChunkCoord, WorldGenerator, WORLD_CHUNK_SIZE,
+};
 
 struct TownsmithExtension;
 
@@ -71,7 +73,8 @@ impl TownsmithCore {
     /// Generate one terrain chunk at a mesh LOD stride.
     ///
     /// `step` is in 1 m terrain cells: 1 = full detail, 2 = half resolution,
-    /// 4 = quarter resolution. Distant chunks use larger steps.
+    /// 4 = quarter resolution. Distant chunks use larger steps. Values outside
+    /// `1..=256` are clamped so bad GDScript input cannot disable meshing.
     #[func]
     fn build_terrain_mesh_lod(
         &self,
@@ -84,7 +87,8 @@ impl TownsmithCore {
         let Ok(chunk) = generator.generate(WorldChunkCoord::new(chunk_x, chunk_z)) else {
             return ArrayMesh::new_gd();
         };
-        let buffers = terrain_mesh_lod(&chunk, usize::try_from(step).unwrap_or(1));
+        let step = usize::try_from(step).map_or(1, |step| step.clamp(1, WORLD_CHUNK_SIZE));
+        let buffers = terrain_mesh_lod(&chunk, step);
         terrain_mesh_to_godot(&buffers)
     }
 }

@@ -30,7 +30,7 @@ A benchmark run is not a synthetic fly-through of an empty map. It is a represen
 > [!info] Phase 0 microbenchmark and harness v0
 > `./scripts/bench_core.sh` runs the core microbenchmarks three times and writes `benchmarks/results/phase0_core_summary.json`: chunk meshing, worldgen/streaming/edit deltas, terrain meshing, and the 1M-cohort tick.
 >
-> `GODOT=/path/to/godot ./scripts/bench_godot.sh` runs the deterministic `phase0_flyover_v1` route three times and writes `benchmarks/results/godot_phase0_summary.json`. Pass a third argument to use another route, e.g. `benchmarks/routes/phase0_streaming_flyover.json` for the multi-chunk streaming route. It builds the terrain scene, moves the camera by elapsed time, records frame times, hitches, and 1% lows. It currently runs headless when no display is available; those frame times validate the route/JSON path but are **not** representative of rendering performance. Use a display and the target machine for real numbers.
+> `GODOT=/path/to/godot ./scripts/bench_godot.sh` runs the deterministic `phase0_flyover_v1` route three times and writes `benchmarks/results/godot_phase0_summary.json`. Pass a third argument to use another route, e.g. `benchmarks/routes/phase0_streaming_flyover.json` for the multi-chunk streaming route; its summary is written to `benchmarks/results/godot_phase0_streaming_flyover_summary.json`. The summary includes `chunks_loaded_min/median/max`. It builds the terrain scene, moves the camera by elapsed time, records frame times, hitches, and 1% lows. It currently runs headless when no display is available; those frame times validate the route/JSON path but are **not** representative of rendering performance. Use a display and the target machine for real numbers.
 
 ## 2. Goals and non-goals
 
@@ -80,7 +80,7 @@ Each scene has one or more **fixed camera routes**. A route is a sequence of way
 
 - **Flyover route:** starts at the outskirts, moves through the dense center, rises to a skyline view, passes over industry/water, and returns.
 - **Street-level route:** drops to eye level, follows a sidewalk/road, passes traffic and crowds, and rises back to the skyline.
-- **Phase 0 terrain routes:** `phase0_flyover.json` covers one 256 m chunk; `phase0_streaming_flyover.json` crosses three chunks and exercises streaming/LOD.
+- **Phase 0 terrain routes:** `phase0_flyover.json` covers one 256 m chunk; `phase0_streaming_flyover.json` crosses three chunks and exercises LOD 1/2/4 streaming.
 - **Duration:** 90–180 seconds of measured movement, plus 10–15 seconds of warm-up (not measured).
 - **Frame-rate independent:** the camera advances by fixed time, not by frame count. A 30 FPS run and a 60 FPS run see the same views.
 - **Deterministic:** no user input, no random camera shake, no dynamic events unless pre-scripted.

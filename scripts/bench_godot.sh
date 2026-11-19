@@ -9,6 +9,10 @@ ROUTE="${3:-$ROOT/benchmarks/routes/phase0_flyover.json}"
 if [[ "$ROUTE" != /* ]]; then
 	ROUTE="$ROOT/$ROUTE"
 fi
+if [[ ! -f "$ROUTE" ]]; then
+	echo "Benchmark route not found: $ROUTE" >&2
+	exit 2
+fi
 OUT_DIR="$ROOT/benchmarks/results"
 mkdir -p "$OUT_DIR"
 TMP="$(mktemp -d)"
@@ -38,7 +42,7 @@ done
 if [[ "$(basename "$ROUTE")" == "phase0_flyover.json" ]]; then
 	SUMMARY="$OUT_DIR/godot_phase0_summary.json"
 else
-	SUMMARY="$OUT_DIR/$(basename "$ROUTE" .json)_summary.json"
+	SUMMARY="$OUT_DIR/godot_$(basename "$ROUTE" .json)_summary.json"
 fi
 
 python3 - "$TMP" "$SUMMARY" "$RUNS" <<'PY'
@@ -56,6 +60,8 @@ records = [json.loads((tmp / f"run_{run}.json").read_text()) for run in range(1,
 def med(key):
     return statistics.median(record["results"][key] for record in records)
 
+chunks = [int(record.get("chunks_loaded", 0)) for record in records]
+
 result = {
     "format_version": 1,
     "suite": "phase0_godot_route",
@@ -71,6 +77,9 @@ result = {
         "frametime_ms_p95": med("frametime_ms_p95"),
         "frametime_ms_p99": med("frametime_ms_p99"),
         "hitches_16ms": med("hitches_16ms"),
+        "chunks_loaded_min": min(chunks),
+        "chunks_loaded_median": statistics.median(chunks),
+        "chunks_loaded_max": max(chunks),
     },
 }
 out.parent.mkdir(parents=True, exist_ok=True)
