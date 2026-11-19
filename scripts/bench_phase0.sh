@@ -26,19 +26,23 @@ if ! [[ "$RUNS" =~ ^[1-9][0-9]*$ && "$DURATION" =~ ^[1-9][0-9]*$ && "$WARMUP" =~
 	exit 2
 fi
 
-echo "Phase 0 target benchmark: $RUNS runs x ${DURATION}s per Godot route (warmup ${WARMUP}s)" >&2
-echo "Core microbenchmarks..." >&2
-"$ROOT/scripts/bench_core.sh" "$RUNS" >/dev/null
+if [[ "${REPORT_ONLY:-0}" == "1" ]]; then
+	echo "Aggregating existing benchmark summaries (REPORT_ONLY=1)" >&2
+else
+	echo "Phase 0 target benchmark: $RUNS runs x ${DURATION}s per Godot route (warmup ${WARMUP}s)" >&2
+	echo "Core microbenchmarks..." >&2
+	"$ROOT/scripts/bench_core.sh" "$RUNS" >/dev/null
 
-echo "Terrain streaming route..." >&2
-CITY_TIER= WARMUP="$WARMUP" GODOT="$GODOT_BIN" "$ROOT/scripts/bench_godot.sh" "$RUNS" "$DURATION" \
-	benchmarks/routes/phase0_streaming_flyover.json >/dev/null
+	echo "Terrain streaming route..." >&2
+	CITY_TIER= WARMUP="$WARMUP" GODOT="$GODOT_BIN" "$ROOT/scripts/bench_godot.sh" "$RUNS" "$DURATION" \
+		benchmarks/routes/phase0_streaming_flyover.json >/dev/null
 
-for tier in early mid late; do
-	echo "City $tier route..." >&2
-	CITY_TIER="$tier" WARMUP="$WARMUP" GODOT="$GODOT_BIN" "$ROOT/scripts/bench_godot.sh" "$RUNS" "$DURATION" \
-		"benchmarks/routes/phase0_city_${tier}.json" >/dev/null
-done
+	for tier in early mid late; do
+		echo "City $tier route..." >&2
+		CITY_TIER="$tier" WARMUP="$WARMUP" GODOT="$GODOT_BIN" "$ROOT/scripts/bench_godot.sh" "$RUNS" "$DURATION" \
+			"benchmarks/routes/phase0_city_${tier}.json" >/dev/null
+	done
+fi
 
 python3 - "$ROOT" "$REPORT" "$STAMP" "$RUNS" "$DURATION" "$WARMUP" <<'PY'
 import json

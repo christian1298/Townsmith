@@ -46,7 +46,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Basements | **Accepted:** cellars/utility basements at launch; underground parking later; no material minimum height. See D-025. |
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
-| Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with 10 cm building detail is tractable. The cohort model and world streaming must be proven in Phase 0. See [[03 - Voxel and Scale]], [[07 - Simulation and AI]], and [[09 - Open Questions]]. |
+| Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with real 10 cm building detail is tractable. The box-city MultiMesh path is measured well above target on an RTX 4080; the target 3060-class run and voxel building LOD remain. See [[03 - Voxel and Scale]], [[23 - City Rendering Benchmark]], and [[09 - Open Questions]]. |
 | Next action | On a desktop with 8-core/16-thread + RTX 3060-class hardware, run `GODOT=/path/to/godot ./scripts/bench_phase0.sh`; record FPS/1% lows, then decide D-003. See [[23 - City Rendering Benchmark]]. |
 
 > [!warning] This is a plan, not a commitment

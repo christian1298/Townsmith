@@ -40,6 +40,8 @@ For a full Phase 0 target run on a desktop:
 GODOT=/path/to/godot ./scripts/bench_phase0.sh
 ```
 
+Baseline results live in `benchmarks/baselines/`. The current developer RTX 4080 baseline is `rtx4080_1080p_gl_compatibility.json`; it is a box-city sanity check, not the target 3060-class result.
+
 It runs the core suite three times and the streaming plus Early/Mid/Late city routes three times each at 30 s (overridable with `RUNS`, `DURATION`, and `WARMUP`), captures best-effort CPU/GPU/OS metadata, and writes `benchmarks/results/phase0_target_<timestamp>.json`. The benchmark forces a 1920×1080 window, disables vsync, and records the actual window/vsync/refresh settings. `ALLOW_HEADLESS=1` runs the same structure without a display but does not produce representative FPS.
 
 ## 2. Goals and non-goals

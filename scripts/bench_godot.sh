@@ -62,7 +62,7 @@ fi
 
 for run in $(seq 1 "$RUNS"); do
 	OUT="$TMP/run_$run.json"
-	"$GODOT_BIN" "${GODOT_FLAGS[@]}" --path "$ROOT/godot" res://benchmark.tscn -- \
+	timeout "${GODOT_TIMEOUT:-180}" "$GODOT_BIN" "${GODOT_FLAGS[@]}" --path "$ROOT/godot" res://benchmark.tscn -- \
 		--route "$ROUTE" \
 		--output "$OUT" --duration "$DURATION" --warmup "$WARMUP" ${CITY_ARGS[@]+"${CITY_ARGS[@]}"} >/dev/null
 done

@@ -69,6 +69,19 @@ Layout is slower than the release-mode `city_layout` microbenchmark because the 
 > [!warning] Headless numbers are not FPS
 > The headless dummy renderer reports ~145 FPS regardless of scene complexity. It validates the route, JSON, MultiMesh upload, and smoke contract; it does **not** measure GPU rendering. Real FPS must be measured on the 8-core/16-thread + RTX 3060-class machine with a display.
 
+### Developer GPU sanity check
+
+A display-backed run on a developer machine (RTX 4080, Ryzen 9 7950X, 1920×1080, vsync off, GL Compatibility, 3 runs × 5 s) produced:
+
+| Route | Avg FPS | 1% low | 16 ms hitches |
+|---|---:|---:|---:|
+| Terrain streaming | 2,841 | 415 | 4 |
+| City Early (200) | 4,619 | 478 | 0 |
+| City Mid (10k) | 3,046 | 376 | 0 |
+| City Late (100k) | 585 | 300 | 0 |
+
+The baseline is stored in `benchmarks/baselines/rtx4080_1080p_gl_compatibility.json`. It is **not** the target 3060-class result, and the boxes are the best case: no voxel geometry, shadows, GI, or LOD. It proves the MultiMesh path and the benchmark harness, not the final city renderer.
+
 ## 5. MultiMesh contract
 
 - `positions`: box centers; `y = height / 2`.

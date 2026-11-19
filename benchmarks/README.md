@@ -6,7 +6,7 @@ Phase 0 benchmark fixtures and results.
 - `results/` — local output (gitignored).
 - `scenes/` — fixed saves, added when city scenes exist.
 - `settings/` — benchmark presets, added with the player-facing benchmark UI.
-- `baselines/` — per-hardware reference results, added after the target machine is defined.
+- `baselines/` — per-hardware reference results. `rtx4080_1080p_gl_compatibility.json` is a developer box-city sanity baseline, not the target 3060-class result.
 
 ## Phase 0 commands
 
