@@ -1,5 +1,8 @@
 extends Node3D
 
+const TerrainStreamer = preload("res://terrain_streamer.gd")
+
+var streamer
 var route: Dictionary = {}
 var waypoints: Array = []
 var route_id := "unknown"
@@ -63,34 +66,19 @@ func _load_route(path: String) -> bool:
 	return true
 
 func _build_world() -> void:
-	var core := TownsmithCore.new()
-	var terrain: ArrayMesh = core.build_terrain_mesh(2026, 0, 0)
-	var terrain_instance := MeshInstance3D.new()
-	terrain_instance.mesh = terrain
-	var terrain_material := StandardMaterial3D.new()
-	terrain_material.vertex_color_use_as_albedo = true
-	terrain_material.roughness = 1.0
-	terrain_material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	terrain_instance.material_override = terrain_material
-	add_child(terrain_instance)
-
-	var water := MeshInstance3D.new()
-	var water_plane := PlaneMesh.new()
-	water_plane.size = Vector2(256.0, 256.0)
-	water.mesh = water_plane
-	water.position = Vector3(128.0, 24.0, 128.0)
-	var water_material := StandardMaterial3D.new()
-	water_material.albedo_color = Color(0.16, 0.38, 0.62, 0.55)
-	water_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	water_material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	water.material_override = water_material
-	add_child(water)
+	streamer = TerrainStreamer.new()
+	streamer.seed = 2026
+	streamer.view_radius = 1
+	streamer.keep_radius = 2
+	streamer.builds_per_frame = 2
+	add_child(streamer)
 
 	camera = Camera3D.new()
 	camera.current = true
-	camera.far = 1000.0
+	camera.far = 1500.0
 	add_child(camera)
 	_apply_route(0.0)
+	streamer.bind_camera(camera)
 
 	var light := DirectionalLight3D.new()
 	light.rotation_degrees = Vector3(-50.0, -30.0, 0.0)
@@ -183,6 +171,7 @@ func _finish() -> void:
 		"format_version": 1,
 		"suite": "godot_route",
 		"scene": "phase0_terrain",
+		"chunks_loaded": streamer.chunk_count() if streamer != null else 0,
 		"route": route_id,
 		"route_path": route_path,
 		"duration_s": duration_s,

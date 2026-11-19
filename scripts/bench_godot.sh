@@ -5,6 +5,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GODOT_BIN="${GODOT:-godot}"
 RUNS="${1:-3}"
 DURATION="${2:-5}"
+ROUTE="${3:-$ROOT/benchmarks/routes/phase0_flyover.json}"
+if [[ "$ROUTE" != /* ]]; then
+	ROUTE="$ROOT/$ROUTE"
+fi
 OUT_DIR="$ROOT/benchmarks/results"
 mkdir -p "$OUT_DIR"
 TMP="$(mktemp -d)"
@@ -27,11 +31,17 @@ fi
 for run in $(seq 1 "$RUNS"); do
 	OUT="$TMP/run_$run.json"
 	"$GODOT_BIN" "${GODOT_FLAGS[@]}" --path "$ROOT/godot" res://benchmark.tscn -- \
-		--route "$ROOT/benchmarks/routes/phase0_flyover.json" \
+		--route "$ROUTE" \
 		--output "$OUT" --duration "$DURATION" --warmup 1 >/dev/null
 done
 
-python3 - "$TMP" "$OUT_DIR/godot_phase0_summary.json" "$RUNS" <<'PY'
+if [[ "$(basename "$ROUTE")" == "phase0_flyover.json" ]]; then
+	SUMMARY="$OUT_DIR/godot_phase0_summary.json"
+else
+	SUMMARY="$OUT_DIR/$(basename "$ROUTE" .json)_summary.json"
+fi
+
+python3 - "$TMP" "$SUMMARY" "$RUNS" <<'PY'
 import json
 import pathlib
 import statistics

@@ -45,54 +45,71 @@ impl TerrainMesh {
 /// Build a terrain mesh for one chunk.
 #[must_use]
 pub fn terrain_mesh(chunk: &WorldChunk) -> TerrainMesh {
+    terrain_mesh_lod(chunk, 1)
+}
+
+/// Build a terrain mesh with a sampling stride.
+///
+/// `step` is the number of 1 m cells per mesh quad. `1` is full detail; `2`
+/// halves the vertex count per axis, and `4` is suitable for distant chunks.
+/// Heights are sampled at the top-left of each span, and walls are emitted
+/// against the neighboring samples. This is deliberately approximate: LOD
+/// chunks are only used beyond the near view distance.
+#[must_use]
+pub fn terrain_mesh_lod(chunk: &WorldChunk, step: usize) -> TerrainMesh {
+    let step = step.max(1);
     let mut mesh = TerrainMesh::default();
 
-    for z in 0..WORLD_CHUNK_SIZE {
-        for x in 0..WORLD_CHUNK_SIZE {
+    for z in (0..WORLD_CHUNK_SIZE).step_by(step) {
+        for x in (0..WORLD_CHUNK_SIZE).step_by(step) {
             let Some(height) = chunk.height(x, z) else {
                 continue;
             };
             let color = cell_color(chunk, x, z, height);
-            push_top(&mut mesh, x, z, height, color);
+            push_top_span(&mut mesh, x, z, height, color, step);
 
             let neighbors = [
                 (
-                    (x as isize) - 1,
+                    x as isize - step as isize,
                     z as isize,
                     [-1.0, 0.0, 0.0],
                     x as f32,
                     z as f32,
+                    step,
                 ),
                 (
-                    (x as isize) + 1,
+                    x as isize + step as isize,
                     z as isize,
                     [1.0, 0.0, 0.0],
-                    (x + 1) as f32,
+                    (x + step) as f32,
                     z as f32,
+                    step,
                 ),
                 (
                     x as isize,
-                    (z as isize) - 1,
+                    z as isize - step as isize,
                     [0.0, 0.0, -1.0],
                     x as f32,
                     z as f32,
+                    step,
                 ),
                 (
                     x as isize,
-                    (z as isize) + 1,
+                    z as isize + step as isize,
                     [0.0, 0.0, 1.0],
                     x as f32,
-                    (z + 1) as f32,
+                    (z + step) as f32,
+                    step,
                 ),
             ];
 
-            for (nx, nz, normal, wx, wz) in neighbors {
+            for (nx, nz, normal, wx, wz, span) in neighbors {
                 let neighbor_height = neighbor_height(chunk, nx, nz);
                 if neighbor_height < height {
-                    push_wall(
+                    push_wall_span(
                         &mut mesh,
-                        wx,
-                        wz,
+                        [wx, wz],
+                        span as f32,
                         neighbor_height,
                         height,
                         normal,
@@ -131,12 +148,19 @@ fn neighbor_height(chunk: &WorldChunk, x: isize, z: isize) -> u16 {
     }
 }
 
-fn push_top(mesh: &mut TerrainMesh, x: usize, z: usize, height: u16, color: [f32; 3]) {
+fn push_top_span(
+    mesh: &mut TerrainMesh,
+    x: usize,
+    z: usize,
+    height: u16,
+    color: [f32; 3],
+    span: usize,
+) {
     let y = f32::from(height);
     let x0 = x as f32;
-    let x1 = (x + 1) as f32;
+    let x1 = (x + span) as f32;
     let z0 = z as f32;
-    let z1 = (z + 1) as f32;
+    let z1 = (z + span) as f32;
     push_quad(
         mesh,
         [[x0, y, z0], [x0, y, z1], [x1, y, z1], [x1, y, z0]],
@@ -145,10 +169,10 @@ fn push_top(mesh: &mut TerrainMesh, x: usize, z: usize, height: u16, color: [f32
     );
 }
 
-fn push_wall(
+fn push_wall_span(
     mesh: &mut TerrainMesh,
-    wx: f32,
-    wz: f32,
+    origin: [f32; 2],
+    span: f32,
     bottom: u16,
     top: u16,
     normal: [f32; 3],
@@ -156,21 +180,23 @@ fn push_wall(
 ) {
     let y0 = f32::from(bottom);
     let y1 = f32::from(top);
+    let wx = origin[0];
+    let wz = origin[1];
 
     // Corners are ordered around the wall; culling is disabled in the preview
     // material until the winding convention is locked.
     let (p0, p1, p2, p3) = if normal[0] != 0.0 {
         (
             [wx, y0, wz],
-            [wx, y0, wz + 1.0],
-            [wx, y1, wz + 1.0],
+            [wx, y0, wz + span],
+            [wx, y1, wz + span],
             [wx, y1, wz],
         )
     } else {
         (
             [wx, y0, wz],
-            [wx + 1.0, y0, wz],
-            [wx + 1.0, y1, wz],
+            [wx + span, y0, wz],
+            [wx + span, y1, wz],
             [wx, y1, wz],
         )
     };
@@ -237,5 +263,42 @@ mod tests {
             assert!(index < vertex_count);
         }
         assert!(mesh.vertices.iter().all(|v| v.position[1] >= 0.0));
+    }
+
+    #[test]
+    fn lod_step_reduces_quads_and_keeps_bounds() {
+        let chunk = flat_chunk(24);
+        let full = terrain_mesh(&chunk);
+        let half = terrain_mesh_lod(&chunk, 2);
+        let quarter = terrain_mesh_lod(&chunk, 4);
+
+        assert!(half.quad_count() < full.quad_count());
+        assert!(quarter.quad_count() < half.quad_count());
+        assert_eq!(half.quad_count(), 128 * 128 + 4 * 128);
+        assert_eq!(quarter.quad_count(), 64 * 64 + 4 * 64);
+
+        for mesh in [&half, &quarter] {
+            let vertex_count = mesh.vertices.len() as u32;
+            assert!(mesh.indices.iter().all(|&index| index < vertex_count));
+            assert!(mesh.vertices.iter().all(|v| v.position[1] >= 0.0));
+        }
+    }
+
+    #[test]
+    fn lod_step_zero_defaults_to_full_detail() {
+        let chunk = flat_chunk(24);
+        assert_eq!(
+            terrain_mesh_lod(&chunk, 0).quad_count(),
+            terrain_mesh(&chunk).quad_count()
+        );
+    }
+
+    #[test]
+    fn lod_vertices_stay_on_the_sample_grid() {
+        let mesh = terrain_mesh_lod(&flat_chunk(24), 4);
+        for vertex in &mesh.vertices {
+            assert_eq!(vertex.position[0] % 4.0, 0.0);
+            assert_eq!(vertex.position[2] % 4.0, 0.0);
+        }
     }
 }

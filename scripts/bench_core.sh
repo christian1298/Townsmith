@@ -54,6 +54,8 @@ result = {
         "worldgen_reload_ms": median("worldgen", "reload_ms"),
         "worldgen_edit_ms": median("worldgen", "edit_ms"),
         "terrain_mesh_ms": median("terrain", "median_mesh_ms"),
+        "terrain_lod_2_ms": median("terrain", "lod_2_median_ms"),
+        "terrain_lod_4_ms": median("terrain", "lod_4_median_ms"),
         "cohort_tick_ms": median("cohort", "tick_ms_median"),
         "cohort_tick_p95_ms": median("cohort", "tick_ms_p95"),
     },

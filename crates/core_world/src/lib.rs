@@ -23,5 +23,5 @@ pub use coords::{
 pub use delta::{DeltaStore, TerrainEdit};
 pub use error::WorldError;
 pub use generator::WorldGenerator;
-pub use mesh::{terrain_mesh, TerrainMesh, TerrainVertex};
+pub use mesh::{terrain_mesh, terrain_mesh_lod, TerrainMesh, TerrainVertex};
 pub use streaming::{StreamUpdate, StreamingConfig, StreamingWorld};

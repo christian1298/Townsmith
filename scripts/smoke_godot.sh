@@ -11,4 +11,9 @@ GODOT_BIN="${GODOT:-godot}"
 if ! "$GODOT_BIN" --headless --path "$ROOT/godot" --import >/dev/null 2>&1; then
 	"$GODOT_BIN" --headless --path "$ROOT/godot" --import >/dev/null
 fi
-exec "$GODOT_BIN" --headless --path "$ROOT/godot" --quit-after 3
+OUTPUT="$("$GODOT_BIN" --headless --path "$ROOT/godot" --quit-after 8 2>&1)"
+printf '%s\n' "$OUTPUT"
+if ! grep -q "Terrain chunk" <<<"$OUTPUT"; then
+	echo "Smoke test failed: terrain streaming did not load a chunk" >&2
+	exit 1
+fi
