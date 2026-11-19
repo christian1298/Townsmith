@@ -42,6 +42,10 @@ else
 		CITY_TIER="$tier" WARMUP="$WARMUP" GODOT="$GODOT_BIN" "$ROOT/scripts/bench_godot.sh" "$RUNS" "$DURATION" \
 			"benchmarks/routes/phase0_city_${tier}.json" >/dev/null
 	done
+
+	echo "Voxel instance route..." >&2
+	VOXEL_INSTANCES=200 WARMUP="$WARMUP" GODOT="$GODOT_BIN" "$ROOT/scripts/bench_godot.sh" "$RUNS" "$DURATION" \
+		benchmarks/routes/phase0_voxel_instances.json >/dev/null
 fi
 
 python3 - "$ROOT" "$REPORT" "$STAMP" <<'PY'
@@ -95,6 +99,7 @@ sections = {
     "city_early": read("godot_phase0_city_early_summary.json"),
     "city_mid": read("godot_phase0_city_mid_summary.json"),
     "city_late": read("godot_phase0_city_late_summary.json"),
+    "voxel_instances": read("godot_phase0_voxel_instances_summary.json"),
 }
 route_sections = {key: value for key, value in sections.items() if key != "core"}
 

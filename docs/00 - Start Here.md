@@ -31,7 +31,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Item | State |
 |---|---|
 | Phase | Phase 0 spike in progress |
-| Code | **Phase 0 in progress:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, 24 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, seam-aware terrain mesh + LOD + skirts, 58 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `core_city` (synthetic Early/Mid/Late layouts, 10 tests), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, a Godot 4.7 GDExtension bridge that streams terrain chunks on Rust worker threads with distance LOD (6 bridge tests), and a MultiMesh city renderer with Early/Mid/Late routes. Headless smoke passes. |
+| Code | **Phase 0 in progress:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, 24 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, seam-aware terrain mesh + LOD + skirts, 58 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `core_city` (synthetic Early/Mid/Late layouts, 10 tests), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, a Godot 4.7 GDExtension bridge that streams terrain chunks on Rust worker threads with distance LOD (6 bridge tests), a MultiMesh city renderer with Early/Mid/Late routes, and a 200-instance voxel-hut route. Headless smoke passes. |
 | Engine | **Proposed:** Godot 4 shell + Rust core. Pending a 3–4 week Phase 0 spike covering voxels, world streaming, and 1M cohorts. See [[04 - Engine and Stack]] and [[10 - Decisions]]. |
 | Team | **Accepted:** 2–3 full-time generalists; Rust/Godot experience or willingness to learn. |
 | Language | **Accepted:** Rust is the primary implementation language from Phase 0; GDScript is shell/UI only; C++ is the fallback. See D-011. |
@@ -47,7 +47,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with real 10 cm building detail is tractable. The box-city MultiMesh path is measured well above target on an RTX 4080; the target 3060-class run and voxel building LOD remain. See [[03 - Voxel and Scale]], [[23 - City Rendering Benchmark]], and [[09 - Open Questions]]. |
-| Next action | On a desktop with 8-core/16-thread + RTX 3060-class hardware, run `GODOT=/path/to/godot ./scripts/bench_phase0.sh`; record FPS/1% lows, then decide D-003. See [[23 - City Rendering Benchmark]]. |
+| Next action | On a desktop with 8-core/16-thread + RTX 3060-class hardware, run `GODOT=/path/to/godot ./scripts/bench_phase0.sh`; record FPS/1% lows, then decide D-003. See [[23 - City Rendering Benchmark]] and [[24 - Voxel Instance Benchmark]]. |
 
 > [!warning] This is a plan, not a commitment
 > Numbers in these docs are **planning targets**, not measured results. Anything marked *Assumption* or *Proposed* must be validated before it becomes an accepted decision.
@@ -186,3 +186,5 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 | [[20 - Water]] | Water shader, uniforms, cost, limitations | You touch water or shoreline rendering |
 | [[21 - LOD Seams]] | Perimeter skirts for terrain LOD seams | You touch terrain meshing or LOD |
 | [[22 - Synthetic City Layout]] | Deterministic Early/Mid/Late box-city layout for rendering benchmarks | You work on the 1M render benchmark |
+| [[23 - City Rendering Benchmark]] | MultiMesh box-city scenes, Early/Mid/Late routes, build metrics | You measure city rendering |
+| [[24 - Voxel Instance Benchmark]] | 200-instance greedy-meshed hut route and results | You measure real voxel geometry |

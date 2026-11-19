@@ -2,12 +2,16 @@ extends Node3D
 
 const TerrainStreamer = preload("res://terrain_streamer.gd")
 const CityRenderer = preload("res://city_renderer.gd")
+const VoxelInstances = preload("res://voxel_instances.gd")
 
 const CITY_TIERS := {"early": 0, "mid": 1, "late": 2}
 const CITY_SEED := 2026
+const VOXEL_SEED := 2026
 
 var streamer
 var city
+var voxel_instances
+var voxel_instance_count := 0
 var city_tier := ""
 var city_tier_index := -1
 var route: Dictionary = {}
@@ -32,6 +36,20 @@ func _ready() -> void:
 	var duration_override := _arg(args, "--duration", "")
 	var warmup_override := _arg(args, "--warmup", "")
 	city_tier = _arg(args, "--city-tier", "")
+	var voxel_arg := _arg(args, "--voxel-instances", "0")
+	if not voxel_arg.is_valid_int():
+		push_error("--voxel-instances expects an integer (got '%s')" % voxel_arg)
+		get_tree().quit(2)
+		return
+	voxel_instance_count = int(voxel_arg)
+	if voxel_instance_count < 0:
+		push_error("--voxel-instances must be zero or positive")
+		get_tree().quit(2)
+		return
+	if city_tier != "" and voxel_instance_count > 0:
+		push_error("--city-tier and --voxel-instances are mutually exclusive")
+		get_tree().quit(2)
+		return
 	if city_tier != "":
 		if not CITY_TIERS.has(city_tier):
 			push_error("Unknown --city-tier '%s'; expected early, mid, or late" % city_tier)
@@ -53,6 +71,9 @@ func _ready() -> void:
 
 	_build_world()
 	if city != null and city.stats().has("error"):
+		get_tree().quit(1)
+		return
+	if voxel_instances != null and voxel_instances.stats().has("error"):
 		get_tree().quit(1)
 		return
 	last_usec = Time.get_ticks_usec()
@@ -84,7 +105,9 @@ func _load_route(path: String) -> bool:
 	return true
 
 func _build_world() -> void:
-	if city_tier != "":
+	if voxel_instance_count > 0:
+		_build_voxel_instances()
+	elif city_tier != "":
 		_build_city()
 	else:
 		_build_terrain()
@@ -131,6 +154,35 @@ func _build_city() -> void:
 		int(stats.get("population", 0)),
 		float(stats.get("build_ms", 0.0)),
 		float(stats.get("layout_ms", 0.0)),
+		float(stats.get("buffer_ms", 0.0)),
+	])
+
+func _build_voxel_instances() -> void:
+	voxel_instances = VoxelInstances.new()
+	voxel_instances.name = "VoxelInstances"
+	add_child(voxel_instances)
+	voxel_instances.build(voxel_instance_count, VOXEL_SEED)
+
+	camera = Camera3D.new()
+	camera.current = true
+	camera.near = 0.1
+	# The grid is ~150 m across, but the route orbits outside it and points
+	# back at the center. Keep a generous far plane so nothing clips.
+	camera.far = maxf(1500.0, voxel_instances.extent_m() * 8.0)
+	add_child(camera)
+	_apply_route(0.0)
+
+	var stats: Dictionary = voxel_instances.stats()
+	if stats.has("error"):
+		push_error("Voxel instance benchmark build failed: " + str(stats["error"]))
+		return
+	print("VOXEL instances=%d seed=%d surfaces=%d bounds=%d build_ms=%.1f mesh_build_ms=%.1f buffer_ms=%.1f" % [
+		int(stats.get("count", 0)),
+		int(stats.get("seed", VOXEL_SEED)),
+		int(stats.get("surfaces", 0)),
+		(stats.get("bounds", []) as Array).size(),
+		float(stats.get("build_ms", 0.0)),
+		float(stats.get("mesh_build_ms", 0.0)),
 		float(stats.get("buffer_ms", 0.0)),
 	])
 
@@ -254,11 +306,17 @@ func _finish() -> void:
 		if value > 16.0:
 			hitches_16 += 1
 	var p99 := _percentile(sorted, 0.99)
+	var scene_name := "phase0_terrain"
+	if voxel_instances != null:
+		scene_name = "phase0_voxel_instances"
+	elif city != null:
+		scene_name = "phase0_city"
 	var result := {
 		"format_version": 1,
 		"suite": "godot_route",
-		"scene": "phase0_city" if city != null else "phase0_terrain",
+		"scene": scene_name,
 		"city": city.stats() if city != null else null,
+		"voxel_instances": voxel_instances.stats() if voxel_instances != null else null,
 		"chunks_loaded": streamer.chunk_count() if streamer != null else null,
 		"streaming": streamer.stats() if streamer != null else null,
 		"route": route_id,

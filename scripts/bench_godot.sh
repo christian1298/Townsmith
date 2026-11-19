@@ -9,9 +9,12 @@ WARMUP="${WARMUP:-3}"
 GODOT_TIMEOUT="${GODOT_TIMEOUT:-$((WARMUP + DURATION + 120))}"
 ROUTE="${3:-$ROOT/benchmarks/routes/phase0_flyover.json}"
 CITY_TIER="${CITY_TIER:-}"
+VOXEL_INSTANCES="${VOXEL_INSTANCES:-0}"
 ROUTE_IS_CITY=false
+ROUTE_IS_VOXEL=false
 case "$(basename "$ROUTE")" in
 	*_city_*) ROUTE_IS_CITY=true ;;
+	*_voxel_*) ROUTE_IS_VOXEL=true ;;
 esac
 if [[ "$ROUTE" != /* ]]; then
 	ROUTE="$ROOT/$ROUTE"
@@ -21,6 +24,11 @@ if [[ ! -f "$ROUTE" ]]; then
 	exit 2
 fi
 CITY_ARGS=()
+VOXEL_ARGS=()
+if [[ -n "$CITY_TIER" && "$VOXEL_INSTANCES" =~ ^[1-9][0-9]*$ ]]; then
+	echo "CITY_TIER=$CITY_TIER and VOXEL_INSTANCES=$VOXEL_INSTANCES are mutually exclusive" >&2
+	exit 2
+fi
 if [[ -n "$CITY_TIER" ]]; then
 	case "$CITY_TIER" in
 		early|mid|late) ;;
@@ -40,6 +48,22 @@ if [[ -n "$CITY_TIER" ]]; then
 	CITY_ARGS+=(--city-tier "$CITY_TIER")
 elif [[ "$ROUTE_IS_CITY" == true ]]; then
 	echo "City route $(basename "$ROUTE") requires CITY_TIER=early|mid|late" >&2
+	exit 2
+fi
+if [[ "$VOXEL_INSTANCES" == "0" || -z "$VOXEL_INSTANCES" ]]; then
+	VOXEL_INSTANCES=""
+elif ! [[ "$VOXEL_INSTANCES" =~ ^[1-9][0-9]*$ ]]; then
+	echo "VOXEL_INSTANCES must be a positive integer (got '$VOXEL_INSTANCES')" >&2
+	exit 2
+fi
+if [[ -n "$VOXEL_INSTANCES" ]]; then
+	if [[ "$ROUTE_IS_VOXEL" != true ]]; then
+		echo "VOXEL_INSTANCES=$VOXEL_INSTANCES requires a phase0_voxel_*.json route" >&2
+		exit 2
+	fi
+	VOXEL_ARGS+=(--voxel-instances "$VOXEL_INSTANCES")
+elif [[ "$ROUTE_IS_VOXEL" == true ]]; then
+	echo "Voxel route $(basename "$ROUTE") requires VOXEL_INSTANCES=<positive integer>" >&2
 	exit 2
 fi
 OUT_DIR="${BENCH_OUT_DIR:-$ROOT/benchmarks/results}"
@@ -65,7 +89,7 @@ for run in $(seq 1 "$RUNS"); do
 	OUT="$TMP/run_$run.json"
 	if timeout "$GODOT_TIMEOUT" "$GODOT_BIN" "${GODOT_FLAGS[@]}" --path "$ROOT/godot" res://benchmark.tscn -- \
 		--route "$ROUTE" \
-		--output "$OUT" --duration "$DURATION" --warmup "$WARMUP" ${CITY_ARGS[@]+"${CITY_ARGS[@]}"} >/dev/null; then
+		--output "$OUT" --duration "$DURATION" --warmup "$WARMUP" ${CITY_ARGS[@]+"${CITY_ARGS[@]}"} ${VOXEL_ARGS[@]+"${VOXEL_ARGS[@]}"} >/dev/null; then
 		:
 	else
 		status=$?
@@ -104,6 +128,11 @@ chunks = [
     if (value := record.get("chunks_loaded")) is not None
 ]
 city_records = [record.get("city") for record in records if record.get("city")]
+voxel_records = [
+    record.get("voxel_instances")
+    for record in records
+    if record.get("voxel_instances")
+]
 
 result = {
     "format_version": 1,
@@ -141,6 +170,16 @@ if city_records:
         "city_build_ms": city["build_ms"],
         "city_layout_ms": city["layout_ms"],
         "city_buffer_ms": city["buffer_ms"],
+    })
+if voxel_records:
+    voxel = dict(voxel_records[0])
+    for key in ("build_ms", "mesh_build_ms", "buffer_ms"):
+        voxel[key] = statistics.median(float(item.get(key, 0.0)) for item in voxel_records)
+    result["voxel_instances"] = voxel
+    result["results"].update({
+        "voxel_build_ms": voxel["build_ms"],
+        "voxel_mesh_build_ms": voxel["mesh_build_ms"],
+        "voxel_buffer_ms": voxel["buffer_ms"],
     })
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps(result, indent=2) + "\n")

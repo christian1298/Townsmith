@@ -252,7 +252,11 @@ GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_strea
 CITY_TIER=late GODOT=/path/to/godot ./scripts/bench_godot.sh 1 5 benchmarks/routes/phase0_city_late.json
 GODOT=/path/to/godot ./scripts/smoke_city.sh
 
-# Full Phase 0 target matrix (core + streaming + city tiers; needs a display)
+# 200 real voxel-hut instances
+VOXEL_INSTANCES=200 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_voxel_instances.json
+GODOT=/path/to/godot ./scripts/smoke_voxel.sh
+
+# Full Phase 0 target matrix (core + streaming + city tiers + 200 voxel instances; needs a display)
 GODOT=/path/to/godot ./scripts/bench_phase0.sh
 ```
 

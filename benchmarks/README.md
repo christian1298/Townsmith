@@ -28,6 +28,8 @@ Routes:
 - `phase0_city_early.json` / `_mid` / `_late` — synthetic MultiMesh cities with
   200 / 10,000 / 100,000 buildings. Set `CITY_TIER` when running the Godot
   benchmark; see `docs/23 - City Rendering Benchmark.md`.
+- `phase0_voxel_instances.json` — 200 greedy-meshed 10 cm huts. Set
+  `VOXEL_INSTANCES=200`; see `docs/24 - Voxel Instance Benchmark.md`.
 
 The routes are deterministic and frame-rate independent: the camera advances by
 elapsed time, not frame count. Headless runs validate the route and JSON shape,
