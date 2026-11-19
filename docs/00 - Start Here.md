@@ -31,7 +31,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Item | State |
 |---|---|
 | Phase | Phase 0 spike in progress |
-| Code | **Phase 0 in progress:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, 24 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, seam-aware terrain mesh + LOD + skirts, 58 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `core_city` (synthetic Early/Mid/Late layouts, 9 tests), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, and a Godot 4.7 GDExtension bridge that streams terrain chunks on Rust worker threads with distance LOD (5 bridge tests). Headless smoke passes. |
+| Code | **Phase 0 in progress:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, 24 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, seam-aware terrain mesh + LOD + skirts, 58 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `core_city` (synthetic Early/Mid/Late layouts, 10 tests), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, and a Godot 4.7 GDExtension bridge that streams terrain chunks on Rust worker threads with distance LOD (6 bridge tests). Headless smoke passes. |
 | Engine | **Proposed:** Godot 4 shell + Rust core. Pending a 3–4 week Phase 0 spike covering voxels, world streaming, and 1M cohorts. See [[04 - Engine and Stack]] and [[10 - Decisions]]. |
 | Team | **Accepted:** 2–3 full-time generalists; Rust/Godot experience or willingness to learn. |
 | Language | **Accepted:** Rust is the primary implementation language from Phase 0; GDScript is shell/UI only; C++ is the fallback. See D-011. |

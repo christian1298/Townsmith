@@ -39,3 +39,13 @@ if [[ "$LODS" != *"1"* || "$LODS" != *"2"* ]]; then
 	echo "Smoke test failed: expected LOD 1 and 2, got '${LODS:-none}'" >&2
 	exit 1
 fi
+
+CITY_LINE="$(grep "^CITY " <<<"$OUTPUT" | tail -1)"
+if [[ -z "$CITY_LINE" ]]; then
+	echo "Smoke test failed: no city bridge marker" >&2
+	exit 1
+fi
+if [[ "$CITY_LINE" != *"tier=late buildings=100000 positions=100000 sizes=100000 colors=100000 kinds=100000 bounds=4 checksum=2595171946372580485 error="* ]]; then
+	echo "Smoke test failed: city bridge contract mismatch: $CITY_LINE" >&2
+	exit 1
+fi

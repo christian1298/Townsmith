@@ -80,11 +80,11 @@ These are warm-up + five-iteration medians; rendering performance is measured in
 
 ## 6. Tests
 
-`core_city` has 9 tests:
+`core_city` has 10 tests:
 
-- counts within 10% of targets;
+- exact target counts (200 / 10,000 / 100,000);
 - same seed → identical layout;
-- different seeds diverge;
+- golden checksums pin all three fixture layouts and the Late smoke seed;
 - all buildings inside bounds;
 - no overlapping footprints (spatial-hash check);
 - tier scaling;

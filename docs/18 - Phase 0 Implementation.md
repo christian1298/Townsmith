@@ -106,6 +106,8 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 - Targets: 500 population / 200 buildings, 100k / 10k, 1M / 100k.
 - Street grid, non-overlapping lots, 3 m floors, tier/core-dependent height mix.
 - FNV checksum pins the layout; `townsmith-bench --bin city_layout` reports medians and checksums.
+- `TownsmithCore.build_city_layout(tier, seed)` returns packed positions/sizes/colors/kinds plus bounds and checksum for a MultiMesh. It must run on the Godot main thread.
+- The smoke builds the Late layout and asserts 100,000 buildings, every packed array length, bounds, tier, and the seed-2026 checksum.
 - This is a rendering stress fixture, not voxel geometry or simulated occupancy. See [[22 - Synthetic City Layout]].
 
 ### Benchmark harness v0
@@ -139,7 +141,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 | Terrain LOD 2, 256 m chunk | 65,536 cells | — | 25,327 quads | ~0.39 ms |
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **122 tests**: 24 voxel, 58 world, 26 simulation, 9 city, and 5 bridge tests.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **124 tests**: 24 voxel, 58 world, 26 simulation, 10 city, and 6 bridge tests.
 
 ## 3. Known limitations
 

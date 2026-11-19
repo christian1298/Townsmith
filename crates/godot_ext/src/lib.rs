@@ -209,15 +209,24 @@ impl TownsmithCore {
 
     /// Generate a synthetic city layout for the rendering benchmark.
     ///
-    /// `tier` is `0` = Early, `1` = Mid, `2` = Late. Returns parallel packed
-    /// arrays for a MultiMesh: positions (box centers), sizes (full extents),
-    /// colors, and building kinds. On failure, returns an `error` string.
+    /// `tier` is `0` = Early, `1` = Mid, `2` = Late. Returns a dictionary:
+    ///
+    /// - `tier` (String), `seed` (int), `population` (int), `buildings` (int count)
+    /// - `bounds` (`PackedFloat32Array`, `[min_x, min_z, max_x, max_z]`)
+    /// - `positions` / `sizes` (`PackedVector3Array`, box centers / full extents)
+    /// - `colors` (`PackedColorArray`, linear RGB)
+    /// - `kinds` (`PackedInt32Array`, 0=house, 1=apartment, 2=shop, 3=office, 4=industry)
+    /// - `checksum` (String, 64-bit layout checksum)
+    ///
+    /// On failure, returns `{ "error": "<message>" }`. Must be called on the
+    /// Godot main thread because it creates Variants and packed arrays.
     #[func]
     fn build_city_layout(&self, tier: i64, seed: i64) -> VarDictionary {
-        let tier = match tier {
-            0 => CityTier::Early,
-            1 => CityTier::Mid,
-            _ => CityTier::Late,
+        let Some(tier) = city_tier_from_code(tier) else {
+            let mut result = VarDictionary::new();
+            let message = format!("invalid_city_tier: {tier}");
+            result.set("error", &GString::from(&message).to_variant());
+            return result;
         };
         match CityLayout::generate(tier, seed as u64) {
             Ok(layout) => city_layout_to_dictionary(&layout),
@@ -410,45 +419,61 @@ fn terrain_mesh_to_godot(buffers: &TerrainMesh) -> Gd<ArrayMesh> {
     mesh
 }
 
-fn city_layout_to_dictionary(layout: &CityLayout) -> VarDictionary {
-    let mut positions = PackedVector3Array::new();
-    let mut sizes = PackedVector3Array::new();
-    let mut colors = PackedColorArray::new();
-    let mut kinds = PackedInt32Array::new();
-    for building in &layout.buildings {
-        positions.push(Vector3::new(
-            building.position[0],
-            building.position[1],
-            building.position[2],
-        ));
-        sizes.push(Vector3::new(
-            building.size[0],
-            building.size[1],
-            building.size[2],
-        ));
-        colors.push(Color::from_rgb(
-            building.color[0],
-            building.color[1],
-            building.color[2],
-        ));
-        kinds.push(building.kind as i32);
+fn city_tier_from_code(code: i64) -> Option<CityTier> {
+    match code {
+        0 => Some(CityTier::Early),
+        1 => Some(CityTier::Mid),
+        2 => Some(CityTier::Late),
+        _ => None,
     }
+}
 
-    let mut bounds = PackedFloat32Array::new();
-    for component in layout.bounds_m {
-        bounds.push(component);
-    }
+fn city_layout_to_dictionary(layout: &CityLayout) -> VarDictionary {
+    let positions: Vec<Vector3> = layout
+        .buildings
+        .iter()
+        .map(|building| {
+            Vector3::new(
+                building.position[0],
+                building.position[1],
+                building.position[2],
+            )
+        })
+        .collect();
+    let sizes: Vec<Vector3> = layout
+        .buildings
+        .iter()
+        .map(|building| Vector3::new(building.size[0], building.size[1], building.size[2]))
+        .collect();
+    let colors: Vec<Color> = layout
+        .buildings
+        .iter()
+        .map(|building| Color::from_rgb(building.color[0], building.color[1], building.color[2]))
+        .collect();
+    let kinds: Vec<i32> = layout
+        .buildings
+        .iter()
+        .map(|building| building.kind as i32)
+        .collect();
 
     let mut result = VarDictionary::new();
     result.set("tier", &GString::from(layout.tier.as_str()).to_variant());
     result.set("seed", layout.seed as i64);
     result.set("population", layout.population as i64);
     result.set("buildings", layout.building_count() as i64);
-    result.set("bounds", &bounds.to_variant());
-    result.set("positions", &positions.to_variant());
-    result.set("sizes", &sizes.to_variant());
-    result.set("colors", &colors.to_variant());
-    result.set("kinds", &kinds.to_variant());
+    result.set(
+        "bounds",
+        &PackedFloat32Array::from(layout.bounds_m.to_vec()).to_variant(),
+    );
+    result.set(
+        "positions",
+        &PackedVector3Array::from(positions).to_variant(),
+    );
+    result.set("sizes", &PackedVector3Array::from(sizes).to_variant());
+    result.set("colors", &PackedColorArray::from(colors).to_variant());
+    result.set("kinds", &PackedInt32Array::from(kinds).to_variant());
+    let checksum = layout.checksum().to_string();
+    result.set("checksum", &GString::from(&checksum).to_variant());
     result
 }
 
@@ -536,6 +561,16 @@ mod tests {
         let result = wait_for_result(&bridge, id);
         assert!(result.error.is_none());
         assert_eq!(result.mesh.expect("mesh"), expected);
+    }
+
+    #[test]
+    fn city_tier_codes_are_strict() {
+        assert_eq!(city_tier_from_code(0), Some(CityTier::Early));
+        assert_eq!(city_tier_from_code(1), Some(CityTier::Mid));
+        assert_eq!(city_tier_from_code(2), Some(CityTier::Late));
+        assert_eq!(city_tier_from_code(-1), None);
+        assert_eq!(city_tier_from_code(3), None);
+        assert_eq!(city_tier_from_code(99), None);
     }
 
     #[test]
