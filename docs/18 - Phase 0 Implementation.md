@@ -68,7 +68,6 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 - Negative chunk coordinates use floor division and are tested at the seam.
 - The Godot preview streams multiple 256 m chunks; the water plane is a placeholder.
 - Multi-chunk meshing uses a seam-aware world-height sampler. Matching boundary faces are culled even when the neighbor chunk has not been loaded.
-- Headless streaming route p99 is ~16.2 ms after boundary culling (not render-representative).
 
 ### Active agents
 
@@ -81,7 +80,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 ### Worker-thread terrain streaming
 
 - `TownsmithCore.request_terrain_chunk` queues a chunk on a fixed Rust worker pool (`available_parallelism - 1`, clamped to 4).
-- Workers run `WorldGenerator::generate` and `terrain_mesh_lod`; no Godot API is touched off the main thread.
+- Workers run `WorldGenerator::generate` and `terrain_mesh_lod_with_sampler` (using `WorldGenerator::height_at` for seam samples); no Godot API is touched off the main thread.
 - `poll_terrain_chunk` drains finished results on the main thread and converts `TerrainMesh` into `ArrayMesh`.
 - Worker jobs are wrapped in `catch_unwind`; a failed job returns an error result instead of wedging the streamer.
 - `TerrainBridge` owns its `JoinHandle`s and joins them on drop; the GDExtension is non-reloadable so a live worker cannot outlive the library.
@@ -89,7 +88,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 - The Godot streamer keeps up to 4 requests in flight, applies LOD, drops stale results, and rebuilds chunks when the desired LOD changes.
 - Finished meshes upload through packed `ArrayMesh` arrays, not per-vertex `SurfaceTool` calls.
 - Headless smoke loads 9 chunks at LOD 1 and 2 in ~0.26 s. The multi-chunk route loads 26–30 chunks depending on the keep radius and records requested/applied/dropped counts.
-- Headless route frame times are not render measurements, but the upload path improved from ~47 ms average / ~647 ms p99 / 17 hitches to ~7.1 ms average / ~18.4 ms p99 / 4 hitches in a single run.
+- Headless route frame times are not render measurements. In a single local run, packed uploads improved the route from ~47 ms average / ~647 ms p99 / 17 hitches to ~7.1 ms / ~18.4 ms / 4; boundary culling then measured ~16.2 ms p99. Treat these as directional only.
 
 ### Cohort simulation
 
@@ -123,15 +122,14 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 | Terrain LOD 2, 256 m chunk | 65,536 cells | — | 25,327 quads | ~0.39 ms |
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **101 tests**: 24 voxel, 47 world, 26 simulation, and 4 bridge tests.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **104 tests**: 24 voxel, 50 world, 26 simulation, and 4 bridge tests.
 
 ## 3. Known limitations
 
-- Chunk boundaries are treated as exposed; adjacent chunks will show internal faces until a neighbor sampler or multi-chunk mesher exists.
 - The Godot preview uses one material override; per-material surfaces/UV atlas mapping is not implemented.
 - Chunk generation and meshing run on a fixed Rust worker pool (up to 4 threads). The Godot main thread converts finished `TerrainMesh` values into packed `ArrayMesh` resources; uploads no longer call `SurfaceTool` per vertex, but large meshes still enter the renderer on the main thread.
 - LOD is distance-based (mesh stride), not a full imposter/HLOD pipeline. Adjacent chunks at different LOD steps can still show small cracks or z-fighting at the seam.
-- Boundary culling samples the deterministic generator, not live edited heights; edits at a chunk edge require a neighbor remesh to update the seam.
+- Boundary culling samples the deterministic generator, not live edited heights. Edited edge cells can render missing or doubled walls until the sampler reads the delta store.
 - No water shader yet; the water plane is a placeholder.
 - No binary save format; palette/RLE and terrain deltas exist only as in-memory structs and a phase 0 blob.
 - The Godot benchmark has single-chunk and multi-chunk terrain routes; it is not the Early/Mid/Late city benchmark yet, and headless frame times are not render measurements.

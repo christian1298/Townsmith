@@ -6,7 +6,7 @@
 
 use crate::biomes::Biome;
 use crate::chunk::WorldChunk;
-use crate::coords::{WATER_LEVEL_M, WORLD_CHUNK_SIZE};
+use crate::coords::{TerrainPos, WATER_LEVEL_M, WORLD_CHUNK_SIZE};
 
 /// One terrain vertex with a biome color.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -61,7 +61,7 @@ pub fn terrain_mesh(chunk: &WorldChunk) -> TerrainMesh {
 /// border and never place a vertex outside the 256 m chunk.
 #[must_use]
 pub fn terrain_mesh_lod(chunk: &WorldChunk, step: usize) -> TerrainMesh {
-    terrain_mesh_lod_with_height(chunk, step, |_, _| 0)
+    terrain_mesh_lod_with_sampler(chunk, step, |_, _| 0)
 }
 
 /// Build a terrain mesh and sample out-of-chunk heights from a world sampler.
@@ -72,7 +72,7 @@ pub fn terrain_mesh_lod(chunk: &WorldChunk, step: usize) -> TerrainMesh {
 /// `height_at` so adjacent chunks agree at the seam even when the neighbor
 /// chunk has not been loaded into memory yet.
 #[must_use]
-pub fn terrain_mesh_lod_with_height<F>(
+pub fn terrain_mesh_lod_with_sampler<F>(
     chunk: &WorldChunk,
     step: usize,
     outside_height: F,
@@ -104,7 +104,7 @@ where
                     span_z,
                 ),
                 (
-                    x as isize + step as isize,
+                    x as isize + span_x as isize,
                     z as isize,
                     [1.0, 0.0, 0.0],
                     (x + span_x) as f32,
@@ -121,7 +121,7 @@ where
                 ),
                 (
                     x as isize,
-                    z as isize + step as isize,
+                    z as isize + span_z as isize,
                     [0.0, 0.0, 1.0],
                     x as f32,
                     (z + span_z) as f32,
@@ -168,7 +168,7 @@ fn dim(color: [f32; 3]) -> [f32; 3] {
 
 fn sample_height<F>(
     chunk: &WorldChunk,
-    origin: crate::coords::TerrainPos,
+    origin: TerrainPos,
     outside_height: &F,
     x: isize,
     z: isize,
@@ -258,8 +258,12 @@ mod tests {
     use crate::coords::{WorldChunkCoord, WORLD_CHUNK_CELLS};
 
     fn flat_chunk(height: u16) -> WorldChunk {
+        flat_chunk_at(WorldChunkCoord::new(0, 0), height)
+    }
+
+    fn flat_chunk_at(coord: WorldChunkCoord, height: u16) -> WorldChunk {
         WorldChunk::from_parts(
-            WorldChunkCoord::new(0, 0),
+            coord,
             vec![height; WORLD_CHUNK_CELLS],
             vec![Biome::Plains; WORLD_CHUNK_CELLS],
         )
@@ -411,22 +415,50 @@ mod tests {
     #[test]
     fn seam_sampler_culls_matching_neighbor_walls() {
         let chunk = flat_chunk(24);
-        let mesh = terrain_mesh_lod_with_height(&chunk, 1, |_, _| 24);
+        let mesh = terrain_mesh_lod_with_sampler(&chunk, 1, |_, _| 24);
         assert_eq!(mesh.quad_count(), WORLD_CHUNK_CELLS);
     }
 
     #[test]
     fn seam_sampler_keeps_lower_neighbor_walls() {
         let chunk = flat_chunk(24);
-        let mesh = terrain_mesh_lod_with_height(&chunk, 1, |x, _| if x >= 256 { 20 } else { 24 });
+        let mesh = terrain_mesh_lod_with_sampler(&chunk, 1, |x, _| if x >= 256 { 20 } else { 24 });
         assert_eq!(mesh.quad_count(), WORLD_CHUNK_CELLS + WORLD_CHUNK_SIZE);
     }
 
     #[test]
     fn seam_sampler_is_used_for_lod_perimeter() {
         let chunk = flat_chunk(24);
-        let mesh = terrain_mesh_lod_with_height(&chunk, 2, |_, _| 24);
-        assert_eq!(mesh.quad_count(), 128 * 128);
+        let mesh = terrain_mesh_lod_with_sampler(&chunk, 2, |_, _| 20);
+        assert_eq!(mesh.quad_count(), 128 * 128 + 4 * 128);
+    }
+
+    #[test]
+    fn seam_sampler_uses_clipped_span_at_the_plus_x_edge() {
+        let chunk = flat_chunk(24);
+        let mesh = terrain_mesh_lod_with_sampler(&chunk, 3, |x, _| if x == 256 { 20 } else { 24 });
+        assert_eq!(mesh.quad_count(), 86 * 86 + 86);
+    }
+
+    #[test]
+    fn seam_sampler_uses_clipped_span_at_the_plus_z_edge() {
+        let chunk = flat_chunk(24);
+        let mesh = terrain_mesh_lod_with_sampler(&chunk, 3, |_, z| if z == 256 { 20 } else { 24 });
+        assert_eq!(mesh.quad_count(), 86 * 86 + 86);
+    }
+
+    #[test]
+    fn seam_sampler_receives_negative_world_coordinates() {
+        let chunk = flat_chunk_at(WorldChunkCoord::new(-1, 0), 24);
+        let saw_west_edge = std::cell::Cell::new(false);
+        let mesh = terrain_mesh_lod_with_sampler(&chunk, 1, |x, z| {
+            if x == -257 && z == 0 {
+                saw_west_edge.set(true);
+            }
+            24
+        });
+        assert!(saw_west_edge.get());
+        assert_eq!(mesh.quad_count(), WORLD_CHUNK_CELLS);
     }
 
     fn expected_flat_quads(step: usize) -> usize {

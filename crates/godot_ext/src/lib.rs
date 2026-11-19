@@ -18,7 +18,7 @@ use godot::prelude::*;
 use core_voxel::demo;
 use core_voxel::mesh::greedy_mesh;
 use core_world::{
-    terrain_mesh_lod_with_height, TerrainMesh, TerrainPos, WorldChunkCoord, WorldGenerator,
+    terrain_mesh_lod_with_sampler, TerrainMesh, TerrainPos, WorldChunkCoord, WorldGenerator,
     WORLD_CHUNK_SIZE,
 };
 
@@ -150,7 +150,7 @@ fn worker_loop(jobs: Arc<Mutex<Receiver<TerrainJob>>>, results: Sender<TerrainRe
             generator
                 .generate(WorldChunkCoord::new(job.chunk_x, job.chunk_z))
                 .map(|chunk| {
-                    terrain_mesh_lod_with_height(&chunk, job.step, |x, z| {
+                    terrain_mesh_lod_with_sampler(&chunk, job.step, |x, z| {
                         generator.height_at(TerrainPos::new(x, z))
                     })
                 })
@@ -259,7 +259,7 @@ impl TownsmithCore {
         let Ok(chunk) = generator.generate(WorldChunkCoord::new(chunk_x, chunk_z)) else {
             return ArrayMesh::new_gd();
         };
-        let buffers = terrain_mesh_lod_with_height(&chunk, step, |x, z| {
+        let buffers = terrain_mesh_lod_with_sampler(&chunk, step, |x, z| {
             generator.height_at(TerrainPos::new(x, z))
         });
         terrain_mesh_to_godot(&buffers)
