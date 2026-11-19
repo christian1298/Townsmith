@@ -6,6 +6,8 @@ extends Node3D
 ## chunk requests, polls finished meshes on the main thread, and uploads them to
 ## MeshInstance3D nodes. LOD is distance-based.
 
+const WaterBody = preload("res://water_body.gd")
+
 const CHUNK_METERS := 256.0
 const CHUNK_CELLS := 256
 const WATER_HEIGHT := 24.1
@@ -28,7 +30,7 @@ var chunks_lod: Dictionary = {}
 var in_flight: Dictionary = {}
 var queue: Array[Vector2i] = []
 var camera: Camera3D
-var water: MeshInstance3D
+var water: WaterBody
 var last_center := Vector2i.ZERO
 var has_center := false
 var chunks_built := 0
@@ -53,20 +55,14 @@ func _ready() -> void:
 	terrain_material.roughness = 1.0
 	terrain_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
-	var water_plane := PlaneMesh.new()
-	water_plane.size = Vector2(8192.0, 8192.0)
-	water = MeshInstance3D.new()
-	water.mesh = water_plane
-	water.position = Vector3(0.0, WATER_HEIGHT, 0.0)
-	var water_material := StandardMaterial3D.new()
-	water_material.albedo_color = Color(0.16, 0.38, 0.62, 0.55)
-	water_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	water_material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	water.material_override = water_material
+	water = WaterBody.new()
+	water.height = WATER_HEIGHT
 	add_child(water)
 
 func bind_camera(camera_node: Camera3D) -> void:
 	camera = camera_node
+	if is_instance_valid(water):
+		water.follow(camera)
 
 func chunk_count() -> int:
 	return chunks.size()
@@ -94,11 +90,7 @@ func _process(_delta: float) -> void:
 	_request_jobs(center)
 	_unload_outside(center)
 	if is_instance_valid(water):
-		water.global_position = Vector3(
-			camera.global_position.x,
-			WATER_HEIGHT,
-			camera.global_position.z
-		)
+		water.follow(camera)
 
 func _camera_chunk() -> Vector2i:
 	var position := camera.global_position
