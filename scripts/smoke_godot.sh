@@ -12,18 +12,27 @@ if ! "$GODOT_BIN" --headless --path "$ROOT/godot" --import >/dev/null 2>&1; then
 	"$GODOT_BIN" --headless --path "$ROOT/godot" --import >/dev/null
 fi
 
-OUTPUT="$("$GODOT_BIN" --headless --path "$ROOT/godot" --quit-after 8 2>&1)"
+set +e
+OUTPUT="$(timeout 60s "$GODOT_BIN" --headless --path "$ROOT/godot" -- --smoke 2>&1)"
+GODOT_STATUS=$?
+set -e
 printf '%s\n' "$OUTPUT"
 
+if [[ $GODOT_STATUS -ne 0 ]]; then
+	echo "Smoke test failed: Godot exited with status $GODOT_STATUS" >&2
+	exit 1
+fi
 if ! grep -q "SMOKE chunks=" <<<"$OUTPUT"; then
 	echo "Smoke test failed: no terrain streaming marker" >&2
 	exit 1
 fi
 
-CHUNKS="$(sed -n 's/.*SMOKE chunks=\([0-9][0-9]*\).*/\1/p' <<<"$OUTPUT" | tail -1)"
-LODS="$(sed -n 's/.*lods=//p' <<<"$OUTPUT" | tail -1)"
-if [[ -z "$CHUNKS" || "$CHUNKS" -lt 3 ]]; then
-	echo "Smoke test failed: expected at least 3 terrain chunks, got '${CHUNKS:-none}'" >&2
+LINE="$(grep "SMOKE chunks=" <<<"$OUTPUT" | tail -1)"
+CHUNKS="$(sed -n 's/.*chunks=\([0-9][0-9]*\).*/\1/p' <<<"$LINE")"
+LODS="$(sed -n 's/.*lods=\([^ ]*\).*/\1/p' <<<"$LINE")"
+STATUS="$(sed -n 's/.*status=\([^ ]*\).*/\1/p' <<<"$LINE")"
+if [[ "$STATUS" != "ok" || -z "$CHUNKS" || "$CHUNKS" -lt 9 ]]; then
+	echo "Smoke test failed: status='${STATUS:-none}', chunks='${CHUNKS:-none}'" >&2
 	exit 1
 fi
 if [[ "$LODS" != *"1"* || "$LODS" != *"2"* ]]; then

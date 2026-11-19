@@ -3,8 +3,6 @@ extends Node3D
 const TerrainStreamer = preload("res://terrain_streamer.gd")
 
 var streamer
-var smoke_frames := 0
-var smoke_reported := false
 
 func _ready() -> void:
 	var core = TownsmithCore.new()
@@ -42,15 +40,30 @@ func _ready() -> void:
 	world_environment.environment = environment
 	add_child(world_environment)
 
-func _process(_delta: float) -> void:
-	smoke_frames += 1
-	if smoke_reported or smoke_frames < 6:
-		return
-	smoke_reported = true
+	if OS.get_cmdline_user_args().has("--smoke"):
+		_run_smoke()
+
+func _run_smoke() -> void:
+	var started := Time.get_ticks_msec()
+	var deadline := started + 15000
+	while streamer.chunk_count() < 9 and Time.get_ticks_msec() < deadline:
+		await get_tree().process_frame
+
 	var lods: Array[int] = streamer.loaded_lods()
 	var lod_text := ""
 	for lod in lods:
 		if lod_text != "":
 			lod_text += ","
 		lod_text += str(lod)
-	print("SMOKE chunks=%d lods=%s" % [streamer.chunk_count(), lod_text])
+	var status := "ok"
+	if streamer.chunk_count() < 9:
+		status = "timeout"
+	elif not lods.has(1) or not lods.has(2):
+		status = "missing_lods"
+	print("SMOKE chunks=%d lods=%s status=%s elapsed_ms=%d" % [
+		streamer.chunk_count(),
+		lod_text,
+		status,
+		Time.get_ticks_msec() - started,
+	])
+	get_tree().quit(0 if status == "ok" else 1)

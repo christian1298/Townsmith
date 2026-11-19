@@ -27,7 +27,7 @@ tags:
 | `benchmarks/` | Route JSON, results, and benchmark notes | Harness v0 |
 | `scripts/bench_core.sh` | 3-run core benchmark aggregation | Working |
 | `scripts/bench_godot.sh` | 3-run Godot flyover aggregation | Working; headless frame times are not representative |
-| `crates/godot_ext` | Godot 4.7 GDExtension bridge | Working, headless smoke |
+| `crates/godot_ext` | Godot 4.7 GDExtension bridge with a Rust terrain worker pool | Working, 4 tests + headless smoke |
 | `godot/` | Preview project; streams 256 m terrain chunks around the camera with distance LOD | Working |
 | `scripts/` | Build, check, run, and smoke commands | Working |
 
@@ -62,7 +62,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 
 - 256 × 256 terrain chunks at 1 m (65,536 cells per chunk).
 - Deterministic value-noise terrain with continents, hills, forests, coasts, and river valleys.
-- A 3 × 3 chunk view (589,824 cells) loads in ~131 ms; generation is CPU-bound and must move to worker threads before it can stream without hitches.
+- A 3 × 3 chunk view (589,824 cells) takes ~131 ms of CPU generation on one core; this now runs on Rust worker threads in the Godot bridge.
 - Sparse height-edit deltas, grouped by chunk; 2,000 edits encode to 8,030 bytes.
 - Deltas survive chunk unload/reload and a binary round trip.
 - Negative chunk coordinates use floor division and are tested at the seam.
@@ -76,6 +76,19 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 - Sparse 128 m world: **~0.19 ms median** tick (p95 ~0.23 ms), ~1.9% of the 10 ms budget.
 - Dense 32 m stress world: **~0.90 ms median** tick (p95 ~1.03 ms), ~9% of the budget; 1,575 agents hit the neighbor cap.
 - No pathfinding, collision, schedules, or rendering yet. See [[19 - Active Agent Benchmark]].
+
+### Worker-thread terrain streaming
+
+- `TownsmithCore.request_terrain_chunk` queues a chunk on a fixed Rust worker pool (`available_parallelism - 1`, clamped to 4).
+- Workers run `WorldGenerator::generate` and `terrain_mesh_lod`; no Godot API is touched off the main thread.
+- `poll_terrain_chunk` drains finished results on the main thread and converts `TerrainMesh` into `ArrayMesh`.
+- Worker jobs are wrapped in `catch_unwind`; a failed job returns an error result instead of wedging the streamer.
+- `TerrainBridge` owns its `JoinHandle`s and joins them on drop; the GDExtension is non-reloadable so a live worker cannot outlive the library.
+- The streamer retries failed chunks up to 3 times and resets the bridge if the worker pool disconnects.
+- The Godot streamer keeps up to 4 requests in flight, applies LOD, drops stale results, and rebuilds chunks when the desired LOD changes.
+- Finished meshes upload through packed `ArrayMesh` arrays, not per-vertex `SurfaceTool` calls.
+- Headless smoke loads 9 chunks at LOD 1 and 2 in ~0.26 s. The multi-chunk route loads 26–30 chunks depending on the keep radius and records requested/applied/dropped counts.
+- Headless route frame times are not render measurements, but the upload path improved from ~47 ms average / ~647 ms p99 / 17 hitches to ~7.1 ms average / ~18.4 ms p99 / 4 hitches in a single run.
 
 ### Cohort simulation
 
@@ -109,28 +122,28 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 | Terrain LOD 2, 256 m chunk | 65,536 cells | — | 25,327 quads | ~0.39 ms |
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, and cohort paths and a baseline for regressions.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **98 tests**: 24 voxel, 44 world, 26 simulation, and 4 bridge tests.
 
 ## 3. Known limitations
 
 - Chunk boundaries are treated as exposed; adjacent chunks will show internal faces until a neighbor sampler or multi-chunk mesher exists.
 - The Godot preview uses one material override; per-material surfaces/UV atlas mapping is not implemented.
-- Multi-chunk streaming exists, but chunk generation and meshing are still synchronous and CPU-bound; they must move to worker threads.
+- Chunk generation and meshing run on a fixed Rust worker pool (up to 4 threads). The Godot main thread converts finished `TerrainMesh` values into packed `ArrayMesh` resources; uploads no longer call `SurfaceTool` per vertex, but large meshes still enter the renderer on the main thread.
 - Adjacent chunks emit coplanar boundary walls at equal heights, causing z-fighting and doubled geometry until neighbor-aware culling lands.
 - LOD is distance-based (mesh stride), not a full imposter/HLOD pipeline; chunk-boundary faces are still not culled against neighbors.
 - No water shader yet; the water plane is a placeholder.
 - No binary save format; palette/RLE and terrain deltas exist only as in-memory structs and a phase 0 blob.
 - The Godot benchmark has single-chunk and multi-chunk terrain routes; it is not the Early/Mid/Late city benchmark yet, and headless frame times are not render measurements.
+- Async chunk completion order is scheduling-dependent; the camera/settings are deterministic, but the frame at which a chunk appears is not yet deterministic (D-020 caveat).
 - The headless server has no networking, persistence, or commands yet; it only proves the CPU tick path.
 - The engine choice is still **proposed** until the Phase 0 spike completes.
 
 ## 4. Next steps
 
-1. Move terrain generation and meshing to worker threads; remove streaming hitches.
-2. Add neighbor-aware chunk-boundary culling and a real water shader.
-3. Build the Early/Mid/Late city benchmark scenes and routes.
-4. Measure the 30 FPS 1M rendering target on 8-core/16-thread + RTX 3060-class hardware.
-5. Decide D-003 (Godot + Rust) from measured results.
+1. Add neighbor-aware chunk-boundary culling and a real water shader.
+2. Build the Early/Mid/Late city benchmark scenes and routes.
+3. Measure the 30 FPS 1M rendering target on 8-core/16-thread + RTX 3060-class hardware.
+4. Decide D-003 (Godot + Rust) from measured results.
 
 ## 5. Commands
 
