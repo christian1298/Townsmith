@@ -6,6 +6,7 @@ GODOT_BIN="${GODOT:-godot}"
 RUNS="${1:-3}"
 DURATION="${2:-5}"
 WARMUP="${WARMUP:-3}"
+GODOT_TIMEOUT="${GODOT_TIMEOUT:-$((WARMUP + DURATION + 120))}"
 ROUTE="${3:-$ROOT/benchmarks/routes/phase0_flyover.json}"
 CITY_TIER="${CITY_TIER:-}"
 ROUTE_IS_CITY=false
@@ -41,7 +42,7 @@ elif [[ "$ROUTE_IS_CITY" == true ]]; then
 	echo "City route $(basename "$ROUTE") requires CITY_TIER=early|mid|late" >&2
 	exit 2
 fi
-OUT_DIR="$ROOT/benchmarks/results"
+OUT_DIR="${BENCH_OUT_DIR:-$ROOT/benchmarks/results}"
 mkdir -p "$OUT_DIR"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -62,9 +63,15 @@ fi
 
 for run in $(seq 1 "$RUNS"); do
 	OUT="$TMP/run_$run.json"
-	"$GODOT_BIN" "${GODOT_FLAGS[@]}" --path "$ROOT/godot" res://benchmark.tscn -- \
+	if timeout "$GODOT_TIMEOUT" "$GODOT_BIN" "${GODOT_FLAGS[@]}" --path "$ROOT/godot" res://benchmark.tscn -- \
 		--route "$ROUTE" \
-		--output "$OUT" --duration "$DURATION" --warmup "$WARMUP" ${CITY_ARGS[@]+"${CITY_ARGS[@]}"} >/dev/null
+		--output "$OUT" --duration "$DURATION" --warmup "$WARMUP" ${CITY_ARGS[@]+"${CITY_ARGS[@]}"} >/dev/null; then
+		:
+	else
+		status=$?
+		echo "Godot run $run failed or timed out after ${GODOT_TIMEOUT}s (exit $status)" >&2
+		exit "$status"
+	fi
 done
 
 if [[ "$(basename "$ROUTE")" == "phase0_flyover.json" ]]; then
@@ -107,6 +114,7 @@ result = {
     "warmup_s": records[0].get("warmup_s"),
     "headless": records[0].get("headless", False),
     "hardware": records[0].get("hardware", {}),
+    "engine": records[0].get("engine", {}),
     "route": records[0].get("route"),
     "results": {
         "fps_avg": med("fps_avg"),

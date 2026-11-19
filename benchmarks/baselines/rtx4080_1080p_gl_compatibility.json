@@ -1,0 +1,147 @@
+{
+  "format_version": 1,
+  "suite": "phase0_godot_route_baseline",
+  "generated_at": "2026-11-19T21:15:24.378758+00:00",
+  "git_commit": "ef11139",
+  "git_dirty": true,
+  "engine": {
+    "build": "official",
+    "hash": "ed1daf0bf001b61586d9930840f2f1394092c079",
+    "hex": 263938,
+    "major": 4,
+    "minor": 7,
+    "patch": 2,
+    "status": "stable",
+    "string": "4.7.2-stable (official)",
+    "timestamp": 0
+  },
+  "note": "Developer-machine sanity baseline. NOT the target 8c/16t + RTX 3060-class result; only box buildings, no shadows/GI/LOD.",
+  "hardware": {
+    "display_server": "Wayland",
+    "logical_processor_count": 32,
+    "max_fps": 0,
+    "os": "Linux",
+    "os_version": "#1 SMP PREEMPT_DYNAMIC Thu, 12 Nov 2026 08:16:20 +0000",
+    "processor": "AMD Ryzen 9 7950X 16-Core Processor",
+    "refresh_rate_hz": 119.998001098633,
+    "rendering_method": "gl_compatibility",
+    "video_adapter": "NVIDIA GeForce RTX 4080",
+    "video_api": "3.3.0 NVIDIA 620.70.06",
+    "video_vendor": "NVIDIA",
+    "vsync_mode": 0,
+    "window_size": [
+      1920,
+      1080
+    ]
+  },
+  "settings": {
+    "resolution": "1920x1080",
+    "vsync": "disabled",
+    "max_fps": 0,
+    "runs": 3,
+    "duration_s": 5,
+    "warmup_s": 3,
+    "renderer": "gl_compatibility"
+  },
+  "routes": {
+    "terrain_streaming": {
+      "route": "phase0_streaming_flyover_v1",
+      "duration_s": 5.0,
+      "warmup_s": 3.0,
+      "fps_avg": 2840.7,
+      "fps_low_1pct": 415.3,
+      "frametime_ms_avg": 0.352,
+      "frametime_ms_p99": 2.408,
+      "hitches_16ms": 4,
+      "chunks_loaded": {
+        "chunks_loaded_min": 30,
+        "chunks_loaded_median": 30,
+        "chunks_loaded_max": 30
+      }
+    },
+    "city_early": {
+      "route": "phase0_city_early_v1",
+      "duration_s": 5.0,
+      "warmup_s": 3.0,
+      "fps_avg": 4618.6,
+      "fps_low_1pct": 477.6,
+      "frametime_ms_avg": 0.217,
+      "frametime_ms_p99": 2.094,
+      "hitches_16ms": 0,
+      "city": {
+        "tier": "early",
+        "population": 500,
+        "buildings": 200,
+        "instances": 200,
+        "build_ms": 1.038,
+        "layout_ms": 0.257,
+        "buffer_ms": 0.777,
+        "buffer_bytes": 12800,
+        "seed": 2026,
+        "extent_m": 600.0,
+        "bounds": [
+          -300.0,
+          -300.0,
+          300.0,
+          300.0
+        ]
+      }
+    },
+    "city_mid": {
+      "route": "phase0_city_mid_v1",
+      "duration_s": 5.0,
+      "warmup_s": 3.0,
+      "fps_avg": 3045.5,
+      "fps_low_1pct": 376.4,
+      "frametime_ms_avg": 0.328,
+      "frametime_ms_p99": 2.657,
+      "hitches_16ms": 0,
+      "city": {
+        "tier": "mid",
+        "population": 100000,
+        "buildings": 10000,
+        "instances": 10000,
+        "build_ms": 11.454,
+        "layout_ms": 7.988,
+        "buffer_ms": 3.483,
+        "buffer_bytes": 640000,
+        "seed": 2026,
+        "extent_m": 3000.0,
+        "bounds": [
+          -1500.0,
+          -1500.0,
+          1500.0,
+          1500.0
+        ]
+      }
+    },
+    "city_late": {
+      "route": "phase0_city_late_v1",
+      "duration_s": 5.0,
+      "warmup_s": 3.0,
+      "fps_avg": 766.2,
+      "fps_low_1pct": 434.6,
+      "frametime_ms_avg": 1.305,
+      "frametime_ms_p99": 2.301,
+      "hitches_16ms": 0,
+      "city": {
+        "tier": "late",
+        "population": 1000000,
+        "buildings": 100000,
+        "instances": 100000,
+        "build_ms": 114.4,
+        "layout_ms": 82.267,
+        "buffer_ms": 32.708,
+        "buffer_bytes": 6400000,
+        "seed": 2026,
+        "extent_m": 8000.0,
+        "bounds": [
+          -4000.0,
+          -4000.0,
+          4000.0,
+          4000.0
+        ]
+      }
+    }
+  }
+}
