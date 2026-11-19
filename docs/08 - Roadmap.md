@@ -55,7 +55,7 @@ tags:
 
 **Deliverables**
 - Benchmark report: 10 cm voxel building, 200 instances, editing, worldgen/streaming, 1M cohorts, 2k active agents, primary jobs, PCK mod, headless server.
-- Accepted or revised D-002 (multi-scale), D-003 (engine), D-016 (open world), and D-017 (cohort simulation).
+- Accepted D-002 (multi-scale), D-003 (engine), D-016 (open world), and D-017 (cohort simulation). D-003 is accepted; the 3060-class 1M performance gate remains open for Phase 5.
 - `core/` Rust workspace with voxel chunk + greedy mesher prototype and a worldgen prototype.
 - Godot project with a test scene and GDExtension bridge.
 - **Benchmark harness v0:** fixed test scene, fixed camera route, JSON result, 3-run median, overhead check.
@@ -70,7 +70,7 @@ tags:
 - Benchmark harness is repeatable: <5% average FPS variance across 3 runs and <2% recording overhead.
 - PCK mod loads without an engine fork.
 - Headless server runs without a GPU.
-- The team agrees on the stack.
+- D-003 (Godot 4 + Rust) is accepted; the 3060-class 1M performance gate is tracked separately.
 
 > [!danger] Stop line
 > If the spike cannot hit these targets, do not proceed to Phase 1. Re-evaluate Bevy, a custom `RenderingDevice` renderer, a coarser voxel size, or a smaller population cap. The worst outcome is discovering this in Phase 5.
@@ -354,7 +354,7 @@ The vertical slice is a small, complete version of the game used to validate the
 1. Close the remaining Phase 0 questions: Q-002 and Q-052 in [[09 - Open Questions]].
 2. Build the Phase 0 benchmark harness: fixed test scene, fixed camera route, JSON result, 3-run median.
 3. Run the Phase 0 engine/worldgen/1M spike through the harness.
-4. Write the ADR for the engine result (D-003); D-016, D-017, and D-020 are already accepted.
+4. D-003 (engine) is accepted; record the 3060-class performance gate for Phase 5.
 5. Set up the Rust workspace and Godot project.
 6. Implement chunk storage + greedy mesher + a test building.
 7. Implement deterministic worldgen + chunk streaming + terrain edit deltas.
