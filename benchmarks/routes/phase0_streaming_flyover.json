@@ -1,0 +1,13 @@
+{
+  "id": "phase0_streaming_flyover_v1",
+  "description": "Phase 0 multi-chunk terrain flyover. Crosses three 256 m chunks and exercises streaming/LOD.",
+  "duration_seconds": 30,
+  "warmup_seconds": 3,
+  "waypoints": [
+    { "t": 0.0, "position": [20, 70, 240], "look_at": [128, 28, 128], "fov": 70 },
+    { "t": 0.25, "position": [180, 85, 220], "look_at": [320, 28, 220], "fov": 68 },
+    { "t": 0.5, "position": [360, 95, 180], "look_at": [512, 30, 180], "fov": 65 },
+    { "t": 0.75, "position": [540, 85, 120], "look_at": [700, 30, 120], "fov": 72 },
+    { "t": 1.0, "position": [700, 115, 40], "look_at": [760, 20, 200], "fov": 70 }
+  ]
+}

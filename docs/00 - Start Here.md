@@ -31,7 +31,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Item | State |
 |---|---|
 | Phase | Phase 0 spike in progress |
-| Code | **Scaffolded:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, 24 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, terrain mesh, 38 tests), `core_sim` (1M cohort tick, 11 tests), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, and a Godot 4.7 GDExtension bridge that previews a generated terrain chunk. Headless smoke passes. |
+| Code | **Phase 0 in progress:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, 24 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, terrain mesh + LOD, 44 tests), `core_sim` (1M cohort tick, 11 tests), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, and a Godot 4.7 GDExtension bridge that streams a 3 × 3 ring of terrain chunks with distance LOD. Headless smoke passes. |
 | Engine | **Proposed:** Godot 4 shell + Rust core. Pending a 3–4 week Phase 0 spike covering voxels, world streaming, and 1M cohorts. See [[04 - Engine and Stack]] and [[10 - Decisions]]. |
 | Team | **Accepted:** 2–3 full-time generalists; Rust/Godot experience or willingness to learn. |
 | Language | **Accepted:** Rust is the primary implementation language from Phase 0; GDScript is shell/UI only; C++ is the fallback. See D-011. |
@@ -47,7 +47,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with 10 cm building detail is tractable. The cohort model and world streaming must be proven in Phase 0. See [[03 - Voxel and Scale]], [[07 - Simulation and AI]], and [[09 - Open Questions]]. |
-| Next action | Continue the Phase 0 spike: Godot multi-chunk terrain streaming and the 30 FPS 1M rendering target. See [[08 - Roadmap]]. |
+| Next action | Move terrain generation/meshing to worker threads, then build the Early/Mid/Late city scenes and measure the 30 FPS 1M rendering target. See [[08 - Roadmap]]. |
 
 > [!warning] This is a plan, not a commitment
 > Numbers in these docs are **planning targets**, not measured results. Anything marked *Assumption* or *Proposed* must be validated before it becomes an accepted decision.
@@ -153,11 +153,11 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 ## Next actions
 
-1. Commit the planning baseline (docs 00–17, README, AGENTS, PR template) on a `docs/plan-update` branch.
-2. Start the `feat/phase-0-spike` worktree: Rust workspace, 32³ voxel chunk, palette/RLE, greedy mesher, unit tests.
-3. Add the Godot 4 test scene and GDExtension bridge; render one 10 cm building.
-4. Build the benchmark harness v0 from [[15 - Benchmarks]]: fixed scene, fixed route, JSON result, 3-run median.
-5. Run worldgen/streaming and the 1M cohort microbenchmark through the harness.
+1. Move terrain generation and meshing to worker threads; remove streaming hitches.
+2. Add neighbor-aware chunk-boundary culling and a real water shader.
+3. Build the Early/Mid/Late city benchmark scenes and routes.
+4. Measure the 30 FPS 1M rendering target on 8-core/16-thread + RTX 3060-class hardware.
+5. Decide D-003 (Godot + Rust) from measured results.
 6. Lock the vertical-slice scope in [[08 - Roadmap]].
 7. Write the first content schemas (blocks, materials, blueprints) from [[06 - Modding and Resource Packs]].
 

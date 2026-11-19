@@ -10,7 +10,9 @@ use godot::prelude::*;
 
 use core_voxel::demo;
 use core_voxel::mesh::greedy_mesh;
-use core_world::{terrain_mesh, WorldChunkCoord, WorldGenerator};
+use core_world::{
+    terrain_mesh_lod, TerrainMesh, WorldChunkCoord, WorldGenerator, WORLD_CHUNK_SIZE,
+};
 
 struct TownsmithExtension;
 
@@ -65,37 +67,57 @@ impl TownsmithCore {
     /// Generate one 256 m terrain chunk and return it as a colored Godot mesh.
     #[func]
     fn build_terrain_mesh(&self, seed: i64, chunk_x: i64, chunk_z: i64) -> Gd<ArrayMesh> {
+        self.build_terrain_mesh_lod(seed, chunk_x, chunk_z, 1)
+    }
+
+    /// Generate one terrain chunk at a mesh LOD stride.
+    ///
+    /// `step` is in 1 m terrain cells: 1 = full detail, 2 = half resolution,
+    /// 4 = quarter resolution. Distant chunks use larger steps. Values outside
+    /// `1..=256` are clamped so bad GDScript input cannot disable meshing.
+    #[func]
+    fn build_terrain_mesh_lod(
+        &self,
+        seed: i64,
+        chunk_x: i64,
+        chunk_z: i64,
+        step: i64,
+    ) -> Gd<ArrayMesh> {
         let generator = WorldGenerator::new(seed as u64);
         let Ok(chunk) = generator.generate(WorldChunkCoord::new(chunk_x, chunk_z)) else {
             return ArrayMesh::new_gd();
         };
-        let buffers = terrain_mesh(&chunk);
-
-        let mut surface = SurfaceTool::new_gd();
-        surface.begin(PrimitiveType::TRIANGLES);
-        for triangle in buffers.indices.chunks(3) {
-            for &index in triangle {
-                let Some(vertex) = buffers.vertices.get(index as usize) else {
-                    continue;
-                };
-                surface.set_normal(Vector3::new(
-                    vertex.normal[0],
-                    vertex.normal[1],
-                    vertex.normal[2],
-                ));
-                surface.set_color(Color::from_rgb(
-                    vertex.color[0],
-                    vertex.color[1],
-                    vertex.color[2],
-                ));
-                surface.add_vertex(Vector3::new(
-                    vertex.position[0],
-                    vertex.position[1],
-                    vertex.position[2],
-                ));
-            }
-        }
-
-        surface.commit().unwrap_or_else(ArrayMesh::new_gd)
+        let step = usize::try_from(step).map_or(1, |step| step.clamp(1, WORLD_CHUNK_SIZE));
+        let buffers = terrain_mesh_lod(&chunk, step);
+        terrain_mesh_to_godot(&buffers)
     }
+}
+
+fn terrain_mesh_to_godot(buffers: &TerrainMesh) -> Gd<ArrayMesh> {
+    let mut surface = SurfaceTool::new_gd();
+    surface.begin(PrimitiveType::TRIANGLES);
+    for triangle in buffers.indices.chunks(3) {
+        for &index in triangle {
+            let Some(vertex) = buffers.vertices.get(index as usize) else {
+                continue;
+            };
+            surface.set_normal(Vector3::new(
+                vertex.normal[0],
+                vertex.normal[1],
+                vertex.normal[2],
+            ));
+            surface.set_color(Color::from_rgb(
+                vertex.color[0],
+                vertex.color[1],
+                vertex.color[2],
+            ));
+            surface.add_vertex(Vector3::new(
+                vertex.position[0],
+                vertex.position[1],
+                vertex.position[2],
+            ));
+        }
+    }
+
+    surface.commit().unwrap_or_else(ArrayMesh::new_gd)
 }

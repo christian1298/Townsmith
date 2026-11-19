@@ -5,6 +5,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GODOT_BIN="${GODOT:-godot}"
 RUNS="${1:-3}"
 DURATION="${2:-5}"
+ROUTE="${3:-$ROOT/benchmarks/routes/phase0_flyover.json}"
+if [[ "$ROUTE" != /* ]]; then
+	ROUTE="$ROOT/$ROUTE"
+fi
+if [[ ! -f "$ROUTE" ]]; then
+	echo "Benchmark route not found: $ROUTE" >&2
+	exit 2
+fi
 OUT_DIR="$ROOT/benchmarks/results"
 mkdir -p "$OUT_DIR"
 TMP="$(mktemp -d)"
@@ -27,11 +35,17 @@ fi
 for run in $(seq 1 "$RUNS"); do
 	OUT="$TMP/run_$run.json"
 	"$GODOT_BIN" "${GODOT_FLAGS[@]}" --path "$ROOT/godot" res://benchmark.tscn -- \
-		--route "$ROOT/benchmarks/routes/phase0_flyover.json" \
+		--route "$ROUTE" \
 		--output "$OUT" --duration "$DURATION" --warmup 1 >/dev/null
 done
 
-python3 - "$TMP" "$OUT_DIR/godot_phase0_summary.json" "$RUNS" <<'PY'
+if [[ "$(basename "$ROUTE")" == "phase0_flyover.json" ]]; then
+	SUMMARY="$OUT_DIR/godot_phase0_summary.json"
+else
+	SUMMARY="$OUT_DIR/godot_$(basename "$ROUTE" .json)_summary.json"
+fi
+
+python3 - "$TMP" "$SUMMARY" "$RUNS" <<'PY'
 import json
 import pathlib
 import statistics
@@ -45,6 +59,8 @@ records = [json.loads((tmp / f"run_{run}.json").read_text()) for run in range(1,
 
 def med(key):
     return statistics.median(record["results"][key] for record in records)
+
+chunks = [int(record.get("chunks_loaded", 0)) for record in records]
 
 result = {
     "format_version": 1,
@@ -61,6 +77,9 @@ result = {
         "frametime_ms_p95": med("frametime_ms_p95"),
         "frametime_ms_p99": med("frametime_ms_p99"),
         "hitches_16ms": med("hitches_16ms"),
+        "chunks_loaded_min": min(chunks),
+        "chunks_loaded_median": statistics.median(chunks),
+        "chunks_loaded_max": max(chunks),
     },
 }
 out.parent.mkdir(parents=True, exist_ok=True)

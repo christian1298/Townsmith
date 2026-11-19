@@ -4,7 +4,7 @@
 
 Townsmith is a city-builder about authorship: design buildings voxel by voxel in first person, then place them in a living city you manage from above. The city builds itself over time with materials, crews, and trades; citizens live, work, and react to the world you shape.
 
-> **Status:** pre-production / Phase 0 spike. The Rust voxel core, deterministic terrain worldgen/streaming, 1M-cohort tick path, and Godot 4.7 GDExtension bridge run headless; the Godot preview renders a generated terrain chunk, the core and route benchmark harnesses produce JSON, but there is no gameplay yet. The design and technical plan live in an Obsidian-compatible vault in [`docs/`](docs/). The engine choice remains proposed until the spike completes.
+> **Status:** pre-production / Phase 0 spike. The Rust voxel core, deterministic terrain worldgen/streaming, 1M-cohort tick path, and Godot 4.7 GDExtension bridge run headless; the Godot preview streams a 3 × 3 ring of 256 m terrain chunks with distance LOD, the core and route benchmark harnesses produce JSON, but there is no gameplay yet. The design and technical plan live in an Obsidian-compatible vault in [`docs/`](docs/). The engine choice remains proposed until the spike completes.
 
 ## At a glance
 
@@ -18,7 +18,7 @@ Townsmith is a city-builder about authorship: design buildings voxel by voxel in
 | **Multiplayer** | Co-op and dedicated servers |
 | **Platform** | Linux and Windows |
 | **Stack** | Godot 4.7 shell + Rust core (spike in progress) |
-| **Status** | Phase 0; headless voxel, worldgen, cohort, and bridge |
+| **Status** | Phase 0; voxel, worldgen/streaming, cohort, and multi-chunk terrain preview |
 
 ## What makes it different
 
@@ -43,7 +43,7 @@ Start with the index; it has reading paths for players, designers, engineers, an
 
 ```text
 crates/      Rust core; core_voxel, core_world, core_sim, server, bench, and the Godot bridge
-godot/       Godot 4.7 project, terrain preview, and route benchmark
+godot/       Godot 4.7 project, streaming terrain preview, and route benchmark
 benchmarks/  Deterministic routes and local benchmark results
 scripts/     Build, check, run, smoke, and benchmark commands
 docs/        Obsidian-compatible design and technical vault
