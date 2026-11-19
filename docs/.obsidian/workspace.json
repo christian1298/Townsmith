@@ -1,0 +1,198 @@
+{
+  "main": {
+    "id": "8c11acd41ceb5617",
+    "type": "split",
+    "children": [
+      {
+        "id": "43ff23f5b777bd24",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "f1cd295355338500",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "04 - Engine and Stack.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "04 - Engine and Stack"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "25deee2768223738",
+    "type": "split",
+    "children": [
+      {
+        "id": "fac3dbab0b8e7df5",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "1f3f5f288920fe6e",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "8a288a7c01de5747",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "6f87512c117449d6",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "d293b4bb1555fd84",
+    "type": "split",
+    "children": [
+      {
+        "id": "83b68221b9eb9d83",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "75301c789c79fa25",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "03 - Voxel and Scale.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks"
+            }
+          },
+          {
+            "id": "015cecf1bcd36189",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "03 - Voxel and Scale.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links"
+            }
+          },
+          {
+            "id": "d54cbfa7e5b71f39",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "8b3b34da5774ccf5",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "a91d1ac5a11c3922",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "03 - Voxel and Scale.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "f1cd295355338500",
+  "lastOpenFiles": [
+    "05 - Multiplayer.md",
+    "03 - Voxel and Scale.md",
+    "04 - Engine and Stack.md",
+    "00 - Start Here.md"
+  ]
+}
