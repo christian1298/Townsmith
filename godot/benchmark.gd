@@ -25,6 +25,7 @@ var last_usec := 0
 var camera: Camera3D
 
 func _ready() -> void:
+	_configure_target_window()
 	var args := OS.get_cmdline_user_args()
 	route_path = _arg(args, "--route", _project_root().path_join("benchmarks/routes/phase0_flyover.json"))
 	output_path = _arg(args, "--output", _project_root().path_join("benchmarks/results/godot_phase0_latest.json"))
@@ -194,6 +195,38 @@ func _apply_route(t: float) -> void:
 	camera.look_at(look)
 	camera.fov = lerpf(float(left.get("fov", 70.0)), float(right.get("fov", 70.0)), f)
 
+func _configure_target_window() -> void:
+	if DisplayServer.get_name() == "headless":
+		return
+	DisplayServer.window_set_size(Vector2i(1920, 1080))
+	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+	Engine.max_fps = 0
+
+func _hardware_info() -> Dictionary:
+	var window_size := DisplayServer.window_get_size()
+	var info := {
+		"os": OS.get_name(),
+		"os_version": OS.get_version(),
+		"processor": OS.get_processor_name(),
+		"logical_processor_count": OS.get_processor_count(),
+		"display_server": DisplayServer.get_name(),
+		"window_size": [window_size.x, window_size.y],
+		"vsync_mode": DisplayServer.window_get_vsync_mode(),
+		"max_fps": Engine.max_fps,
+		"refresh_rate_hz": DisplayServer.screen_get_refresh_rate(),
+		"rendering_method": str(ProjectSettings.get_setting("rendering/renderer/rendering_method", "unknown")),
+	}
+	var adapter := RenderingServer.get_video_adapter_name()
+	if adapter != "":
+		info["video_adapter"] = adapter
+	var vendor := RenderingServer.get_video_adapter_vendor()
+	if vendor != "":
+		info["video_vendor"] = vendor
+	var api := RenderingServer.get_video_adapter_api_version()
+	if api != "":
+		info["video_api"] = api
+	return info
+
 func _percentile(sorted_values: Array[float], fraction: float) -> float:
 	if sorted_values.is_empty():
 		return 0.0
@@ -234,6 +267,7 @@ func _finish() -> void:
 		"warmup_s": warmup_s,
 		"headless": DisplayServer.get_name() == "headless",
 		"engine": Engine.get_version_info(),
+		"hardware": _hardware_info(),
 		"frames": sorted.size(),
 		"results": {
 			"fps_avg": 1000.0 / maxf(frame_avg, 0.001),

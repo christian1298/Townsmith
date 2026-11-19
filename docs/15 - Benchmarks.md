@@ -34,6 +34,14 @@ A benchmark run is not a synthetic fly-through of an empty map. It is a represen
 >
 > `GODOT=/path/to/godot ./scripts/bench_godot.sh` runs the deterministic `phase0_flyover_v1` route three times and writes `benchmarks/results/godot_phase0_summary.json`. For city scenes, set `CITY_TIER=early|mid|late` and pass a `phase0_city_*.json` route; see [[23 - City Rendering Benchmark]]. Pass a third argument to use another route, e.g. `benchmarks/routes/phase0_streaming_flyover.json` for the multi-chunk streaming route; its summary is written to `benchmarks/results/godot_phase0_streaming_flyover_summary.json`. The summary includes `chunks_loaded_min/median/max`. It builds the terrain scene, moves the camera by elapsed time, records frame times, hitches, and 1% lows. It currently runs headless when no display is available; those frame times validate the route/JSON path but are **not** representative of rendering performance. Use a display and the target machine for real numbers. Async terrain streaming also makes chunk completion order scheduling-dependent; camera/settings/route stay fixed, but frame-exact chunk population is not guaranteed yet. Record the streaming counters with the result.
 
+For a full Phase 0 target run on a desktop:
+
+```bash
+GODOT=/path/to/godot ./scripts/bench_phase0.sh
+```
+
+It runs the core suite three times and the streaming plus Early/Mid/Late city routes three times each at 30 s (overridable with `RUNS`, `DURATION`, and `WARMUP`), captures best-effort CPU/GPU/OS metadata, and writes `benchmarks/results/phase0_target_<timestamp>.json`. The benchmark forces a 1920×1080 window, disables vsync, and records the actual window/vsync/refresh settings. `ALLOW_HEADLESS=1` runs the same structure without a display but does not produce representative FPS.
+
 ## 2. Goals and non-goals
 
 ### Goals

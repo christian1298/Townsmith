@@ -118,6 +118,8 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 - Early/Mid/Late routes; `CITY_TIER` selects the layout in `bench_godot.sh`.
 - Debug-build headless build times: Early ~1 ms, Mid ~12–16 ms, Late ~110–115 ms (layout ~80–85 ms + buffer ~25–30 ms). 100k instances use 6.4 MB.
 - Headless FPS is not render-representative. See [[23 - City Rendering Benchmark]].
+- Godot route JSON records OS, CPU, logical processor count, display server, window size, vsync/max FPS, renderer, and best-effort video adapter metadata.
+- `scripts/bench_phase0.sh` runs the rendering target matrix (core, streaming, Early/Mid/Late city) and writes one combined report with run config, git revision, and host CPU/GPU metadata.
 
 ### Benchmark harness v0
 

@@ -251,6 +251,9 @@ GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_strea
 # Synthetic city routes (200 / 10k / 100k buildings)
 CITY_TIER=late GODOT=/path/to/godot ./scripts/bench_godot.sh 1 5 benchmarks/routes/phase0_city_late.json
 GODOT=/path/to/godot ./scripts/smoke_city.sh
+
+# Full Phase 0 target matrix (core + streaming + city tiers; needs a display)
+GODOT=/path/to/godot ./scripts/bench_phase0.sh
 ```
 
 Godot is not on `PATH` on every machine; `GODOT` selects the binary. The extension is copied to `godot/bin/libtownsmith_core.so` and is gitignored.

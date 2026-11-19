@@ -24,6 +24,9 @@ if int(city.get("buildings", 0)) != 100_000:
     raise SystemExit(f"city smoke failed: buildings={city.get('buildings')!r}")
 if int(city.get("instances", 0)) != 100_000:
     raise SystemExit(f"city smoke failed: instances={city.get('instances')!r}")
+hardware = data.get("hardware") or {}
+if not hardware.get("os"):
+    raise SystemExit("city smoke failed: hardware metadata missing")
 print(
     "CITY_SMOKE tier={tier} buildings={buildings} instances={instances} "
     "build_ms={build_ms:.1f} buffer_ms={buffer_ms:.1f}".format(**city)
