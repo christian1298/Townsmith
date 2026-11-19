@@ -4,6 +4,7 @@ members = [
     "crates/core_voxel",
     "crates/core_world",
     "crates/core_sim",
+    "crates/core_city",
     "crates/server",
     "crates/bench",
     "crates/godot_ext",
@@ -19,6 +20,7 @@ publish = false
 core_voxel = { path = "crates/core_voxel" }
 core_world = { path = "crates/core_world" }
 core_sim = { path = "crates/core_sim" }
+core_city = { path = "crates/core_city" }
 
 [profile.release]
 lto = "thin"
