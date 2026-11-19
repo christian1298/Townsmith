@@ -29,13 +29,29 @@ if int(voxel.get("surfaces", 0)) != 1:
     raise SystemExit(f"voxel smoke failed: surfaces={voxel.get('surfaces')!r}")
 if int(voxel.get("seed", 0)) != 2026:
     raise SystemExit(f"voxel smoke failed: seed={voxel.get('seed')!r}")
-if len(voxel.get("bounds") or []) != 4:
-    raise SystemExit(f"voxel smoke failed: bounds={voxel.get('bounds')!r}")
+bounds = voxel.get("bounds") or []
+expected_bounds = [-71.2, -66.2, 71.2, 66.2]
+if len(bounds) != 4 or any(abs(a - b) > 0.01 for a, b in zip(bounds, expected_bounds)):
+    raise SystemExit(f"voxel smoke failed: bounds={bounds!r}, expected={expected_bounds!r}")
+mesh_aabb = voxel.get("mesh_aabb") or []
+expected_mesh_aabb = [0.4, 0.0, 0.4, 2.4, 2.5, 2.4]
+if len(mesh_aabb) != 6 or any(abs(a - b) > 0.01 for a, b in zip(mesh_aabb, expected_mesh_aabb)):
+    raise SystemExit(f"voxel smoke failed: mesh_aabb={mesh_aabb!r}, expected={expected_mesh_aabb!r}")
+if abs(float(voxel.get("extent_m", 0.0)) - 142.4) > 0.01:
+    raise SystemExit(f"voxel smoke failed: extent_m={voxel.get('extent_m')!r}")
+if int(voxel.get("buffer_bytes", 0)) != 9600:
+    raise SystemExit(f"voxel smoke failed: buffer_bytes={voxel.get('buffer_bytes')!r}")
 hardware = data.get("hardware") or {}
 if not hardware.get("os"):
     raise SystemExit("voxel smoke failed: hardware metadata missing")
 print(
     "VOXEL_SMOKE instances={count} surfaces={surfaces} seed={seed} "
-    "build_ms={build_ms:.1f} buffer_bytes={buffer_bytes}".format(**voxel)
+    "build_ms={build_ms:.1f} buffer_bytes={buffer_bytes}".format(
+        count=voxel.get("count"),
+        surfaces=voxel.get("surfaces"),
+        seed=voxel.get("seed"),
+        build_ms=float(voxel.get("build_ms", 0.0)),
+        buffer_bytes=voxel.get("buffer_bytes"),
+    )
 )
 PY

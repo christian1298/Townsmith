@@ -42,8 +42,8 @@ tags:
 
 ### Phase 0 — Foundations and spikes (3–4 weeks)
 
-> [!success] Phase 0 progress — 2026-11-19
-> Rust workspace with `core_voxel` (32³ chunk, palette/RLE, greedy mesher), `core_world` (deterministic 1 m terrain, 256 m chunks, edit deltas, streaming, terrain mesh + LOD + seam skirts, 58 tests), `core_sim` (10k cohorts / 1M citizens, ~0.21 ms/tick), `core_city` (deterministic Early/Mid/Late synthetic layouts), `townsmith-server` (headless tick), `townsmith-bench`, and a Godot 4.7 GDExtension bridge. The preview streams a 3 × 3 ring of 256 m terrain chunks with distance LOD; headless smoke and the 3-run core/route benchmark harnesses pass. Generation and meshing now run on Rust worker threads; packed-array mesh upload is in place; boundary culling and LOD seam skirts are in place; the synthetic city layout, Godot MultiMesh renderer, and 200-instance voxel-hut route are in place with Early/Mid/Late routes; remaining work is the measured 30 FPS 1M-population rendering target on the target machine.
+> [!success] Phase 0 complete — 2026-11-19
+> Rust workspace with `core_voxel` (32³ chunk, palette/RLE, greedy mesher), `core_world` (deterministic 1 m terrain, 256 m chunks, edit deltas, streaming, terrain mesh + LOD + seam skirts, 58 tests), `core_sim` (10k cohorts / 1M citizens, ~0.21 ms/tick), `core_city` (deterministic Early/Mid/Late synthetic layouts), `townsmith-server` (headless tick), `townsmith-bench`, and a Godot 4.7 GDExtension bridge. The preview streams a 3 × 3 ring of 256 m terrain chunks with distance LOD; headless smoke and the 3-run core/route benchmark harnesses pass. Generation and meshing now run on Rust worker threads; packed-array mesh upload is in place; boundary culling and LOD seam skirts are in place; the synthetic city layout and Godot MultiMesh renderer are in place with Early/Mid/Late routes, and the 200-instance voxel-hut route is in place. The 30 FPS 1M-population target remains a Phase 5 gate on the target machine; see [[25 - Phase 0 Results]].
 
 **Goals**
 - Validate the accepted architecture decisions (D-002, D-006, D-008, D-016, D-017).

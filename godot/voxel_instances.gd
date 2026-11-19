@@ -74,19 +74,17 @@ func build(count: int = DEFAULT_COUNT, seed: int = DEFAULT_SEED) -> void:
 	var height := mesh_aabb.size.y
 	var x0 := -float(GRID_COLUMNS - 1) * SPACING_M * 0.5
 	var z0 := -float(GRID_ROWS - 1) * SPACING_M * 0.5
-	# Instances are translated by -mesh_center on X/Z, and quarter-turn yaw can
-	# swap width and depth. Use the larger half-span and the actual instance
-	# centers so the AABB covers the whole grid (an undersized AABB can cull
-	# instances at the edges).
-	var first_x := x0 - mesh_center.x
-	var last_x := x0 + float(GRID_COLUMNS - 1) * SPACING_M - mesh_center.x
-	var first_z := z0 - mesh_center.z
-	var last_z := z0 + float(GRID_ROWS - 1) * SPACING_M - mesh_center.z
+	# After the origin fix, every instance is centered exactly on its grid cell.
+	# Quarter-turn yaw can swap width and depth, so use the larger half-span for
+	# both axes. The AABB is set before the buffer upload to avoid Godot scanning
+	# all 200 instances; an undersized AABB can cull edge instances.
+	var last_x := x0 + float(GRID_COLUMNS - 1) * SPACING_M
+	var last_z := z0 + float(GRID_ROWS - 1) * SPACING_M
 	var half_span := maxf(half_width, half_depth)
-	var min_x := minf(first_x, last_x) - half_span
-	var max_x := maxf(first_x, last_x) + half_span
-	var min_z := minf(first_z, last_z) - half_span
-	var max_z := maxf(first_z, last_z) + half_span
+	var min_x := x0 - half_span
+	var max_x := last_x + half_span
+	var min_z := z0 - half_span
+	var max_z := last_z + half_span
 
 	var upload_started_usec := Time.get_ticks_usec()
 	var data := PackedFloat32Array()
@@ -101,12 +99,15 @@ func build(count: int = DEFAULT_COUNT, seed: int = DEFAULT_SEED) -> void:
 		var angle := float(posmod(seed + index * 7, 4)) * PI * 0.5
 		var c := cos(angle)
 		var s := sin(angle)
+		var rotated_center := _rotated_center(angle, mesh_center)
 		var offset := index * FLOATS_PER_INSTANCE
 		# Row-major 3x4 transform. The basis columns are the rotated unit axes.
+		# Translate by the cell minus the *rotated* mesh center so the hut
+		# rotates about its own center and stays on its grid cell.
 		data[offset + 0] = c
 		data[offset + 1] = 0.0
 		data[offset + 2] = -s
-		data[offset + 3] = x - mesh_center.x
+		data[offset + 3] = x - rotated_center.x
 		data[offset + 4] = 0.0
 		data[offset + 5] = 1.0
 		data[offset + 6] = 0.0
@@ -114,7 +115,7 @@ func build(count: int = DEFAULT_COUNT, seed: int = DEFAULT_SEED) -> void:
 		data[offset + 8] = s
 		data[offset + 9] = 0.0
 		data[offset + 10] = c
-		data[offset + 11] = z - mesh_center.z
+		data[offset + 11] = z - rotated_center.y
 
 	multimesh = MultiMesh.new()
 	multimesh.mesh = mesh
@@ -163,9 +164,6 @@ func build(count: int = DEFAULT_COUNT, seed: int = DEFAULT_SEED) -> void:
 		"buffer_ms": _ms_between(upload_started_usec, finished_usec),
 		"build_ms": _ms_between(started_usec, finished_usec),
 	}
-	# Drop the GDScript reference to the source mesh; the MultiMesh owns it.
-	mesh = null
-
 ## Benchmark metadata. Required keys are `count`, `seed`, `surfaces`, `bounds`
 ## (`[min_x, min_z, max_x, max_z]`), and `build_ms`.
 func stats() -> Dictionary:
@@ -221,6 +219,11 @@ func _clear() -> void:
 	multimesh = null
 	_stats = {}
 	_built = false
+
+func _rotated_center(angle: float, center: Vector3) -> Vector2:
+	var c := cos(angle)
+	var s := sin(angle)
+	return Vector2(c * center.x - s * center.z, s * center.x + c * center.z)
 
 func _ms_between(start_usec: int, end_usec: int) -> float:
 	return float(end_usec - start_usec) / 1000.0

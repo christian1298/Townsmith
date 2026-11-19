@@ -1,6 +1,6 @@
 {
   "id": "phase0_voxel_instances_v1",
-  "description": "Phase 0 voxel-instance route: 200 greedy-meshed 10 cm huts on a 15x14 grid, orbited at 25-80 m.",
+  "description": "Phase 0 voxel-instance route: 200 greedy-meshed 10 cm huts on a 15x14 grid, orbited at 25-80 m altitude, roughly 206-262 m ground radius.",
   "duration_seconds": 30,
   "warmup_seconds": 3,
   "waypoints": [
