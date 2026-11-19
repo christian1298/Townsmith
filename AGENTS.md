@@ -203,15 +203,30 @@ docs(adr): accept deterministic benchmark mode
 
 ## Build commands
 
-No build exists yet. Once the project is scaffolded, document the exact commands here and in `docs/12 - Technical Architecture.md`. Expected shape:
+Phase 0 workspace: `crates/core_voxel`, `crates/bench`, `crates/godot_ext`. Requires Rust 1.94+ and Godot 4.7+.
 
 ```bash
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-# Godot headless import/smoke test
-# townsmith-bench --scene ... --route ... --settings ... --repeat 3
+# Fast inner loop
+cargo test -p core_voxel
+
+# Full local gate (format, clippy, workspace tests)
+./scripts/check.sh
+
+# Build and copy the GDExtension library
+./scripts/build_godot_ext.sh          # debug
+./scripts/build_godot_ext.sh release
+
+# Run the Godot preview; set GODOT if it is not on PATH
+GODOT=/path/to/godot ./scripts/run_godot.sh
+
+# Headless bridge smoke test
+GODOT=/path/to/godot ./scripts/smoke_godot.sh
+
+# Voxel meshing microbenchmark
+cargo run --release -p townsmith-bench -- 100
 ```
+
+Godot is not on `PATH` on every machine; `GODOT` selects the binary. The extension is copied to `godot/bin/libtownsmith_core.so` and is gitignored.
 
 ## Security and data rules
 

@@ -30,8 +30,8 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 
 | Item | State |
 |---|---|
-| Phase | Pre-production / planning |
-| Code | None yet |
+| Phase | Phase 0 spike in progress |
+| Code | **Scaffolded:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, 24 tests), `townsmith-bench`, and a Godot 4.7 GDExtension bridge. Headless smoke passes. |
 | Engine | **Proposed:** Godot 4 shell + Rust core. Pending a 3–4 week Phase 0 spike covering voxels, world streaming, and 1M cohorts. See [[04 - Engine and Stack]] and [[10 - Decisions]]. |
 | Team | **Accepted:** 2–3 full-time generalists; Rust/Godot experience or willingness to learn. |
 | Language | **Accepted:** Rust is the primary implementation language from Phase 0; GDScript is shell/UI only; C++ is the fallback. See D-011. |
@@ -47,7 +47,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with 10 cm building detail is tractable. The cohort model and world streaming must be proven in Phase 0. See [[03 - Voxel and Scale]], [[07 - Simulation and AI]], and [[09 - Open Questions]]. |
-| Next action | Commit the planning baseline, then run the Phase 0 spike: Rust voxel core, Godot bridge, infinite world streaming, 1M cohort benchmark, dedicated-server tick, and 30 FPS 1M rendering target. See [[08 - Roadmap]]. |
+| Next action | Continue the Phase 0 spike: benchmark harness v0, worldgen/streaming prototype, 1M cohort microbenchmark, dedicated-server tick, and 30 FPS 1M rendering target. See [[08 - Roadmap]]. |
 
 > [!warning] This is a plan, not a commitment
 > Numbers in these docs are **planning targets**, not measured results. Anything marked *Assumption* or *Proposed* must be validated before it becomes an accepted decision.
@@ -76,7 +76,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Role | Path |
 |---|---|
 | New contributor | 00 → 01 → 02 → 11 → 09 |
-| Engine / tools developer | 00 → 04 → 03 → 12 → 10 |
+| Engine / tools developer | 00 → 04 → 03 → 12 → 18 → 10 |
 | Game designer | 00 → 01 → 02 → 07 → 09 |
 | Content / modding developer | 00 → 02 → 06 → 11 |
 | Performance / QA | 00 → 15 → 03 → 07 → 08 |
@@ -182,3 +182,4 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 | [[15 - Benchmarks]] | Deterministic benchmark scenes, routes, metrics, player results, CI | You measure performance |
 | [[16 - Localization]] | English/German, key-based strings, language packs, per-player locale | You touch UI text or translations |
 | [[17 - Materials and Structure]] | Material progression, structural limits, composite construction, service gates | You design buildings or materials |
+| [[18 - Phase 0 Implementation]] | Current code, test status, limitations, next steps | You are working on the Phase 0 spike |
