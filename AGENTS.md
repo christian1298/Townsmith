@@ -236,6 +236,12 @@ cargo run --release -p townsmith-bench --bin terrain
 
 # Headless server tick harness (no GPU, no socket yet)
 cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
+
+# 3-run core benchmark summary
+./scripts/bench_core.sh
+
+# 3-run Godot route benchmark (use a display for real frame times)
+GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5
 ```
 
 Godot is not on `PATH` on every machine; `GODOT` selects the binary. The extension is copied to `godot/bin/libtownsmith_core.so` and is gitignored.
