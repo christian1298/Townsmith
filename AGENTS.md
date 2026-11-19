@@ -227,6 +227,12 @@ cargo run --release -p townsmith-bench -- 100
 
 # Worldgen/streaming microbenchmark
 cargo run --release -p townsmith-bench --bin worldgen
+
+# 1M cohort tick microbenchmark
+cargo run --release -p townsmith-bench --bin cohort
+
+# Headless server tick harness (no GPU, no socket yet)
+cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
 ```
 
 Godot is not on `PATH` on every machine; `GODOT` selects the binary. The extension is copied to `godot/bin/libtownsmith_core.so` and is gitignored.

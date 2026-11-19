@@ -21,12 +21,14 @@ tags:
 |---|---|---|
 | `crates/core_voxel` | 32³ chunk, palette/RLE, greedy mesher, demo hut | Working, 24 tests |
 | `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming | Working, 34 tests |
-| `crates/bench` | Voxel meshing and worldgen streaming microbenchmarks | Working |
+| `crates/core_sim` | 1M-scale cohort simulation: needs, happiness, employment, district services | Working, 11 tests |
+| `crates/server` | Headless cohort tick harness (no GPU, no socket yet) | Working |
+| `crates/bench` | Voxel meshing, worldgen streaming, and 1M cohort microbenchmarks | Working |
 | `crates/godot_ext` | Godot 4.7 GDExtension bridge | Working, headless smoke |
 | `godot/` | Preview project; calls the bridge and displays the demo hut | Working |
 | `scripts/` | Build, check, run, and smoke commands | Working |
 
-The core is engine-agnostic. `core_voxel` and `core_world` have no Godot dependency.
+The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server` have no Godot dependency.
 
 ## 2. What works
 
@@ -60,6 +62,15 @@ The core is engine-agnostic. `core_voxel` and `core_world` have no Godot depende
 - Deltas survive chunk unload/reload and a binary round trip.
 - Negative chunk coordinates use floor division and are tested at the seam.
 
+### Cohort simulation
+
+- 10,000 cohorts × 100 citizens = 1,000,000 citizens.
+- 128 districts with food, water, rest, hygiene, social, safety, jobs, housing, pollution, noise, commute, and wages.
+- Needs move toward service targets; happiness is derived from needs, pollution, noise, commute, and income; employment follows available jobs.
+- 1M cohort tick: **~0.21 ms median** (p95 ~0.22 ms), far below the 60 ms Phase 0 budget.
+- Population remains stable at 1,000,000 across 100 ticks.
+- This is a simplified aggregate model. It does not yet include households, buildings, construction, migration, or materialized individual agents.
+
 ### Microbenchmark
 
 `cargo run --release -p townsmith-bench -- 100` on the current machine:
@@ -69,8 +80,9 @@ The core is engine-agnostic. `core_voxel` and `core_world` have no Godot depende
 | Checkerboard stress | 16,384 | 32,272 | 98,304 | ~3.8 ms |
 | Demo hut | 3,931 | 1,867 | 56 | ~0.5 ms |
 | Worldgen, 3 × 3 chunks | 589,824 cells | — | — | ~131 ms load / ~128 ms reload |
+| Cohort, 1M citizens | — | — | — | ~0.21 ms/tick |
 
-These are **microbenchmark** numbers, not the 1M city benchmark. They establish the core meshing path and a baseline for regressions.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, and cohort paths and a baseline for regressions.
 
 ## 3. Known limitations
 
@@ -79,14 +91,15 @@ These are **microbenchmark** numbers, not the 1M city benchmark. They establish 
 - Worldgen is a headless core prototype; there is no Godot terrain renderer or LOD yet.
 - Chunk generation is synchronous and CPU-bound; it must run on worker threads in the shell.
 - No binary save format; palette/RLE and terrain deltas exist only as in-memory structs and a phase 0 blob.
-- No 1M cohort or dedicated-server benchmark yet.
+- No 1M rendering benchmark or full benchmark scene/route harness yet.
+- The headless server has no networking, persistence, or commands yet; it only proves the CPU tick path.
 - The engine choice is still **proposed** until the Phase 0 spike completes.
 
 ## 4. Next steps
 
 1. Benchmark harness v0 with fixed scene, camera route, JSON, 3-run median.
-2. 1M cohort microbenchmark and dedicated-server tick.
-3. 30 FPS 1M rendering target on the 8-core/16-thread + RTX 3060-class machine.
+2. 30 FPS 1M rendering target on the 8-core/16-thread + RTX 3060-class machine.
+3. Connect the worldgen streamer to the Godot shell and render terrain chunks.
 4. Decide D-003 (Godot + Rust) from measured results.
 
 ## 5. Commands
@@ -99,4 +112,6 @@ GODOT=/path/to/godot ./scripts/run_godot.sh
 GODOT=/path/to/godot ./scripts/smoke_godot.sh
 cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
+cargo run --release -p townsmith-bench --bin cohort
+cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
 ```
