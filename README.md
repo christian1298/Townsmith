@@ -4,7 +4,7 @@
 
 Townsmith is a city-builder about authorship: design buildings voxel by voxel in first person, then place them in a living city you manage from above. The city builds itself over time with materials, crews, and trades; citizens live, work, and react to the world you shape.
 
-> **Status:** pre-production / Phase 0 spike. The Rust voxel core, deterministic terrain worldgen/streaming, 1M-cohort tick path, and Godot 4.7 GDExtension bridge run headless; the Godot preview renders a generated terrain chunk, but there is no gameplay yet. The design and technical plan live in an Obsidian-compatible vault in [`docs/`](docs/). The engine choice remains proposed until the spike completes.
+> **Status:** pre-production / Phase 0 spike. The Rust voxel core, deterministic terrain worldgen/streaming, 1M-cohort tick path, and Godot 4.7 GDExtension bridge run headless; the Godot preview renders a generated terrain chunk, the core and route benchmark harnesses produce JSON, but there is no gameplay yet. The design and technical plan live in an Obsidian-compatible vault in [`docs/`](docs/). The engine choice remains proposed until the spike completes.
 
 ## At a glance
 
@@ -43,8 +43,9 @@ Start with the index; it has reading paths for players, designers, engineers, an
 
 ```text
 crates/      Rust core; core_voxel, core_world, core_sim, server, bench, and the Godot bridge
-godot/       Godot 4.7 project and GDExtension preview
-scripts/     Build, check, run, and headless smoke commands
+godot/       Godot 4.7 project, terrain preview, and route benchmark
+benchmarks/  Deterministic routes and local benchmark results
+scripts/     Build, check, run, smoke, and benchmark commands
 docs/        Obsidian-compatible design and technical vault
 AGENTS.md    Working agreement for humans and AI agents
 .github/     PR template
@@ -66,6 +67,8 @@ cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort
 cargo run --release -p townsmith-bench --bin terrain
+./scripts/bench_core.sh                    # 3-run core benchmark summary
+GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5
 cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
 ```
 

@@ -23,7 +23,10 @@ tags:
 | `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming, terrain mesh | Working, 38 tests |
 | `crates/core_sim` | 1M-scale cohort simulation: needs, happiness, employment, district services | Working, 11 tests |
 | `crates/server` | Headless cohort tick harness (no GPU, no socket yet) | Working |
-| `crates/bench` | Voxel meshing, worldgen streaming, and 1M cohort microbenchmarks | Working |
+| `crates/bench` | Voxel meshing, worldgen streaming, terrain, and 1M cohort microbenchmarks | Working |
+| `benchmarks/` | Route JSON, results, and benchmark notes | Harness v0 |
+| `scripts/bench_core.sh` | 3-run core benchmark aggregation | Working |
+| `scripts/bench_godot.sh` | 3-run Godot flyover aggregation | Working; headless frame times are not representative |
 | `crates/godot_ext` | Godot 4.7 GDExtension bridge | Working, headless smoke |
 | `godot/` | Preview project; calls the bridge and displays the demo hut | Working |
 | `scripts/` | Build, check, run, and smoke commands | Working |
@@ -73,6 +76,13 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 - Population remains stable at 1,000,000 across 100 ticks.
 - This is a simplified aggregate model. It does not yet include households, buildings, construction, migration, or materialized individual agents.
 
+### Benchmark harness v0
+
+- `scripts/bench_core.sh` runs meshing, worldgen, terrain, and cohort benchmarks three times and writes a median JSON summary.
+- `benchmarks/routes/phase0_flyover.json` is a deterministic, time-based camera route over the generated terrain chunk.
+- `scripts/bench_godot.sh` builds the scene, records frame times, hitches, and 1% lows, and writes a 3-run summary.
+- The headless path validates routing and result JSON; it does not measure GPU rendering.
+
 ### Microbenchmark
 
 `cargo run --release -p townsmith-bench -- 100` on the current machine:
@@ -94,15 +104,15 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 - The Godot preview renders a single static terrain chunk; there is no multi-chunk streaming, LOD, or water shader yet.
 - Chunk generation and meshing are synchronous and CPU-bound; they must run on worker threads in the shell.
 - No binary save format; palette/RLE and terrain deltas exist only as in-memory structs and a phase 0 blob.
-- No 1M rendering benchmark or full benchmark scene/route harness yet.
+- The Godot benchmark is a single-chunk terrain route; it is not the Early/Mid/Late city benchmark yet, and headless frame times are not render measurements.
 - The headless server has no networking, persistence, or commands yet; it only proves the CPU tick path.
 - The engine choice is still **proposed** until the Phase 0 spike completes.
 
 ## 4. Next steps
 
-1. Benchmark harness v0 with fixed scene, camera route, JSON, 3-run median.
-2. 30 FPS 1M rendering target on the 8-core/16-thread + RTX 3060-class machine.
-3. Stream multiple terrain chunks in the Godot shell with worker-thread generation and LOD.
+1. 30 FPS 1M rendering target on the 8-core/16-thread + RTX 3060-class machine.
+2. Stream multiple terrain chunks in the Godot shell with worker-thread generation and LOD.
+3. Build the Early/Mid/Late benchmark scenes and routes.
 4. Decide D-003 (Godot + Rust) from measured results.
 
 ## 5. Commands

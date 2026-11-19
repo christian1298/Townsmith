@@ -43,7 +43,7 @@ tags:
 ### Phase 0 — Foundations and spikes (3–4 weeks)
 
 > [!success] Phase 0 progress — 2026-11-19
-> Rust workspace with `core_voxel` (32³ chunk, palette/RLE, greedy mesher), `core_world` (deterministic 1 m terrain, 256 m chunks, edit deltas, streaming, terrain mesh), `core_sim` (10k cohorts / 1M citizens, ~0.21 ms/tick), `townsmith-server` (headless tick), `townsmith-bench`, and a Godot 4.7 GDExtension bridge. The preview renders a generated 256 m terrain chunk; headless smoke passes. Remaining: benchmark harness v0 and the 30 FPS 1M rendering target.
+> Rust workspace with `core_voxel` (32³ chunk, palette/RLE, greedy mesher), `core_world` (deterministic 1 m terrain, 256 m chunks, edit deltas, streaming, terrain mesh), `core_sim` (10k cohorts / 1M citizens, ~0.21 ms/tick), `townsmith-server` (headless tick), `townsmith-bench`, and a Godot 4.7 GDExtension bridge. The preview renders a generated 256 m terrain chunk; headless smoke and the 3-run core/route benchmark harnesses pass. Remaining: multi-chunk streaming/LOD and the 30 FPS 1M rendering target.
 
 **Goals**
 - Validate the accepted architecture decisions (D-002, D-006, D-008, D-016, D-017).

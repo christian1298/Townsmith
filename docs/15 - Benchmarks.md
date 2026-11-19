@@ -27,8 +27,10 @@ Performance is a feature, not a post-launch cleanup task.
 
 A benchmark run is not a synthetic fly-through of an empty map. It is a representative save, a representative camera path, and a representative simulation load.
 
-> [!info] Phase 0 microbenchmark
-> `cargo run --release -p townsmith-bench -- 100` measures chunk meshing (checkerboard stress case + demo hut). `cargo run --release -p townsmith-bench --bin worldgen` measures deterministic 3 × 3 terrain generation, streaming, edit deltas, and reload. `cargo run --release -p townsmith-bench --bin terrain` measures the 256 m terrain mesh; `cargo run --release -p townsmith-bench --bin cohort` measures the 1M-cohort tick path; `cargo run --release -p townsmith-server` proves the same tick path headless without a GPU. Both are core-path regression checks, not the full player-facing benchmark below.
+> [!info] Phase 0 microbenchmark and harness v0
+> `./scripts/bench_core.sh` runs the core microbenchmarks three times and writes `benchmarks/results/phase0_core_summary.json`: chunk meshing, worldgen/streaming/edit deltas, terrain meshing, and the 1M-cohort tick.
+>
+> `GODOT=/path/to/godot ./scripts/bench_godot.sh` runs the deterministic `phase0_flyover_v1` route three times and writes `benchmarks/results/godot_phase0_summary.json`. It builds the terrain scene, moves the camera by elapsed time, records frame times, hitches, and 1% lows. It currently runs headless when no display is available; those frame times validate the route/JSON path but are **not** representative of rendering performance. Use a display and the target machine for real numbers.
 
 ## 2. Goals and non-goals
 
