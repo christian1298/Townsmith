@@ -1,0 +1,15 @@
+[package]
+name = "godot_ext"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Godot 4 GDExtension bridge for the Townsmith core"
+
+[lib]
+name = "townsmith_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+core_voxel.workspace = true
+godot = { version = "0.5.5", features = ["api-4-7"] }
