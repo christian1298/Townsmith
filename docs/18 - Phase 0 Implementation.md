@@ -20,14 +20,14 @@ tags:
 | Path | Purpose | Status |
 |---|---|---|
 | `crates/core_voxel` | 32³ chunk, palette/RLE, greedy mesher, demo hut | Working, 24 tests |
-| `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming, terrain mesh + LOD | Working, 44 tests |
+| `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming, terrain mesh + LOD + seam skirts | Working, 58 tests |
 | `crates/core_sim` | 1M-scale cohort simulation plus deterministic 2,000 active agents | Working, 26 tests |
 | `crates/server` | Headless cohort tick harness (no GPU, no socket yet) | Working |
 | `crates/bench` | Voxel meshing, worldgen, terrain, 1M cohort, and active-agent microbenchmarks | Working |
 | `benchmarks/` | Route JSON, results, and benchmark notes | Harness v0 |
 | `scripts/bench_core.sh` | 3-run core benchmark aggregation | Working |
 | `scripts/bench_godot.sh` | 3-run Godot flyover aggregation | Working; headless frame times are not representative |
-| `crates/godot_ext` | Godot 4.7 GDExtension bridge with a Rust terrain worker pool | Working, 4 tests + headless smoke |
+| `crates/godot_ext` | Godot 4.7 GDExtension bridge with a Rust terrain worker pool | Working, 5 tests + headless smoke |
 | `godot/` | Preview project; streams 256 m terrain chunks around the camera with distance LOD | Working |
 | `scripts/` | Build, check, run, and smoke commands | Working |
 
@@ -80,7 +80,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 ### Worker-thread terrain streaming
 
 - `TownsmithCore.request_terrain_chunk` queues a chunk on a fixed Rust worker pool (`available_parallelism - 1`, clamped to 4).
-- Workers run `WorldGenerator::generate` and `terrain_mesh_lod_with_sampler` (using `WorldGenerator::height_at` for seam samples); no Godot API is touched off the main thread.
+- Workers run `WorldGenerator::generate` and the skirted seam sampler (`WorldGenerator::height_at` for out-of-chunk heights); no Godot API is touched off the main thread.
 - `poll_terrain_chunk` drains finished results on the main thread and converts `TerrainMesh` into `ArrayMesh`.
 - Worker jobs are wrapped in `catch_unwind`; a failed job returns an error result instead of wedging the streamer.
 - `TerrainBridge` owns its `JoinHandle`s and joins them on drop; the GDExtension is non-reloadable so a live worker cannot outlive the library.
@@ -130,13 +130,14 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 | Terrain LOD 2, 256 m chunk | 65,536 cells | — | 25,327 quads | ~0.39 ms |
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **104 tests**: 24 voxel, 50 world, 26 simulation, and 4 bridge tests.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **113 tests**: 24 voxel, 58 world, 26 simulation, and 5 bridge tests.
 
 ## 3. Known limitations
 
 - The Godot preview uses one material override; per-material surfaces/UV atlas mapping is not implemented.
 - Chunk generation and meshing run on a fixed Rust worker pool (up to 4 threads). The Godot main thread converts finished `TerrainMesh` values into packed `ArrayMesh` resources; uploads no longer call `SurfaceTool` per vertex, but large meshes still enter the renderer on the main thread.
-- LOD is distance-based (mesh stride), not a full imposter/HLOD pipeline. Adjacent chunks at different LOD steps can still show small cracks or z-fighting at the seam.
+- LOD is distance-based (mesh stride), not a full imposter/HLOD pipeline. A 2 m perimeter skirt hides T-junction cracks between different LOD steps; extreme height differences, lighting seams, or biome color seams can still show.
+- The benchmark quads above are for the skirt-free `terrain_mesh_lod` path; streamed chunks add up to 1,024 skirt quads at LOD 1 (see [[21 - LOD Seams]]).
 - Boundary culling samples the deterministic generator, not live edited heights. Edited edge cells can render missing or doubled walls until the sampler reads the delta store.
 - No binary save format; palette/RLE and terrain deltas exist only as in-memory structs and a phase 0 blob.
 - The Godot benchmark has single-chunk and multi-chunk terrain routes; it is not the Early/Mid/Late city benchmark yet, and headless frame times are not render measurements.
@@ -147,7 +148,7 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 
 ## 4. Next steps
 
-1. Stitch LOD seams and add a depth-based shoreline/foam pass.
+1. Add a depth-based shoreline/foam pass on top of the water shader.
 2. Build the Early/Mid/Late city benchmark scenes and routes.
 3. Measure the 30 FPS 1M rendering target on 8-core/16-thread + RTX 3060-class hardware.
 4. Decide D-003 (Godot + Rust) from measured results.

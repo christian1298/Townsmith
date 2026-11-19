@@ -458,6 +458,10 @@ mod tests {
             |x, z| generator.height_at(TerrainPos::new(x, z)),
             DEFAULT_SKIRT_DEPTH_M,
         );
+        let unskirted = core_world::terrain_mesh_lod_with_sampler(&chunk, 2, |x, z| {
+            generator.height_at(TerrainPos::new(x, z))
+        });
+        assert_eq!(expected.quad_count(), unskirted.quad_count() + 4 * 128);
 
         let mut bridge = TerrainBridge::new();
         let id = bridge.request(2026, 0, 0, 2);

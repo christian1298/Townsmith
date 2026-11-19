@@ -62,7 +62,7 @@ where
 | 3 | 86 (last span clipped) | 344 | 1,376 |
 | 4 | 64 | 256 | 1,024 |
 
-The skirt is a small fraction of the top surface at step 1 and negligible at step 4.
+The skirt grows as a share of the coarse mesh: roughly 1.6% of top quads at step 1, 3.1% at step 2, 4.7% at step 3, and 6.3% at step 4. It is always small in absolute terms.
 
 ## 5. Winding and normals
 
@@ -71,7 +71,7 @@ Skirt quads use outward-facing normals and a winding whose triangle cross produc
 ## 6. Limitations
 
 - Skirts hide cracks; they do not fix the underlying LOD height mismatch. A vertical error larger than 2 m on an extreme cliff can still show.
-- Adjacent chunks can produce coplanar overlapping skirt quads at a seam. Colors match, but subtle z-fighting is possible.
+- Adjacent chunks can produce coplanar overlapping skirt quads at a seam, and the two sides can sample different biome colors at the boundary. Subtle z-fighting or color patchwork is possible; a small inward offset or depth bias is a follow-up if it becomes visible.
 - Skirts do not hide normal/lighting discontinuities or biome color seams.
 - Skirts are not a substitute for a proper HLOD/impostor pipeline at city scale.
 - Boundary sampling uses the deterministic generator, not live edits; edge edits require a neighbor remesh.

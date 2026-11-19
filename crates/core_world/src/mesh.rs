@@ -167,7 +167,7 @@ where
 ///
 /// Perimeter spans follow the top-surface sampling grid, including clipped final
 /// spans for non-divisor steps (for example `3`). Skirt quads use the same
-/// biome color and [`dim`] shade as cliff walls, with outward-facing normals and
+/// biome color and dimmed shade as cliff walls, with outward-facing normals and
 /// winding that matches the normal. A non-finite `skirt_depth_m` also disables
 /// skirts.
 #[must_use]
@@ -629,6 +629,50 @@ mod tests {
     }
 
     #[test]
+    fn skirt_spans_cover_each_edge_without_gaps_or_overlap() {
+        let chunk = flat_chunk(24);
+        for step in [1, 2, 3, 4] {
+            let mesh = terrain_mesh_lod_with_sampler_and_skirt(&chunk, step, |_, _| 24, 2.0);
+            let mut edges: [Vec<(f32, f32)>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+
+            for quad in non_top_quads(&mesh) {
+                let normal = quad[0].normal;
+                let (edge, axis) = if normal[0] < 0.0 {
+                    (0, 2)
+                } else if normal[0] > 0.0 {
+                    (1, 2)
+                } else if normal[2] < 0.0 {
+                    (2, 0)
+                } else {
+                    (3, 0)
+                };
+                let min = quad
+                    .iter()
+                    .map(|vertex| vertex.position[axis])
+                    .fold(f32::INFINITY, f32::min);
+                let max = quad
+                    .iter()
+                    .map(|vertex| vertex.position[axis])
+                    .fold(f32::NEG_INFINITY, f32::max);
+                edges[edge].push((min, max));
+            }
+
+            for edge in &mut edges {
+                edge.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                assert_eq!(edge.first().map(|span| span.0), Some(0.0), "step {step}");
+                assert_eq!(
+                    edge.last().map(|span| span.1),
+                    Some(WORLD_CHUNK_SIZE as f32),
+                    "step {step}"
+                );
+                for pair in edge.windows(2) {
+                    assert_eq!(pair[0].1, pair[1].0, "gap at step {step}: {pair:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn zero_or_invalid_skirt_matches_the_sampler_mesh() {
         let chunk = flat_chunk(24);
         for step in [1, 2, 3, 4] {
@@ -639,6 +683,19 @@ mod tests {
                 assert_eq!(actual, expected, "step {step}, skirt depth {depth}");
             }
         }
+    }
+
+    #[test]
+    fn skirted_mesh_clamps_step() {
+        let chunk = flat_chunk(24);
+        let full = terrain_mesh_lod_with_sampler_and_skirt(&chunk, 1, |_, _| 24, 2.0);
+        let zero = terrain_mesh_lod_with_sampler_and_skirt(&chunk, 0, |_, _| 24, 2.0);
+        let max = terrain_mesh_lod_with_sampler_and_skirt(&chunk, 300, |_, _| 24, 2.0);
+        let sane = terrain_mesh_lod_with_sampler_and_skirt(&chunk, 256, |_, _| 24, 2.0);
+
+        assert_eq!(zero, full);
+        assert_eq!(max, sane);
+        assert_eq!(sane.quad_count(), 1 + 4);
     }
 
     #[test]
@@ -668,72 +725,77 @@ mod tests {
             }
         }
 
-        let step = 4;
-        let last = last_sample(step);
-        // Mirror the nearest boundary sample so the regular perimeter walls are
-        // culled; the remaining boundary quads are exactly the skirts.
-        let outside = |x: i64, z: i64| {
-            let x = if x < 0 {
-                0
-            } else if x >= WORLD_CHUNK_SIZE as i64 {
-                last
-            } else {
-                x as usize
+        for step in [3, 4] {
+            let last = last_sample(step);
+            // Mirror the nearest boundary sample so the regular perimeter walls are
+            // culled; the remaining boundary quads are exactly the skirts.
+            let outside = |x: i64, z: i64| {
+                let x = if x < 0 {
+                    0
+                } else if x >= WORLD_CHUNK_SIZE as i64 {
+                    last
+                } else {
+                    x as usize
+                };
+                let z = if z < 0 {
+                    0
+                } else if z >= WORLD_CHUNK_SIZE as i64 {
+                    last
+                } else {
+                    z as usize
+                };
+                chunk.height(x, z).expect("in-chunk sample")
             };
-            let z = if z < 0 {
-                0
-            } else if z >= WORLD_CHUNK_SIZE as i64 {
-                last
-            } else {
-                z as usize
-            };
-            chunk.height(x, z).expect("in-chunk sample")
-        };
 
-        let mesh = terrain_mesh_lod_with_sampler_and_skirt(&chunk, step, outside, 2.0);
-        let skirts: Vec<[TerrainVertex; 4]> = non_top_quads(&mesh)
-            .into_iter()
-            .filter(|quad| quad.iter().all(on_perimeter))
-            .collect();
+            let mesh = terrain_mesh_lod_with_sampler_and_skirt(&chunk, step, outside, 2.0);
+            let skirts: Vec<[TerrainVertex; 4]> = non_top_quads(&mesh)
+                .into_iter()
+                .filter(|quad| quad.iter().all(on_perimeter))
+                .collect();
 
-        assert_eq!(skirts.len(), 4 * WORLD_CHUNK_SIZE.div_ceil(step));
-        for quad in skirts {
-            let top = quad
-                .iter()
-                .map(|vertex| vertex.position[1])
-                .fold(f32::NEG_INFINITY, f32::max);
-            let bottom = quad
-                .iter()
-                .map(|vertex| vertex.position[1])
-                .fold(f32::INFINITY, f32::min);
-            assert_eq!(bottom, top - 2.0);
-
-            let min_x = quad
-                .iter()
-                .map(|vertex| vertex.position[0])
-                .fold(f32::INFINITY, f32::min);
-            let min_z = quad
-                .iter()
-                .map(|vertex| vertex.position[2])
-                .fold(f32::INFINITY, f32::min);
-            let normal = quad[0].normal;
-
-            if normal[0] < 0.0 {
-                assert!(quad.iter().all(|vertex| vertex.position[0] == 0.0));
-                assert_eq!(top, f32::from(chunk.height(0, min_z as usize).unwrap()));
-            } else if normal[0] > 0.0 {
-                assert!(quad
+            assert_eq!(
+                skirts.len(),
+                4 * WORLD_CHUNK_SIZE.div_ceil(step),
+                "step {step}"
+            );
+            for quad in skirts {
+                let top = quad
                     .iter()
-                    .all(|vertex| vertex.position[0] == WORLD_CHUNK_SIZE as f32));
-                assert_eq!(top, f32::from(chunk.height(last, min_z as usize).unwrap()));
-            } else if normal[2] < 0.0 {
-                assert!(quad.iter().all(|vertex| vertex.position[2] == 0.0));
-                assert_eq!(top, f32::from(chunk.height(min_x as usize, 0).unwrap()));
-            } else {
-                assert!(quad
+                    .map(|vertex| vertex.position[1])
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let bottom = quad
                     .iter()
-                    .all(|vertex| vertex.position[2] == WORLD_CHUNK_SIZE as f32));
-                assert_eq!(top, f32::from(chunk.height(min_x as usize, last).unwrap()));
+                    .map(|vertex| vertex.position[1])
+                    .fold(f32::INFINITY, f32::min);
+                assert_eq!(bottom, top - 2.0);
+
+                let min_x = quad
+                    .iter()
+                    .map(|vertex| vertex.position[0])
+                    .fold(f32::INFINITY, f32::min);
+                let min_z = quad
+                    .iter()
+                    .map(|vertex| vertex.position[2])
+                    .fold(f32::INFINITY, f32::min);
+                let normal = quad[0].normal;
+
+                if normal[0] < 0.0 {
+                    assert!(quad.iter().all(|vertex| vertex.position[0] == 0.0));
+                    assert_eq!(top, f32::from(chunk.height(0, min_z as usize).unwrap()));
+                } else if normal[0] > 0.0 {
+                    assert!(quad
+                        .iter()
+                        .all(|vertex| vertex.position[0] == WORLD_CHUNK_SIZE as f32));
+                    assert_eq!(top, f32::from(chunk.height(last, min_z as usize).unwrap()));
+                } else if normal[2] < 0.0 {
+                    assert!(quad.iter().all(|vertex| vertex.position[2] == 0.0));
+                    assert_eq!(top, f32::from(chunk.height(min_x as usize, 0).unwrap()));
+                } else {
+                    assert!(quad
+                        .iter()
+                        .all(|vertex| vertex.position[2] == WORLD_CHUNK_SIZE as f32));
+                    assert_eq!(top, f32::from(chunk.height(min_x as usize, last).unwrap()));
+                }
             }
         }
     }
