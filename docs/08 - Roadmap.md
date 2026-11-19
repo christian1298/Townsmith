@@ -42,6 +42,9 @@ tags:
 
 ### Phase 0 — Foundations and spikes (3–4 weeks)
 
+> [!success] Phase 0 progress — 2026-11-19
+> Rust workspace with `core_voxel` (32³ chunk, palette/RLE, greedy mesher), `townsmith-bench`, and a Godot 4.7 GDExtension bridge. The bridge builds the demo hut as an `ArrayMesh`; headless smoke passes. Remaining: benchmark harness v0, worldgen/streaming, 1M cohort microbenchmark, and dedicated-server tick.
+
 **Goals**
 - Validate the accepted architecture decisions (D-002, D-006, D-008, D-016, D-017).
 - Answer the remaining Phase 0 questions: **Q-002** (multiplayer scale) and **Q-052** (minimum hardware).

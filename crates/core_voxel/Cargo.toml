@@ -1,0 +1,11 @@
+[package]
+name = "core_voxel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Engine-agnostic voxel chunk, palette/RLE, and greedy meshing core for Townsmith"
+
+[lib]
+name = "core_voxel"
+path = "src/lib.rs"

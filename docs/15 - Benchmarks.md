@@ -27,6 +27,9 @@ Performance is a feature, not a post-launch cleanup task.
 
 A benchmark run is not a synthetic fly-through of an empty map. It is a representative save, a representative camera path, and a representative simulation load.
 
+> [!info] Phase 0 microbenchmark
+> `cargo run --release -p townsmith-bench -- 100` currently measures chunk meshing only (checkerboard stress case + demo hut). It is a core-path regression check, not the full player-facing benchmark below.
+
 ## 2. Goals and non-goals
 
 ### Goals

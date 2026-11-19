@@ -1,0 +1,8 @@
+/target
+/godot/.godot/
+/godot/bin/*.so
+/godot/bin/*.dll
+/godot/bin/*.dylib
+/benchmarks/results/
+*.swp
+.DS_Store

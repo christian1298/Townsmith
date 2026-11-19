@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core_voxel",
+    "crates/bench",
+    "crates/godot_ext",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+publish = false
+
+[workspace.dependencies]
+core_voxel = { path = "crates/core_voxel" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

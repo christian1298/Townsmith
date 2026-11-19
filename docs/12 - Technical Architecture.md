@@ -404,6 +404,21 @@ members = [
 ]
 ```
 
+The Phase 0 scaffold currently contains `core_voxel`, `bench`, and `godot_ext`; the remaining crates are added as their phases land.
+
+### Local build commands
+
+```bash
+cargo test -p core_voxel
+./scripts/check.sh
+./scripts/build_godot_ext.sh
+GODOT=/path/to/godot ./scripts/run_godot.sh
+GODOT=/path/to/godot ./scripts/smoke_godot.sh
+cargo run --release -p townsmith-bench -- 100
+```
+
+Requires Rust 1.94+ and Godot 4.7+. The GDExtension output is copied to `godot/bin/libtownsmith_core.so` and is not committed.
+
 ### Benchmark fixtures
 
 ```
