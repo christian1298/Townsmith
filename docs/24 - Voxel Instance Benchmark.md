@@ -33,8 +33,8 @@ This is intentionally cheap. It answers "what do 200 real voxel hut meshes cost 
 `benchmarks/routes/phase0_voxel_instances.json`:
 
 - 30 s, 3 s warm-up.
-- Five waypoints orbiting the 142 m grid at 25–80 m.
-- Camera looks at the grid center.
+- Five waypoints at 25–80 m altitude, with a ground radius of roughly 206–262 m from the grid center.
+- Camera looks at the grid center. This is a wide FPS orbit; the huts are small at this distance. Add close-up waypoints when visual inspection matters.
 
 ## 3. Command
 
@@ -47,6 +47,9 @@ GODOT=/path/to/godot ./scripts/smoke_voxel.sh
 ```
 
 ## 4. Current local numbers
+
+> [!warning] Pre-fix visual run
+> These numbers were captured before the follow-up rotation-origin fix. The fix changes only per-instance transforms, not the mesh, draw count, or buffer size, so performance should be unchanged. Re-run on the target machine after the fix to publish a canonical baseline.
 
 Display-backed on an RTX 4080, 1920×1080, vsync off, GL Compatibility, 3 × 5 s:
 
@@ -73,7 +76,9 @@ The 1% low is far above the 60 FPS / 30 FPS targets. This does not prove the fin
 - exactly 200 instances;
 - one mesh surface;
 - seed 2026;
-- four bounds values;
+- exact bounds `[-71.2, -66.2, 71.2, 66.2]`;
+- exact mesh AABB `[0.4, 0.0, 0.4, 2.4, 2.5, 2.4]`;
+- extent 142.4 m and a 9,600-byte instance buffer;
 - hardware metadata present.
 
 ## 6. Limitations
@@ -83,7 +88,7 @@ The 1% low is far above the 60 FPS / 30 FPS targets. This does not prove the fin
 - No terrain, roads, water, or city context.
 - 200 instances is a small fraction of the 100k-building target.
 - Headless runs cannot measure GPU cost; the displayed numbers are from a 4080, not the 3060-class target.
-- The route is a visual stress check, not a city simulation.
+- The route is a wide FPS orbit, not a close-up visual inspection or a city simulation.
 
 ## 7. Next
 

@@ -25,7 +25,7 @@ if [[ ! -f "$ROUTE" ]]; then
 fi
 CITY_ARGS=()
 VOXEL_ARGS=()
-if [[ -n "$CITY_TIER" && "$VOXEL_INSTANCES" =~ ^[1-9][0-9]*$ ]]; then
+if [[ -n "$CITY_TIER" && -n "$VOXEL_INSTANCES" && "$VOXEL_INSTANCES" != "0" ]]; then
 	echo "CITY_TIER=$CITY_TIER and VOXEL_INSTANCES=$VOXEL_INSTANCES are mutually exclusive" >&2
 	exit 2
 fi
@@ -54,6 +54,9 @@ if [[ "$VOXEL_INSTANCES" == "0" || -z "$VOXEL_INSTANCES" ]]; then
 	VOXEL_INSTANCES=""
 elif ! [[ "$VOXEL_INSTANCES" =~ ^[1-9][0-9]*$ ]]; then
 	echo "VOXEL_INSTANCES must be a positive integer (got '$VOXEL_INSTANCES')" >&2
+	exit 2
+elif (( VOXEL_INSTANCES > 210 )); then
+	echo "VOXEL_INSTANCES must be <= 210 (got '$VOXEL_INSTANCES')" >&2
 	exit 2
 fi
 if [[ -n "$VOXEL_INSTANCES" ]]; then
