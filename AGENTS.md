@@ -231,6 +231,9 @@ cargo run --release -p townsmith-bench --bin worldgen
 # 1M cohort tick microbenchmark
 cargo run --release -p townsmith-bench --bin cohort
 
+# Terrain mesh microbenchmark
+cargo run --release -p townsmith-bench --bin terrain
+
 # Headless server tick harness (no GPU, no socket yet)
 cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
 ```

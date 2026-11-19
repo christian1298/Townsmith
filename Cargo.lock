@@ -105,6 +105,7 @@ name = "godot_ext"
 version = "0.1.0"
 dependencies = [
  "core_voxel",
+ "core_world",
  "godot",
 ]
 
