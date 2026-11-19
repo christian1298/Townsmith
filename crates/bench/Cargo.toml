@@ -10,7 +10,12 @@ description = "Phase 0 voxel microbenchmark for Townsmith"
 name = "townsmith-bench"
 path = "src/main.rs"
 
+[[bin]]
+name = "city_layout"
+path = "src/bin/city_layout.rs"
+
 [dependencies]
 core_voxel.workspace = true
 core_world.workspace = true
 core_sim.workspace = true
+core_city.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "core_city"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Deterministic synthetic city layouts for Townsmith rendering benchmarks"
+
+[lib]
+name = "core_city"
+path = "src/lib.rs"
