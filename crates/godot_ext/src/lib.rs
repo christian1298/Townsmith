@@ -5,11 +5,13 @@
 //! Terrain generation and meshing run on Rust worker threads; all Godot
 //! resource creation stays on the main thread.
 
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 
-use godot::classes::mesh::PrimitiveType;
+use godot::builtin::{PackedColorArray, PackedInt32Array, PackedVector3Array, VarArray, Variant};
+use godot::classes::mesh::{ArrayType, PrimitiveType};
 use godot::classes::{ArrayMesh, SurfaceTool};
 use godot::prelude::*;
 
@@ -40,6 +42,13 @@ struct TerrainResult {
     chunk_z: i64,
     step: usize,
     mesh: Option<TerrainMesh>,
+    error: Option<String>,
+}
+
+enum PollOutcome {
+    Empty,
+    Result(TerrainResult),
+    Disconnected,
 }
 
 /// Fixed-size Rust worker pool for terrain generation and meshing.
@@ -47,9 +56,10 @@ struct TerrainResult {
 /// Workers only touch Rust data. The main thread converts finished
 /// [`TerrainMesh`] values into Godot resources in [`TownsmithCore::poll_terrain_chunk`].
 struct TerrainBridge {
-    jobs: Sender<TerrainJob>,
+    jobs: Option<Sender<TerrainJob>>,
     results: Receiver<TerrainResult>,
-    next_id: u64,
+    workers: Vec<JoinHandle<()>>,
+    next_id: i64,
 }
 
 impl TerrainBridge {
@@ -59,66 +69,107 @@ impl TerrainBridge {
         let job_rx = Arc::new(Mutex::new(job_rx));
 
         let available = thread::available_parallelism().map_or(1, std::num::NonZero::get);
-        let worker_count = available.clamp(1, MAX_TERRAIN_WORKERS);
-        for _ in 0..worker_count {
+        let worker_count = available.saturating_sub(1).clamp(1, MAX_TERRAIN_WORKERS);
+        let mut workers = Vec::with_capacity(worker_count);
+
+        for index in 0..worker_count {
             let jobs = Arc::clone(&job_rx);
             let results = result_tx.clone();
-            thread::spawn(move || loop {
-                let job = {
-                    let receiver = jobs.lock().unwrap_or_else(|error| error.into_inner());
-                    receiver.recv()
-                };
-                let Ok(job) = job else {
-                    break;
-                };
-
-                let generator = WorldGenerator::new(job.seed);
-                let mesh = generator
-                    .generate(WorldChunkCoord::new(job.chunk_x, job.chunk_z))
-                    .ok()
-                    .map(|chunk| terrain_mesh_lod(&chunk, job.step));
-
-                if results
-                    .send(TerrainResult {
-                        id: job.id,
-                        chunk_x: job.chunk_x,
-                        chunk_z: job.chunk_z,
-                        step: job.step,
-                        mesh,
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            });
+            match thread::Builder::new()
+                .name(format!("townsmith-terrain-{index}"))
+                .spawn(move || worker_loop(jobs, results))
+            {
+                Ok(handle) => workers.push(handle),
+                Err(error) => eprintln!("Townsmith: failed to spawn terrain worker: {error}"),
+            }
         }
 
         Self {
-            jobs: job_tx,
+            jobs: Some(job_tx),
             results: result_rx,
+            workers,
             next_id: 1,
         }
     }
 
     fn request(&mut self, seed: u64, chunk_x: i64, chunk_z: i64, step: usize) -> i64 {
         let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
+        self.next_id = if id == i64::MAX { 1 } else { id + 1 };
+
         let job = TerrainJob {
-            id,
+            id: id as u64,
             seed,
             chunk_x,
             chunk_z,
             step,
         };
-        if self.jobs.send(job).is_err() {
-            -1
-        } else {
-            i64::try_from(id).unwrap_or(-1)
+        let sent = self
+            .jobs
+            .as_ref()
+            .is_some_and(|jobs| jobs.send(job).is_ok());
+        if !sent {
+            self.jobs = None;
+            return -1;
         }
+        id
     }
 
-    fn poll(&self) -> Option<TerrainResult> {
-        self.results.try_recv().ok()
+    fn poll(&self) -> PollOutcome {
+        match self.results.try_recv() {
+            Ok(result) => PollOutcome::Result(result),
+            Err(TryRecvError::Empty) => PollOutcome::Empty,
+            Err(TryRecvError::Disconnected) => PollOutcome::Disconnected,
+        }
+    }
+}
+
+impl Drop for TerrainBridge {
+    fn drop(&mut self) {
+        // Closing the job channel makes idle workers exit; joining prevents the
+        // shared library from being unloaded while a worker is still running.
+        self.jobs.take();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn worker_loop(jobs: Arc<Mutex<Receiver<TerrainJob>>>, results: Sender<TerrainResult>) {
+    loop {
+        let job = {
+            let receiver = jobs.lock().unwrap_or_else(|error| error.into_inner());
+            receiver.recv()
+        };
+        let Ok(job) = job else {
+            break;
+        };
+
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let generator = WorldGenerator::new(job.seed);
+            generator
+                .generate(WorldChunkCoord::new(job.chunk_x, job.chunk_z))
+                .map(|chunk| terrain_mesh_lod(&chunk, job.step))
+        }));
+
+        let (mesh, error) = match outcome {
+            Ok(Ok(mesh)) => (Some(mesh), None),
+            Ok(Err(error)) => (None, Some(error.to_string())),
+            Err(_) => (None, Some("terrain worker panicked".to_string())),
+        };
+
+        if results
+            .send(TerrainResult {
+                id: job.id,
+                chunk_x: job.chunk_x,
+                chunk_z: job.chunk_z,
+                step: job.step,
+                mesh,
+                error,
+            })
+            .is_err()
+        {
+            break;
+        }
     }
 }
 
@@ -209,9 +260,10 @@ impl TownsmithCore {
 
     /// Queue a terrain chunk for worker-thread generation.
     ///
-    /// Returns a request id. Results are collected with
-    /// [`Self::poll_terrain_chunk`] on the main thread. A result dictionary
-    /// contains `id`, `chunk_x`, `chunk_z`, `step`, and `mesh`.
+    /// Returns a request id, or `-1` if the worker pool is unavailable.
+    /// Results are collected with [`Self::poll_terrain_chunk`] on the main
+    /// thread. A result dictionary contains `id`, `chunk_x`, `chunk_z`, `step`,
+    /// `mesh`, and an optional `error`.
     #[func]
     fn request_terrain_chunk(&self, seed: i64, chunk_x: i64, chunk_z: i64, step: i64) -> i64 {
         let step = clamp_step(step);
@@ -225,19 +277,30 @@ impl TownsmithCore {
 
     /// Poll one finished worker-thread terrain chunk.
     ///
-    /// Returns an empty `Dictionary` when no result is ready. The caller should
-    /// poll in a loop until it receives an empty dictionary.
+    /// Returns an empty `Dictionary` when no result is ready. If the worker
+    /// pool has disconnected, returns `{"id": -1, "error":
+    /// "worker_pool_disconnected"}`. The caller should poll in a loop until it
+    /// receives an empty dictionary.
     #[func]
     fn poll_terrain_chunk(&self) -> VarDictionary {
-        let guard = self
-            .terrain
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let Some(bridge) = guard.as_ref() else {
-            return VarDictionary::new();
-        };
-        let Some(result) = bridge.poll() else {
-            return VarDictionary::new();
+        let result = {
+            let guard = self
+                .terrain
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let Some(bridge) = guard.as_ref() else {
+                return VarDictionary::new();
+            };
+            match bridge.poll() {
+                PollOutcome::Empty => return VarDictionary::new(),
+                PollOutcome::Disconnected => {
+                    let mut output = VarDictionary::new();
+                    output.set("id", -1);
+                    output.set("error", "worker_pool_disconnected");
+                    return output;
+                }
+                PollOutcome::Result(result) => result,
+            }
         };
 
         let mesh = result
@@ -251,6 +314,9 @@ impl TownsmithCore {
         output.set("chunk_z", result.chunk_z);
         output.set("step", result.step as i64);
         output.set("mesh", &mesh);
+        if let Some(error) = result.error {
+            output.set("error", error);
+        }
         output
     }
 }
@@ -260,30 +326,116 @@ fn clamp_step(step: i64) -> usize {
 }
 
 fn terrain_mesh_to_godot(buffers: &TerrainMesh) -> Gd<ArrayMesh> {
-    let mut surface = SurfaceTool::new_gd();
-    surface.begin(PrimitiveType::TRIANGLES);
-    for triangle in buffers.indices.chunks(3) {
-        for &index in triangle {
-            let Some(vertex) = buffers.vertices.get(index as usize) else {
-                continue;
-            };
-            surface.set_normal(Vector3::new(
-                vertex.normal[0],
-                vertex.normal[1],
-                vertex.normal[2],
-            ));
-            surface.set_color(Color::from_rgb(
-                vertex.color[0],
-                vertex.color[1],
-                vertex.color[2],
-            ));
-            surface.add_vertex(Vector3::new(
-                vertex.position[0],
-                vertex.position[1],
-                vertex.position[2],
-            ));
+    if buffers.indices.is_empty() {
+        return ArrayMesh::new_gd();
+    }
+
+    let vertices: Vec<Vector3> = buffers
+        .vertices
+        .iter()
+        .map(|vertex| Vector3::new(vertex.position[0], vertex.position[1], vertex.position[2]))
+        .collect();
+    let normals: Vec<Vector3> = buffers
+        .vertices
+        .iter()
+        .map(|vertex| Vector3::new(vertex.normal[0], vertex.normal[1], vertex.normal[2]))
+        .collect();
+    let colors: Vec<Color> = buffers
+        .vertices
+        .iter()
+        .map(|vertex| Color::from_rgb(vertex.color[0], vertex.color[1], vertex.color[2]))
+        .collect();
+    let indices: Vec<i32> = buffers.indices.iter().map(|&index| index as i32).collect();
+
+    let mut arrays = VarArray::new();
+    arrays.resize(ArrayType::MAX.ord() as usize, &Variant::nil());
+    arrays.set(
+        ArrayType::VERTEX.ord() as usize,
+        &PackedVector3Array::from(vertices),
+    );
+    arrays.set(
+        ArrayType::NORMAL.ord() as usize,
+        &PackedVector3Array::from(normals),
+    );
+    arrays.set(
+        ArrayType::COLOR.ord() as usize,
+        &PackedColorArray::from(colors),
+    );
+    arrays.set(
+        ArrayType::INDEX.ord() as usize,
+        &PackedInt32Array::from(indices),
+    );
+
+    let mut mesh = ArrayMesh::new_gd();
+    mesh.add_surface_from_arrays(PrimitiveType::TRIANGLES, &arrays);
+    mesh
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn wait_for_result(bridge: &TerrainBridge, id: i64) -> TerrainResult {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match bridge.poll() {
+                PollOutcome::Result(result) => return result,
+                PollOutcome::Empty => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for terrain result {id}"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+                PollOutcome::Disconnected => panic!("terrain workers disconnected"),
+            }
         }
     }
 
-    surface.commit().unwrap_or_else(ArrayMesh::new_gd)
+    #[test]
+    fn terrain_mesh_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<TerrainMesh>();
+    }
+
+    #[test]
+    fn request_round_trips_a_mesh() {
+        let mut bridge = TerrainBridge::new();
+        let id = bridge.request(2026, 0, 0, 1);
+        assert!(id > 0);
+
+        let result = wait_for_result(&bridge, id);
+        assert_eq!(result.id, id as u64);
+        assert_eq!(result.chunk_x, 0);
+        assert_eq!(result.chunk_z, 0);
+        assert_eq!(result.step, 1);
+        assert!(result.error.is_none());
+        assert!(result.mesh.as_ref().is_some_and(|mesh| !mesh.is_empty()));
+    }
+
+    #[test]
+    fn concurrent_requests_each_return_once() {
+        let mut bridge = TerrainBridge::new();
+        let ids: Vec<i64> = (0..4)
+            .map(|index| bridge.request(2026, index, 0, 1))
+            .collect();
+        assert!(ids.iter().all(|id| *id > 0));
+
+        let mut seen = Vec::new();
+        for _ in 0..ids.len() {
+            let result = wait_for_result(&bridge, ids[0]);
+            seen.push(result.id);
+        }
+        seen.sort_unstable();
+        let mut expected: Vec<u64> = ids.iter().map(|id| *id as u64).collect();
+        expected.sort_unstable();
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn drop_joins_workers_without_hanging() {
+        let bridge = TerrainBridge::new();
+        drop(bridge);
+    }
 }

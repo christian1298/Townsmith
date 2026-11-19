@@ -4,7 +4,7 @@
 
 Townsmith is a city-builder about authorship: design buildings voxel by voxel in first person, then place them in a living city you manage from above. The city builds itself over time with materials, crews, and trades; citizens live, work, and react to the world you shape.
 
-> **Status:** pre-production / Phase 0 spike. The Rust voxel core, deterministic terrain worldgen/streaming, 1M-cohort tick path, and Godot 4.7 GDExtension bridge run headless; the Godot preview streams 256 m terrain chunks on Rust worker threads with distance LOD, the core and route benchmark harnesses produce JSON, but there is no gameplay yet. The design and technical plan live in an Obsidian-compatible vault in [`docs/`](docs/). The engine choice remains proposed until the spike completes.
+> **Status:** pre-production / Phase 0 spike. The Rust voxel core, deterministic terrain worldgen/streaming, 1M-cohort tick path, and Godot 4.7 GDExtension bridge run headless; the Godot preview streams 256 m terrain chunks on Rust worker threads with distance LOD and packed-array mesh upload, the core and route benchmark harnesses produce JSON, but there is no gameplay yet. The design and technical plan live in an Obsidian-compatible vault in [`docs/`](docs/). The engine choice remains proposed until the spike completes.
 
 ## At a glance
 
@@ -58,7 +58,8 @@ Requires Rust 1.94+ and Godot 4.7+.
 ```bash
 cargo test -p core_voxel                  # fast voxel tests
 cargo test -p core_world                  # worldgen/streaming tests
-cargo test -p core_sim                    # cohort simulation tests
+cargo test -p core_sim                    # cohort + active-agent tests
+cargo test -p godot_ext                   # terrain worker bridge tests
 ./scripts/check.sh                        # fmt + clippy + workspace tests
 ./scripts/build_godot_ext.sh              # build the GDExtension library
 GODOT=/path/to/godot ./scripts/run_godot.sh

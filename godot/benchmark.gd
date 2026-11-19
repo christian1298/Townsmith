@@ -172,6 +172,7 @@ func _finish() -> void:
 		"suite": "godot_route",
 		"scene": "phase0_terrain",
 		"chunks_loaded": streamer.chunk_count() if streamer != null else 0,
+		"streaming": streamer.stats() if streamer != null else {},
 		"route": route_id,
 		"route_path": route_path,
 		"duration_s": duration_s,

@@ -60,6 +60,9 @@ records = [json.loads((tmp / f"run_{run}.json").read_text()) for run in range(1,
 def med(key):
     return statistics.median(record["results"][key] for record in records)
 
+def med_stream(key):
+    return statistics.median(record.get("streaming", {}).get(key, 0) for record in records)
+
 chunks = [int(record.get("chunks_loaded", 0)) for record in records]
 
 result = {
@@ -80,6 +83,9 @@ result = {
         "chunks_loaded_min": min(chunks),
         "chunks_loaded_median": statistics.median(chunks),
         "chunks_loaded_max": max(chunks),
+        "chunks_requested_median": med_stream("chunks_requested"),
+        "chunks_applied_median": med_stream("chunks_applied"),
+        "chunks_dropped_median": med_stream("chunks_dropped"),
     },
 }
 out.parent.mkdir(parents=True, exist_ok=True)

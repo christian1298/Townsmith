@@ -9,6 +9,8 @@ extends Node3D
 const CHUNK_METERS := 256.0
 const CHUNK_CELLS := 256
 const WATER_HEIGHT := 24.1
+const MAX_COORD_ATTEMPTS := 3
+const MAX_IN_FLIGHT := 32
 
 @export var seed: int = 2026
 @export var view_radius: int = 1
@@ -23,7 +25,6 @@ var core: TownsmithCore
 var terrain_material: StandardMaterial3D
 var chunks: Dictionary = {}
 var chunks_lod: Dictionary = {}
-var empty_reported: Dictionary = {}
 var in_flight: Dictionary = {}
 var queue: Array[Vector2i] = []
 var camera: Camera3D
@@ -31,12 +32,17 @@ var water: MeshInstance3D
 var last_center := Vector2i.ZERO
 var has_center := false
 var chunks_built := 0
+var coord_attempts: Dictionary = {}
+var chunks_requested := 0
+var chunks_applied := 0
+var chunks_dropped := 0
+var bridge_failures := 0
 
 func _ready() -> void:
 	view_radius = maxi(view_radius, 0)
 	keep_radius = maxi(keep_radius, view_radius)
-	builds_per_frame = maxi(builds_per_frame, 1)
-	max_in_flight = maxi(max_in_flight, 1)
+	builds_per_frame = clampi(builds_per_frame, 1, 8)
+	max_in_flight = clampi(max_in_flight, 1, MAX_IN_FLIGHT)
 	full_detail_radius = maxi(full_detail_radius, 0)
 	half_detail_radius = maxi(half_detail_radius, full_detail_radius)
 	far_detail_step = clampi(far_detail_step, 1, CHUNK_CELLS)
@@ -140,22 +146,30 @@ func _poll_results(center: Vector2i) -> void:
 		if result.is_empty():
 			return
 
+		var error := str(result.get("error", ""))
+		if error == "worker_pool_disconnected":
+			_handle_disconnected()
+			return
+
 		var id := int(result.get("id", -1))
 		var job: Dictionary = in_flight.get(id, {})
-		in_flight.erase(id)
 		if job.is_empty():
 			continue
+		in_flight.erase(id)
 
 		var coord: Vector2i = job["coord"]
 		var step := int(result.get("step", job["step"]))
+		if error != "":
+			_retry_coord(coord, error)
+			continue
+
 		var mesh := result.get("mesh") as ArrayMesh
 		if mesh == null or mesh.get_surface_count() == 0:
-			if not empty_reported.has(coord):
-				empty_reported[coord] = true
-				push_warning("Terrain chunk %s produced no geometry; will retry" % coord)
+			_retry_coord(coord, "empty mesh")
 			continue
 
 		if not _is_desired(coord, center) or _lod_step(coord, center) != step:
+			chunks_dropped += 1
 			if _is_desired(coord, center):
 				_enqueue(coord)
 			continue
@@ -174,13 +188,45 @@ func _request_jobs(center: Vector2i) -> void:
 			continue
 		var id := core.request_terrain_chunk(seed, coord.x, coord.y, step)
 		if id < 0:
-			push_error("Terrain request failed for %s" % coord)
-			continue
+			push_error("Terrain request failed for %s; resetting workers" % coord)
+			_handle_disconnected()
+			return
 		in_flight[id] = {"coord": coord, "step": step}
+		chunks_requested += 1
 
 func _enqueue(coord: Vector2i) -> void:
 	if not queue.has(coord):
 		queue.append(coord)
+
+func _retry_coord(coord: Vector2i, reason: String) -> void:
+	var attempts := int(coord_attempts.get(coord, 0)) + 1
+	coord_attempts[coord] = attempts
+	if attempts <= MAX_COORD_ATTEMPTS:
+		_enqueue(coord)
+	else:
+		push_error("Terrain chunk %s failed after %d attempts: %s" % [coord, attempts, reason])
+
+func _handle_disconnected() -> void:
+	in_flight.clear()
+	bridge_failures += 1
+	if bridge_failures > 2:
+		push_error("Terrain worker pool disconnected repeatedly; disabling streaming")
+		set_process(false)
+		return
+	push_error("Terrain worker pool disconnected; resetting")
+	core = TownsmithCore.new()
+	if has_center:
+		_refill_queue(last_center)
+
+func stats() -> Dictionary:
+	return {
+		"chunks_loaded": chunks.size(),
+		"chunks_requested": chunks_requested,
+		"chunks_applied": chunks_applied,
+		"chunks_dropped": chunks_dropped,
+		"in_flight": in_flight.size(),
+		"queue": queue.size(),
+	}
 
 func _apply_chunk(coord: Vector2i, step: int, mesh: ArrayMesh) -> void:
 	var instance := MeshInstance3D.new()
@@ -191,10 +237,12 @@ func _apply_chunk(coord: Vector2i, step: int, mesh: ArrayMesh) -> void:
 	if chunks.has(coord):
 		var previous: MeshInstance3D = chunks[coord]
 		if is_instance_valid(previous):
+			previous.mesh = null
 			previous.queue_free()
 	chunks[coord] = instance
 	chunks_lod[coord] = step
-	empty_reported.erase(coord)
+	coord_attempts.erase(coord)
+	chunks_applied += 1
 	chunks_built += 1
 	if chunks_built <= 3 or chunks_built % 8 == 0:
 		print("Terrain chunk ", coord, " LOD ", step, " loaded; total ", chunks.size())
@@ -206,7 +254,8 @@ func _unload_outside(center: Vector2i) -> void:
 		if distance > keep_radius:
 			var instance: MeshInstance3D = chunks[key]
 			if is_instance_valid(instance):
+				instance.mesh = null
 				instance.queue_free()
 			chunks.erase(key)
 			chunks_lod.erase(key)
-			empty_reported.erase(key)
+			coord_attempts.erase(key)
