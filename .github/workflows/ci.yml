@@ -23,3 +23,44 @@ jobs:
         run: cargo test --workspace
       - name: Build GDExtension
         run: cargo build -p godot_ext
+
+  godot-smoke:
+    name: Godot headless smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2t64 libpulse0 libx11-6 libxcursor1 libxinerama1 \
+            libxrandr2 libxi6 libgl1 libfontconfig1 libfreetype6 libdbus-1-3 \
+            unzip
+      - name: Install Godot 4.7.2
+        run: |
+          GODOT_VERSION="4.7.2"
+          GODOT_ZIP="Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          BASE="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable"
+          mkdir -p "$RUNNER_TEMP/godot"
+          curl -fsSL -o "$RUNNER_TEMP/$GODOT_ZIP" "$BASE/$GODOT_ZIP"
+          curl -fsSL -o "$RUNNER_TEMP/SHA512-SUMS.txt" "$BASE/SHA512-SUMS.txt"
+          (cd "$RUNNER_TEMP" && grep -E "[ *]${GODOT_ZIP}$" SHA512-SUMS.txt | sha512sum -c -)
+          unzip -q "$RUNNER_TEMP/$GODOT_ZIP" -d "$RUNNER_TEMP/godot"
+          chmod +x "$RUNNER_TEMP/godot/Godot_v${GODOT_VERSION}-stable_linux.x86_64"
+          echo "GODOT=$RUNNER_TEMP/godot/Godot_v${GODOT_VERSION}-stable_linux.x86_64" >> "$GITHUB_ENV"
+      - name: Verify Godot
+        run: '"$GODOT" --version'
+      - name: Run headless smoke
+        shell: bash
+        run: |
+          set -o pipefail
+          bash ./scripts/smoke_godot.sh 2>&1 | tee "$RUNNER_TEMP/godot-smoke.log"
+      - name: Upload smoke log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: godot-smoke-log
+          path: ${{ runner.temp }}/godot-smoke.log
+          if-no-files-found: warn
