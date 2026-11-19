@@ -1,7 +1,7 @@
 ---
 title: Engine and Stack
 project: Townsmith
-status: proposed
+status: accepted
 updated: 2026-11-19
 tags:
   - townsmith
@@ -11,8 +11,8 @@ tags:
 
 # 04 — Engine and Stack
 
-> [!decision] D-003 — Recommended stack (proposed)
-> **Godot 4.x as the shell + a Rust core for voxels and simulation, connected through GDExtension.** GDScript handles UI and glue. If the team is C++-heavy, the core can be C++ instead of Rust. This recommendation is **pending a 3–4 week Phase 0 spike** (Section 9) covering voxels, world streaming, and a 1M cohort benchmark.
+> [!decision] D-003 — Accepted stack
+> **Godot 4.x as the shell + a Rust core for voxels and simulation, connected through GDExtension.** GDScript handles UI and glue. The Phase 0 spike passed: voxels, streaming, 1M cohorts, 2k agents, 100k box instances, 200 voxel huts, and Linux/Windows CI all work. The 3060-class 1M 30 FPS target remains a Phase 5 performance gate.
 
 ## 1. TL;DR
 

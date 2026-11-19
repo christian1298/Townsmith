@@ -20,7 +20,7 @@ tags:
 |---|---|---|---|---|
 | D-001 | 1 voxel = 10 cm = 1 liter | Accepted | 2026-11-19 | [[03 - Voxel and Scale]], [[02 - Game Design]] |
 | D-002 | Multi-scale world: 1 m terrain + 10 cm buildings + LOD | Accepted | 2026-11-19 | [[03 - Voxel and Scale]] |
-| D-003 | Godot 4 shell + Rust core via GDExtension | Proposed | 2026-11-19 | [[04 - Engine and Stack]], [[12 - Technical Architecture]] |
+| D-003 | Godot 4 shell + Rust core via GDExtension | Accepted | 2026-11-19 | [[04 - Engine and Stack]], [[12 - Technical Architecture]] |
 | D-004 | Authoritative server; single-player runs a local server | Accepted | 2026-11-19 | [[05 - Multiplayer]] |
 | D-005 | Blueprints are the bridge between modes | Accepted | 2026-11-19 | [[02 - Game Design]], [[03 - Voxel and Scale]] |
 | D-006 | Data-first content with namespaced IDs | Proposed | 2026-11-19 | [[06 - Modding and Resource Packs]] |
@@ -138,7 +138,7 @@ Phase 0 visual/performance spike. Terrain resolution is confirmed at 1 m; if the
 
 ## D-003 — Godot 4 shell + Rust core via GDExtension
 
-**Status:** Proposed · **Date:** 2026-11-19 · **Affects:** [[04 - Engine and Stack]], [[12 - Technical Architecture]]
+**Status:** Accepted · **Date:** 2026-11-19 · **Affects:** [[04 - Engine and Stack]], [[12 - Technical Architecture]], [[25 - Phase 0 Results]]
 
 ### Context
 
@@ -177,7 +177,7 @@ The project needs native Linux/Windows builds, 10 cm voxel rendering, a large si
 
 ### Review trigger
 
-The Phase 0 spike (Section 9 of [[04 - Engine and Stack]]). If it fails, test Bevy or a custom `RenderingDevice` renderer.
+Accepted for the architecture based on [[25 - Phase 0 Results]]. The 3060-class 1M 30 FPS target remains a Phase 5 performance gate (Q-052); if it misses, optimize LOD/impostors and active-agent limits before considering an engine change.
 
 ---
 
