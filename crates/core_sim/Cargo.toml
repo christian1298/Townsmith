@@ -1,0 +1,11 @@
+[package]
+name = "core_sim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Engine-agnostic cohort simulation core for Townsmith"
+
+[lib]
+name = "core_sim"
+path = "src/lib.rs"

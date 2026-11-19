@@ -259,6 +259,9 @@ This is the core trade: **the player gets a living metropolis of millions, and i
 
 These are targets. The Phase 0 spike must measure them.
 
+> [!success] Phase 0 cohort tick
+> `core_sim` ticks 10,000 cohorts / 1,000,000 citizens in **~0.21 ms median** on the current machine, far below the 10 ms cohort budget. This is a simplified aggregate model: it excludes buildings, construction, active agents, pathfinding, and the economy, so it is a floor for the full tick, not the final number. See [[18 - Phase 0 Implementation]].
+
 ### Dormant regions and catch-up
 
 - A region with no player nearby does not tick. It stores a statistical snapshot: population, housing, jobs, resource stocks, wildlife, pollution.
