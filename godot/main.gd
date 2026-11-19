@@ -1,6 +1,10 @@
 extends Node3D
 
 const TerrainStreamer = preload("res://terrain_streamer.gd")
+const SMOKE_CITY_TIER := 2
+const SMOKE_CITY_SEED := 2026
+const SMOKE_CITY_BUILDINGS := 100000
+const SMOKE_CITY_CHECKSUM := "2595171946372580485"
 
 var streamer
 
@@ -55,11 +59,50 @@ func _run_smoke() -> void:
 		if lod_text != "":
 			lod_text += ","
 		lod_text += str(lod)
+	var city_core := TownsmithCore.new()
+	var city: Dictionary = city_core.build_city_layout(SMOKE_CITY_TIER, SMOKE_CITY_SEED)
+	var city_error := str(city.get("error", ""))
+	var city_tier := str(city.get("tier", ""))
+	var city_buildings := int(city.get("buildings", 0))
+	var city_positions: PackedVector3Array = city.get("positions", PackedVector3Array())
+	var city_sizes: PackedVector3Array = city.get("sizes", PackedVector3Array())
+	var city_colors: PackedColorArray = city.get("colors", PackedColorArray())
+	var city_kinds: PackedInt32Array = city.get("kinds", PackedInt32Array())
+	var city_bounds: PackedFloat32Array = city.get("bounds", PackedFloat32Array())
+	var city_checksum := str(city.get("checksum", ""))
+	print("CITY tier=%s buildings=%d positions=%d sizes=%d colors=%d kinds=%d bounds=%d checksum=%s error=%s" % [
+		city_tier,
+		city_buildings,
+		city_positions.size(),
+		city_sizes.size(),
+		city_colors.size(),
+		city_kinds.size(),
+		city_bounds.size(),
+		city_checksum,
+		city_error,
+	])
+
 	var status := "ok"
 	if streamer.chunk_count() < 9:
 		status = "timeout"
 	elif not lods.has(1) or not lods.has(2):
 		status = "missing_lods"
+	elif city_error != "":
+		status = "city_error"
+	elif city_tier != "late" or city_buildings != SMOKE_CITY_BUILDINGS:
+		status = "city_failed"
+	elif city_positions.size() != SMOKE_CITY_BUILDINGS:
+		status = "city_positions"
+	elif city_sizes.size() != SMOKE_CITY_BUILDINGS:
+		status = "city_sizes"
+	elif city_colors.size() != SMOKE_CITY_BUILDINGS:
+		status = "city_colors"
+	elif city_kinds.size() != SMOKE_CITY_BUILDINGS:
+		status = "city_kinds"
+	elif city_bounds.size() != 4:
+		status = "city_bounds"
+	elif city_checksum != SMOKE_CITY_CHECKSUM:
+		status = "city_checksum"
 	print("SMOKE chunks=%d lods=%s status=%s elapsed_ms=%d" % [
 		streamer.chunk_count(),
 		lod_text,

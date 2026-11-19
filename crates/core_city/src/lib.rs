@@ -716,6 +716,12 @@ mod tests {
     }
 
     #[test]
+    fn smoke_seed_late_checksum_is_stable() {
+        let layout = CityLayout::generate(CityTier::Late, 2026).expect("layout generates");
+        assert_eq!(layout.checksum(), 2_595_171_946_372_580_485);
+    }
+
+    #[test]
     fn same_seed_produces_identical_layouts() {
         for tier in CityTier::ALL {
             let first = CityLayout::generate(tier, SEED).expect("layout generates");
