@@ -56,7 +56,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          ./scripts/smoke_godot.sh 2>&1 | tee "$RUNNER_TEMP/godot-smoke.log"
+          bash ./scripts/smoke_godot.sh 2>&1 | tee "$RUNNER_TEMP/godot-smoke.log"
       - name: Upload smoke log
         if: always()
         uses: actions/upload-artifact@v4
