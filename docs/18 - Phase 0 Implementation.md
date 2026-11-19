@@ -20,7 +20,7 @@ tags:
 | Path | Purpose | Status |
 |---|---|---|
 | `crates/core_voxel` | 32³ chunk, palette/RLE, greedy mesher, demo hut | Working, 24 tests |
-| `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming | Working, 34 tests |
+| `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming, terrain mesh | Working, 38 tests |
 | `crates/core_sim` | 1M-scale cohort simulation: needs, happiness, employment, district services | Working, 11 tests |
 | `crates/server` | Headless cohort tick harness (no GPU, no socket yet) | Working |
 | `crates/bench` | Voxel meshing, worldgen streaming, and 1M cohort microbenchmarks | Working |
@@ -49,9 +49,10 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 ### Godot bridge
 
 - `TownsmithCore` is a `RefCounted` class exposed to GDScript.
-- `build_demo_mesh()` runs the Rust mesher and returns an `ArrayMesh`.
-- The preview scene builds the demo hut, ground, camera, light, and environment.
-- Headless smoke prints the version and surface count.
+- `build_demo_mesh()` runs the Rust voxel mesher and returns an `ArrayMesh`.
+- `build_terrain_mesh(seed, chunk_x, chunk_z)` generates and meshes one 256 m terrain chunk with biome vertex colors.
+- The preview scene displays the terrain chunk, a water plane, camera, light, and environment.
+- Headless smoke prints the version, demo surface count, and terrain surface count.
 
 ### Worldgen and streaming
 
@@ -61,6 +62,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 - Sparse height-edit deltas, grouped by chunk; 2,000 edits encode to 8,030 bytes.
 - Deltas survive chunk unload/reload and a binary round trip.
 - Negative chunk coordinates use floor division and are tested at the seam.
+- The Godot preview renders one 256 m chunk with biome colors; the water plane is a placeholder.
 
 ### Cohort simulation
 
@@ -81,6 +83,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 | Demo hut | 3,931 | 1,867 | 56 | ~0.5 ms |
 | Worldgen, 3 × 3 chunks | 589,824 cells | — | — | ~131 ms load / ~128 ms reload |
 | Cohort, 1M citizens | — | — | — | ~0.21 ms/tick |
+| Terrain mesh, 256 m chunk | 65,536 cells | — | 83,994 quads | ~1.38 ms |
 
 These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, and cohort paths and a baseline for regressions.
 
@@ -88,8 +91,8 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 
 - Chunk boundaries are treated as exposed; adjacent chunks will show internal faces until a neighbor sampler or multi-chunk mesher exists.
 - The Godot preview uses one material override; per-material surfaces/UV atlas mapping is not implemented.
-- Worldgen is a headless core prototype; there is no Godot terrain renderer or LOD yet.
-- Chunk generation is synchronous and CPU-bound; it must run on worker threads in the shell.
+- The Godot preview renders a single static terrain chunk; there is no multi-chunk streaming, LOD, or water shader yet.
+- Chunk generation and meshing are synchronous and CPU-bound; they must run on worker threads in the shell.
 - No binary save format; palette/RLE and terrain deltas exist only as in-memory structs and a phase 0 blob.
 - No 1M rendering benchmark or full benchmark scene/route harness yet.
 - The headless server has no networking, persistence, or commands yet; it only proves the CPU tick path.
@@ -99,7 +102,7 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 
 1. Benchmark harness v0 with fixed scene, camera route, JSON, 3-run median.
 2. 30 FPS 1M rendering target on the 8-core/16-thread + RTX 3060-class machine.
-3. Connect the worldgen streamer to the Godot shell and render terrain chunks.
+3. Stream multiple terrain chunks in the Godot shell with worker-thread generation and LOD.
 4. Decide D-003 (Godot + Rust) from measured results.
 
 ## 5. Commands
@@ -113,5 +116,6 @@ GODOT=/path/to/godot ./scripts/smoke_godot.sh
 cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort
+cargo run --release -p townsmith-bench --bin terrain
 cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
 ```

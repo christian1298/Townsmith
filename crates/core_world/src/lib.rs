@@ -10,6 +10,7 @@ pub mod coords;
 pub mod delta;
 pub mod error;
 pub mod generator;
+pub mod mesh;
 pub mod noise;
 pub mod streaming;
 
@@ -22,4 +23,5 @@ pub use coords::{
 pub use delta::{DeltaStore, TerrainEdit};
 pub use error::WorldError;
 pub use generator::WorldGenerator;
+pub use mesh::{terrain_mesh, TerrainMesh, TerrainVertex};
 pub use streaming::{StreamUpdate, StreamingConfig, StreamingWorld};

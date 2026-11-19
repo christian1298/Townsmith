@@ -12,4 +12,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 core_voxel.workspace = true
+core_world.workspace = true
 godot = { version = "0.5.5", features = ["api-4-7"] }

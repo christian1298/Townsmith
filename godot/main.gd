@@ -4,30 +4,38 @@ func _ready() -> void:
 	var core = TownsmithCore.new()
 	print("Townsmith core version: ", core.version())
 
-	var mesh: ArrayMesh = core.build_demo_mesh()
-	print("Demo mesh surfaces: ", mesh.get_surface_count())
+	var demo: ArrayMesh = core.build_demo_mesh()
+	print("Demo mesh surfaces: ", demo.get_surface_count())
 
-	var mesh_instance := MeshInstance3D.new()
-	mesh_instance.mesh = mesh
-	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(0.62, 0.48, 0.33)
-	material.roughness = 0.9
-	mesh_instance.material_override = material
-	add_child(mesh_instance)
+	var terrain: ArrayMesh = core.build_terrain_mesh(2026, 0, 0)
+	print("Terrain mesh surfaces: ", terrain.get_surface_count())
 
-	var ground := MeshInstance3D.new()
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(12.0, 12.0)
-	ground.mesh = plane
-	var ground_material := StandardMaterial3D.new()
-	ground_material.albedo_color = Color(0.27, 0.45, 0.22)
-	ground.material_override = ground_material
-	add_child(ground)
+	var terrain_instance := MeshInstance3D.new()
+	terrain_instance.mesh = terrain
+	var terrain_material := StandardMaterial3D.new()
+	terrain_material.vertex_color_use_as_albedo = true
+	terrain_material.roughness = 1.0
+	terrain_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	terrain_instance.material_override = terrain_material
+	add_child(terrain_instance)
+
+	var water := MeshInstance3D.new()
+	var water_plane := PlaneMesh.new()
+	water_plane.size = Vector2(256.0, 256.0)
+	water.mesh = water_plane
+	water.position = Vector3(128.0, 24.0, 128.0)
+	var water_material := StandardMaterial3D.new()
+	water_material.albedo_color = Color(0.16, 0.38, 0.62, 0.55)
+	water_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	water_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	water.material_override = water_material
+	add_child(water)
 
 	var camera := Camera3D.new()
-	camera.position = Vector3(5.0, 4.2, 5.0)
+	camera.position = Vector3(128.0, 92.0, 244.0)
+	camera.far = 1000.0
 	add_child(camera)
-	camera.look_at(Vector3(0.0, 1.2, 0.0))
+	camera.look_at(Vector3(128.0, 28.0, 128.0))
 
 	var light := DirectionalLight3D.new()
 	light.rotation_degrees = Vector3(-50.0, -30.0, 0.0)

@@ -10,6 +10,7 @@ use godot::prelude::*;
 
 use core_voxel::demo;
 use core_voxel::mesh::greedy_mesh;
+use core_world::{terrain_mesh, WorldChunkCoord, WorldGenerator};
 
 struct TownsmithExtension;
 
@@ -50,6 +51,43 @@ impl TownsmithCore {
                     vertex.normal[2],
                 ));
                 surface.set_uv(Vector2::new(vertex.uv[0], vertex.uv[1]));
+                surface.add_vertex(Vector3::new(
+                    vertex.position[0],
+                    vertex.position[1],
+                    vertex.position[2],
+                ));
+            }
+        }
+
+        surface.commit().unwrap_or_else(ArrayMesh::new_gd)
+    }
+
+    /// Generate one 256 m terrain chunk and return it as a colored Godot mesh.
+    #[func]
+    fn build_terrain_mesh(&self, seed: i64, chunk_x: i64, chunk_z: i64) -> Gd<ArrayMesh> {
+        let generator = WorldGenerator::new(seed as u64);
+        let Ok(chunk) = generator.generate(WorldChunkCoord::new(chunk_x, chunk_z)) else {
+            return ArrayMesh::new_gd();
+        };
+        let buffers = terrain_mesh(&chunk);
+
+        let mut surface = SurfaceTool::new_gd();
+        surface.begin(PrimitiveType::TRIANGLES);
+        for triangle in buffers.indices.chunks(3) {
+            for &index in triangle {
+                let Some(vertex) = buffers.vertices.get(index as usize) else {
+                    continue;
+                };
+                surface.set_normal(Vector3::new(
+                    vertex.normal[0],
+                    vertex.normal[1],
+                    vertex.normal[2],
+                ));
+                surface.set_color(Color::from_rgb(
+                    vertex.color[0],
+                    vertex.color[1],
+                    vertex.color[2],
+                ));
                 surface.add_vertex(Vector3::new(
                     vertex.position[0],
                     vertex.position[1],
