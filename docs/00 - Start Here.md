@@ -47,7 +47,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with 10 cm building detail is tractable. The cohort model and world streaming must be proven in Phase 0. See [[03 - Voxel and Scale]], [[07 - Simulation and AI]], and [[09 - Open Questions]]. |
-| Next action | Add a real water shader, then build the Early/Mid/Late city scenes and measure the 30 FPS 1M rendering target. See [[08 - Roadmap]]. |
+| Next action | Build the Early/Mid/Late city scenes and measure the 30 FPS 1M rendering target. See [[08 - Roadmap]]. |
 
 > [!warning] This is a plan, not a commitment
 > Numbers in these docs are **planning targets**, not measured results. Anything marked *Assumption* or *Proposed* must be validated before it becomes an accepted decision.
@@ -153,7 +153,7 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 ## Next actions
 
-1. Add a real water shader and stitch LOD seams.
+1. Stitch LOD seams and improve the water shader with a depth-based shoreline.
 2. Reduce main-thread mesh upload cost (array meshes instead of per-vertex SurfaceTool).
 3. Build the Early/Mid/Late city benchmark scenes and routes.
 4. Measure the 30 FPS 1M rendering target on 8-core/16-thread + RTX 3060-class hardware.

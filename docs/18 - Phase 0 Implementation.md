@@ -66,7 +66,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 - Sparse height-edit deltas, grouped by chunk; 2,000 edits encode to 8,030 bytes.
 - Deltas survive chunk unload/reload and a binary round trip.
 - Negative chunk coordinates use floor division and are tested at the seam.
-- The Godot preview streams multiple 256 m chunks; the water plane is a placeholder.
+- The Godot preview streams multiple 256 m chunks with a stylized water shader (see [[20 - Water]]).
 - Multi-chunk meshing uses a seam-aware world-height sampler. Matching boundary faces are culled even when the neighbor chunk has not been loaded.
 
 ### Active agents
@@ -138,7 +138,6 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 - Chunk generation and meshing run on a fixed Rust worker pool (up to 4 threads). The Godot main thread converts finished `TerrainMesh` values into packed `ArrayMesh` resources; uploads no longer call `SurfaceTool` per vertex, but large meshes still enter the renderer on the main thread.
 - LOD is distance-based (mesh stride), not a full imposter/HLOD pipeline. Adjacent chunks at different LOD steps can still show small cracks or z-fighting at the seam.
 - Boundary culling samples the deterministic generator, not live edited heights. Edited edge cells can render missing or doubled walls until the sampler reads the delta store.
-- No water shader yet; the water plane is a placeholder.
 - No binary save format; palette/RLE and terrain deltas exist only as in-memory structs and a phase 0 blob.
 - The Godot benchmark has single-chunk and multi-chunk terrain routes; it is not the Early/Mid/Late city benchmark yet, and headless frame times are not render measurements.
 - Async chunk completion order is scheduling-dependent; the camera/settings are deterministic, but the frame at which a chunk appears is not yet deterministic (D-020 caveat).
@@ -148,7 +147,7 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 
 ## 4. Next steps
 
-1. Add a real water shader and stitch LOD seams.
+1. Stitch LOD seams and add a depth-based shoreline/foam pass.
 2. Build the Early/Mid/Late city benchmark scenes and routes.
 3. Measure the 30 FPS 1M rendering target on 8-core/16-thread + RTX 3060-class hardware.
 4. Decide D-003 (Godot + Rust) from measured results.
