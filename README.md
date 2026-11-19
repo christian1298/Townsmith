@@ -42,7 +42,7 @@ Start with the index; it has reading paths for players, designers, engineers, an
 ## Repository layout
 
 ```text
-crates/      Rust core; core_voxel, core_world, core_sim, server, bench, and the Godot bridge
+crates/      Rust core; core_voxel, core_world, core_sim, core_city, server, bench, and the Godot bridge
 godot/       Godot 4.7 project, streaming terrain preview, and route benchmark
 benchmarks/  Deterministic routes and local benchmark results
 scripts/     Build, check, run, smoke, and benchmark commands
@@ -68,6 +68,7 @@ cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort
 cargo run --release -p townsmith-bench --bin terrain
+cargo run --release -p townsmith-bench --bin city_layout
 ./scripts/bench_core.sh                    # 3-run core benchmark summary
 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5
 cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100

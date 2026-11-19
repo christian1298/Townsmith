@@ -43,7 +43,7 @@ tags:
 ### Phase 0 — Foundations and spikes (3–4 weeks)
 
 > [!success] Phase 0 progress — 2026-11-19
-> Rust workspace with `core_voxel` (32³ chunk, palette/RLE, greedy mesher), `core_world` (deterministic 1 m terrain, 256 m chunks, edit deltas, streaming, terrain mesh + LOD + seam skirts, 58 tests), `core_sim` (10k cohorts / 1M citizens, ~0.21 ms/tick), `townsmith-server` (headless tick), `townsmith-bench`, and a Godot 4.7 GDExtension bridge. The preview streams a 3 × 3 ring of 256 m terrain chunks with distance LOD; headless smoke and the 3-run core/route benchmark harnesses pass. Generation and meshing now run on Rust worker threads; packed-array mesh upload is in place; boundary culling and LOD seam skirts are in place; remaining work is the Early/Mid/Late city scenes and the 30 FPS 1M rendering target.
+> Rust workspace with `core_voxel` (32³ chunk, palette/RLE, greedy mesher), `core_world` (deterministic 1 m terrain, 256 m chunks, edit deltas, streaming, terrain mesh + LOD + seam skirts, 58 tests), `core_sim` (10k cohorts / 1M citizens, ~0.21 ms/tick), `core_city` (deterministic Early/Mid/Late synthetic layouts), `townsmith-server` (headless tick), `townsmith-bench`, and a Godot 4.7 GDExtension bridge. The preview streams a 3 × 3 ring of 256 m terrain chunks with distance LOD; headless smoke and the 3-run core/route benchmark harnesses pass. Generation and meshing now run on Rust worker threads; packed-array mesh upload is in place; boundary culling and LOD seam skirts are in place; the synthetic city layout is ready; remaining work is the Godot MultiMesh renderer, Early/Mid/Late routes, and the 30 FPS 1M-population rendering target.
 
 **Goals**
 - Validate the accepted architecture decisions (D-002, D-006, D-008, D-016, D-017).

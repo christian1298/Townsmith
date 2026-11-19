@@ -13,7 +13,9 @@ tags:
 # 15 — Benchmarks
 
 > [!decision] D-020 — Deterministic benchmark mode
-> Every benchmark run loads the **same savegame**, applies the **same settings**, moves the camera along a **fixed route**, and records the **same metrics**. Results are shown to the player and exported as JSON for developers. No two runs should differ because of input, camera, time of day, or random events.
+> Phase 0 terrain/city scenes are generated from a fixed seed and layout checksum rather than a savegame; the same determinism rules apply. Later city scenes load fixed saves.
+>
+> Every benchmark run applies the **same settings**, moves the camera along a **fixed route**, and records the **same metrics**. Results are shown to the player and exported as JSON for developers. No two runs should differ because of input, camera, time of day, or random events.
 
 ## 1. Why this exists
 

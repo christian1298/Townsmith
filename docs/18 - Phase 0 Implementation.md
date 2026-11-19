@@ -22,8 +22,9 @@ tags:
 | `crates/core_voxel` | 32³ chunk, palette/RLE, greedy mesher, demo hut | Working, 24 tests |
 | `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming, terrain mesh + LOD + seam skirts | Working, 58 tests |
 | `crates/core_sim` | 1M-scale cohort simulation plus deterministic 2,000 active agents | Working, 26 tests |
+| `crates/core_city` | Deterministic synthetic Early/Mid/Late city layouts for rendering benchmarks | Working, 9 tests |
 | `crates/server` | Headless cohort tick harness (no GPU, no socket yet) | Working |
-| `crates/bench` | Voxel meshing, worldgen, terrain, 1M cohort, and active-agent microbenchmarks | Working |
+| `crates/bench` | Voxel, worldgen, terrain, cohort, active-agent, and city-layout microbenchmarks | Working |
 | `benchmarks/` | Route JSON, results, and benchmark notes | Harness v0 |
 | `scripts/bench_core.sh` | 3-run core benchmark aggregation | Working |
 | `scripts/bench_godot.sh` | 3-run Godot flyover aggregation | Working; headless frame times are not representative |
@@ -31,7 +32,7 @@ tags:
 | `godot/` | Preview project; streams 256 m terrain chunks around the camera with distance LOD | Working |
 | `scripts/` | Build, check, run, and smoke commands | Working |
 
-The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server` have no Godot dependency.
+The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`, and `server` have no Godot dependency.
 
 ## 2. What works
 
@@ -99,6 +100,14 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 - Population remains stable at 1,000,000 across 100 ticks.
 - This is a simplified aggregate model. It does not yet include households, buildings, construction, migration, or materialized individual agents.
 
+### Synthetic city layout
+
+- `core_city` generates deterministic Early/Mid/Late box cities for the rendering benchmark.
+- Targets: 500 population / 200 buildings, 100k / 10k, 1M / 100k.
+- Street grid, non-overlapping lots, 3 m floors, tier/core-dependent height mix.
+- FNV checksum pins the layout; `townsmith-bench --bin city_layout` reports medians and checksums.
+- This is a rendering stress fixture, not voxel geometry or simulated occupancy. See [[22 - Synthetic City Layout]].
+
 ### Benchmark harness v0
 
 - `scripts/bench_core.sh` runs meshing, worldgen, terrain, and cohort benchmarks three times and writes a median JSON summary.
@@ -109,7 +118,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 ### Cross-platform CI
 
 - `.github/workflows/ci.yml` runs three jobs: `Rust` (Ubuntu; fmt, clippy, workspace tests, GDExtension build), `Rust (Windows)` (clippy, workspace tests, `cargo build --workspace`, DLL presence check), and `Godot headless smoke` (Ubuntu only).
-- The Windows job runs on `windows-latest` with the MSVC host toolchain, the same `-D warnings` clippy gate, and the same 98 tests as Linux.
+- The Windows job runs on `windows-latest` with the MSVC host toolchain, the same `-D warnings` clippy gate, and the same workspace tests as Linux.
 - It proves the workspace and the GDExtension cdylib (`townsmith_core.dll`) compile and link on Windows, which is the Phase 0 exit requirement for a Windows build.
 - `cargo fmt` is enforced once, on Linux; it is platform-independent and duplicating it on Windows only risks CRLF noise.
 - The Windows job does **not** run Godot or the benchmark routes (see the limitations below).
@@ -130,7 +139,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 | Terrain LOD 2, 256 m chunk | 65,536 cells | — | 25,327 quads | ~0.39 ms |
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **113 tests**: 24 voxel, 58 world, 26 simulation, and 5 bridge tests.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **122 tests**: 24 voxel, 58 world, 26 simulation, 9 city, and 5 bridge tests.
 
 ## 3. Known limitations
 
@@ -165,6 +174,7 @@ GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_strea
 cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort
+cargo run --release -p townsmith-bench --bin city_layout
 cargo run --release -p townsmith-bench --bin agents
 cargo run --release -p townsmith-bench --bin terrain
 cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
