@@ -40,7 +40,7 @@ For a full Phase 0 target run on a desktop:
 GODOT=/path/to/godot ./scripts/bench_phase0.sh
 ```
 
-It runs the core suite, the streaming route, and Early/Mid/Late city routes three times each at 30 s, captures CPU/GPU/OS metadata, and writes `benchmarks/results/phase0_target_<timestamp>.json`. `ALLOW_HEADLESS=1` runs the same structure without a display but does not produce representative FPS.
+It runs the core suite three times and the streaming plus Early/Mid/Late city routes three times each at 30 s (overridable with `RUNS`, `DURATION`, and `WARMUP`), captures best-effort CPU/GPU/OS metadata, and writes `benchmarks/results/phase0_target_<timestamp>.json`. The benchmark forces a 1920×1080 window, disables vsync, and records the actual window/vsync/refresh settings. `ALLOW_HEADLESS=1` runs the same structure without a display but does not produce representative FPS.
 
 ## 2. Goals and non-goals
 

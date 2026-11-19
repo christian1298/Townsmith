@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GODOT_BIN="${GODOT:-godot}"
 RUNS="${1:-3}"
 DURATION="${2:-5}"
+WARMUP="${WARMUP:-3}"
 ROUTE="${3:-$ROOT/benchmarks/routes/phase0_flyover.json}"
 CITY_TIER="${CITY_TIER:-}"
 ROUTE_IS_CITY=false
@@ -63,7 +64,7 @@ for run in $(seq 1 "$RUNS"); do
 	OUT="$TMP/run_$run.json"
 	"$GODOT_BIN" "${GODOT_FLAGS[@]}" --path "$ROOT/godot" res://benchmark.tscn -- \
 		--route "$ROUTE" \
-		--output "$OUT" --duration "$DURATION" --warmup 1 ${CITY_ARGS[@]+"${CITY_ARGS[@]}"} >/dev/null
+		--output "$OUT" --duration "$DURATION" --warmup "$WARMUP" ${CITY_ARGS[@]+"${CITY_ARGS[@]}"} >/dev/null
 done
 
 if [[ "$(basename "$ROUTE")" == "phase0_flyover.json" ]]; then
@@ -102,6 +103,8 @@ result = {
     "suite": "phase0_godot_route",
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "runs": runs,
+    "duration_s": records[0].get("duration_s"),
+    "warmup_s": records[0].get("warmup_s"),
     "headless": records[0].get("headless", False),
     "hardware": records[0].get("hardware", {}),
     "route": records[0].get("route"),

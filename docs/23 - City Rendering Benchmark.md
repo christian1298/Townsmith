@@ -36,7 +36,7 @@ The instance buffer is written through `MultiMesh.buffer` in bulk (16 floats per
 | Mid | 100k | 10,000 | 3 km | `phase0_city_mid.json` |
 | Late | 1M | 100,000 | 8 km | `phase0_city_late.json` |
 
-Each route is 30 s with 3 s warm-up and five time-based waypoints. The camera height rises with tier so the whole skyline is visible.
+Each route is 30 s with 3 s warm-up and five time-based waypoints. The full matrix script forces a 1920×1080 window with vsync disabled and records the actual window/vsync settings. The camera height rises with tier so the whole skyline is visible.
 
 ## 3. Commands
 
