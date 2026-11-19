@@ -31,7 +31,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Item | State |
 |---|---|
 | Phase | Phase 0 spike in progress |
-| Code | **Phase 0 in progress:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, 24 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, seam-aware terrain mesh + LOD, 50 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, and a Godot 4.7 GDExtension bridge that streams terrain chunks on Rust worker threads with distance LOD (4 bridge tests). Headless smoke passes. |
+| Code | **Phase 0 in progress:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, 24 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, seam-aware terrain mesh + LOD + skirts, 58 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, and a Godot 4.7 GDExtension bridge that streams terrain chunks on Rust worker threads with distance LOD (5 bridge tests). Headless smoke passes. |
 | Engine | **Proposed:** Godot 4 shell + Rust core. Pending a 3–4 week Phase 0 spike covering voxels, world streaming, and 1M cohorts. See [[04 - Engine and Stack]] and [[10 - Decisions]]. |
 | Team | **Accepted:** 2–3 full-time generalists; Rust/Godot experience or willingness to learn. |
 | Language | **Accepted:** Rust is the primary implementation language from Phase 0; GDScript is shell/UI only; C++ is the fallback. See D-011. |
@@ -153,7 +153,7 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 ## Next actions
 
-1. Stitch LOD seams and improve the water shader with a depth-based shoreline.
+1. Improve the water shader with a depth-based shoreline.
 2. Reduce main-thread mesh upload cost (array meshes instead of per-vertex SurfaceTool).
 3. Build the Early/Mid/Late city benchmark scenes and routes.
 4. Measure the 30 FPS 1M rendering target on 8-core/16-thread + RTX 3060-class hardware.
@@ -184,3 +184,5 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 | [[17 - Materials and Structure]] | Material progression, structural limits, composite construction, service gates | You design buildings or materials |
 | [[18 - Phase 0 Implementation]] | Current code, test status, limitations, next steps | You are working on the Phase 0 spike |
 | [[19 - Active Agent Benchmark]] | 2,000-agent tick benchmark, dense stress case, results | You touch active agents or movement |
+| [[20 - Water]] | Water shader, uniforms, cost, limitations | You touch water or shoreline rendering |
+| [[21 - LOD Seams]] | Perimeter skirts for terrain LOD seams | You touch terrain meshing or LOD |

@@ -18,8 +18,8 @@ use godot::prelude::*;
 use core_voxel::demo;
 use core_voxel::mesh::greedy_mesh;
 use core_world::{
-    terrain_mesh_lod_with_sampler, TerrainMesh, TerrainPos, WorldChunkCoord, WorldGenerator,
-    WORLD_CHUNK_SIZE,
+    terrain_mesh_lod_with_sampler_and_skirt, TerrainMesh, TerrainPos, WorldChunkCoord,
+    WorldGenerator, DEFAULT_SKIRT_DEPTH_M, WORLD_CHUNK_SIZE,
 };
 
 const MAX_TERRAIN_WORKERS: usize = 4;
@@ -150,9 +150,12 @@ fn worker_loop(jobs: Arc<Mutex<Receiver<TerrainJob>>>, results: Sender<TerrainRe
             generator
                 .generate(WorldChunkCoord::new(job.chunk_x, job.chunk_z))
                 .map(|chunk| {
-                    terrain_mesh_lod_with_sampler(&chunk, job.step, |x, z| {
-                        generator.height_at(TerrainPos::new(x, z))
-                    })
+                    terrain_mesh_lod_with_sampler_and_skirt(
+                        &chunk,
+                        job.step,
+                        |x, z| generator.height_at(TerrainPos::new(x, z)),
+                        DEFAULT_SKIRT_DEPTH_M,
+                    )
                 })
         }));
 
@@ -259,9 +262,12 @@ impl TownsmithCore {
         let Ok(chunk) = generator.generate(WorldChunkCoord::new(chunk_x, chunk_z)) else {
             return ArrayMesh::new_gd();
         };
-        let buffers = terrain_mesh_lod_with_sampler(&chunk, step, |x, z| {
-            generator.height_at(TerrainPos::new(x, z))
-        });
+        let buffers = terrain_mesh_lod_with_sampler_and_skirt(
+            &chunk,
+            step,
+            |x, z| generator.height_at(TerrainPos::new(x, z)),
+            DEFAULT_SKIRT_DEPTH_M,
+        );
         terrain_mesh_to_godot(&buffers)
     }
 
@@ -438,6 +444,30 @@ mod tests {
         let mut expected: Vec<u64> = ids.iter().map(|id| *id as u64).collect();
         expected.sort_unstable();
         assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn worker_matches_synchronous_skirted_mesh() {
+        let generator = WorldGenerator::new(2026);
+        let chunk = generator
+            .generate(WorldChunkCoord::new(0, 0))
+            .expect("generated chunk");
+        let expected = terrain_mesh_lod_with_sampler_and_skirt(
+            &chunk,
+            2,
+            |x, z| generator.height_at(TerrainPos::new(x, z)),
+            DEFAULT_SKIRT_DEPTH_M,
+        );
+        let unskirted = core_world::terrain_mesh_lod_with_sampler(&chunk, 2, |x, z| {
+            generator.height_at(TerrainPos::new(x, z))
+        });
+        assert_eq!(expected.quad_count(), unskirted.quad_count() + 4 * 128);
+
+        let mut bridge = TerrainBridge::new();
+        let id = bridge.request(2026, 0, 0, 2);
+        let result = wait_for_result(&bridge, id);
+        assert!(result.error.is_none());
+        assert_eq!(result.mesh.expect("mesh"), expected);
     }
 
     #[test]
