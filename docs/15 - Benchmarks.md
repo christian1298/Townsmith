@@ -1,0 +1,370 @@
+---
+title: Benchmarks
+project: Townsmith
+status: proposed
+updated: 2026-11-19
+tags:
+  - townsmith
+  - performance
+  - benchmark
+  - qa
+---
+
+# 15 — Benchmarks
+
+> [!decision] D-020 — Deterministic benchmark mode
+> Every benchmark run loads the **same savegame**, applies the **same settings**, moves the camera along a **fixed route**, and records the **same metrics**. Results are shown to the player and exported as JSON for developers. No two runs should differ because of input, camera, time of day, or random events.
+
+## 1. Why this exists
+
+Performance is a feature, not a post-launch cleanup task.
+
+- The 1M+ target needs **measurement**, not guesses.
+- Optimization needs **comparable runs** across patches, hardware, drivers, and settings.
+- Players need a **sense of how the game should run** in the early, mid, and late game on their machine.
+- CI needs a **regression alarm** when a change makes the city slower.
+- Streaming, LOD, and cohort simulation need scene-specific stress tests.
+
+A benchmark run is not a synthetic fly-through of an empty map. It is a representative save, a representative camera path, and a representative simulation load.
+
+## 2. Goals and non-goals
+
+### Goals
+
+- **Deterministic:** same save, settings, content, route, seed, time, and weather.
+- **Comparable:** results include hardware, driver, game version, content hash, route hash, and settings hash.
+- **Player-facing:** a simple Benchmark screen with early/mid/late scenes and understandable results.
+- **Developer-facing:** a CLI/headless runner for CI, baselines, and regression checks.
+- **Safe:** the benchmark uses a copy of the save and never modifies the player's city.
+- **Mod-aware:** base content by default; modded benchmarks are clearly marked and not comparable.
+- **Low overhead:** recording must not materially change the frame time it measures.
+
+### Non-goals
+
+- Competitive scoring or anti-cheat for benchmark results.
+- Cloud upload or public leaderboards at launch (opt-in sharing is a later feature).
+- Benchmarking multiplayer network conditions.
+- Benchmarking every possible city layout. Three scenes plus optional stress scenes are enough.
+
+## 3. Benchmark scenes
+
+The game ships with three fixed benchmark saves, plus an optional stress scene.
+
+| Scene | Population | Area | Buildings | Primary stress | Client target |
+|---|---:|---:|---:|---|---:|
+| **Early Settlement** | 500–1,000 | ~1 km² | 30–50 | World streaming, vegetation, small simulation, first-person detail | 60 FPS / 1080p |
+| **Mid City** | ~100,000 | 10–25 km² | ~25,000 | City rendering, traffic, utilities, district aggregation | 60 FPS / 1080p |
+| **Late Metropolis** | 1,000,000+ | 50–100 km² | 250,000 | LOD/impostors, cohorts, streaming, dense skyline | **~30 FPS / 1080p on RTX 3060-class** |
+| **Stress (optional)** | 1M+ | 100 km² | 250k+ | Max settings, fast camera, worst-case streaming | Informational |
+
+- Scenes are **fixed saves** committed as benchmark fixtures, not generated at run time. A generated scene can drift when worldgen changes; a fixed save is the reference.
+- Each scene represents a plausible state, not a player's actual city:
+  - **Early:** a wood-age settlement with a lumber camp, farm, hunting lodge, forest, river, and a few roads.
+  - **Mid:** a masonry/industrial city with districts, traffic, utilities, a rail line, and mixed housing.
+  - **Late:** a modern/information metropolis with high-rises, transit, industry, pollution, and dense LOD.
+- Each scene includes **active construction sites** at different phases (early: 1–3, mid: 5–10, late: 10–20) so scaffolding, crews, material piles, and partial buildings are part of the performance picture.
+- Base content only by default. Modded scenes are allowed but marked; their results are not comparable to base benchmarks.
+- Each scene records its **save hash**, **content hash**, and **worldgen version**.
+
+> [!question] Q-073 — Scene definitions
+> Are three scenes (Early/Mid/Late) enough at launch, or do we also need dedicated scenes for day/night, winter, rain, and heavy traffic?
+
+## 4. Camera routes
+
+Each scene has one or more **fixed camera routes**. A route is a sequence of waypoints with position, look-at target, FOV, speed, and easing.
+
+- **Flyover route:** starts at the outskirts, moves through the dense center, rises to a skyline view, passes over industry/water, and returns.
+- **Street-level route:** drops to eye level, follows a sidewalk/road, passes traffic and crowds, and rises back to the skyline.
+- **Duration:** 90–180 seconds of measured movement, plus 10–15 seconds of warm-up (not measured).
+- **Frame-rate independent:** the camera advances by fixed time, not by frame count. A 30 FPS run and a 60 FPS run see the same views.
+- **Deterministic:** no user input, no random camera shake, no dynamic events unless pre-scripted.
+- **Route hash** is recorded in the result; changing the route invalidates comparisons.
+
+Example route format:
+
+```json
+{
+  "id": "late_flyover_v1",
+  "duration_seconds": 120,
+  "warmup_seconds": 15,
+  "waypoints": [
+    { "t": 0.0, "position": [0, 80, 0], "look_at": [0, 0, 0], "fov": 70 },
+    { "t": 0.25, "position": [400, 120, 200], "look_at": [400, 0, 200], "fov": 65 },
+    { "t": 0.5, "position": [800, 60, 600], "look_at": [800, 10, 600], "fov": 60 },
+    { "t": 0.75, "position": [1200, 20, 900], "look_at": [1200, 5, 900], "fov": 75 },
+    { "t": 1.0, "position": [1600, 150, 1200], "look_at": [1600, 0, 1200], "fov": 70 }
+  ]
+}
+```
+
+A route should cover:
+
+1. Streaming from empty space into dense content.
+2. A dense skyline view with many LOD/impostor buildings.
+3. A street-level view with agents, vehicles, and shadows.
+4. Water/vegetation/terrain, if the scene has them.
+5. A return to a wide view so the average is not dominated by one shot.
+
+## 5. Determinism rules
+
+A benchmark result is only meaningful if another run can reproduce it.
+
+| Rule | Why |
+|---|---|
+| Load the same save hash | City content must be identical |
+| Same game version + content hash | Mechanics and assets must match |
+| Same mod set, or base-only | Mods change rendering and simulation |
+| Same route hash | Camera views must match |
+| Same settings hash | Resolution, shadows, LOD, upscaling, etc. |
+| Fixed seed, time of day, season, weather | Avoid random variation |
+| Disable vsync and frame cap | Measure the frame time, not the cap |
+| Disable dynamic resolution/upscaling unless it is the tested preset | Keep the comparison honest |
+| Fixed simulation speed | Same number of ticks per camera second |
+| Warm-up before measuring | Shader compilation and chunk loading must not count |
+| Load a copy of the save | Never touch the player's city |
+| Median of 3 runs | Thermal/boost variance is real |
+| Record CPU/GPU/driver/OS | Results are hardware-specific |
+
+- **Standard preset:** a fixed, documented settings profile for comparable results.
+- **Current settings:** runs at the player's actual settings for a personal result; marked as non-comparable.
+- **Variance:** if the three runs differ by more than ~5% in average FPS, show a warning; the machine may be thermal-throttling or background-loaded.
+- **Overhead:** the benchmark recorder must add <2% frame-time overhead. Sample once per frame; avoid per-frame JSON writes.
+
+## 6. Metrics
+
+### Player-facing
+
+- Average FPS.
+- Minimum FPS.
+- **1% low** and **0.1% low** (frame-time percentiles).
+- Frame-time graph over the run.
+- Hitch count (>16 ms, >33 ms, >50 ms).
+- Bottleneck: CPU, GPU, streaming, or mixed.
+- Scene rating: Excellent / Good / Playable / Heavy.
+- Recommended settings for the scene on this machine.
+
+### Developer-facing
+
+| Metric | Why |
+|---|---|
+| Frame time avg / median / p95 / p99 / max | Distribution, not just average |
+| 1% low / 0.1% low | Stutter and consistency |
+| CPU frame time | Main-thread and job-system cost |
+| GPU frame time (where available) | Rendering cost |
+| Draw calls | Batching/instancing health |
+| Triangles | LOD and meshing health |
+| Visible chunks / buildings / agents | Scene load |
+| Active construction sites / crew agents | Construction rendering and simulation cost |
+| VRAM / RAM | Memory pressure |
+| Chunk streaming hits/misses/stalls | Open-world streaming |
+| Hitch count by threshold | Perceived smoothness |
+| Simulation tick time | Cohort/building/agent cost |
+| Economy tick time | 1M-scale economy cost |
+| Server tick time (headless) | Dedicated-server performance |
+| Benchmark overhead | Trust in the numbers |
+
+### Result JSON (draft)
+
+```json
+{
+  "format_version": 1,
+  "scene": "late_metropolis",
+  "scene_hash": "blake3:...",
+  "route": "late_flyover_v1",
+  "route_hash": "blake3:...",
+  "settings": "standard_1080p_high",
+  "settings_hash": "blake3:...",
+  "game_version": "0.1.0",
+  "content_hash": "blake3:...",
+  "mods": [],
+  "hardware": {
+    "cpu": "8-core/16-thread",
+    "gpu": "RTX 3060 12 GB",
+    "ram_gb": 32,
+    "os": "Linux",
+    "driver": "..."
+  },
+  "results": {
+    "fps_avg": 31.4,
+    "fps_min": 21.0,
+    "low_1pct": 24.8,
+    "low_0_1pct": 18.2,
+    "frametime_ms_avg": 31.8,
+    "frametime_ms_p95": 42.1,
+    "frametime_ms_p99": 55.0,
+    "hitches_16ms": 124,
+    "hitches_33ms": 31,
+    "hitches_50ms": 8,
+    "draw_calls_avg": 1840,
+    "triangles_avg": 7600000,
+    "vram_mb_peak": 9800,
+    "ram_mb_peak": 12400,
+    "sim_tick_ms_avg": 8.1,
+    "economy_tick_ms_avg": 9.4
+  },
+  "rating": "playable",
+  "bottleneck": "gpu"
+}
+```
+
+## 7. Player-facing experience
+
+### Entry point
+
+- Main menu → **Benchmark**.
+- Also available from Settings → Performance → “Run benchmark.”
+
+### Flow
+
+1. Choose a scene: **Early Settlement**, **Mid City**, **Late Metropolis**, or **Stress**.
+2. Choose a route: **Flyover** or **Street-level**.
+3. Choose settings: **Standard benchmark preset** (comparable) or **My current settings** (personal).
+4. Read the warning: the run takes ~2–3 minutes, do not alt-tab, close background apps for best results.
+5. Run. The camera moves automatically; input is disabled except Cancel.
+6. Results screen: FPS graph, 1%/0.1% lows, hitches, bottleneck, rating, and recommended settings.
+7. Optionally save/export the result as JSON or a shareable code (later).
+
+### Ratings
+
+| Rating | Meaning |
+|---|---|
+| **Excellent** | Above the target for this scene/hardware tier |
+| **Good** | At or near the target |
+| **Playable** | Below target but consistent; lower settings recommended |
+| **Heavy** | Significantly below target; the scene may be uncomfortable |
+
+- Ratings are scene-specific. A machine can be “Excellent” at Early and “Heavy” at Late.
+- Do not collapse the three scenes into one misleading “score.”
+- Recommended settings should be concrete: resolution scale, shadow quality, LOD distance, crowd/agent density, anti-aliasing.
+
+### “How should it run?”
+
+The results screen can show a small table:
+
+| Scene | Your result | Target | Verdict |
+|---|---:|---:|---|
+| Early Settlement | 74 FPS | 60 | Excellent |
+| Mid City | 61 FPS | 60 | Good |
+| Late Metropolis | 27 FPS | 30 | Playable |
+
+This is the player-facing version of the benchmark: a clear expectation for the early, mid, and late game.
+
+## 8. Developer and CI mode
+
+### CLI
+
+```bash
+townsmith-bench \
+  --scene benchmarks/scenes/late.tsave \
+  --route benchmarks/routes/late_flyover_v1.json \
+  --settings benchmarks/settings/standard_1080p_high.json \
+  --repeat 3 \
+  --out benchmarks/results/late_$(date +%F).json
+```
+
+### Headless server
+
+```bash
+townsmith-bench --server \
+  --scene benchmarks/scenes/late.tsave \
+  --duration 300 \
+  --out benchmarks/results/late_server.json
+```
+
+- The server benchmark measures cohort ticks, building aggregates, economy, pathfinding, memory, and save/load.
+- No GPU or rendering; it is a pure simulation benchmark.
+
+### CI
+
+- Run the benchmark suite on a fixed runner (or a small hardware matrix).
+- Compare against `benchmarks/baselines/<scene>/<hardware>.json`.
+- Fail the build if:
+  - Average FPS drops more than 5%.
+  - 1% low drops more than 8%.
+  - Hitches increase beyond a threshold.
+  - Simulation tick exceeds its budget.
+- Store JSON, CSV, screenshots, and logs as CI artifacts.
+- Nightly run with longer routes and more repetitions.
+
+### Compare tool
+
+```bash
+townsmith-bench compare baseline.json new.json
+```
+
+Outputs a table of deltas and highlights regressions. This is the main tool for “did this optimization actually help?”.
+
+## 9. Implementation architecture
+
+| Layer | Responsibility |
+|---|---|
+| **Benchmark controller (shell)** | Loads scene, applies settings, moves camera, disables input, samples frames |
+| **Core simulation** | Deterministic tick, cohorts, buildings, agents, economy |
+| **Metrics collector** | Frame-time ring buffer, percentiles, hitch counters, memory samples |
+| **Result writer** | JSON/CSV export, hardware metadata, hashes |
+| **Results UI** | Graph, table, rating, recommendations |
+| **CLI (`tools/bench`)** | Headless and windowed runs, repeats, compare, CI mode |
+| **Scene/route/settings assets** | Versioned fixtures under `benchmarks/` |
+
+### Repository layout
+
+```
+benchmarks/
+├── scenes/
+│   ├── early.tsave
+│   ├── mid.tsave
+│   └── late.tsave
+├── routes/
+│   ├── early_flyover_v1.json
+│   ├── mid_flyover_v1.json
+│   ├── late_flyover_v1.json
+│   └── late_street_v1.json
+├── settings/
+│   ├── standard_1080p_high.json
+│   ├── standard_1080p_low.json
+│   └── standard_1440p_high.json
+├── baselines/
+│   ├── rtx3060_1080p_high/
+│   └── ...
+└── results/
+```
+
+### Safety and isolation
+
+- The benchmark loads a **copy** of the scene save in a temp directory.
+- Autosave and achievements are disabled.
+- The run can be canceled at any time.
+- Modded benchmarks use a separate content manifest and are marked “not comparable.”
+- Benchmark results are local by default; sharing is opt-in.
+
+### Overhead
+
+- Record one sample per frame into a preallocated ring buffer.
+- Do not write to disk during the run; write the result once at the end.
+- Avoid per-frame string formatting or allocations.
+- Use the engine's frame time, and optionally GPU timestamp queries.
+- Validate overhead by running with recording on/off and comparing the average; target <2%.
+
+## 10. Performance targets
+
+| Scene | Target on 8c/16t + RTX 3060 | Notes |
+|---|---:|---|
+| Early Settlement | 60 FPS / 1080p | World streaming and vegetation |
+| Mid City | 60 FPS / 1080p | 100k citizens, ~25k buildings |
+| Late Metropolis | ~30 FPS / 1080p | 1M citizens, 250k buildings, 2k active agents |
+| Stress | Informational | Worst-case, max settings |
+| Run variance | <5% average FPS | Median of 3 runs |
+| Benchmark overhead | <2% | Recording must not change the result |
+| Scene load | <30 s | Warm-up excluded from measurement |
+
+These are targets, not guarantees. The benchmark exists to tell us where reality lands.
+
+## 11. Open questions
+
+- **Q-073:** Are Early/Mid/Late enough, or do we need separate day/night, winter, rain, and heavy-traffic benchmark scenes?
+- **Q-074:** Should players be able to share/upload benchmark results? Local-only at launch; opt-in share code later?
+- **Q-075:** Should the default benchmark use a standard preset or the player's current settings? Proposal: both, with the standard preset as the comparable one.
+- **Q-076:** How long should routes be? Proposal: 90–180 seconds measured, 10–15 seconds warm-up.
+- **Q-077:** Should modded benchmark scenes be supported at launch, or base-only?
+
+See [[09 - Open Questions]] and [[10 - Decisions]].

@@ -33,11 +33,21 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Phase | Pre-production / planning |
 | Code | None yet |
 | Engine | **Proposed:** Godot 4 shell + Rust core. Pending a 3–4 week Phase 0 spike covering voxels, world streaming, and 1M cohorts. See [[04 - Engine and Stack]] and [[10 - Decisions]]. |
+| Team | **Accepted:** 2–3 full-time generalists; Rust/Godot experience or willingness to learn. |
+| Language | **Accepted:** Rust is the primary implementation language from Phase 0; GDScript is shell/UI only; C++ is the fallback. See D-011. |
 | Voxel size | **Accepted:** 10 cm × 10 cm × 10 cm = 1 liter. See [[03 - Voxel and Scale]]. |
-| World | **Proposed:** procedurally generated, chunked, build anywhere; 1 m terrain + 10 cm buildings. See D-016. |
-| Population | **Proposed target:** 1M+ citizens in a late-game metropolis, via cohort simulation. See D-017. |
-| Biggest open risk | Whether a 1M+ city with 10 cm building detail is tractable. The cohort model and world streaming must be proven in Phase 0. See [[03 - Voxel and Scale]], [[07 - Simulation and AI]], and [[09 - Open Questions]]. |
-| Next action | Answer Q-062–Q-065 (scale and cohort questions), then extend the engine spike to cover world streaming and a 1M cohort benchmark. See [[08 - Roadmap]]. |
+| World | **Accepted:** procedurally generated, chunked, effectively infinite, build anywhere; 1 m terrain + 10 cm buildings. See D-016. |
+| Population | **Accepted target:** 1M+ citizens in a late-game metropolis, via cohort simulation, on 8-core/16-thread + RTX 3060-class hardware. **Expectation: ~30 FPS at 1080p**; dedicated server recommended for simulation. See D-017. |
+| Benchmark | **Accepted:** deterministic Early/Mid/Late scenes, fixed camera routes, player results + JSON/CI. See [[15 - Benchmarks]]. |
+| Time control | **Accepted:** single-player Mode B auto-pauses; multiplayer uses admin `time.control` or a simple-majority online vote. Pause is a shared design freeze: simulation stops, editing continues, no auto-resume. See D-021. |
+| Localization | **Accepted:** English + German at launch; key-based, moddable language packs; per-player locale. See [[16 - Localization]]. |
+| Construction | **Accepted:** placing a building creates a phased construction site, built by trade crews over time; no pop-in. See D-023. |
+| Building progression | **Accepted:** tent/shed → timber → stone → half-timber → brick → concrete → steel/glass; material-based max stories/height/span; composite allowed. See [[17 - Materials and Structure]]. |
+| Basements | **Accepted:** cellars/utility basements at launch; underground parking later; no material minimum height. See D-025. |
+| Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
+| Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
+| Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with 10 cm building detail is tractable. The cohort model and world streaming must be proven in Phase 0. See [[03 - Voxel and Scale]], [[07 - Simulation and AI]], and [[09 - Open Questions]]. |
+| Next action | Commit the planning baseline, then run the Phase 0 spike: Rust voxel core, Godot bridge, infinite world streaming, 1M cohort benchmark, dedicated-server tick, and 30 FPS 1M rendering target. See [[08 - Roadmap]]. |
 
 > [!warning] This is a plan, not a commitment
 > Numbers in these docs are **planning targets**, not measured results. Anything marked *Assumption* or *Proposed* must be validated before it becomes an accepted decision.
@@ -54,6 +64,9 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Work on simulation or AI | [[07 - Simulation and AI]], [[02 - Game Design]] |
 | Work on multiplayer | [[05 - Multiplayer]], [[12 - Technical Architecture]] |
 | Work on modding or resource packs | [[06 - Modding and Resource Packs]], [[12 - Technical Architecture]] |
+| Measure performance or design benchmarks | [[15 - Benchmarks]], [[03 - Voxel and Scale]], [[07 - Simulation and AI]] |
+| Work on localization or translations | [[16 - Localization]], [[06 - Modding and Resource Packs]] |
+| Work on building materials or structure | [[17 - Materials and Structure]], [[02 - Game Design]], [[03 - Voxel and Scale]] |
 | Plan the next milestone | [[08 - Roadmap]], [[09 - Open Questions]] |
 | Know what is already decided | [[10 - Decisions]] |
 | Look up a term | [[11 - Glossary]] |
@@ -66,6 +79,9 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Engine / tools developer | 00 → 04 → 03 → 12 → 10 |
 | Game designer | 00 → 01 → 02 → 07 → 09 |
 | Content / modding developer | 00 → 02 → 06 → 11 |
+| Performance / QA | 00 → 15 → 03 → 07 → 08 |
+| Localization / community | 00 → 16 → 06 → 02 |
+| Building / art | 00 → 17 → 13 → 02 |
 | Producer / planner | 00 → 08 → 09 → 10 |
 | Artist / audio | 00 → 01 → 13 → 02 |
 
@@ -83,18 +99,25 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | ID | Decision | Status |
 |---|---|---|
 | D-001 | 1 voxel = 10 cm cube = 1 liter | Accepted |
-| D-002 | Multi-scale world: 1 m terrain macro-grid + 10 cm building micro-grid | Proposed |
+| D-002 | Multi-scale world: 1 m terrain macro-grid + 10 cm building micro-grid | Accepted |
 | D-003 | Godot 4 shell + Rust simulation/voxel core via GDExtension | Proposed, pending spike |
 | D-004 | Authoritative server; co-op scale first; single-player runs a local server | Accepted |
 | D-005 | Blueprints are the bridge between the two modes | Accepted |
 | D-006 | Data-first content with namespaced IDs | Proposed |
 | D-007 | Off-screen citizens are simulated in aggregate | Proposed |
-| D-008 | No per-voxel physics or destruction in v1 | Proposed |
+| D-008 | No per-voxel physics or destruction in v1 | Accepted |
 | D-009 | This vault is the source of truth; decisions are recorded as ADRs | Accepted |
-| D-016 | Chunked, procedurally generated open world; build anywhere | Proposed |
-| D-017 | 1M+ population via cohort simulation; active agents near camera | Proposed |
-| D-018 | Living world layer: forestry, agriculture, wildlife | Proposed |
-| D-019 | Settlements and regions are soft simulation units | Proposed |
+| D-016 | Chunked, procedurally generated, effectively infinite world; build anywhere | Accepted |
+| D-017 | 1M+ late-game population via cohort simulation; active agents near camera | Accepted |
+| D-018 | Living world layer: forestry, agriculture, wildlife; seasons with toggle | Accepted |
+| D-019 | Settlements and regions are soft units; multiple settlements per player | Accepted |
+| D-020 | Deterministic benchmark mode with fixed saves, routes, and settings | Accepted |
+| D-021 | Time control: single-player Mode B pauses; multiplayer admin/vote | Accepted |
+| D-022 | English + German at launch; key-based, moddable localization | Accepted |
+| D-023 | Construction is a phased, crew-driven process with trade jobs | Accepted |
+| D-024 | Material-based structural limits and composite construction | Accepted |
+| D-025 | Basements and sub-ground floors; underground parking later | Accepted |
+| D-026 | Workshop-first blueprint authoring; permissioned live editing later | Accepted |
 
 Full context and consequences: [[10 - Decisions]].
 
@@ -104,16 +127,7 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 | ID | Question | Why it matters |
 |---|---|---|
-| Q-001 | Team size, skills, and weekly time budget? | Determines engine choice and scope realism. |
-| Q-002 | Target multiplayer scale: 2–8 co-op, or public servers with dozens of players? | Changes the networking architecture. |
-| Q-003 | Target population is now 1M+. What area and target hardware define "1M"? | Changes voxel, simulation, and rendering budgets. |
-| Q-004 | Is a 1 m terrain grid acceptable, with 10 cm detail for buildings, or must terrain also be 10 cm? | Core technical feasibility; 10 cm terrain is not viable at 1M scale. |
-| Q-005 | Can players build anywhere in the world, and where does blueprint authoring happen? | Permissions, griefing, and multiplayer design. |
-| Q-006 | Do we need destruction physics (digging, collapsing buildings), or static structures? | Huge engine and networking implications. |
-| Q-062 | Is 1M a late-game target or a typical city? What hardware? | Determines whether the 1M target is honest. |
-| Q-063 | Is the world a large finite region or effectively infinite? | Determines streaming and save architecture. |
-| Q-064 | Is cohort/statistical simulation acceptable for most citizens? | Without it, 1M is not feasible. |
-| Q-065 | How deep is the living world (trees, crops, animals)? | Determines simulation and content scope. |
+| Q-002 | Target multiplayer scale: 2–8 co-op, or public servers with dozens of players? | Changes the networking architecture. Current default: 8-player co-op. |
 
 ## Conventions used in this vault
 
@@ -139,11 +153,13 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 ## Next actions
 
-1. Answer Q-001 through Q-006 in [[09 - Open Questions]].
-2. Run the engine spike described in [[04 - Engine and Stack]] and [[08 - Roadmap]].
-3. Lock the vertical-slice scope in [[08 - Roadmap]].
-4. Write the first content schemas (blocks, materials, blueprints) from [[06 - Modding and Resource Packs]].
-5. Start the voxel + room-detection prototype.
+1. Commit the planning baseline (docs 00–17, README, AGENTS, PR template) on a `docs/plan-update` branch.
+2. Start the `feat/phase-0-spike` worktree: Rust workspace, 32³ voxel chunk, palette/RLE, greedy mesher, unit tests.
+3. Add the Godot 4 test scene and GDExtension bridge; render one 10 cm building.
+4. Build the benchmark harness v0 from [[15 - Benchmarks]]: fixed scene, fixed route, JSON result, 3-run median.
+5. Run worldgen/streaming and the 1M cohort microbenchmark through the harness.
+6. Lock the vertical-slice scope in [[08 - Roadmap]].
+7. Write the first content schemas (blocks, materials, blueprints) from [[06 - Modding and Resource Packs]].
 
 ## Document map
 
@@ -163,3 +179,6 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 | [[12 - Technical Architecture]] | Modules, data flow, threading, saves, repo layout | You write code |
 | [[13 - Art Direction]] | Visual/audio identity at 10 cm | You make art or UI |
 | [[14 - References]] | Sources and further reading | You need evidence |
+| [[15 - Benchmarks]] | Deterministic benchmark scenes, routes, metrics, player results, CI | You measure performance |
+| [[16 - Localization]] | English/German, key-based strings, language packs, per-player locale | You touch UI text or translations |
+| [[17 - Materials and Structure]] | Material progression, structural limits, composite construction, service gates | You design buildings or materials |

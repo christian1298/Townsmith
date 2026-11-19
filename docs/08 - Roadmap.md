@@ -43,7 +43,8 @@ tags:
 ### Phase 0 — Foundations and spikes (3–4 weeks)
 
 **Goals**
-- Answer the blocking questions Q-001 through Q-006 **and Q-062 through Q-065**.
+- Validate the accepted architecture decisions (D-002, D-006, D-008, D-016, D-017).
+- Answer the remaining Phase 0 questions: **Q-002** (multiplayer scale) and **Q-052** (minimum hardware).
 - Run the Phase 0 spike from [[04 - Engine and Stack]].
 - Set up the repository, CI, and build scripts.
 - Define the first content schemas (material, prop, recipe, blueprint metadata, biome, tree, crop, animal).
@@ -54,7 +55,8 @@ tags:
 - Accepted or revised D-002 (multi-scale), D-003 (engine), D-016 (open world), and D-017 (cohort simulation).
 - `core/` Rust workspace with voxel chunk + greedy mesher prototype and a worldgen prototype.
 - Godot project with a test scene and GDExtension bridge.
-- CI: Linux + Windows build, headless tests.
+- **Benchmark harness v0:** fixed test scene, fixed camera route, JSON result, 3-run median, overhead check.
+- CI: Linux + Windows build, headless tests, benchmark smoke test.
 - A one-page vertical-slice spec.
 
 **Exit criteria**
@@ -62,6 +64,7 @@ tags:
 - No frame hitch > 16 ms during continuous editing or chunk streaming.
 - 1M cohort tick < 60 ms at 1 Hz; 2,000 active agents < 10 ms at 10 Hz.
 - Worldgen is deterministic: same seed + edits = same hash.
+- Benchmark harness is repeatable: <5% average FPS variance across 3 runs and <2% recording overhead.
 - PCK mod loads without an engine fork.
 - Headless server runs without a GPU.
 - The team agrees on the stack.
@@ -87,6 +90,7 @@ tags:
 - Room flood-fill detection; room types from props.
 - Material cost, solid voxel count, basic stats.
 - Structural support check v0.
+- All editor UI strings externalized to keys; English + German tables; language selector.
 - A test bench scene with a few materials and props.
 
 **Exit criteria**
@@ -95,11 +99,12 @@ tags:
 - The stats panel reports capacity, cost, and rooms correctly.
 - 60 FPS with the house and 20 copies in view.
 - No data loss on undo/redo or save/load.
+- The editor UI switches between English and German without missing keys or clipped text.
 
 ### Phase 2 — Open world and Mayor Mode (8–10 weeks)
 
 **Goals**
-- A procedurally generated world you can fly over, build anywhere in, and save.
+- An effectively infinite, procedurally generated world you can fly over, build anywhere in, and save.
 - Chunk streaming and edit persistence.
 - The bridge between the two modes.
 
@@ -109,21 +114,25 @@ tags:
 - Terrain edits as deltas; deterministic regeneration.
 - Build anywhere: placement validation, foundations, terrain cut/fill.
 - Roads: draw, intersections, sidewalks, lots.
-- Settlements: soft boundaries, districts, naming.
+- Settlements: soft boundaries, districts, naming, multiple settlements per player, ownership and local policies.
 - Zoning inside settlements; direct placement in the wilderness.
 - Blueprint library UI; placement preview, rotation, validation.
+- **Construction sites v0:** placement creates a site; phased progress (foundation, structure, envelope, finish); materials delivered; builders/trades; no pop-in.
 - Mayor camera; selection; inspection panels.
 - Overlays v0: land value, road access, building stats, resources.
-- Budget/economy stub; time controls.
+- Budget/economy stub; time controls (pause/1×/2×/4×); single-player Mode B auto-pause; server-authoritative time state.
 - Save/load world (seed, terrain deltas, roads, lots, instances).
 - Switch to Architect Mode at a building's door.
 
 **Exit criteria**
-- Generate a 2 km × 2 km region from a seed and stream it while flying.
+- Generate and stream a 2 km × 2 km area from a seed, then keep flying beyond it with no hard edge.
 - Build a settlement anywhere, save, quit, reload, and see the same world.
 - Terrain edits and buildings survive save/load with a hash check.
 - Switch modes without losing state.
 - Placement validation catches water, steep slope, missing access, and blocked footprints.
+- A placed building becomes a construction site and completes through visible phases; it never pops in finished.
+- A stalled site explains whether it is missing materials, a trade, access, or a permit.
+- Save/load mid-construction resumes the same phase, stockpile, and assigned crew.
 
 ### Phase 3 — Simulation v1 (8–12 weeks)
 
@@ -135,6 +144,7 @@ tags:
 - Households and citizens; cohort/aggregate simulation with individual agents near the camera.
 - Needs, happiness, complaints.
 - Jobs, wages, commuting.
+- **Construction jobs:** builders, carpenters, masons, electricians, plumbers, engineers; construction offices/crews; trade shortages and training v0.
 - **Primary industries:** lumberjack, farmer, hunter; trees, fields, livestock basics, wildlife populations.
 - Production recipes v1; storage; supply/demand.
 - Utilities: water, power, garbage (choose two for v1 if time is tight).
@@ -142,7 +152,7 @@ tags:
 - Economy: taxes, upkeep, construction costs, loans, bankruptcy.
 - Building runtime: occupants, workers, inventory, condition.
 - Service buildings: school, clinic, fire, police, park (basic coverage).
-- Seasons v0 if Q-069 says launch (crop/wildlife effects).
+- Seasons v0 (toggleable; crop/wildlife effects; Q-069 answered).
 - Headless simulation runner and metrics.
 - UI: city dashboard, district panel, overlays, notifications, advisor.
 
@@ -162,8 +172,10 @@ tags:
 
 **Features**
 - Ages and tech tree; research generation.
-- Material tiers and structural limits.
-- Building class calculation; rent/tax effects.
+- Material tiers and structural limits: tent/shed → timber → stone → half-timber → brick → reinforced concrete → steel → glass facade.
+- Structural validator: load paths, story/height limits, spans, bracing, foundation, service gates.
+- Age-specific construction methods and trades (carpenters → masons → steelworkers/electricians → HVAC/engineers).
+- Cellars and utility basements: below-grade editing, depth limits, excavation, waterproofing, drainage.
 - Production chains for each age.
 - Service tiers (school, clinic, fire, police, transit).
 - Starter blueprint set (20–30 buildings) and props (30–50), including lumber camp, farm, hunting lodge, sawmill, well, house, bakery, school.
@@ -180,25 +192,32 @@ tags:
 ### Phase 5 — Metropolis scale (6–8 weeks)
 
 **Goals**
-- Prove 1M+ population on recommended hardware.
+- Prove 1M+ population on 8-core/16-thread + RTX 3060-class hardware.
 - Make the city readable and manageable at district scale.
 
 **Features**
 - Cohort simulation at 1M across 100 km².
 - 250k building records; district aggregation for housing, jobs, production, utilities.
+- High-rise and skyscraper content: reinforced concrete, steel frame, glass curtain walls; service gates for elevators/fire/water.
+- Underground parking v0: parking capacity, ramp connection, visible vehicles near the camera.
 - 2,000 active agents; 200 detailed agents.
 - Dormant-region catch-up and away summaries.
 - District dashboards, heatmaps, policies, service coverage at scale.
 - 1M benchmark suite and profiling.
+- **Benchmark scenes and routes:** Early Settlement, Mid City, Late Metropolis; Flyover + Street-level.
+- **Player-facing Benchmark screen:** scene selection, results graph, rating, recommended settings.
 - Memory, save/load, and streaming optimization.
 - Economic balance at metropolis scale.
 
 **Exit criteria**
-- 1M+ citizens, 250k buildings, 2k active agents at 60 FPS on recommended hardware.
+- 1M+ citizens, 250k buildings, 2k active agents at **~30 FPS at 1080p** on 8-core/16-thread + RTX 3060-class hardware; 60 FPS on higher-end GPU/lower settings.
+- Dedicated server runs the 1M simulation within tick budget without a GPU.
 - Save/load of a 1M city under 30 s.
 - District UI can explain happiness, housing, jobs, traffic, and pollution without per-citizen lists.
 - Dormant regions advance plausibly when the player returns.
 - The 1M benchmark is part of CI.
+- The player-facing benchmark shows Early/Mid/Late results, 1% lows, hitches, and recommended settings.
+- Benchmark variance <5% across three runs on the reference machine.
 
 ### Phase 6 — Multiplayer (6–10 weeks)
 
@@ -211,10 +230,12 @@ tags:
 - Listen server and dedicated server.
 - Commands, validation, snapshots, interpolation.
 - Roles and permissions; lot claims; blueprint locks.
+- **Time control:** `time.control` permission, admin pause/resume/speed, simple-majority online votes, cooldowns, audit log.
 - Voxel edit sync and blueprint versioning.
 - Reconnect, autosave, journal, rollback.
 - Content manifest and mod mismatch screen.
 - Text chat and pings.
+- Server messages as keys + parameters; per-player locale.
 - Headless server config and admin commands.
 - Network tests with latency/loss.
 
@@ -223,6 +244,8 @@ tags:
 - One player edits a blueprint while another places buildings; no corruption.
 - A client disconnects mid-edit and reconnects without losing the city or the lock.
 - Dedicated server survives a restart and reloads the save.
+- Time pause/resume/fast-forward works via admin and vote; one player entering Mode B does not pause the server.
+- While paused, all players can place/remove buildings and edit blueprints; construction resumes correctly when time resumes.
 - Bandwidth and tick time are within target.
 
 ### Phase 7 — Modding and resource packs (4–6 weeks)
@@ -256,7 +279,7 @@ tags:
 - Performance pass: meshing, LOD, draw calls, simulation, memory.
 - Tutorial and onboarding.
 - Settings, keybinds, accessibility (colorblind overlays, text size, remapping).
-- Localization pipeline (at least English + one language).
+- Localization polish: English + German, key lint, pseudo-localization, text expansion pass.
 - Save compatibility and migration tests.
 - Crash reporting and logging.
 - Steam integration: achievements, Workshop, cloud saves (optional).
@@ -295,12 +318,12 @@ The vertical slice is a small, complete version of the game used to validate the
 
 | ID | Milestone | Proof |
 |---|---|---|
-| **M0** | It renders | 10 cm voxel building at 60 FPS, editable |
+| **M0** | It renders | 10 cm voxel building at 60 FPS, editable; benchmark harness is repeatable |
 | **M1** | I built that | Save a blueprint, reload it, place a copy |
 | **M2** | The world is open | Procedural 2 km region, chunk streaming, build anywhere, save/load edits |
 | **M3** | The city lives | 500 citizens, primary jobs, needs, utilities, economy |
-| **M4** | Ages | Wood → industrial progression in 2 hours |
-| **M5** | Metropolis | 1M+ citizens, 250k buildings, 2k active agents at 60 FPS |
+| **M4** | Ages | Wood → industrial progression in 4–6 hours |
+| **M5** | Metropolis | 1M+ citizens, 250k buildings, 2k active agents at ~30 FPS on RTX 3060-class hardware |
 | **M6** | Together | 4-player co-op, reconnect, dedicated server |
 | **M7** | Modded | External mod adds content; resource pack works |
 | **M8** | Ship | Release candidate |
@@ -311,7 +334,7 @@ The vertical slice is a small, complete version of the game used to validate the
 |---|---|---|---|---|
 | 10 cm voxel city too expensive | Medium | High | Multi-scale, LOD, instancing; spike in Phase 0 | Frame time > 16 ms in spike |
 | Godot renderer/upload bottleneck | Medium | High | `RenderingDevice` path; Bevy fallback | Meshing/upload > budget |
-| 1M population too slow | Medium | High | Cohorts, district aggregation, dormant regions, 2k active cap; benchmark in Phase 0 and Phase 5 | 1M tick > 60 ms or < 60 FPS |
+| 1M population too slow | Medium | High | Cohorts, district aggregation, dormant regions, 2k active cap; benchmark in Phase 0 and Phase 5 | 1M tick > 60 ms or < 30 FPS on target |
 | Open-world streaming too slow | Medium | High | Chunked world, edit deltas, async generation, LOD; spike in Phase 0 | Hitch > 16 ms while flying |
 | Ecosystem/primary jobs too complex | Medium | Medium | Keep the model light; species/jobs data-driven; cut depth before cutting the loop | Phase 3 slips > 2 weeks |
 | Multiplayer scope creep | High | High | Co-op cap, no MMO, authoritative server, cut public servers | Phase 6 slips > 2 weeks |
@@ -325,10 +348,10 @@ The vertical slice is a small, complete version of the game used to validate the
 
 ## 7. Next 10 tasks
 
-1. Answer Q-001 through Q-006 and Q-062 through Q-065 in [[09 - Open Questions]].
-2. Define the target test machine (CPU, GPU, RAM) for the 1M benchmark.
-3. Run the Phase 0 engine/worldgen/1M spike.
-4. Write the ADRs for the engine and scale results (D-003, D-016, D-017).
+1. Close the remaining Phase 0 questions: Q-002 and Q-052 in [[09 - Open Questions]].
+2. Build the Phase 0 benchmark harness: fixed test scene, fixed camera route, JSON result, 3-run median.
+3. Run the Phase 0 engine/worldgen/1M spike through the harness.
+4. Write the ADR for the engine result (D-003); D-016, D-017, and D-020 are already accepted.
 5. Set up the Rust workspace and Godot project.
 6. Implement chunk storage + greedy mesher + a test building.
 7. Implement deterministic worldgen + chunk streaming + terrain edit deltas.
@@ -340,7 +363,7 @@ The vertical slice is a small, complete version of the game used to validate the
 
 If the schedule slips, cut in this order:
 
-1. Weather (keep day/night and seasons if they ship).
+1. Weather (keep day/night and toggleable seasons).
 2. Disasters (fires, floods, disease).
 3. Advanced traffic (lane-level microsimulation, accidents).
 4. Voice chat.
@@ -350,7 +373,7 @@ If the schedule slips, cut in this order:
 8. Skyscrapers above 128 m.
 9. Workshop auto-download.
 10. Public server browser (keep direct IP/invite).
-11. World size beyond 16 km × 16 km (keep the finite region).
+11. Distant-region simulation fidelity (keep infinite generation; simplify dormant catch-up instead).
 
 **Do not cut:** blueprint save/place, room semantics, data-first modding, dedicated server, save reliability, the two-mode loop, build-anywhere placement, the 1M target. If 1M misses on recommended hardware, profile and reduce detail; do not silently lower the cap.
 
@@ -362,6 +385,7 @@ If the schedule slips, cut in this order:
 - Feature works in single-player and survives save/load.
 - No new crashes or data loss in automated tests.
 - Performance targets for the phase are met or an ADR records the exception.
+- A benchmark result (JSON + summary) is recorded for the phase.
 - Docs updated (this vault, ADRs, questions).
 - A human has played it for at least 30 minutes and given feedback.
 - The next phase's risks are identified.
@@ -372,8 +396,6 @@ If the schedule slips, cut in this order:
 - **Q-050:** Is Steam the launch platform, and is Workshop required at launch?
 - **Q-051:** Is a playable demo/vertical slice needed for funding or marketing?
 - **Q-052:** What is the minimum hardware target?
-- **Q-062:** Is 1M a late-game target or a typical city, and what hardware defines it?
-- **Q-063:** Is the world a finite 16 km × 16 km region or effectively infinite?
 - **Q-070:** How many players and active regions must a 1M server support?
 
 See [[09 - Open Questions]].

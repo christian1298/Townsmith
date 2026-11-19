@@ -18,10 +18,27 @@ Shared vocabulary for design, code, docs, and modding. When a term is used diffe
 |---|---|
 | **Age** | A technology era (Wood, Masonry, Industrial, Modern, Information) that unlocks materials, building types, services, and structural limits. |
 | **Architect Mode** | Mode B. First-person voxel building, room design, prop placement, and blueprint saving. |
+| **Builder (player role)** | A multiplayer permission role that can place/remove voxels. Not the NPC construction trade. |
+| **Design freeze / design pause** | A pause that stops simulation progress but keeps building/editing available; used for unlimited design time. |
+| **Mode B pause** | Single-player rule: entering Architect Mode pauses game time; leaving restores the previous state. |
+| **Time state** | Server-owned simulation speed: `paused`, `1×`, `2×`, or `4×`. |
+| **Time vote** | Multiplayer vote to pause/resume/fast-forward; passes when yes votes exceed 50% of players online at vote start. |
 | **Asset Library** | The collection of blueprints available to a player or server: local, server-shared, and published. |
 | **Blueprint** | A saved building template: voxels, palette, props, rooms, structure, metadata, dependencies, and economics. The bridge between the two modes. |
 | **Blueprint instance** | A placed copy of a blueprint in the city, with local state (occupants, inventory, condition) and a pinned version. |
 | **Building class** | A derived quality tier (lower, middle, upper) based on space, amenities, materials, services, pollution, and commute. Affects rent, taxes, and happiness. |
+| **Construction site** | The temporary entity created when a blueprint is placed; it progresses through phases and becomes a building only when complete. |
+| **Construction phase** | A stage of work: survey, foundation, structure, envelope, rough-in, finish, commissioning. |
+| **Trade** | A construction or maintenance skill: carpenter, mason, electrician, plumber, HVAC technician, inspector, engineer. |
+| **Crew** | A group of workers with the tools/vehicles to build; provided by public works or contractors. |
+| **Commissioning** | Final testing/inspection before a building can be occupied or produce. |
+| **Blocker** | A visible reason a construction site is not progressing: missing material, trade, access, permit, weather. |
+| **Utility connection** | A link to a city network: water, electricity, wastewater, telecom/data, gas. |
+| **Service gate** | A building-system requirement triggered by height/occupancy: elevators, fire egress, water pressure, HVAC, backup power. |
+| **Hard gate** | A requirement that blocks occupancy/commissioning if unmet (water, wastewater, fire egress, elevators, structural safety). |
+| **Soft gate** | A requirement that causes penalties but does not block occupancy (telecom, parking, HVAC efficiency, backup power). |
+| **Basement / cellar** | A sub-ground level used for storage, utilities, or (later) habitable space/parking; separate depth limit from above-ground stories. |
+| **Underground parking** | A later basement type with vehicle capacity, ramps, ventilation, and fire separation. |
 | **Citizen** | An NPC resident of the city. Has a household, job, needs, health, and happiness. Not player-controlled in v1. |
 | **City** | A large settlement, typically 100k citizens. A **town** is smaller; a **metropolis** is 1M+. |
 | **Household** | One or more citizens sharing a home and a budget. The unit of housing. |
@@ -32,6 +49,7 @@ Shared vocabulary for design, code, docs, and modding. When a term is used diffe
 | **Prop** | A non-voxel functional object such as a bed, stove, toilet, machine, or shelf. Has a footprint, tags, cost, and simulation effects. |
 | **Room** | An enclosed air volume inside a building, classified by its props (bedroom, kitchen, bathroom, workshop, etc.). |
 | **Settlement** | A player-named cluster of buildings and roads. Boundaries are soft and derived from density/services, not fixed walls. |
+| **Settlement ownership** | Who controls a settlement's policies, taxes, and building permissions: a player, a group, or the server. |
 | **Structural validation** | Rules that check support, cantilever, height, and material limits before a blueprint is saved or placed. Not physics. |
 | **Utility** | A city network or service: power, water, sewage, garbage, food, noise, air pollution, transit. |
 | **Zoning** | Painting land for residential, commercial, industrial, or office growth inside a settlement. Growth draws from the enabled blueprint library. |
@@ -43,7 +61,9 @@ Shared vocabulary for design, code, docs, and modding. When a term is used diffe
 | **Build anywhere** | The player can place roads and buildings anywhere the terrain allows, not only inside a pre-authored city tile. |
 | **Chunk streaming** | Loading and unloading world chunks around the player/camera instead of the whole map at once. |
 | **Cohort** | A group of citizens with the same district, building type, needs band, and employment band; the unit of 1M-scale population simulation. |
+| **Cohort simulation** | Simulating counts and flows between cohorts instead of every citizen individually; individual records are materialized near the camera/selection. |
 | **Dormant region** | A region with no active player; it does not tick and is advanced statistically when activated. |
+| **Effectively infinite** | No authored map edge; the procedural world extends as far as players travel, and only visited/edited chunks are stored. |
 | **Edit delta** | A stored difference from the procedural world base: terrain height changes, roads, buildings, harvested resources, wildlife changes. |
 | **Ecosystem** | The light simulation of trees, crops, livestock, wildlife, pests, and predators that supply and constrain the city. |
 | **Forestry** | The tree/resource system: species, growth, harvesting, replanting, and depletion. |
@@ -111,11 +131,29 @@ Shared vocabulary for design, code, docs, and modding. When a term is used diffe
 |---|---|
 | **Age tier** | The age in which a material, building, or tech node becomes available. |
 | **Data-first** | Content is defined in JSON/schema; code is only for behavior that data cannot express. |
+| **Language pack** | A mod/data package that adds or overrides translations for a locale without gameplay code. |
+| **Locale** | A language/region code such as `en` or `de`; each player can choose their own. |
 | **Mod manifest** | `mod.json`: ID, version, game/API version, dependencies, load order, permissions. |
+| **Translation key** | A stable identifier such as `base.ui.build_menu.title`; content references keys, not display text. |
+| **Fallback** | The lookup order when a translation is missing: player locale → English → key. |
 | **Recipe** | A production rule: inputs, outputs, time, workers, power, byproducts. |
 | **Schema** | A JSON Schema that validates a content definition. |
 | **Starter blueprint** | A base-game blueprint used as a fallback when the player's library has no suitable building for zoned growth. |
 | **Tech node** | A research unlock in the tech tree, with prerequisites and effects. |
+
+## Performance and benchmarks
+
+| Term | Definition |
+|---|---|
+| **Benchmark mode** | A deterministic run with a fixed save, settings, and camera route that records frame times and system metrics. |
+| **Benchmark scene** | A fixed save representing a game stage: Early Settlement, Mid City, or Late Metropolis. |
+| **Camera route** | A fixed sequence of waypoints/timings used by the benchmark; frame-rate independent and versioned by hash. |
+| **Frame time** | The time between rendered frames, in milliseconds; the inverse of FPS. More useful than average FPS for stutter. |
+| **1% low / 0.1% low** | The average of the slowest 1% / 0.1% of frames; measures consistency, not just peak FPS. |
+| **Hitch** | A frame that exceeds a threshold (e.g., 16 ms, 33 ms, 50 ms); perceived as a stutter. |
+| **Standard preset** | A fixed, documented settings profile used for comparable benchmark runs. |
+| **Baseline** | A recorded benchmark result used as the reference for regression comparisons. |
+| **Recording overhead** | The performance cost of the benchmark recorder itself; target <2%. |
 
 ## Abbreviations
 

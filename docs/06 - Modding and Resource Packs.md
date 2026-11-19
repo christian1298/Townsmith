@@ -43,10 +43,16 @@ tags:
 | **Room type** | Bedroom, kitchen, bathroom, workshop, shop floor | JSON + rules |
 | **Building / blueprint** | House, bakery, factory, school | `.tsbp` + JSON metadata |
 | **Job** | Baker, lumberjack, farmer, hunter, miner, teacher | JSON + behavior hooks |
+| **Trade** | Carpenter, mason, electrician, plumber, HVAC technician, inspector | JSON + skill/education |
+| **Construction phase** | Foundation, structure, envelope, rough-in, commissioning | JSON + requirements |
+| **Construction method** | Timber frame, brick masonry, steel frame, prefab | JSON + phase graph |
+| **Structural system** | Timber frame, load-bearing stone, half-timber, brick, concrete frame, steel frame | JSON + max stories/height/span |
+| **Basement type** | Cellar, utility basement, parking, transit | JSON + depth/requirements |
 | **Recipe** | Smelt copper, bake bread, mill logs, butcher meat | JSON |
 | **Resource** | Timber, stone, copper ore, grain, meat, bread | JSON |
 | **Need** | Hunger, rest, hygiene, fun | JSON + behavior hooks |
 | **Age** | Wood, masonry, industrial, modern, information | JSON |
+| **Season** | Spring, summer, autumn, winter; growth/migration effects | JSON |
 | **Tech node** | Masonry, electricity, steel framing | JSON |
 | **Policy** | Recycling, water restriction, tax break | JSON + behavior hooks |
 | **Tree species** | Oak, pine, birch, fruit tree | JSON + growth rules + model |
@@ -221,6 +227,31 @@ Resource packs change **presentation**, not simulation.
 - A pack cannot add gameplay content or change IDs.
 - A "vanilla" pack is always available as a fallback.
 - Server-enforced resource packs are possible for competitive fairness, but not required for co-op.
+
+### 6.1 Language packs
+
+Language packs are a separate, lightweight mod type. They add or override translations without gameplay code.
+
+```json
+{
+  "id": "example:german_extra",
+  "type": "language_pack",
+  "locale": "de",
+  "version": 1,
+  "namespace": "example.german_extra",
+  "strings": {
+    "ui.extra.hint": "Zusätzlicher Hinweis",
+    "building.workshop.name": "Werkstatt"
+  }
+}
+```
+
+- Client-side; each player can use a different language.
+- Keys are namespaced; missing keys fall back to English, then to the key itself.
+- Base-game overrides require `"override": true` and are listed in the manifest.
+- Language packs are versioned and hashed in the server manifest when they affect modded content keys.
+- Community translations can be distributed as language packs without forking the game.
+- See [[16 - Localization]].
 
 ## 7. Scripting and security
 

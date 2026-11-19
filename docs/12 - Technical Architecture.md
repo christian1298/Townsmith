@@ -25,6 +25,7 @@ This is the engineering view: modules, data flow, threading, saves, and the boun
 5. **Determinism where it matters.** Server authority removes the need for cross-platform lockstep; seeded RNG and stable ordering still matter for tests and replays.
 6. **Measure before optimizing.** The Phase 0 spike sets the budgets; profiling, not intuition, decides.
 7. **Docs and code move together.** A changed decision gets an ADR in [[10 - Decisions]].
+8. **Rust is the primary language from Phase 0.** GDScript owns scenes/UI/glue; C++ is the fallback core language. Do not prototype the core in a scripting language and rewrite it.
 
 ## 2. System overview
 
@@ -73,6 +74,9 @@ flowchart TB
 
 The simulation code is identical in all three. Only the transport and the presence of rendering differ.
 
+> [!important] Dedicated servers offload simulation, not rendering
+> The client still draws the city. A dedicated server frees the client CPU from cohort/building/agent simulation and supports persistence/multiplayer, but it does not make the client GPU faster. A 1M city is expected to be **~30 FPS at 1080p on an RTX 3060-class client** even with a dedicated server; 60 FPS for ~100k. Server target: 4–8 cores, 16 GB RAM.
+
 ### World and region pipeline
 
 ```text
@@ -84,7 +88,8 @@ seed + generator version
   → persistence (seed + edit deltas + dynamic state)
 ```
 
-- **Worldgen** runs on worker threads, deterministic from the seed and content manifest.
+- **Worldgen** runs on worker threads, deterministic from the seed and content manifest. The world is **effectively infinite**; only visited/edited chunks are persisted.
+- **Coordinates:** 64-bit integer chunk/world coordinates; rendering uses a floating origin rebased near the player to avoid `f32` precision loss.
 - **Edit deltas** are applied over the procedural base when a chunk loads.
 - **Region manager** decides which regions are active (near players), aggregate (nearby but no player), or dormant (no player, no ticks).
 - **Dormant catch-up** advances a region statistically on activation; it is bounded and deterministic.
@@ -101,14 +106,17 @@ seed + generator version
 | `core_world` | Seed, noise, biomes, resources, wildlife spawns, chunk streaming, edit deltas | `WorldSeed`, `WorldChunk`, `Biome`, `EditDelta` |
 | `core_region` | Region activation, dormant snapshots, catch-up | `Region`, `RegionState`, `CatchUp` |
 | `core_content` | Content registry, schemas, mod manifests, hashes | `ContentId`, `Registry`, `ModManifest` |
-| `core_city` | Settlements, districts, buildings, lots, roads, zoning, utilities | `Settlement`, `District`, `BuildingInstance`, `RoadGraph` |
-| `core_sim` | ECS, cohorts, citizens, households, jobs, needs, production | `Cohort`, `Citizen`, `Household`, `Job`, `Need` |
+| `core_i18n` | Translation tables, locale fallback, key/placeholder validation, language packs | `Locale`, `TranslationKey`, `TranslationTable` |
+| `core_structure` | Material properties, structural systems, load paths, story/span/bracing validation | `MaterialSpec`, `StructuralSystem`, `StructureCheck` |
+| `core_city` | Settlements, districts, buildings, construction sites, sub-ground levels, lots, roads, zoning, utilities | `Settlement`, `District`, `BuildingInstance`, `ConstructionSite`, `ConstructionPhase`, `SubgradeLevel`, `RoadGraph` |
+| `core_sim` | ECS, cohorts, citizens, households, jobs, needs, production, time state | `Cohort`, `Citizen`, `Household`, `Job`, `Need`, `TimeState`, `TimeVote` |
 | `core_living` | Trees, fields, livestock, wildlife populations | `Tree`, `Field`, `WildlifePopulation` |
 | `core_econ` | Treasury, taxes, prices, trade, loans | `Treasury`, `Market`, `Loan` |
 | `core_save` | SQLite schema, snapshots, migrations, journal | `SaveDb`, `Snapshot`, `Migration` |
-| `core_net` | Protocol, commands, snapshots, validation hooks | `NetCommand`, `Snapshot`, `Manifest` |
+| `core_net` | Protocol, commands, snapshots, validation hooks | `NetCommand`, `Snapshot`, `Manifest`, `TimeCommand` |
 | `godot_ext` | GDExtension bindings, buffer conversion | `TownsmithCore`, `Node` wrappers |
 | `server` | Headless server binary | `ServerConfig`, `ServerApp` |
+| `bench` | Fixed-scene benchmark runner, camera routes, frame metrics, JSON/compare | `BenchScene`, `CameraRoute`, `FrameStats` |
 | `tools` | CLI: validate mods, inspect blueprints, run sims | `validate`, `inspect`, `bench` |
 
 > [!tip] Start simpler
@@ -145,6 +153,16 @@ Player input
   → Event emitted (BuildingPlaced, TaxChanged, VoxelsEdited, TerrainEdited)
   → Clients receive the event or a snapshot delta
   → Godot updates the scene/UI
+```
+
+Time control follows the same path:
+
+```text
+Client requests pause/resume/speed/vote
+  → Server checks time.control or an active time vote
+  → Server updates TimeState
+  → Event emitted (TimePaused, TimeResumed, SpeedChanged, TimeVoteStarted, TimeVoteResult)
+  → Clients update HUD and simulation interpolation
 ```
 
 ### Why commands, not state
@@ -251,7 +269,9 @@ save_001/
 | `roads` | id, points, type, lanes |
 | `lots` | id, polygon, zone, building_id, locked |
 | `buildings` | id, blueprint_hash, version, transform, condition, inventory_json |
-| `citizens` | id, household_id, cohort_id, age, job_id, health, happiness, needs_json |
+| `construction_sites` | id, blueprint_hash, transform, phase, progress, stockpile_json, blockers_json, priority |
+| `subgrade_levels` | building_id, level, depth, use, access_json, waterproofing, ventilation |
+| `citizens` | id, household_id, cohort_id, age, job_id, trade, health, happiness, needs_json |
 | `households` | id, home_id, income, savings |
 | `cohorts` | id, district_id, building_type, needs_band, count, averages_json |
 | `jobs` | id, building_id, role, worker_id, wage |
@@ -325,6 +345,12 @@ Details: [[06 - Modding and Resource Packs]].
 | Simulation | Scenario: 500 citizens, 30 days, assert metrics | Headless runner |
 | Cohorts | Compare cohort aggregates to a fully individual reference sim | Headless runner |
 | 1M benchmark | 1M cohorts, 250k buildings, 2k active agents | Headless + `criterion` |
+| Benchmark regression | Fixed early/mid/late scenes, fixed routes, 3-run median, baseline compare | `townsmith-bench` in CI |
+| Time control | SP Mode B auto-pause; MP admin/vote; pause freezes sim but not editing | Headless server + 4-player test |
+| Localization | Missing keys, placeholders, plural forms, German UI, language-pack override | Lint + pseudo-locale + screenshots |
+| Construction | Phase progression, trade assignment, material stalls, pause/resume, save/load | Headless scenario + 4-player test |
+| Structure | Height/span limits, load path, composite materials, service gates, modded materials | Golden structural cases + editor validation |
+| Basements | Depth/water table, retaining walls, drainage, culling, save/load | Headless + editor scenario |
 | Dormant catch-up | Leave a region for a year; compare to continuous sim | Headless runner |
 | Living world | Forest regrowth, crop yields, wildlife under hunting pressure | Scenario tests |
 | Performance | Mesh time, tick time, memory, draw calls | `criterion` + in-game overlay |
@@ -336,6 +362,20 @@ Details: [[06 - Modding and Resource Packs]].
 - **Fuzz** voxel and command parsers.
 - **Deterministic seeds** for reproducible tests.
 - **No test depends on wall-clock time**; use a simulated clock.
+
+### Test cadence
+
+| Stage | Run |
+|---|---|
+| Inner loop | Tests for the changed crate/module only |
+| Pre-PR | Affected crate tests + integration tests for touched boundaries |
+| PR gate (CI) | Full workspace tests, headless smoke, relevant benchmark gate |
+| Nightly | Full matrix, long simulation, benchmark suite |
+| Release | Full suite + platform matrix + long-session/network tests |
+
+- The full suite is required before merge; local selective runs are a speed optimization.
+- A change to save/load, networking, security, or 1M-scale simulation always requires the broader suite.
+- Docs-only changes run link/ID/frontmatter checks, not the game test suite.
 
 ## 12. Build and CI
 
@@ -349,6 +389,8 @@ members = [
   "crates/core_world",
   "crates/core_region",
   "crates/core_content",
+  "crates/core_i18n",
+  "crates/core_structure",
   "crates/core_city",
   "crates/core_sim",
   "crates/core_living",
@@ -357,9 +399,23 @@ members = [
   "crates/core_net",
   "crates/godot_ext",
   "crates/server",
+  "crates/bench",
   "crates/tools",
 ]
 ```
+
+### Benchmark fixtures
+
+```
+benchmarks/
+├── scenes/       # fixed .tsave scenes (early, mid, late)
+├── routes/       # deterministic camera routes
+├── settings/     # standard benchmark presets
+├── baselines/    # per-hardware reference results
+└── results/      # local/CI output (gitignored)
+```
+
+The `bench` crate loads the scene, applies settings, runs the fixed route, samples frame times, and writes JSON. It also supports a headless server mode with no rendering. See [[15 - Benchmarks]].
 
 ### CI pipeline
 
@@ -441,9 +497,18 @@ members = [
 - **Q-057:** Mesh upload on the main thread or via `RenderingServer` from a worker? (Measure in the spike.)
 - **Q-058:** How are blueprint overrides stored: new version or per-instance diff? (Recommendation: new version for shared edits; per-instance diff for live tweaks.)
 - **Q-062:** What hardware defines the 1M benchmark?
-- **Q-063:** Is the world a finite 16 km × 16 km region or effectively infinite?
 - **Q-064:** Is cohort simulation acceptable for most of the 1M population?
 - **Q-071:** Is terrain editing 1 m, or 10 cm near the player?
 - **Q-072:** How moddable is worldgen, and can mods replace the generator?
+- **Q-073:** Are three benchmark scenes enough at launch?
+- **Q-074:** Should benchmark results be shareable/uploaded?
+- **Q-075:** Standard preset vs current settings as the default?
+- **Q-076:** Benchmark route length and warm-up.
+- **Q-077:** Modded benchmark scenes at launch?
+- **Q-078:** Time-vote duration, cooldown, and quorum tuning.
+- **Q-079–Q-082:** Additional languages, voiceover, translation workflow, server log language.
+- **Q-083–Q-089:** Construction management depth, workforce model, partial occupancy, roads/utilities crews, delivery visibility, time scale, expedite.
+- **Q-090–Q-096:** Structural validation depth, story/height targets, roof counting, material mixing, glass facades, service gates, modded material migration.
+- **Q-097–Q-100:** Basement scope/depth/groundwater, underground parking, tunnels.
 
 See [[09 - Open Questions]] and [[10 - Decisions]].

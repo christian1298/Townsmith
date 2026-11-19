@@ -71,6 +71,25 @@ At 10 cm, a 1 m wall is **10 voxels across**. If each voxel face uses a 16×16 t
 - The palette should shift gradually; a city should look like it has layers of history.
 - Avoid a single global color filter. Age is expressed through materials, not grading.
 
+### Structural progression
+
+| Stage | Visual language |
+|---|---|
+| **Tent / lean-to** | Canvas, rope, rough poles; temporary, low silhouette |
+| **Timber shed** | Rough planks, posts, shingle/thatch roof; visible joinery |
+| **Wood house** | Timber frame, clapboard, pitched roof, small windows; 2–3 stories |
+| **Stone house** | Thick walls, small openings, stone lintels, slate roof; heavy silhouette |
+| **Half-timber** | Stone/plaster ground floor, exposed timber upper floors, overhangs; 3–4 stories |
+| **Brick** | Repeated bays, pilasters, tall windows, cornices; 4–6 stories |
+| **Reinforced concrete** | Flat slabs, repeated floors, cantilevers, parking podiums; 20+ stories |
+| **Steel/glass** | Thin frame, curtain wall, reflective facade, exposed structure; 40+ stories |
+| **Composite supertall** | Tapered form, core, wind bracing, sky lobbies, crown |
+
+- **Material honesty:** load-bearing stone looks heavy; timber shows its frame; steel shows its slenderness; glass reflects sky and lights at night.
+- **Structure should be legible** from the silhouette: a timber house should not look like a concrete tower with wood paint.
+- **Glass facades** need readable mullions, reflections, and interior light; avoid a flat transparent box.
+- **Age layers:** a stone ground floor with a timber upper is a visible story, not a texture swap.
+
 ## 4. Lighting
 
 - **Sun + sky:** a simple directional sun, sky ambient, and a soft shadow map.
@@ -140,6 +159,28 @@ The open world is a major part of the visual identity. It should feel like a pla
 - **Impostors:** baked billboards with alpha; fade between LODs to hide popping.
 - **Avoid visual clutter:** too many props at city scale becomes noise. Use them where the player looks.
 
+### 6.1 Construction sites
+
+A construction site must read as **work in progress**, not a missing building.
+
+- **Scaffolding, cranes, fences, material piles, and partial geometry** make the phase legible from the mayor camera.
+- Build the building progressively: foundation → frame → envelope → interior fit-out. Do not hide the whole structure behind a generic “under construction” box.
+- **Age-specific equipment:** hand tools and timber scaffolds in the wood age; cranes and steel in the industrial age; glass lifts and safety systems in the modern age.
+- **Workers and trades** are visible near the camera: carpenters, masons, electricians, plumbers, inspectors. At distance, show aggregate activity and site silhouettes.
+- **No occupancy cues** until commissioning: no smoke, lights, residents, or production from a partially built structure.
+- **LOD:** full scaffolding and crews near the camera; simplified frames/impostors at distance; no popping between states.
+- **Audio:** sawing, hammering, engines, reversing beeps, and site chatter; mix by distance and camera altitude.
+- **Performance:** instance scaffolding/props, cap active construction effects, and use LOD; construction must fit the 1M benchmark scenes.
+
+### 6.2 Underground spaces
+
+- **Cellars and basements:** rough stone/brick/concrete walls, low ceilings, storage, boilers, pipes; warm artificial light.
+- **Underground parking:** concrete columns, painted bays, ramps, ventilation ducts, fluorescent lighting, fire equipment.
+- **Cutaway/visibility:** underground rooms are hidden by terrain until entered or viewed in a cutaway/blueprint mode; no floating underground geometry.
+- **Lighting:** no sky contribution; use local fixtures, emissive signs, and practical lights. Keep shadow cost bounded.
+- **Sound:** muffled street noise, drips, HVAC hum, garage echoes.
+- **Readability:** stairs/elevators/ramps should be obvious; players should never get lost in a basement.
+
 ## 7. UI and UX art
 
 - **City-builder dashboard:** clear hierarchy, readable numbers, trends.
@@ -187,6 +228,7 @@ The open world is a major part of the visual identity. It should feel like a pla
 - **LOD/impostors** must be authored or generated consistently.
 - **Memory budget:** texture arrays are the dominant VRAM cost; keep base materials at 16×16 and allow 32×32 resource packs.
 - **Shader complexity:** keep the voxel shader cheap; the city has many chunks and instances.
+- **Frame budget:** 100k city at 60 FPS, 1M city at ~30 FPS / 1080p on RTX 3060-class hardware. LOD, impostors, and shadow budgets are art constraints, not just engineering ones.
 - **Color space:** sRGB textures; linear lighting; consistent palette across ages.
 
 ## 11. Inspirations
@@ -210,7 +252,7 @@ The open world is a major part of the visual identity. It should feel like a pla
 - **Q-059:** Art style for citizens: stylized low-poly, voxel, or billboard?
 - **Q-060:** How much visual variation between biomes/maps at launch? Current target: 3–4 biomes.
 - **Q-061:** UI language: clean modern dashboard, or diegetic/newspaper style?
-- **Q-065:** How deep is the living world visually (trees, crops, animals)?
-- **Q-069:** Seasons at launch? Art needs spring/summer/autumn/winter palettes if yes.
+- **Q-065 (answered):** Living world is hybrid; art needs individual trees/animals near the camera and aggregate silhouettes at distance.
+- **Q-069 (answered):** Seasons are at launch with a toggle; art needs spring/summer/autumn/winter palettes.
 
 See [[09 - Open Questions]].

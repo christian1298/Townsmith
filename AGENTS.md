@@ -19,37 +19,204 @@ Read the docs that match your task. The index in `00 - Start Here` has a reading
 - **Keep the core engine-agnostic.** The proposed architecture is a Rust core + Godot shell, but the core must not depend on Godot.
 - **Use the established vocabulary.** See `docs/11 - Glossary.md`.
 - **Update the docs** when a plan or decision changes: frontmatter `updated`, affected docs, ADR/question IDs.
+- **Measure performance, don’t guess.** Use the deterministic benchmark scenes in `docs/15 - Benchmarks.md`.
 
-## Current technical direction (proposed)
-
-- 10 cm voxels = 1 liter (D-001, accepted).
-- Multi-scale world: 1 m terrain + 10 cm buildings + LOD (D-002, proposed).
-- Godot 4 shell + Rust core via GDExtension (D-003, proposed; needs Phase 0 spike).
-- Authoritative server; single-player runs a local server (D-004, accepted).
-- Blueprints are the bridge between Mayor and Architect modes (D-005, accepted).
-- Data-first modding with namespaced IDs (D-006, proposed).
-- Tiered simulation; off-screen citizens aggregate (D-007, proposed).
-- No destruction physics in v1 (D-008, proposed).
-- Chunked, procedurally generated open world; build anywhere (D-016, proposed).
-- 1M+ population target via cohort simulation; 2k active agents (D-017, proposed).
-- Living world layer: forestry, agriculture, wildlife; early jobs lumberjack/farmer/hunter (D-018, proposed).
-- Settlements and regions are soft simulation units (D-019, proposed).
-
-## Conventions
+## Docs conventions
 
 - Docs are Obsidian-compatible Markdown: YAML frontmatter, wikilinks, callouts, Mermaid.
 - Decisions: `D-xxx` in `docs/10 - Decisions.md`.
 - Questions: `Q-xxx` in `docs/09 - Open Questions.md`.
 - Assumptions: `A-xxx` in `docs/09 - Open Questions.md`.
 - File names are stable; link with `[[03 - Voxel and Scale]]`.
+- Update the `updated` field on every doc you touch.
+- Do not silently contradict an accepted ADR; add a new one.
 
-## Before writing code
+## Current technical direction
 
-- Confirm the Phase 0 spike result or the relevant ADR is accepted.
-- Define the module boundary and the data format first.
-- Add tests (unit, golden, headless) with the implementation.
-- Update the docs in the same change.
+- 10 cm voxels = 1 liter (D-001, accepted).
+- Team: 2–3 full-time generalists (A-001); Rust/Godot experience or willingness to learn.
+- Multi-scale world: 1 m terrain + 10 cm buildings + LOD (D-002, accepted).
+- Godot 4 shell + Rust core via GDExtension (D-003, proposed; needs Phase 0 spike). Rust is the primary implementation language from Phase 0; GDScript is shell/UI only; C++ is the fallback (D-011, accepted).
+- Authoritative server; single-player runs a local server (D-004, accepted).
+- Blueprints are the bridge between Mayor and Architect modes (D-005, accepted).
+- Data-first modding with namespaced IDs (D-006, proposed).
+- Tiered simulation; off-screen citizens aggregate (D-007, proposed).
+- No destruction physics in v1; cosmetic damage and repair later (D-008, accepted).
+- Chunked, procedurally generated, effectively infinite world; build anywhere (D-016, accepted).
+- 1M+ late-game population via cohort simulation; 2k active agents (D-017, accepted). Target: ~30 FPS at 1080p on 8c/16t + RTX 3060-class client; dedicated server recommended for simulation (offloads sim, not rendering).
+- Living world layer: forestry, agriculture, wildlife; early jobs lumberjack/farmer/hunter; seasons with a toggle (D-018, accepted).
+- Settlements and regions are soft simulation units; multiple settlements with per-player ownership (D-019, accepted).
+- Deterministic benchmark mode: fixed saves, camera routes, settings, metrics, player results, and CI baselines (D-020, accepted; see `docs/15 - Benchmarks.md`).
+- Time control: single-player Mode B auto-pauses; multiplayer time is server-authoritative via admin `time.control` or a simple-majority online vote. Pause is a shared design freeze — simulation stops, editing continues, no auto-resume (D-021, accepted).
+- Localization: English + German at launch; all user-facing strings key-based; moddable language packs; per-player locale (D-022, accepted; see `docs/16 - Localization.md`).
+- Construction: placing a building creates a phased construction site built by trade crews over time; jobs for builders/engineers/electricians/plumbers, materials, inspections, no pop-in (D-023, accepted).
+- Building progression: tent/shed → timber → stone → half-timber → brick → concrete → steel/glass; material-based max stories/height/span with composite construction (D-024, accepted; see `docs/17 - Materials and Structure.md`).
+- Basements/sub-ground floors: cellars and utility basements at launch, underground parking later; separate depth limits; no material minimum height (D-025, accepted).
+- Authoring: workshop/creative editor first; build-anywhere placement; permissioned live editing later (D-026, accepted).
+
+## Agent workflow
+
+### 1. Plan before touching files
+
+- Read the relevant docs and the current ADRs.
+- Restate the task, acceptance criteria, and files you expect to touch.
+- If a requirement is ambiguous, ask. If it is non-blocking, add it to `docs/09 - Open Questions.md`.
+- Find the smallest change that delivers the milestone. Do not mix a refactor with a feature.
+
+### 2. Isolate every feature in a worktree
+
+Use a **git worktree** for every feature, fix, or experiment. Do not work directly on the default branch (`master` in this repository).
+
+```bash
+# One worktree per logical change
+git worktree add ../Townsmith-feat-benchmarks -b feat/benchmarks
+cd ../Townsmith-feat-benchmarks
+```
+
+Rules:
+
+- One worktree and one branch per logical change.
+- Branch names: `feat/...`, `fix/...`, `docs/...`, `test/...`, `perf/...`, `chore/...`.
+- The repository is initialized; ensure `origin` is configured before pushing a branch.
+- If no remote is configured, keep the branch PR-ready and ask for the remote; do not fabricate a PR.
+- Do not reuse a dirty worktree for an unrelated task.
+- Remove the worktree after the PR is merged: `git worktree remove ../Townsmith-feat-benchmarks`.
+- Do not commit generated build output, caches, secrets, or large binaries. Use LFS for source assets if needed.
+
+### 3. Use subagents when applicable
+
+Subagents are for **independent** work. Give them the docs, the exact task, and the files they own.
+
+| Situation | Use |
+|---|---|
+| You need to find code, files, or patterns | `explore` |
+| You need a pre-PR review | `code-reviewer` |
+| You need a test plan or test scaffolding | `test-automator` |
+| You need profiling or benchmark analysis | `performance-engineer` |
+| You have a failing test or crash | `debugger` |
+| You need a focused implementation in a separate area | `general` or the relevant specialist |
+
+Rules:
+
+- Do not run overlapping edits in the same files from multiple agents.
+- Give each subagent its own worktree or a clearly disjoint file set.
+- Ask for a concise report: files changed, tests run, risks, follow-ups.
+- Review the subagent's diff before merging. You own the final result.
+- Do not delegate final architectural decisions; write an ADR instead.
+
+### 4. Implement in small commits
+
+- Keep each commit focused and reviewable.
+- Prefer a PR under ~400 changed lines. Split larger work.
+- Add tests with the implementation, not after.
+- Update docs and ADRs in the same PR.
+- Use feature flags for incomplete work that must land early.
+- Keep the default branch releasable; do not merge known-broken code.
+- Remove dead code, debug prints, and temporary files before opening the PR.
+- Do not disable or delete a failing test without an ADR or a clear explanation.
+
+### 5. Test at the right level
+
+| Level | Use for | Examples |
+|---|---|---|
+| **Unit** | Pure logic and edge cases | Voxel indexing, RLE, room detection, formulas, validation |
+| **Integration** | Boundaries between modules | Save/load roundtrip, mod registry, command validation |
+| **Golden** | Stable binary/text formats | Blueprint hash, mesh hash, save migration |
+| **Headless simulation** | Gameplay and scale | 500 citizens for 30 days, cohort vs individual reference |
+| **Network** | Multiplayer behavior | Reconnect, permissions, malformed commands, mod mismatch |
+| **Benchmark** | Performance-sensitive changes | Fixed scenes/routes, 3-run median, baseline compare |
+
+Testing rules:
+
+- Bug fixes get a regression test.
+- Tests must be deterministic: fixed seeds, simulated clock, no real network, no wall-clock sleeps.
+- Do not over-mock. Test behavior through the public boundary.
+- Prefer small, readable tests over one large integration test.
+- Performance PRs include before/after benchmark JSON.
+
+**Run tests when they are relevant, not on every save.** The full suite is a merge gate, not an inner-loop tax.
+
+| Change | Minimum local test |
+|---|---|
+| One module/crate | `cargo test -p <crate>` |
+| Shared types, save format, networking, security | `cargo test --workspace` |
+| GDScript/UI/scene | Godot headless smoke + the affected UI flow |
+| Rendering, streaming, simulation scale | Benchmark scene + relevant tests |
+| Docs only | Link/ID/frontmatter validation; no code tests |
+
+- CI runs the full required suite on every PR.
+- Before merge, the full suite must be green; do not merge on “only the affected tests passed.”
+- Never skip save/load, networking, security, or 1M-scale tests to save time. Optimize the test run, not the coverage.
+- Use `cargo nextest` or filters for speed; keep the full suite available.
+
+### 6. Open a PR for every merge
+
+Never push directly to the default branch (`master`).
+
+PR body must include:
+
+- **What** changed and **why**.
+- **How** it was tested (commands and results).
+- **Benchmark results** for performance-sensitive changes.
+- **Screenshots/GIFs** for UI or visual changes.
+- **Risks and rollback** notes.
+- **Links** to the ADR, question, or roadmap milestone.
+- Any follow-up work.
+
+Before merging:
+
+- CI is green: format, lint, unit/integration tests, headless smoke, benchmark gate.
+- The diff is self-reviewed.
+- A human or `code-reviewer` subagent has reviewed it.
+- No unrelated changes are mixed in.
+- The branch is up to date with the default branch (`master`).
+
+After merging:
+
+- Delete the branch and remove the worktree.
+- Update `docs/09` if a question was answered.
+- Update or add an ADR if a decision changed.
+
+### 7. Commit style
+
+Use a short, scoped, imperative subject. Examples:
+
+```text
+feat(voxel): add greedy meshing for 32³ chunks
+fix(save): preserve terrain deltas on reload
+perf(sim): batch cohort updates by district
+test(bench): add fixed late-game camera route
+docs(adr): accept deterministic benchmark mode
+```
+
+## Best-practice checklist
+
+- [ ] Read the docs and ADRs that apply.
+- [ ] One logical change per branch/worktree/PR.
+- [ ] Tests added at the right level.
+- [ ] Deterministic tests, fixed seeds, no wall-clock dependencies.
+- [ ] Docs/ADRs updated in the same change.
+- [ ] Benchmark before/after for performance-sensitive work.
+- [ ] CI green and review complete.
+- [ ] No secrets, generated artifacts, or unrelated refactors.
+- [ ] Worktree removed after merge.
 
 ## Build commands
 
-No build exists yet. When the project is scaffolded, document the commands here and in `docs/12 - Technical Architecture.md`.
+No build exists yet. Once the project is scaffolded, document the exact commands here and in `docs/12 - Technical Architecture.md`. Expected shape:
+
+```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+# Godot headless import/smoke test
+# townsmith-bench --scene ... --route ... --settings ... --repeat 3
+```
+
+## Security and data rules
+
+- The server is authoritative; never trust client state.
+- Validate every command, voxel edit, blueprint, and mod manifest.
+- Sandbox mod scripts; never auto-download native mods.
+- Do not commit secrets, credentials, or personal data.
+- Benchmark results are local by default; sharing is opt-in.

@@ -1,7 +1,7 @@
 ---
 title: Voxel and Scale
 project: Townsmith
-status: proposed
+status: accepted
 updated: 2026-11-19
 tags:
   - townsmith
@@ -46,9 +46,9 @@ A 1 km² city at 10 cm resolution is **one billion voxels per meter of depth**. 
 - **Detail is local.** Only the building the player is editing, and the handful of buildings near the camera, need full 10 cm geometry. Distant buildings can be LOD meshes or impostors.
 - **The city is simulated at a coarser level.** Roads, lots, utilities, and citizens do not need 10 cm resolution.
 
-## 3. Proposed multi-scale world
+## 3. Multi-scale world (accepted)
 
-> [!decision] D-002 — Multi-scale world (proposed)
+> [!decision] D-002 — Multi-scale world (accepted)
 > Use three cooperating scales. The player still experiences a 10 cm building grid; the city does not store one.
 
 ```mermaid
@@ -84,14 +84,14 @@ flowchart TB
 - From Mayor Mode's altitude, buildings fade into LOD meshes; the player sees the skyline, not individual bricks.
 - The transition between scales must be invisible in normal play. That is a rendering and LOD problem, not a design compromise.
 
-> [!question] Q-004 — Is 1 m terrain acceptable?
-> If terrain must also be 10 cm, the world size, memory budget, and streaming architecture all change. This is the single most important technical question in the project.
+> [!decision] Q-004 answered — 1 m terrain confirmed
+> Terrain uses a 1 m grid; buildings use 10 cm voxels. The Phase 0 spike validates the visual mix and performance, but 10 cm terrain is not an option at 1M scale.
 
 ### Alternative considered: 10 cm everywhere
 
 - **Pros:** one grid, one editor, no scale mismatch; digging and terraforming at the same resolution as building.
 - **Cons:** a 1 km² map is ~1B voxels per meter of depth; meshing, saving, streaming, and multiplayer sync become much harder; the visual benefit at mayor altitude is negligible.
-- **Verdict:** rejected for v1, unless Q-004 says otherwise.
+- **Verdict:** rejected for v1.
 
 ## 4. Open world, chunks, and build anywhere
 
@@ -105,7 +105,7 @@ The world is not a fixed city tile. It is a **large, procedurally generated regi
 | **World chunk** | 256 m × 256 m | Terrain at 1 m (65,536 cells), vegetation, resources, streaming |
 | **Simulation region** | 512 m × 512 m | Active/aggregate/dormant simulation LOD |
 | **Settlement** | Soft, player-defined | Named cluster of buildings and roads |
-| **World** | Target 16 km × 16 km (256 km²) | The playable region; soft edges |
+| **World** | Effectively infinite | No hard map edge; procedural generation + edit deltas |
 
 - **Streaming:** world chunks load within a radius of each player/camera; building voxel data loads only for nearby or edited buildings.
 - **Dormant regions:** outside the active set, no per-tick simulation runs. When the player returns, the region is advanced statistically.
@@ -144,7 +144,8 @@ The world is not a fixed city tile. It is a **large, procedurally generated regi
 - The player can start a settlement in a forest, on a coast, or on a mountain shelf. The game does not require a pre-authored city tile.
 - Placement validation checks slope, water, foundation depth, road access, and utility connection.
 - Off-grid buildings are allowed but need self-contained utilities; connected settlements are more efficient.
-- The world's soft edges allow future expansion; the v1 target is a finite 16 km × 16 km region.
+- The world is **effectively infinite**: there is no authored map edge. Practical limits are streaming radius, save size, and server resources; only visited/edited chunks are stored.
+- **Coordinates:** use 64-bit integer chunk/world coordinates. Rendering uses a **floating origin** that rebases near the player, because 32-bit floats lose precision far from spawn.
 
 ## 5. Voxel data structures
 
@@ -182,7 +183,9 @@ Materials are data, not code:
   "texture": "base:textures/oak_plank",
   "cost_per_liter": 0.4,
   "density_kg_per_liter": 0.65,
-  "strength": 2,
+  "compressive_strength_mpa": 40,
+  "tensile_strength_mpa": 5,
+  "max_span_m": 6,
   "max_cantilever_m": 1.2,
   "fire_risk": 0.7,
   "insulation": 0.3,
@@ -192,7 +195,8 @@ Materials are data, not code:
 ```
 
 - `cost_per_liter` makes the 1 L voxel directly meaningful.
-- `strength` and `max_cantilever_m` feed the structural validator.
+- `compressive_strength_mpa`, `tensile_strength_mpa`, `max_span_m`, and `max_cantilever_m` feed the structural validator.
+- **Story/height limits live on the structural system**, not the material alone. See [[17 - Materials and Structure]].
 - `fire_risk` and `insulation` feed simulation.
 - Mods can add materials without touching the mesher.
 
@@ -200,15 +204,16 @@ Materials are data, not code:
 
 | Limit | Value | Rationale |
 |---|---:|---|
-| Max solid voxels | 2,000,000 | Keeps editing, meshing, and saving responsive |
-| Max footprint | 32 m × 32 m | Fits city lots; encourages compact design |
-| Max height | 128 m | Supports modern towers without a separate format |
-| Max props | 5,000 | Enough for detailed interiors |
-| Max rooms | 500 | Enough for large buildings |
+| Max solid voxels | 8,000,000 | Keeps editing, meshing, and saving responsive while allowing detailed towers |
+| Max footprint | 48 m × 48 m | Fits large towers, stations, and industrial buildings |
+| Max height | 512 m | Supports steel/composite skyscrapers without stacking hacks |
+| Max depth | 32 m | Basements, cellars, and underground parking (initial target) |
+| Max props | 10,000 | Enough for detailed interiors and large buildings |
+| Max rooms | 1,000 | Enough for towers, stations, and complexes |
 
 - These are soft limits with warnings and a hard cap. Modded/sandbox settings can raise them.
-- A 2M-solid-voxel building is 2 MB raw at 1 byte/voxel; compressed, likely 0.2–1 MB. A library of 500 unique buildings is a few hundred MB, acceptable on disk and streamable.
-- Skyscrapers taller than 128 m can be composed of stacked blueprints or a future "tower module" system.
+- An 8M-solid-voxel building is 8 MB raw at 1 byte/voxel; compressed, likely 1–4 MB. Most buildings are far smaller; the cap is for detailed towers.
+- Extremely large complexes can still be composed of multiple blueprints; the limit is not a design ceiling.
 
 ## 6. Meshing and rendering
 
@@ -328,9 +333,19 @@ Example metadata:
 - **Local grid:** the building is authored in its own local 10 cm grid, then rotated and placed on the city. See Q-011 for global-vs-local grid implications.
 - **Terrain contact:** a building's foundation must sit on the terrain/lot. The editor shows the terrain cut and warns about floating or buried foundations.
 
+### Sub-ground editing
+
+- Building blueprints can include levels below grade: cellars, utility basements, later habitable basements and parking.
+- The editor shows a **depth meter** and the terrain cut; basement voxels use the same 10 cm building grid but sit below the 1 m terrain surface.
+- Basements have a separate depth limit (initial blueprint cap: 32 m; practical early depth 3–6 m) and do not count toward above-ground story limits.
+- Validation checks retaining walls, water table/soil, drainage, ventilation, egress, and vehicle ramp geometry (later).
+- Underground geometry is culled when not visible/entered; it is not rendered through the terrain.
+- Save data includes underground voxels and terrain edits; a reload resumes the same basement.
+- See [[17 - Materials and Structure]] and D-025.
+
 ## 9. Collision and physics
 
-- **No per-voxel rigid-body physics in v1.** This is decision D-008 (proposed).
+- **No per-voxel rigid-body physics in v1.** This is decision D-008 (accepted); cosmetic damage and repair are later.
 - Player collision in Architect Mode uses static trimesh colliders generated from the visual mesh (or simplified collision meshes per chunk).
 - Voxel placement uses a DDA raycast against the voxel grid, not the physics engine.
 - Terrain collision uses the heightmap.
@@ -338,8 +353,8 @@ Example metadata:
 - Structural failure is a **validation rule**, not a physics simulation. Unsupported voxels are rejected at save/placement time.
 - Destruction, debris, and fire propagation are post-v1 features and would require a different voxel/physics architecture.
 
-> [!question] Q-006 — Destruction?
-> If destruction is a core fantasy, say so now. Retrofitting it into a static-mesh architecture is expensive. If it is a "nice to have," D-008 stands.
+> [!decision] Q-006 answered — no destruction in v1
+> D-008 is accepted: static buildings and structural validation only. Cosmetic damage and repair can be added later; full destruction would require a different voxel/physics architecture.
 
 ## 10. Streaming and saving
 
@@ -389,10 +404,11 @@ Two target tiers, because 1M+ is not a minimum-hardware promise:
 
 | Metric | Minimum | Recommended (1M+ target) |
 |---|---:|---:|
-| CPU | 6-core mid-range | 8-core modern |
-| RAM | 16 GB | 32 GB |
-| GPU | 8 GB VRAM | 12+ GB VRAM |
-| Frame rate | 60 FPS at 1080p (100k city) | 60 FPS at 1080p, 45+ at 1440p (1M city) |
+| CPU | 6-core mid-range | **8-core/16-thread** |
+| RAM | 16 GB | 16–32 GB |
+| GPU | 8 GB VRAM | **RTX 3060 12 GB or better** |
+| Frame rate | 60 FPS at 1080p (100k city) | **~30 FPS at 1080p (1M city, aggressive LOD)**; 60 FPS on higher-end GPU/lower settings |
+| Dedicated server | n/a | Simulation only; 4–8 cores, 16 GB RAM; offloads sim, not GPU rendering |
 | Visible triangles | 3–5M | 5–10M |
 | Draw calls | < 1,500 | < 2,000 |
 | Voxel meshing | < 4 ms/frame | < 4 ms/frame |
@@ -404,20 +420,20 @@ Two target tiers, because 1M+ is not a minimum-hardware promise:
 | 1M benchmark | n/a | 1M cohorts, 250k buildings, 2k active agents |
 | Save/load | < 15 s (100k) | < 30 s (1M) |
 
-These are **targets**, not measurements. The Phase 0 spike in [[08 - Roadmap]] must produce real numbers on the target machine before D-002, D-016, and D-017 are accepted.
+These are **targets**, not measurements. The Phase 0 spike in [[08 - Roadmap]] must produce real numbers on the target machine to validate D-002/D-016/D-017. The deterministic benchmark scenes in [[15 - Benchmarks]] are how these numbers are produced and compared over time.
 
 ## 12. Open questions
 
-- **Q-004 / Q-071:** Must terrain also be 10 cm, or is 1 m acceptable?
-- **Q-006:** Is destruction/physics required?
+- **Q-071:** Terrain editing resolution: 1 m edits, with 10 cm building detail. Confirmed by Q-004.
 - **Q-010:** What are the final blueprint size limits?
 - **Q-011:** Global grid or local grid with rotation? How are slopes handled?
 - **Q-025:** How much visual fidelity is required at distance? Are impostors acceptable?
 - **Q-026:** Texture resolution per voxel face: 16×16, 8×8, or flat colors? This affects the Minecraft look and resource pack authoring.
 - **Q-027:** Do we need voxel lighting (torches, lamps) inside buildings, or is baked/emissive lighting enough?
-- **Q-062:** What is the target hardware for the 1M benchmark?
-- **Q-063:** Is the world a finite 16 km × 16 km region, or effectively infinite?
 - **Q-064:** Is cohort simulation acceptable for the 1M population?
+- **Q-067:** How deep is ecosystem pressure (overhunting, deforestation, predators)?
 - **Q-072:** How moddable is worldgen (biomes, features, resources)?
+- **Q-090:** How strict is structural validation: rule-based limits or stress simulation?
+- **Q-093:** Can materials be mixed per floor/wall, and how is the weakest-load-path rule explained?
 
 See [[09 - Open Questions]] for the full list and assumptions.

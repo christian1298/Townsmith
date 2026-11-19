@@ -88,6 +88,27 @@ Sources used for the plan, plus places to look when a decision is revisited.
 | [glam](https://docs.rs/glam/) | Math |
 | [tracing](https://docs.rs/tracing/) | Structured logging |
 
+## Localization
+
+| Source | Why it matters |
+|---|---|
+| [Godot internationalization](https://docs.godotengine.org/en/stable/tutorials/i18n/internationalizing_games.html) | Godot translation workflow and CSV/PO support |
+| [GNU gettext](https://www.gnu.org/software/gettext/) | Standard translation catalog format and tooling |
+| [Unicode CLDR](https://cldr.unicode.org/) | Locale data for numbers, dates, plurals |
+| [ICU MessageFormat](https://unicode-org.github.io/icu/userguide/format_parse/messages/) | Placeholder and plural message formatting |
+
+## Performance and benchmarking
+
+| Source | Why it matters |
+|---|---|
+| [PresentMon](https://github.com/GameTechDev/PresentMon) | Frame-time capture on Windows |
+| [CapFrameX](https://www.capframex.com/) | Frame-time analysis and 1% lows |
+| [NVIDIA Nsight Systems](https://developer.nvidia.com/nsight-systems) | CPU/GPU timeline profiling |
+| [AMD Radeon GPU Profiler](https://gpuopen.com/rgp/) | GPU pipeline profiling |
+| [RenderDoc](https://renderdoc.org/) | Frame capture and draw-call inspection |
+| [Godot profiler](https://docs.godotengine.org/en/stable/tutorials/scripting/debug/the_profiler.html) | Engine-level frame and script profiling |
+| [Godot performance docs](https://docs.godotengine.org/en/stable/tutorials/performance/index.html) | Engine performance guidance |
+
 ## Design and production reading
 
 | Source | Why it matters |

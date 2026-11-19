@@ -19,24 +19,31 @@ tags:
 | ID | Decision | Status | Date | Affects |
 |---|---|---|---|---|
 | D-001 | 1 voxel = 10 cm = 1 liter | Accepted | 2026-11-19 | [[03 - Voxel and Scale]], [[02 - Game Design]] |
-| D-002 | Multi-scale world: 1 m terrain + 10 cm buildings + LOD | Proposed | 2026-11-19 | [[03 - Voxel and Scale]] |
+| D-002 | Multi-scale world: 1 m terrain + 10 cm buildings + LOD | Accepted | 2026-11-19 | [[03 - Voxel and Scale]] |
 | D-003 | Godot 4 shell + Rust core via GDExtension | Proposed | 2026-11-19 | [[04 - Engine and Stack]], [[12 - Technical Architecture]] |
 | D-004 | Authoritative server; single-player runs a local server | Accepted | 2026-11-19 | [[05 - Multiplayer]] |
 | D-005 | Blueprints are the bridge between modes | Accepted | 2026-11-19 | [[02 - Game Design]], [[03 - Voxel and Scale]] |
 | D-006 | Data-first content with namespaced IDs | Proposed | 2026-11-19 | [[06 - Modding and Resource Packs]] |
 | D-007 | Tiered simulation; off-screen citizens aggregate | Proposed | 2026-11-19 | [[07 - Simulation and AI]] |
-| D-008 | No per-voxel physics or destruction in v1 | Proposed | 2026-11-19 | [[03 - Voxel and Scale]], [[07 - Simulation and AI]] |
+| D-008 | No per-voxel physics or destruction in v1 | Accepted | 2026-11-19 | [[03 - Voxel and Scale]], [[07 - Simulation and AI]] |
 | D-009 | This vault is the source of truth; ADR process | Accepted | 2026-11-19 | All docs |
 | D-010 | Mode names: Mayor Mode and Architect Mode | Accepted | 2026-11-19 | [[02 - Game Design]] |
-| D-011 | Rust core + GDScript shell; C++ fallback | Proposed | 2026-11-19 | [[04 - Engine and Stack]] |
+| D-011 | Rust core from Phase 0 + GDScript shell; C++ fallback | Accepted | 2026-11-19 | [[04 - Engine and Stack]] |
 | D-012 | Save format: SQLite state + binary content-addressed blueprints | Proposed | 2026-11-19 | [[12 - Technical Architecture]] |
 | D-013 | Blueprint instances pin versions; upgrades are explicit | Proposed | 2026-11-19 | [[02 - Game Design]] |
 | D-014 | NPCs abstract building interiors in v1 | Proposed | 2026-11-19 | [[07 - Simulation and AI]] |
 | D-015 | Premium game; no paid mods or live-service dependency | Proposed | 2026-11-19 | [[01 - Vision]] |
-| D-016 | Chunked, procedurally generated open world; build anywhere | Proposed | 2026-11-19 | [[03 - Voxel and Scale]], [[12 - Technical Architecture]] |
-| D-017 | 1M+ population via cohort simulation; active agents near camera | Proposed | 2026-11-19 | [[07 - Simulation and AI]] |
-| D-018 | Living world layer: forestry, agriculture, wildlife | Proposed | 2026-11-19 | [[07 - Simulation and AI]], [[02 - Game Design]] |
-| D-019 | Settlements and regions are soft simulation units | Proposed | 2026-11-19 | [[02 - Game Design]], [[07 - Simulation and AI]] |
+| D-016 | Chunked, procedurally generated, effectively infinite world; build anywhere | Accepted | 2026-11-19 | [[03 - Voxel and Scale]], [[12 - Technical Architecture]] |
+| D-017 | 1M+ late-game population via cohort simulation; active agents near camera | Accepted | 2026-11-19 | [[07 - Simulation and AI]] |
+| D-018 | Living world layer: forestry, agriculture, wildlife; seasons with toggle | Accepted | 2026-11-19 | [[07 - Simulation and AI]], [[02 - Game Design]] |
+| D-019 | Settlements and regions are soft simulation units; multi-settlement ownership | Accepted | 2026-11-19 | [[02 - Game Design]], [[07 - Simulation and AI]] |
+| D-020 | Deterministic benchmark mode with fixed saves, routes, and settings | Accepted | 2026-11-19 | [[15 - Benchmarks]], [[08 - Roadmap]] |
+| D-021 | Time control: single-player Mode B pauses; multiplayer admin/vote | Accepted | 2026-11-19 | [[02 - Game Design]], [[05 - Multiplayer]], [[07 - Simulation and AI]] |
+| D-022 | English + German at launch; key-based, moddable localization | Accepted | 2026-11-19 | [[16 - Localization]], [[06 - Modding and Resource Packs]] |
+| D-023 | Construction is a phased, crew-driven process with trade jobs | Accepted | 2026-11-19 | [[02 - Game Design]], [[07 - Simulation and AI]], [[05 - Multiplayer]] |
+| D-024 | Material-based structural limits and composite construction | Accepted | 2026-11-19 | [[17 - Materials and Structure]], [[02 - Game Design]], [[03 - Voxel and Scale]] |
+| D-025 | Basements and sub-ground floors; underground parking later | Accepted | 2026-11-19 | [[17 - Materials and Structure]], [[03 - Voxel and Scale]], [[07 - Simulation and AI]] |
+| D-026 | Workshop-first blueprint authoring; permissioned live editing later | Accepted | 2026-11-19 | [[02 - Game Design]], [[05 - Multiplayer]] |
 
 ---
 
@@ -84,7 +91,7 @@ If the Phase 0 spike cannot render and edit a 10 cm building at 60 FPS, revisit 
 
 ## D-002 — Multi-scale world
 
-**Status:** Proposed · **Date:** 2026-11-19 · **Affects:** [[03 - Voxel and Scale]]
+**Status:** Accepted · **Date:** 2026-11-19 · **Affects:** [[03 - Voxel and Scale]]
 
 ### Context
 
@@ -125,7 +132,7 @@ Buildings are authored at 10 cm and placed on the 1 m city grid. Distant buildin
 
 ### Review trigger
 
-Q-004 (terrain resolution) and the Phase 0 visual/performance spike.
+Phase 0 visual/performance spike. Terrain resolution is confirmed at 1 m; if the visual mix fails, re-open before Phase 1.
 
 ---
 
@@ -338,7 +345,7 @@ Phase 5 headless benchmark: 1M cohorts, 250k buildings, 2k active agents on targ
 
 ## D-008 — No per-voxel physics or destruction in v1
 
-**Status:** Proposed · **Date:** 2026-11-19 · **Affects:** [[03 - Voxel and Scale]], [[07 - Simulation and AI]]
+**Status:** Accepted · **Date:** 2026-11-19 · **Affects:** [[03 - Voxel and Scale]], [[07 - Simulation and AI]]
 
 ### Context
 
@@ -445,9 +452,9 @@ Marketing/branding pass.
 
 ---
 
-## D-011 — Rust core + GDScript shell; C++ fallback
+## D-011 — Rust core from Phase 0 + GDScript shell; C++ fallback
 
-**Status:** Proposed · **Date:** 2026-11-19 · **Affects:** [[04 - Engine and Stack]]
+**Status:** Accepted · **Date:** 2026-11-19 · **Affects:** [[04 - Engine and Stack]], [[12 - Technical Architecture]]
 
 ### Context
 
@@ -455,9 +462,9 @@ The core needs performance, safety, and testability; the shell needs fast UI ite
 
 ### Decision
 
-- **Rust** for the core (voxel, simulation, economy, saves).
-- **GDScript** for UI, glue, and tools.
-- **C++20** only if the team is C++-heavy or godot-rust proves unsuitable.
+- **Rust from Phase 0** is the primary implementation language for the core (voxel, worldgen, simulation, economy, saves). Do not build a prototype in GDScript/C# and rewrite later.
+- **GDScript** is the shell/UI/glue language: scenes, UI, input, audio, tooling. It never owns per-voxel or per-citizen state.
+- **C++20** is the fallback only if the team is C++-heavy or godot-rust proves unsuitable in the Phase 0 spike.
 - No C# in the critical path.
 - Content is JSON + schema; shaders are Godot shading language.
 - The core exposes a coarse, batch-oriented API; no per-voxel GDScript calls.
@@ -482,7 +489,7 @@ The core needs performance, safety, and testability; the shell needs fast UI ite
 
 ### Review trigger
 
-Phase 0 spike and team skill assessment (Q-001).
+Phase 0 spike and team skill assessment (Q-001 answered: 2–3 full-time generalists).
 
 ---
 
@@ -643,9 +650,9 @@ Business/funding discussions (Q-019, Q-049).
 
 ---
 
-## D-016 — Chunked, procedurally generated open world; build anywhere
+## D-016 — Chunked, procedurally generated, effectively infinite world; build anywhere
 
-**Status:** Proposed · **Date:** 2026-11-19 · **Affects:** [[03 - Voxel and Scale]], [[12 - Technical Architecture]], [[05 - Multiplayer]]
+**Status:** Accepted · **Date:** 2026-11-19 · **Affects:** [[03 - Voxel and Scale]], [[12 - Technical Architecture]], [[05 - Multiplayer]]
 
 ### Context
 
@@ -660,7 +667,7 @@ The Minecraft fantasy is that the player can build anywhere, not only inside a p
   - **Building chunks:** 32 × 32 × 32 voxels (3.2 m) for 10 cm building data.
 - Player edits are stored as **sparse deltas** against the procedural base: terrain height changes, roads, buildings, harvested resources, and wildlife changes.
 - The player can **build anywhere** the terrain allows; there is no hard city tile. Settlements are soft, player-named clusters (D-019).
-- World extent: a large finite region (target 16 km × 16 km = 256 km²) with soft edges. Infinite streaming is a later extension (Q-063).
+- World extent: **effectively infinite** (Q-063). There is no hard map edge; the procedural world extends as far as players travel. Practical limits are streaming radius, save size, and server resources.
 - The server owns the seed and the edit deltas; clients stream chunks on demand.
 
 ### Consequences
@@ -678,12 +685,13 @@ The Minecraft fantasy is that the player can build anywhere, not only inside a p
 - Terrain seams and LOD transitions must be hidden.
 
 **Neutral**
-- The world is not truly infinite at launch; it is large enough to feel open.
+- "Effectively infinite" means no authored boundary, not that every coordinate is pre-generated. Only visited/edited chunks are stored.
+- The world can be arbitrarily large, but a 1M metropolis still occupies a finite 50–100 km² area.
 
 ### Alternatives considered
 
 - **Fixed 1–4 km² city tile:** simple, but fails the build-anywhere fantasy and the 1M target.
-- **Fully infinite world from day one:** more complex streaming and save semantics; not needed for v1.
+- **Finite 16 km × 16 km region:** simpler boundaries, but the user wants effectively infinite; dropped.
 - **Hand-authored maps only:** beautiful, but incompatible with the scale and modding goals.
 
 ### Review trigger
@@ -692,9 +700,9 @@ Phase 0 worldgen spike and Phase 2 streaming test.
 
 ---
 
-## D-017 — 1M+ population via cohort simulation
+## D-017 — 1M+ late-game population via cohort simulation
 
-**Status:** Proposed · **Date:** 2026-11-19 · **Affects:** [[07 - Simulation and AI]]
+**Status:** Accepted · **Date:** 2026-11-19 · **Affects:** [[07 - Simulation and AI]]
 
 ### Context
 
@@ -702,7 +710,8 @@ The user wants cities of 1M+ citizens. Simulating 1M individuals with needs, pat
 
 ### Decision
 
-- **1M+ is the late-game target** on recommended hardware; 100k is the minimum-hardware target.
+- **1M+ is the late-game target** on 8-core/16-thread CPU + RTX 3060-class GPU hardware; 100k is the minimum-hardware target. RAM target: 16–32 GB.
+- **Performance expectation:** ~30 FPS at 1080p for a 1M city on RTX 3060-class hardware; 60 FPS for ~100k. A dedicated server is recommended for simulation and multiplayer; it offloads simulation, not client GPU rendering.
 - Every citizen has an **individual record** for identity, household, job, selection, and stories.
 - The bulk population is simulated in **cohorts**: groups of citizens by district, building type, and needs band. Cohorts update at 1 Hz (or slower for distant districts).
 - **2,000 active agents** near the camera are individual agents at 10 Hz.
@@ -730,13 +739,13 @@ The user wants cities of 1M+ citizens. Simulating 1M individuals with needs, pat
 
 ### Review trigger
 
-Phase 5 benchmark: 1M cohorts, 250k buildings, 2k active agents on the target machine.
+Phase 5 benchmark: 1M cohorts, 250k buildings, 2k active agents at ~30 FPS / 1080p on RTX 3060-class hardware, plus a dedicated-server tick benchmark.
 
 ---
 
 ## D-018 — Living world layer: forestry, agriculture, wildlife
 
-**Status:** Proposed · **Date:** 2026-11-19 · **Affects:** [[07 - Simulation and AI]], [[02 - Game Design]]
+**Status:** Accepted · **Date:** 2026-11-19 · **Affects:** [[07 - Simulation and AI]], [[02 - Game Design]]
 
 ### Context
 
@@ -749,7 +758,7 @@ The early-game jobs — lumberjack, farmer, hunter — require a world with tree
 - **Wildlife** populations live per region with habitat, food, predators, and migration. Hunters harvest them; overhunting depletes them; pests damage crops.
 - Primary industry jobs are **data-driven**: lumber camp, farm, hunting lodge, tools, recipes, and outputs.
 - Simulation is **hybrid**: individual trees/animals/workers near the camera; aggregate resources and populations elsewhere.
-- **Seasons are proposed for launch** because farming and hunting depend on them (Q-069).
+- **Seasons are at launch** with an on/off toggle (Q-069); farming and hunting depend on them.
 - Ecosystem depth is light: regrowth, overharvest pressure, pests, and predators; not a full ecology simulation.
 
 ### Consequences
@@ -777,7 +786,7 @@ Phase 3 primary-industry prototype and Phase 4 balance pass.
 
 ## D-019 — Settlements and regions are soft simulation units
 
-**Status:** Proposed · **Date:** 2026-11-19 · **Affects:** [[02 - Game Design]], [[07 - Simulation and AI]]
+**Status:** Accepted · **Date:** 2026-11-19 · **Affects:** [[02 - Game Design]], [[07 - Simulation and AI]]
 
 ### Context
 
@@ -789,6 +798,7 @@ With build anywhere, there is no natural hard city boundary. The simulation stil
 - **Settlements** are player-named clusters of buildings and roads. Their boundaries are soft and derived from density and service coverage, not fixed walls.
 - **Districts** are sub-areas within a settlement for statistics, policies, and overlays.
 - A player can found multiple settlements; at late game they can merge into one continuous metropolis.
+- Each player may manage their own settlement(s); one player may manage several. Settlement ownership and permissions are configurable.
 - City-wide totals aggregate all settlements.
 
 ### Consequences
@@ -811,6 +821,346 @@ With build anywhere, there is no natural hard city boundary. The simulation stil
 ### Review trigger
 
 Phase 2 settlement UI and Phase 5 1M benchmark.
+
+---
+
+## D-020 — Deterministic benchmark mode
+
+**Status:** Accepted · **Date:** 2026-11-19 · **Affects:** [[15 - Benchmarks]], [[08 - Roadmap]], [[12 - Technical Architecture]]
+
+### Context
+
+Performance is central to the 1M+ target and to player trust. Ad-hoc profiling is not comparable across patches, hardware, or settings. Players also need a realistic sense of how the game should run in the early, mid, and late game, not a single marketing claim.
+
+### Decision
+
+- Ship a **Benchmark mode** that loads a fixed save, applies fixed settings, moves the camera along a fixed route, and records frame times and system metrics.
+- Provide three scenes: **Early Settlement**, **Mid City**, and **Late Metropolis** (plus an optional stress scene).
+- Provide two routes per scene: **Flyover** and **Street-level**.
+- Record average FPS, min, 1% low, 0.1% low, frame-time percentiles, hitches, draw calls, triangles, memory, streaming, simulation tick, and economy tick.
+- Show a player-facing results screen with a scene-specific rating and recommended settings.
+- Export JSON; support a CLI/headless runner for CI and dedicated-server benchmarks.
+- Use a **standard preset** for comparable runs and an optional **current settings** mode for personal results.
+- Load a copy of the save; disable autosave, achievements, vsync, and frame caps during measurement.
+- Mark modded benchmark results as non-comparable.
+- Keep benchmark overhead below 2%.
+
+### Consequences
+
+**Positive**
+- Reproducible optimization data across patches and hardware.
+- CI can catch performance regressions.
+- Players get honest early/mid/late expectations.
+- Scene-specific tuning of LOD, streaming, cohorts, and rendering.
+
+**Negative**
+- Benchmark scenes and routes must be maintained and versioned.
+- Three fixed saves add repository size.
+- Results can still vary with drivers, thermals, and background load; the UI must explain this.
+- A single “score” would be misleading; the design uses per-scene ratings instead.
+
+### Alternatives considered
+
+- **Ad-hoc profiling only:** useful for developers, invisible to players, not comparable.
+- **Synthetic empty-map fly-through:** fast to build, but does not represent real city load.
+- **External tools only (PresentMon, Nsight):** excellent for deep dives, but not player-facing and not a CI gate.
+- **A single “benchmark score”:** easy to market, misleading across scenes and hardware.
+
+### Review trigger
+
+Phase 0 benchmark harness and Phase 5 player-facing benchmark scenes.
+
+---
+
+## D-021 — Time control: single-player Mode B pauses; multiplayer admin/vote
+
+**Status:** Accepted · **Date:** 2026-11-19 · **Affects:** [[02 - Game Design]], [[05 - Multiplayer]], [[07 - Simulation and AI]], [[08 - Roadmap]]
+
+### Context
+
+Architect Mode is a focused building activity. In single-player, the city can pause while the player builds without hurting anyone. In multiplayer, the world is shared: one player entering Mode B must not freeze the game for everyone. Time control therefore needs different rules per mode, and it must be server-authoritative.
+
+### Decision
+
+- **Single-player:** entering **Architect Mode** automatically pauses the local server. Leaving restores the previous time state: if the game was paused before, it stays paused; otherwise the previous speed resumes.
+- **Multiplayer:** entering Architect Mode **never auto-pauses** the shared world.
+- Time state is `paused`, `1×`, `2×`, or `4×`.
+- An **admin with `time.control`** can pause, resume, or set speed directly. `time.control` is admin-only by default and grantable to other roles.
+- Any player with `time.vote` (default: all players) can start a vote to pause, resume, or fast-forward (`2×`/`4×`).
+- A vote passes when **yes votes are a simple majority of players online at vote start** (`yes > online / 2`). Abstentions and non-votes count as **no**.
+- One vote at a time; default duration **60 seconds**; cooldown after a vote; admin can cancel.
+- Pause is a **shared design freeze**: it stops simulation, construction progress, production, needs, economy, and day/night, but **all players can still edit** — fly, inspect, place/remove buildings, and design blueprints — for as long as they want.
+- There is **no auto-resume timer**. Single-player resumes when the player leaves Architect Mode (or manually resumes); multiplayer stays paused until an admin resumes it or a resume vote passes.
+- Fast-forward is capped by the server's tick budget; if the server cannot hold the requested speed, it caps the effective speed and notifies players.
+
+### Consequences
+
+**Positive**
+- Single-player Mode B is calm and interruption-free.
+- Multiplayer time cannot be griefed by one player entering a building.
+- Admin and vote paths cover both private servers and community servers.
+- Pause semantics are clear: the city stops, but building does not.
+
+**Negative**
+- Vote UI, cooldowns, and logging add UI and server complexity.
+- A paused multiplayer session still accepts edits; construction completion waits for resume, which must be communicated clearly.
+- Admin time control needs audit logging to prevent abuse.
+
+**Neutral**
+- Time control is a server setting; single-player uses the same code path with a local server.
+
+### Alternatives considered
+
+- **Auto-pause Mode B everywhere:** simple, but unacceptable in multiplayer.
+- **No pause in multiplayer at all:** predictable, but hostile to players who need to build or step away.
+- **Host-only time control:** simple, but the user asked for admin rights and votes.
+- **Majority of votes cast instead of online players:** easier to pass, but easier to manipulate with low turnout.
+
+### Review trigger
+
+Phase 1 single-player Mode B pause; Phase 6 multiplayer time votes.
+
+---
+
+## D-022 — English + German at launch; key-based, moddable localization
+
+**Status:** Accepted · **Date:** 2026-11-19 · **Affects:** [[16 - Localization]], [[02 - Game Design]], [[05 - Multiplayer]], [[06 - Modding and Resource Packs]], [[12 - Technical Architecture]]
+
+### Context
+
+The game should support multiple languages from the start, not retrofit localization after the UI is built. English is the source language; German is the first additional language. Mods and community translators must be able to add languages without code changes. Multiplayer players may use different languages in the same session.
+
+### Decision
+
+- Launch languages: **English** and **German**; English is the fallback.
+- All user-facing strings are **externalized and key-based** from the first implementation.
+- Content data references translation keys, not display names.
+- The client owns the player's locale; the server sends keys + parameters, not localized strings.
+- Base-game strings live in a validated source table; the build compiles them for Godot and the Rust core.
+- Mods can ship **language packs** with namespaced keys; missing keys fall back to English.
+- German must be reviewed by a fluent speaker, not shipped as raw machine translation.
+- Fonts and layouts must handle umlauts, ß, text expansion, and locale-aware numbers/dates.
+- No hard-coded UI strings; CI catches missing keys and placeholder mismatches.
+- Server logs remain English for admin readability; player chat is never auto-translated.
+
+### Consequences
+
+**Positive**
+- German ships with the game, not as a later patch.
+- Community translations and mod languages are data, not code.
+- Multiplayer players can use different languages.
+- Localization bugs are caught in CI before they reach players.
+
+**Negative**
+- Every string needs a key and a translation pass.
+- German text is longer; UI layouts need flexible sizing.
+- Server/client key contracts must be versioned.
+- Translation quality and community workflow need ownership.
+
+### Alternatives considered
+
+- **English only at launch:** faster, but fails the stated requirement and makes retrofitting expensive.
+- **Hard-coded English strings with a later extraction pass:** cheap now, expensive later; rejected.
+- **Full voiceover at launch:** out of scope; subtitles only for now.
+- **Server-localized strings:** breaks mixed-language multiplayer; rejected.
+
+### Review trigger
+
+Phase 1 editor UI localization; Phase 8 German QA pass.
+
+---
+
+## D-023 — Construction is a phased, crew-driven process with trade jobs
+
+**Status:** Accepted · **Date:** 2026-11-19 · **Affects:** [[02 - Game Design]], [[07 - Simulation and AI]], [[05 - Multiplayer]], [[08 - Roadmap]], [[13 - Art Direction]]
+
+### Context
+
+Placing a building should feel like commissioning work, not spawning an object. The city should visibly build itself, and construction should create real jobs for builders, engineers, electricians, plumbers, and other trades. The player should feel the consequences of labor shortages and material supply.
+
+### Decision
+
+- Placing a blueprint creates a **construction site**, not a finished building.
+- Construction is **phased**: survey/site prep, foundation, structure, envelope, utility rough-in, interior finish, commissioning/inspection.
+- Each phase creates **temporary job slots for trades** (laborers, carpenters, masons, steelworkers, roofers, glaziers, electricians, plumbers, HVAC technicians, painters, surveyors, engineers, inspectors).
+- Trades depend on the building's materials, systems, age, and complexity. Early ages use fewer licensed trades; modern buildings need more specialists.
+- **Crew capacity** comes from construction offices/public works and outside contractors. If a crew or trade is unavailable, the site stalls with a reason.
+- **Materials are delivered progressively** from the city's supply chain. A site has a stockpile; missing materials stall the phase.
+- The player sets **priority/budget**; crews auto-assign. The player is not expected to micromanage individual workers.
+- A building is **not occupiable** until commissioning/inspection passes.
+- **Demolition and major upgrades** use the same crew/trade model, with waste and temporary closure.
+- Pause freezes construction progress; placement/editing remains allowed. Multiplayer construction is server-authoritative.
+- At 1M scale, only nearby sites simulate individual workers; distant sites use aggregate progress and trade demand.
+
+### Consequences
+
+**Positive**
+- The city visibly builds itself; no pop-in.
+- Construction creates a real labor market for trades and training.
+- Material logistics and construction capacity become meaningful city-builder levers.
+- Jobs and age progression connect to the building system.
+- Stalled sites produce clear, actionable problems.
+
+**Negative**
+- More simulation, UI, art, and save state than an instant-build or timer-only model.
+- Construction can frustrate players if blockers are opaque; the UI must explain them.
+- Trade shortages and material logistics need careful tuning to avoid constant stalls.
+- Partial buildings and construction crews add rendering and pathfinding cost.
+
+### Alternatives considered
+
+- **Instant placement:** simple, but loses the jobs, logistics, and city-building fantasy.
+- **Visual-only construction animation:** looks alive but creates no jobs or economic consequences.
+- **Single abstract build timer:** cheap, but does not produce trade-specific jobs or material flow.
+- **Full worker micromanagement:** too much UI and not fun at city scale.
+
+### Review trigger
+
+Phase 2 construction sites; Phase 3 jobs; Phase 4 trade progression.
+
+---
+
+## D-024 — Material-based structural limits and composite construction
+
+**Status:** Accepted · **Date:** 2026-11-19 · **Affects:** [[17 - Materials and Structure]], [[02 - Game Design]], [[03 - Voxel and Scale]], [[07 - Simulation and AI]], [[13 - Art Direction]]
+
+### Context
+
+Buildings should progress from tents and wooden sheds to wood houses, stone houses, half-timber, brick, concrete, steel, and glass facades. Each material should have a maximum it can support. A wooden house should top out at 2–3 stories plus a roof; a half-timber house with a stone ground floor should reach one story higher; reinforced concrete should support 20+ stories; steel and glass should enable skyscrapers.
+
+### Decision
+
+- Materials and structural systems have **readable limits**: max stories, max height, max span, load, fire rating, foundation/bracing requirements.
+- Initial targets:
+  - Tent: 1 temporary level.
+  - Timber shed: 1 story.
+  - Timber house: **2–3 stories + roof**.
+  - Load-bearing stone: 2–3 stories + roof.
+  - Half-timber with stone ground floor: **3–4 stories + roof**.
+  - Brick masonry: 4–6 stories.
+  - Reinforced concrete: **20–30 stories**.
+  - Steel frame: 40–80 stories.
+  - Composite steel/concrete: 80+ stories.
+- **Composite construction is allowed**: stone ground floor + timber upper, concrete podium + steel tower, etc. The limit is set by the **weakest support in the load path**, not the strongest material.
+- **Glass facades are non-structural cladding**. They attach to a concrete/steel frame; they do not add height.
+- The validator checks load paths, stories/height, span, wall thickness, openings, cantilevers, bracing, foundation, fire/egress, and service gates.
+- Tall buildings require services: elevators, water pressure, fire suppression, wind bracing, structural engineering, HVAC.
+- The editor shows limit reasons and upgrade previews; invalid blueprints can be saved as drafts but not placed in normal play.
+- Mods can add materials/systems with declared properties; the same validator applies; no server bypass.
+
+### Consequences
+
+**Positive**
+- Material progression is structural and readable, not cosmetic.
+- Composite construction creates interesting design decisions.
+- Skyscrapers require infrastructure and services, not just a material unlock.
+- Modders can add materials without code changes.
+
+**Negative**
+- The structural validator and editor feedback are significant UI/engineering work.
+- Mixed-material load paths can confuse players if not explained clearly.
+- Exact story limits need tuning; too strict feels arbitrary, too loose breaks the fantasy.
+- Modded material changes can invalidate existing blueprints; migration/versioning is required.
+
+### Alternatives considered
+
+- **Cosmetic materials only:** simple, but loses the progression and structural fantasy.
+- **Full stress simulation:** realistic, but too complex and expensive for v1.
+- **Single “building HP” limit:** cheap, but does not capture spans, bracing, or composite construction.
+- **Glass as structural:** visually tempting, but physically wrong and breaks the material logic.
+
+### Review trigger
+
+Phase 4 material progression; Phase 5 high-rise construction.
+
+---
+
+## D-025 — Basements and sub-ground floors; underground parking later
+
+**Status:** Accepted · **Date:** 2026-11-19 · **Affects:** [[17 - Materials and Structure]], [[03 - Voxel and Scale]], [[07 - Simulation and AI]], [[08 - Roadmap]]
+
+### Context
+
+Buildings need cellars, utility basements, and — later — underground parking. Sub-ground floors affect excavation, foundations, waterproofing, drainage, ventilation, and vehicle access. They should be part of the building editor, not a separate afterthought.
+
+### Decision
+
+- Building blueprints can include **sub-ground levels** below grade.
+- **v1 scope:** cellars, storage, utility/mechanical basements, 1–2 levels typical.
+- **Later:** habitable basements, underground parking, vehicle ramps, and possibly transit/service tunnels.
+- Basements **do not count toward the above-ground material story limit**, but they add load, foundation depth, and excavation cost.
+- Initial blueprint depth cap: **32 m**; practical early depth is 3–6 m. Deeper levels need engineering, dewatering, and stronger retaining walls.
+- **Construction phases:** excavate, shore, foundation, waterproof, backfill; trades include excavator operators, foundation crews, and waterproofers.
+- **Services:** sump pumps, footing drains, sewage ejector below the sewer line, ventilation, lighting, and egress.
+- **Water table/soil:** high groundwater raises cost and flood risk; validation checks depth vs. soil/water table.
+- **Vehicle parking:** a parking capacity with a ramp connection to the road; near-camera vehicles can drive in/out; distant parking is abstracted. Vehicle pathfinding and garage levels are later.
+- **Rendering:** underground spaces are culled when not visible/entered; interior lighting is local.
+- **Save/load:** underground voxels, terrain edits, ramps, and service state persist with the building/site.
+- The same structural validator and server authority apply.
+
+### Consequences
+
+**Positive**
+- Cellars add usable space without increasing building height.
+- Underground parking is a natural late-game density tool.
+- Excavation and waterproofing create construction jobs and trade-offs.
+- Basements make terrain and water table matter.
+
+**Negative**
+- Excavation, waterproofing, and underground rendering add complexity.
+- Vehicle ramps/pathfinding are a later scope risk.
+- Deep basements can flood or become unusable if services are missing.
+- More save/validation state.
+
+### Alternatives considered
+
+- **No basements:** simpler, but loses cellars, utility space, and underground parking.
+- **Cosmetic basements only:** cheap, but not simulation-relevant.
+- **Full underground city/tunnels at launch:** too much scope; defer.
+
+### Review trigger
+
+Phase 4 cellars/utility basements; Phase 5 underground parking.
+
+---
+
+## D-026 — Workshop-first blueprint authoring; permissioned live editing later
+
+**Status:** Accepted · **Date:** 2026-11-19 · **Affects:** [[02 - Game Design]], [[05 - Multiplayer]]
+
+### Context
+
+The core fantasy is first-person authorship: the player builds a structure voxel by voxel and saves it to a library that Mayor Mode can place. "Build anywhere" is also core. Live in-world editing is the most immersive version, but it creates griefing, lock, permission, sync, and structural-validation problems in multiplayer. A separate workshop/creative space is safer and easier to synchronize, but less immersive.
+
+### Decision
+
+- **Placement:** players can place blueprints anywhere the terrain allows, from the start.
+- **Authoring:** the **Workshop/creative editor is the default authoring space** at launch. Players build, furnish, and save blueprints there.
+- **Live editing:** after multiplayer is stable, players with permission can enter a building anywhere and edit it in place. The server grants an edit lock; edits are server-authoritative and produce a new blueprint version or an instance variation.
+- **Single-player:** a creative-mode toggle may allow unrestricted live editing without multiplayer permissions.
+- **Blueprint-first:** the saved blueprint remains the unit of reuse; live edits do not silently mutate the library version used by other instances.
+
+### Consequences
+
+**Positive**
+- Preserves the first-person building fantasy without betting multiplayer on live griefing controls.
+- Simpler Phase 1/2 scope: the editor and blueprint format come first.
+- Permissions, locks, and versioning are designed before live editing ships.
+
+**Negative**
+- Launch authoring is less seamless than "edit the building you are standing in."
+- Two paths (workshop and live) must eventually converge.
+- Live editing adds blueprint-version and conflict handling later.
+
+### Alternatives considered
+
+- **Live editing anywhere from day one:** maximum immersion; highest griefing/sync risk.
+- **Workshop only:** simplest; weaker fantasy.
+- **Creative-mode toggle only:** good for sandbox, not a multiplayer default.
+
+### Review trigger
+
+Phase 2 workshop/editor; Phase 6 multiplayer live-edit permissions.
 
 ---
 

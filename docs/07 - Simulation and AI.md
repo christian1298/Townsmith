@@ -70,8 +70,10 @@ flowchart TB
 - **Time scale:** pause, 1×, 2×, 4×. Target: **1 game day ≈ 10–20 real minutes at 1×**, **1 game month ≈ 1–2 real hours** (Q-041).
 - The simulation uses a **fixed timestep** with an accumulator; rendering interpolates.
 - Time scale multiplies the number of simulation steps, not the timestep.
-- In multiplayer, the server owns time; clients interpolate.
-- **Seasons:** if enabled at launch (Q-069), they affect crop growth, wildlife migration, heating demand, and construction.
+- **Single-player:** entering Architect Mode automatically pauses time; leaving restores the previous state (paused stays paused, otherwise the prior speed resumes).
+- **Multiplayer:** the server owns time; clients interpolate. Mode B never auto-pauses a shared world. An admin with `time.control`, or a simple-majority vote of online players, can pause/resume/fast-forward (D-021).
+- Pause is a **shared design freeze**, not a menu: it freezes simulation, construction progress, production, needs, and day/night, but all players can still fly, inspect, place/remove buildings, and edit blueprints. There is no auto-resume timer: single-player resumes when leaving Mode B; multiplayer stays paused until an admin or vote resumes. See [[05 - Multiplayer]].
+- **Seasons:** at launch with an on/off toggle (Q-069). They affect crop growth, wildlife migration, heating demand, and construction.
 
 ## 3. Population scale: 1M+ and cohorts
 
@@ -88,35 +90,130 @@ flowchart TB
 - 1M individual pathfinders is far worse: the road graph alone is 100k–200k edges.
 - The game only needs individual detail where the player looks. Everywhere else, statistics are indistinguishable in play.
 
-### The cohort model
+### The cohort model, in detail
 
-A **cohort** is a group of citizens with the same:
-- District.
-- Building type (e.g., lower-class apartment, suburban house, dormitory).
-- Needs band (e.g., hungry, content, unhappy).
-- Employment band (e.g., employed, unemployed, retired).
+#### The intuition
+
+A city of 1M people does not need to know that citizen #481,222 is 3% hungrier than yesterday. It needs to know that **12% of the Riverside district is hungry**, that the number is rising, and that a new grocery store would fix it. Cohort simulation tracks those groups and the flows between them.
+
+Think of it like traffic: you do not simulate every car's engine to know that a highway is congested. You track how many cars are in each speed band and move them between bands. Cohorts do the same for people and needs.
+
+#### What a cohort is
+
+A **cohort** is a statistical bucket of citizens who share the same:
+
+| Key | Examples |
+|---|---|
+| District | Riverside, Old Town, North Industrial |
+| Housing type | Lower-class apartment, suburban house, dormitory, retirement home |
+| Employment band | Employed, unemployed, retired, student |
+| Needs band | Content, stressed, hungry, unsafe |
+| Income band | Low, middle, high (optional, if it changes behavior) |
+| Age band | Child, adult, elderly (optional) |
+
+A cohort is **not a fixed group of named people**. Citizens move between cohorts as their circumstances change. The simulation moves **counts** between buckets.
 
 Each cohort stores:
-- Count.
-- Average needs satisfaction.
-- Average happiness.
+- `count` — how many citizens are in this state.
+- Average needs satisfaction (hunger, rest, hygiene, social, fun, safety, health).
+- Average happiness and health.
 - Average income/wealth band.
 - Home building type and job type distribution.
-- Migration pressure.
+- Average commute time and service access.
+- Migration pressure and tenure (how long the group has been in this state).
 
-The simulation updates cohorts at 1 Hz:
-- Satisfy needs based on building quality, services, food, water, and commute.
-- Update happiness and health.
-- Generate migration, births, deaths, and job changes.
-- Feed aggregate demand into utilities, traffic, and the economy.
+#### The update loop
 
-**Individual citizens** are materialized:
-- When selected.
-- When near the camera.
-- When an event needs a named actor (a complaint, a birth, a death, a promotion).
-- When a story or tutorial needs a face.
+At each aggregate tick (1 Hz game time, or slower for distant districts):
 
-Materialization pulls a consistent state from the cohort; dematerialization writes the state back. The player never sees a citizen "pop."
+1. **Snapshot** the current cohort counts.
+2. **Evaluate** needs satisfaction from housing quality, food/water access, services, jobs, pollution, noise, commute, and taxes.
+3. **Move counts** between needs/employment bands. For example, a food shortage moves citizens from `content` to `hungry`; a new grocery moves them back.
+4. **Apply lifecycle:** births, deaths, aging, and migration in and out of the district.
+5. **Update jobs and income:** hiring, firing, wage changes, commuting.
+6. **Emit aggregate demand** for utilities, goods, housing, and traffic.
+7. **Emit events and sampled stories** for the UI, advisors, and newspapers.
+
+```mermaid
+flowchart LR
+  A["Content<br/>employed"] -->|food shortage| B["Stressed<br/>employed"]
+  B -->|grocery opens| A
+  A -->|job loss| C["Stressed<br/>unemployed"]
+  C -->|new job| A
+  B -->|long shortage| D["Hungry<br/>unemployed"]
+  D -->|aid + jobs| A
+```
+
+#### A worked example
+
+Riverside has 12,000 residents:
+
+| Cohort | Count |
+|---|---:|
+| Content, employed | 7,200 |
+| Stressed, employed | 2,400 |
+| Hungry, unemployed | 1,200 |
+| Content, retired | 1,200 |
+
+A bakery closes, and food coverage drops from 92% to 70%. On the next aggregate tick:
+- 600 `content` citizens become `stressed`.
+- 300 `stressed` citizens become `hungry`.
+- The district's food satisfaction drops from 88% to 74%.
+- The player sees "Food access: 92% → 70%" and a sampled complaint from a household in the affected cohort.
+
+A new grocery store opens. The flows reverse over the next few ticks. The player sees the district recover.
+
+#### Materialization: where individual citizens come from
+
+Every citizen has an **individual record** (id, name, household, home, job, basic attributes). But their needs and happiness are not updated individually every tick.
+
+When a citizen is **materialized**:
+- The player selects them.
+- They are near the camera.
+- An event needs a named actor (a complaint, a birth, a death, a promotion).
+- A story or tutorial needs a face.
+
+The game samples a citizen from the relevant cohort and gives them:
+- A name, household, home, and job.
+- Needs/happiness near the cohort average, with variance.
+- A consistent personal history while they are active.
+
+While materialized, the citizen updates at 10 Hz like an individual agent. When they are **dematerialized**, their state is folded back into the cohort aggregates. The player never sees a citizen "pop"; the transition is hidden by distance or UI.
+
+#### Keeping the cohort count under control
+
+A full cross-product of every band would explode. The design uses a **fixed set of 12–30 cohorts per district**, with split/merge rules:
+
+- Start with a small set of states per district.
+- If a cohort grows beyond a threshold, split it into two (e.g., split by income or age).
+- If two cohorts become similar and small, merge them.
+- 333 districts × ~30 cohorts ≈ 10,000 cohorts for a 1M city, or ~100 citizens per cohort on average.
+- The cohort key is deliberately coarse; fine distinctions are handled by materialized citizens or additional splits only where they matter.
+
+#### Why it works
+
+- **Scale:** 1M citizens become ~10k cohort updates, not 1M individual updates.
+- **Readability:** the UI naturally works with districts, distributions, and trends, which is how players manage a metropolis.
+- **Detail where it matters:** individual agents near the camera still have names, homes, jobs, and needs.
+- **Stability:** statistical aggregates are less noisy than individual simulations and easier to balance.
+
+#### Tradeoffs and risks
+
+- **Individual history is approximate.** A citizen's past is reconstructed/sampled; it is not a fully persistent life simulation.
+- **Cohort design is hard.** Bad bands can create artifacts ("everyone in this district is suddenly hungry").
+- **Events need sampling.** A complaint is representative, not exhaustive; the UI must not imply it is the only one.
+- **Validation is required.** Compare cohort aggregates against a fully individual reference simulation on a small city; they should match within tolerance.
+- **Transitions must be hidden.** Materialization/dematerialization needs care to avoid visible popping or inconsistent stories.
+
+#### What the player sees
+
+- District dashboards: needs distribution, happiness, income, employment, housing.
+- Heatmaps: hunger, pollution, commute, service coverage.
+- Sampled stories: "The Millers can't sleep because the steel mill runs at night" — a representative household from the affected cohort, not the only one.
+- Selected citizens: a consistent individual with a home, job, and needs while the player watches.
+- City-wide trends: population, migration, health, and happiness over time.
+
+This is the core trade: **the player gets a living metropolis of millions, and individual detail where they look, without simulating every life at once.**
 
 ### Data budget
 
@@ -130,8 +227,23 @@ Materialization pulls a consistent state from the cohort; dematerialization writ
 | Road graph | 150k edges | ~100 B | 15 MB |
 | **Total (with indexes/overhead)** | | | **~0.5–2 GB** |
 
-- This fits in a 32 GB machine with room for rendering and the OS.
+- This fits the 16–32 GB target with room for rendering and the OS.
 - The save stores individual citizen records + aggregates; compressed, 100–300 MB.
+
+### Performance expectation on the target machine
+
+| Scenario | Expectation |
+|---|---|
+| ~100k city, 8c/16t + RTX 3060 | 60 FPS at 1080p |
+| 1M city, 8c/16t + RTX 3060 | **~30 FPS at 1080p** |
+| 1M city, higher-end GPU / lower settings | 60 FPS target |
+| Dedicated server, 1M city | Simulation only; 4–8 cores, 16 GB RAM |
+
+- **The dedicated server offloads simulation, not rendering.** The client still draws the city; the server's CPU does not make the client's GPU faster.
+- A dedicated server helps most when the client is CPU-bound by simulation, when multiple players share a city, and when the world must persist. It also lets low-end clients join without running the full simulation.
+- With a dedicated server, the client's CPU is free for chunk meshing, UI, and render submission; the remaining 1M-city limit is largely GPU (LOD, overdraw, shadows) and streaming.
+- The Phase 0/5 benchmark must measure both: server tick time and client frame time on the target hardware.
+- These expectations are measured by the deterministic benchmark scenes: **Early Settlement**, **Mid City**, and **Late Metropolis**. See [[15 - Benchmarks]].
 
 ### Tick budget
 
@@ -259,6 +371,43 @@ happiness =
 - Vacancies reduce output; overstaffing wastes wages.
 - Workplaces need utilities (power, water) and inputs; a factory without power is idle.
 
+### Construction trades and sites
+
+Construction is a **temporary workplace** with its own job slots, material stockpile, phases, and blockers.
+
+| Phase | Typical trades | What can stall it |
+|---|---|---|
+| Survey and site prep | Surveyor, civil engineer, laborers | Access, permits, terrain, utilities |
+| Foundation | Laborers, concrete/masonry workers | Materials, excavation, weather |
+| Structure | Carpenters, masons, steelworkers | Structural materials, cranes, crew |
+| Envelope | Roofers, glaziers, insulators | Weather, materials, access |
+| Utility rough-in | Electricians, plumbers, HVAC technicians | Utility connection, licensed trades |
+| Interior finish | Carpenters, plasterers, painters, flooring | Materials, elevators, inspections |
+| Commissioning | Engineers, inspectors, utility technicians | Tests, permits, final connections |
+
+- A construction site generates **temporary job slots per phase**, scaled by workload. A small house needs a handful of workers; a factory or high-rise needs large crews and specialists.
+- Workers are citizens with trade skills. Electricians, plumbers, HVAC technicians, and engineers require vocational training or education; laborers and apprentices are easier to hire.
+- If a trade is missing, the site stalls with a reason and a duration estimate. The player can build a construction office, fund training, import temporary contractors, or accept the delay.
+- **Construction offices / public works** provide crew capacity, tools, and vehicles. More capacity means more simultaneous sites and faster work, at a wage/upkeep cost.
+- Materials are delivered progressively from warehouses/producers. A site keeps a stockpile; the phase consumes it. Missing materials stall the phase before workers are assigned.
+- Phases can overlap where physically possible (e.g., rough-in after the structure is weather-tight; interior finish in completed floors), but dependencies are explicit.
+- A building is **not occupiable** until commissioning/inspection passes. Partially built buildings do not generate residents or production.
+- Demolition and major upgrades use the same crew/trade model, with waste hauling and temporary closure.
+- At 1M scale, only nearby sites simulate workers individually; distant sites use aggregate progress and trade demand.
+
+#### Age progression of trades
+
+| Age | Construction character |
+|---|---|
+| **Wood** | Laborers, carpenters, roofers; hand tools; no licensed electricians/plumbers |
+| **Masonry** | Masons, stonecutters, glaziers; aqueducts and sewers need engineers |
+| **Industrial** | Steelworkers, electricians, plumbers, steamfitters, inspectors; cranes and powered tools |
+| **Modern** | HVAC, elevator technicians, structural engineers, code inspectors, glazing crews |
+| **Information** | Smart-building technicians, sustainability engineers, complex systems commissioning |
+
+> [!note] Why this matters
+> Construction jobs are a real part of the city's labor market, not a cosmetic animation. A building boom creates demand for trades; a shortage slows the boom and raises wages. This is a lever the player can manage through education, training, and construction capacity.
+
 ### Production
 
 ```json
@@ -328,7 +477,7 @@ The early game is built on the land. These jobs have visible work loops and feed
 | Loop | Plow → plant → water/fertilize → harvest → store; livestock later |
 | Outputs | Grain, vegetables, milk, eggs, meat, wool |
 | Inputs | Seeds, water, feed, labor, tools |
-| Seasons | Growth depends on season/temperature; winter fallow or greenhouse (Q-069) |
+| Seasons | Growth depends on season/temperature; winter fallow or greenhouse; toggleable |
 | LOD | Fields update on a daily/cohort tick; active farmers animate near camera |
 | Upgrades | Irrigation, fertilizer, crop rotation, machinery, greenhouses |
 | Failure | Drought, pests, overwork, soil depletion |
@@ -398,9 +547,17 @@ Utilities are graphs plus demand/supply. They should be readable and fixable, no
 ### Water and sewage
 
 - **Water:** pumps, towers, pipes, treatment; buildings demand water per day.
+- **Water pressure:** tall buildings need pumps/water towers to serve upper floors. Above the pressure limit, upper floors are unusable until boosted. This is a **service gate**, not just a pipe connection.
 - **Sewage:** pipes, treatment plants, discharge; untreated sewage pollutes rivers and groundwater.
-- **Failure:** no water → hygiene/health collapse; no sewage → pollution and disease.
+- **Basements:** below-sewer cellars need a sewage ejector/pump; sump pumps and footing drains handle groundwater.
+- **Failure:** no water → hygiene/health collapse; no sewage → pollution and disease; no pressure → upper floors unusable.
 - **Contamination:** later; requires a water quality model.
+
+### Telecom and data
+
+- **Telephone/fiber** are optional connections for early buildings; they become important for offices, commerce, and happiness.
+- **Missing telecom** is a **soft penalty**: lower land value, office efficiency, and happiness; it does not block occupancy.
+- **High-rise/office** demand for data grows with age; modern towers need fiber and backup connectivity.
 
 ### Garbage
 
@@ -526,11 +683,36 @@ Utilities are graphs plus demand/supply. They should be readable and fixable, no
 
 ## 12. Building runtime
 
+### Construction site state
+
+A placed blueprint starts as a **construction site**, not a building instance:
+
+| Field | Description |
+|---|---|
+| Blueprint ID + version | What is being built |
+| Phase graph | Survey, foundation, structure, envelope, rough-in, finish, commissioning |
+| Current phase + progress | 0–100% per phase |
+| Material stockpile | Delivered materials vs required per phase |
+| Crew slots | Trade, count, skill, assigned workers |
+| Blockers | Missing material, missing trade, no access, permit, weather |
+| Cost | Materials, labor, permits, contractor premiums |
+| Priority | Player-set priority; affects crew assignment |
+| Completion estimate | Updated from current blockers and crew |
+| Inspection | Pass/fail, defects, rework |
+| Visual state | Scaffolding, partial geometry, material piles, cranes |
+
+- The site is saved and synced like any other entity; a reload resumes it exactly.
+- Workers are assigned from the city labor pool; the site competes with other sites for scarce trades.
+- On completion, the site becomes a normal building instance, generates its occupancy/production, and releases temporary crews.
+- A stalled site is a visible problem, not a silent failure: UI alerts and overlays explain the blocker.
+
 Each placed building instance has:
 
 | State | Description |
 |---|---|
 | Blueprint ID + version | Template and content hash |
+| Structure | Structural system(s), material mix, max stories/height/span, bracing, foundation |
+| Sub-ground levels | Cellars, utility basements, later parking; depth, water table, access, drainage, ventilation |
 | Condition | 0–100%; decay, maintenance, damage |
 | Occupants | Households/residents |
 | Workers | Assigned citizens and job slots |
@@ -617,14 +799,20 @@ Each placed building instance has:
 - **Q-045:** Crime and health depth: basic coverage + stats, or deeper simulation?
 - **Q-046:** Will NPCs ever need interior pathfinding?
 - **Q-047:** Should individual citizens be visible at mayor altitude?
-- **Q-048:** Seasons and weather: cosmetic or gameplay-affecting?
-- **Q-062:** What hardware defines the 1M benchmark?
-- **Q-063:** World extent and dormant-region behavior.
-- **Q-064:** Is cohort simulation acceptable for most of the population?
-- **Q-065:** How deep is the living world (trees, crops, animals)?
+- **Q-064:** Is cohort simulation acceptable for most of the population? (Explained above; confirm.)
 - **Q-067:** Ecosystem balance: overhunting, deforestation, predators, pests?
 - **Q-068:** Visible transport for primary industries?
-- **Q-069:** Seasons at launch?
 - **Q-070:** 1M multiplayer server scale.
+- **Q-083:** How much construction management? (Proposal: auto-assign crews, player sets priority/budget.)
+- **Q-084:** Public works vs private contractors? (Proposal: public works + outside contractors.)
+- **Q-085:** Partial occupancy during construction? (Proposal: no; inspect first.)
+- **Q-086:** Do roads/utilities use the same crew model? (Proposal: simplified yes.)
+- **Q-087:** Visible material delivery? (Proposal: trucks near camera.)
+- **Q-088:** Construction time scale? (Proposal: hours/days at 1×.)
+- **Q-089:** Pay extra to expedite? (Proposal: yes, with a premium.)
+- **Q-097:** Basement launch scope: cellars/utility first, habitable/parking later?
+- **Q-098:** Maximum basement depth and groundwater/flood model?
+- **Q-099:** When do underground parking and vehicle ramps arrive?
+- **Q-100:** Underground tunnels/transit between buildings later?
 
 See [[09 - Open Questions]] and [[10 - Decisions]].

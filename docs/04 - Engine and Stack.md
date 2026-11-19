@@ -36,10 +36,10 @@ tags:
 | R7 | Iteration speed for a small team | 10% | Hot reload, scene editor, debuggability |
 | R8 | Licensing and cost | 5% | No royalties, predictable terms |
 
-**Assumption A-001:** small team (1–5 people), PC-first, premium game, no publisher mandates.
+**Assumption A-001:** 2–3 full-time generalists, PC-first, premium game, no publisher mandates.
 
-> [!question] Q-001 — Team profile
-> The engine recommendation depends on the team's skills. A Rust-only team should weigh Bevy more heavily. A C++-only team should use C++ GDExtension. A designer-heavy team should default to Godot + GDScript for tools.
+> [!decision] Q-001 answered — team profile
+> The plan assumes 2–3 full-time generalists with Rust/Godot experience or willingness to learn. The engine recommendation still depends on the Phase 0 spike; if the team is Rust-only, Bevy remains the runner-up.
 
 ## 3. Candidates considered
 
@@ -131,6 +131,9 @@ Scores are **1–5 planning estimates**, not benchmarks. Weights reflect the req
 > [!warning] Two-language cost
 > Rust + GDScript is a real complexity cost: two build systems, two debuggers, two dependency cultures. Mitigate with a **coarse API boundary**, a single `cargo` workspace, CI that builds both, and a rule that GDScript never touches per-voxel data.
 
+> [!important] Rust from day one
+> The first implementation is **Rust**, not a GDScript/C# prototype that gets rewritten later. Phase 0 writes the voxel, worldgen, and cohort prototypes in Rust. GDScript is only the shell/UI layer. If the Godot/Rust bridge fails the Phase 0 spike, the fallback is a **C++ core**, not moving the game into GDScript.
+
 ### 5.4 The engine-agnostic core
 
 The core must not import Godot types. Its public API should look like:
@@ -221,7 +224,7 @@ See [[05 - Multiplayer]] and [[12 - Technical Architecture]].
 
 | Choice | Decision |
 |---|---|
-| Core language | **Rust** by default; C++ if the team is C++-heavy |
+| Core language | **Rust from Phase 0** — primary implementation language; C++ only as fallback |
 | Shell scripting | **GDScript** for UI, glue, tools; no C# in the critical path |
 | Content format | **JSON + JSON Schema**; TOML only for build/tool config |
 | Shaders | Godot shading language; compute via `RenderingDevice` only if needed |
@@ -260,20 +263,24 @@ The recommendation is only valid if the risky parts work. Run this before commit
 1. **Voxel rendering:** load a 24 m × 24 m × 24 m building with ~500k solid voxels; greedy-mesh it; render at 60 FPS at 1080p on the target machine.
 2. **Instancing:** place 200 copies of the same blueprint; measure draw calls and triangles with `MultiMeshInstance3D` + LOD.
 3. **Editing:** add/remove voxels at interactive rates; remesh dirty chunks with a < 4 ms/frame budget; no > 16 ms hitch.
-4. **World streaming:** generate a 2 km × 2 km procedural terrain from a seed; stream world chunks around a moving camera; save/load terrain edits; no hitch over 16 ms.
+4. **World streaming:** generate a 2 km × 2 km procedural terrain from a seed, keep flying beyond it with no hard edge, stream chunks around a moving camera, and save/load terrain edits with no hitch over 16 ms.
 5. **1M cohort simulation:** create 1,000,000 citizen records grouped into ~10,000 cohorts and 250,000 building records; tick cohorts at 1 Hz and 2,000 active agents at 10 Hz; measure CPU and memory.
 6. **Primary jobs:** simulate 200 lumberjacks/farmers/hunters producing resources from trees/fields/wildlife at LOD; verify outputs and save/load.
 7. **Mod loading:** load a PCK mod that adds one material, one tree species, and one blueprint.
 8. **Headless server:** run the Godot headless export with the GDExtension; connect one client; place a voxel; verify authority.
 9. **Memory and load time:** measure RAM, VRAM, save/load time, and chunk streaming for the test scene.
+10. **Benchmark harness:** load a fixed save, run a fixed camera route, record frame times/metrics, export JSON, and compare three runs for variance and overhead. See [[15 - Benchmarks]].
 
 ### Acceptance criteria
 
-- 60 FPS at 1080p on the target machine (define the exact CPU/GPU/RAM before starting).
+- **60 FPS at 1080p** for the 100k-city test scene; **~30 FPS at 1080p** for the 1M-city LOD scene on **8-core/16-thread CPU, RTX 3060 12 GB-class GPU, 16–32 GB RAM**.
 - No frame hitch over 16 ms during continuous editing or chunk streaming.
+- Dedicated-server simulation benchmark: 1M cohorts and 2k active agents within the tick budget, without a GPU.
 - 1M cohort tick within the Phase 0 budget (target: < 60 ms at 1 Hz; active agents < 10 ms at 10 Hz).
 - 2,000 active agents at 10 Hz under 10 ms.
 - Worldgen is deterministic: same seed + edits produces the same hash.
+- The world keeps streaming with no hard edge; only visited chunks are saved.
+- Benchmark harness: three runs of the same scene/route/settings have <5% average FPS variance and <2% recording overhead.
 - PCK mod loads without an engine fork.
 - Headless server runs on Linux without a GPU.
 - The test scene saves and reloads with identical voxel data and terrain edits (hash check).
