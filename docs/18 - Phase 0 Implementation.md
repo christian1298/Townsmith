@@ -22,14 +22,14 @@ tags:
 | `crates/core_voxel` | 32³ chunk, palette/RLE, greedy mesher, demo hut | Working, 24 tests |
 | `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming, terrain mesh + LOD + seam skirts | Working, 58 tests |
 | `crates/core_sim` | 1M-scale cohort simulation plus deterministic 2,000 active agents | Working, 26 tests |
-| `crates/core_city` | Deterministic synthetic Early/Mid/Late city layouts for rendering benchmarks | Working, 9 tests |
+| `crates/core_city` | Deterministic synthetic Early/Mid/Late city layouts for rendering benchmarks | Working, 10 tests |
 | `crates/server` | Headless cohort tick harness (no GPU, no socket yet) | Working |
 | `crates/bench` | Voxel, worldgen, terrain, cohort, active-agent, and city-layout microbenchmarks | Working |
 | `benchmarks/` | Route JSON, results, and benchmark notes | Harness v0 |
 | `scripts/bench_core.sh` | 3-run core benchmark aggregation | Working |
 | `scripts/bench_godot.sh` | 3-run Godot flyover aggregation | Working; headless frame times are not representative |
-| `crates/godot_ext` | Godot 4.7 GDExtension bridge with a Rust terrain worker pool | Working, 5 tests + headless smoke |
-| `godot/` | Preview project; streams 256 m terrain chunks around the camera with distance LOD | Working |
+| `crates/godot_ext` | Godot 4.7 GDExtension bridge with a Rust terrain worker pool and city layout bridge | Working, 6 tests + headless smoke |
+| `godot/` | Preview project; streams terrain and renders synthetic city MultiMeshes | Working |
 | `scripts/` | Build, check, run, and smoke commands | Working |
 
 The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`, and `server` have no Godot dependency.
@@ -110,6 +110,15 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 - The smoke builds the Late layout and asserts 100,000 buildings, every packed array length, bounds, tier, and the seed-2026 checksum.
 - This is a rendering stress fixture, not voxel geometry or simulated occupancy. See [[22 - Synthetic City Layout]].
 
+### City MultiMesh rendering
+
+- `godot/city_renderer.gd` builds one `MultiMeshInstance3D` from the bridge arrays; no per-building nodes.
+- Instance buffer: row-major 3 × 4 transform + RGBA color, 16 floats per building.
+- One opaque vertex-colored material, no shadows, no GI, no LOD.
+- Early/Mid/Late routes; `CITY_TIER` selects the layout in `bench_godot.sh`.
+- Debug-build headless build times: Early ~1 ms, Mid ~12–16 ms, Late ~110–115 ms (layout ~80–85 ms + buffer ~25–30 ms). 100k instances use 6.4 MB.
+- Headless FPS is not render-representative. See [[23 - City Rendering Benchmark]].
+
 ### Benchmark harness v0
 
 - `scripts/bench_core.sh` runs meshing, worldgen, terrain, and cohort benchmarks three times and writes a median JSON summary.
@@ -160,8 +169,8 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 ## 4. Next steps
 
 1. Add a depth-based shoreline/foam pass on top of the water shader.
-2. Build the Early/Mid/Late city benchmark scenes and routes.
-3. Measure the 30 FPS 1M rendering target on 8-core/16-thread + RTX 3060-class hardware.
+2. Run the Early/Mid/Late city routes on the 8-core/16-thread + RTX 3060-class target with a display.
+3. Measure the 30 FPS 1M-population (100k-building) rendering target and record FPS/1% lows/hitches.
 4. Decide D-003 (Godot + Rust) from measured results.
 
 ## 5. Commands
@@ -173,6 +182,8 @@ cargo test -p core_voxel
 GODOT=/path/to/godot ./scripts/run_godot.sh
 GODOT=/path/to/godot ./scripts/smoke_godot.sh
 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_streaming_flyover.json
+CITY_TIER=late GODOT=/path/to/godot ./scripts/bench_godot.sh 1 5 benchmarks/routes/phase0_city_late.json
+GODOT=/path/to/godot ./scripts/smoke_city.sh
 cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort

@@ -1,0 +1,13 @@
+{
+  "id": "phase0_city_late_v1",
+  "description": "Phase 0 synthetic Late metropolis flyover: 8 km city, 100,000 buildings, 1M population.",
+  "duration_seconds": 30,
+  "warmup_seconds": 3,
+  "waypoints": [
+    { "t": 0.0, "position": [0, 520, 6800], "look_at": [0, 120, 0], "fov": 70 },
+    { "t": 0.25, "position": [3200, 620, 4200], "look_at": [0, 160, 0], "fov": 68 },
+    { "t": 0.5, "position": [4800, 700, 0], "look_at": [0, 180, 0], "fov": 65 },
+    { "t": 0.75, "position": [2400, 620, -3800], "look_at": [0, 140, 0], "fov": 72 },
+    { "t": 1.0, "position": [0, 800, -6800], "look_at": [0, 100, 0], "fov": 70 }
+  ]
+}

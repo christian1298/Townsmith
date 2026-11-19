@@ -247,6 +247,10 @@ cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5
 # Multi-chunk streaming route
 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_streaming_flyover.json
+
+# Synthetic city routes (200 / 10k / 100k buildings)
+CITY_TIER=late GODOT=/path/to/godot ./scripts/bench_godot.sh 1 5 benchmarks/routes/phase0_city_late.json
+GODOT=/path/to/godot ./scripts/smoke_city.sh
 ```
 
 Godot is not on `PATH` on every machine; `GODOT` selects the binary. The extension is copied to `godot/bin/libtownsmith_core.so` and is gitignored.
