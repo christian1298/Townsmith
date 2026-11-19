@@ -4,7 +4,7 @@
 
 Townsmith is a city-builder about authorship: design buildings voxel by voxel in first person, then place them in a living city you manage from above. The city builds itself over time with materials, crews, and trades; citizens live, work, and react to the world you shape.
 
-> **Status:** pre-production / Phase 0 spike. The Rust voxel core and Godot 4.7 GDExtension bridge run headless; there is no gameplay yet. The design and technical plan live in an Obsidian-compatible vault in [`docs/`](docs/). The engine choice remains proposed until the spike completes.
+> **Status:** pre-production / Phase 0 spike. The Rust voxel core, deterministic terrain worldgen/streaming, and Godot 4.7 GDExtension bridge run headless; there is no gameplay yet. The design and technical plan live in an Obsidian-compatible vault in [`docs/`](docs/). The engine choice remains proposed until the spike completes.
 
 ## At a glance
 
@@ -18,7 +18,7 @@ Townsmith is a city-builder about authorship: design buildings voxel by voxel in
 | **Multiplayer** | Co-op and dedicated servers |
 | **Platform** | Linux and Windows |
 | **Stack** | Godot 4.7 shell + Rust core (spike in progress) |
-| **Status** | Phase 0; headless voxel core + bridge |
+| **Status** | Phase 0; headless voxel core, worldgen, and bridge |
 
 ## What makes it different
 
@@ -42,7 +42,7 @@ Start with the index; it has reading paths for players, designers, engineers, an
 ## Repository layout
 
 ```text
-crates/      Rust core; core_voxel and the Phase 0 bench/bridge
+crates/      Rust core; core_voxel, core_world, bench, and the Godot bridge
 godot/       Godot 4.7 project and GDExtension preview
 scripts/     Build, check, run, and headless smoke commands
 docs/        Obsidian-compatible design and technical vault
@@ -56,11 +56,13 @@ Requires Rust 1.94+ and Godot 4.7+.
 
 ```bash
 cargo test -p core_voxel                  # fast voxel tests
+cargo test -p core_world                  # worldgen/streaming tests
 ./scripts/check.sh                        # fmt + clippy + workspace tests
 ./scripts/build_godot_ext.sh              # build the GDExtension library
 GODOT=/path/to/godot ./scripts/run_godot.sh
 GODOT=/path/to/godot ./scripts/smoke_godot.sh
 cargo run --release -p townsmith-bench -- 100
+cargo run --release -p townsmith-bench --bin worldgen
 ```
 
 See [`docs/12 - Technical Architecture.md`](docs/12%20-%20Technical%20Architecture.md) for the module boundaries and [`docs/15 - Benchmarks.md`](docs/15%20-%20Benchmarks.md) for the benchmark plan.

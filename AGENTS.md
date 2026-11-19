@@ -224,6 +224,9 @@ GODOT=/path/to/godot ./scripts/smoke_godot.sh
 
 # Voxel meshing microbenchmark
 cargo run --release -p townsmith-bench -- 100
+
+# Worldgen/streaming microbenchmark
+cargo run --release -p townsmith-bench --bin worldgen
 ```
 
 Godot is not on `PATH` on every machine; `GODOT` selects the binary. The extension is copied to `godot/bin/libtownsmith_core.so` and is gitignored.

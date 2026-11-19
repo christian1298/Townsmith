@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/core_voxel",
+    "crates/core_world",
     "crates/bench",
     "crates/godot_ext",
 ]
@@ -14,6 +15,7 @@ publish = false
 
 [workspace.dependencies]
 core_voxel = { path = "crates/core_voxel" }
+core_world = { path = "crates/core_world" }
 
 [profile.release]
 lto = "thin"
