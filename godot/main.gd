@@ -55,11 +55,23 @@ func _run_smoke() -> void:
 		if lod_text != "":
 			lod_text += ","
 		lod_text += str(lod)
+	var city_core := TownsmithCore.new()
+	var city: Dictionary = city_core.build_city_layout(2, 2026)
+	var city_buildings := int(city.get("buildings", 0))
+	var city_positions: PackedVector3Array = city.get("positions", PackedVector3Array())
+	print("CITY buildings=%d positions=%d bounds=%s" % [
+		city_buildings,
+		city_positions.size(),
+		city.get("bounds", PackedFloat32Array()),
+	])
+
 	var status := "ok"
 	if streamer.chunk_count() < 9:
 		status = "timeout"
 	elif not lods.has(1) or not lods.has(2):
 		status = "missing_lods"
+	elif city_buildings != 100000 or city_positions.size() != 100000:
+		status = "city_failed"
 	print("SMOKE chunks=%d lods=%s status=%s elapsed_ms=%d" % [
 		streamer.chunk_count(),
 		lod_text,
