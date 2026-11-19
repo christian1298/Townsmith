@@ -106,6 +106,14 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 - `scripts/bench_godot.sh` builds the scene, records frame times, hitches, and 1% lows, and writes a 3-run summary.
 - The headless path validates routing and result JSON; it does not measure GPU rendering.
 
+### Cross-platform CI
+
+- `.github/workflows/ci.yml` runs three jobs: `Rust` (Ubuntu; fmt, clippy, workspace tests, GDExtension build), `Rust (Windows)` (clippy, workspace tests, `cargo build --workspace`, DLL presence check), and `Godot headless smoke` (Ubuntu only).
+- The Windows job runs on `windows-latest` with the MSVC host toolchain, the same `-D warnings` clippy gate, and the same 98 tests as Linux.
+- It proves the workspace and the GDExtension cdylib (`townsmith_core.dll`) compile and link on Windows, which is the Phase 0 exit requirement for a Windows build.
+- `cargo fmt` is enforced once, on Linux; it is platform-independent and duplicating it on Windows only risks CRLF noise.
+- The Windows job does **not** run Godot or the benchmark routes (see the limitations below).
+
 ### Microbenchmark
 
 `cargo run --release -p townsmith-bench -- 100` on the current machine:
@@ -136,6 +144,7 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 - The Godot benchmark has single-chunk and multi-chunk terrain routes; it is not the Early/Mid/Late city benchmark yet, and headless frame times are not render measurements.
 - Async chunk completion order is scheduling-dependent; the camera/settings are deterministic, but the frame at which a chunk appears is not yet deterministic (D-020 caveat).
 - The headless server has no networking, persistence, or commands yet; it only proves the CPU tick path.
+- Windows CI validates compile, clippy, and tests only. The Godot headless smoke, benchmark routes, and packaging stay Linux-only, and `godot/townsmith_core.gdextension` still declares only `linux.*` library paths, so a Windows Godot run needs `windows.*` entries before it can be added.
 - The engine choice is still **proposed** until the Phase 0 spike completes.
 
 ## 4. Next steps

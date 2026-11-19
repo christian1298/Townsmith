@@ -24,6 +24,42 @@ jobs:
       - name: Build GDExtension
         run: cargo build -p godot_ext
 
+  # Windows stays a separate job (not a matrix leg) so the existing required
+  # check name "Rust" is unchanged and the Windows leg can be skipped or
+  # debugged without renaming the Linux gate.
+  windows:
+    name: Rust (Windows)
+    runs-on: windows-latest
+    steps:
+      # The Windows images default to core.autocrlf=true. Pin LF so the
+      # Windows build sees byte-identical sources to Linux; rustfmt and the
+      # Godot resource loader both expect LF.
+      - name: Use LF line endings
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # `cargo fmt` is platform-independent and already enforced by the
+      # Linux job; skipping it here avoids duplicate work and line-ending noise.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      # `cargo test` only builds test harnesses; this links the GDExtension
+      # cdylib as a real Windows DLL, which is the Phase 0 deliverable.
+      - name: Build workspace
+        run: cargo build --workspace
+      - name: Verify GDExtension DLL
+        shell: pwsh
+        run: |
+          $dll = "target/debug/townsmith_core.dll"
+          if (-not (Test-Path $dll)) {
+            throw "Missing $dll - the GDExtension cdylib did not link on Windows"
+          }
+          Get-Item $dll | Select-Object Name, Length
+
   godot-smoke:
     name: Godot headless smoke
     runs-on: ubuntu-latest
