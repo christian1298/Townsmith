@@ -96,6 +96,7 @@ Each scene has one or more **fixed camera routes**. A route is a sequence of way
 - **Street-level route:** drops to eye level, follows a sidewalk/road, passes traffic and crowds, and rises back to the skyline.
 - **Phase 0 terrain routes:** `phase0_flyover.json` covers one 256 m chunk; `phase0_streaming_flyover.json` crosses three chunks and exercises LOD 1/2/4 streaming.
 - **Phase 0 city routes:** `phase0_city_early.json` (600 m / 200 buildings), `phase0_city_mid.json` (3 km / 10k), `phase0_city_late.json` (8 km / 100k). City runs include MultiMesh build/layout/buffer times and city stats.
+- **Phase 0 voxel route:** `phase0_voxel_instances.json` renders 200 greedy-meshed 10 cm huts. Run with `VOXEL_INSTANCES=200`; see [[24 - Voxel Instance Benchmark]].
 - **Duration:** 90–180 seconds of measured movement, plus 10–15 seconds of warm-up (not measured).
 - **Frame-rate independent:** the camera advances by fixed time, not by frame count. A 30 FPS run and a 60 FPS run see the same views.
 - **Deterministic:** no user input, no random camera shake, no dynamic events unless pre-scripted.
