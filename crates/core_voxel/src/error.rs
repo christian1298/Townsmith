@@ -6,7 +6,7 @@ use std::fmt;
 /// A voxel, palette, or encoding error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VoxelError {
-    /// A coordinate was outside the 32 x 32 x 32 chunk.
+    /// A coordinate was outside the target chunk or volume.
     OutOfBounds { x: usize, y: usize, z: usize },
     /// A run-length stream did not cover exactly one chunk.
     InvalidRunLength { expected: usize, actual: usize },
@@ -24,7 +24,10 @@ impl fmt::Display for VoxelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::OutOfBounds { x, y, z } => {
-                write!(f, "voxel coordinate ({x}, {y}, {z}) is outside the chunk")
+                write!(
+                    f,
+                    "voxel coordinate ({x}, {y}, {z}) is outside the target grid"
+                )
             }
             Self::InvalidRunLength { expected, actual } => {
                 write!(f, "RLE stream covers {actual} voxels, expected {expected}")
