@@ -21,9 +21,9 @@ tags:
 |---|---|---|
 | `crates/core_voxel` | 32³ chunk, palette/RLE, greedy mesher, demo hut | Working, 24 tests |
 | `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming, terrain mesh + LOD | Working, 44 tests |
-| `crates/core_sim` | 1M-scale cohort simulation: needs, happiness, employment, district services | Working, 11 tests |
+| `crates/core_sim` | 1M-scale cohort simulation plus deterministic 2,000 active agents | Working, 26 tests |
 | `crates/server` | Headless cohort tick harness (no GPU, no socket yet) | Working |
-| `crates/bench` | Voxel meshing, worldgen streaming, terrain, and 1M cohort microbenchmarks | Working |
+| `crates/bench` | Voxel meshing, worldgen, terrain, 1M cohort, and active-agent microbenchmarks | Working |
 | `benchmarks/` | Route JSON, results, and benchmark notes | Harness v0 |
 | `scripts/bench_core.sh` | 3-run core benchmark aggregation | Working |
 | `scripts/bench_godot.sh` | 3-run Godot flyover aggregation | Working; headless frame times are not representative |
@@ -69,6 +69,14 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 - The Godot preview streams multiple 256 m chunks; the water plane is a placeholder.
 - Multi-chunk meshing uses a neighbor-agnostic LOD sampler. Chunk-boundary faces are still treated as exposed.
 
+### Active agents
+
+- 2,000 agents at a fixed 10 Hz step, with deterministic spawn, steering, and local separation.
+- Uniform spatial hash with 4 m cells; at most 16 neighbors considered per agent per tick.
+- Sparse 128 m world: **~0.19 ms median** tick (p95 ~0.23 ms), ~1.9% of the 10 ms budget.
+- Dense 32 m stress world: **~0.90 ms median** tick (p95 ~1.03 ms), ~9% of the budget; 1,575 agents hit the neighbor cap.
+- No pathfinding, collision, schedules, or rendering yet. See [[19 - Active Agent Benchmark]].
+
 ### Cohort simulation
 
 - 10,000 cohorts × 100 citizens = 1,000,000 citizens.
@@ -95,6 +103,8 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, and `server
 | Demo hut | 3,931 | 1,867 | 56 | ~0.5 ms |
 | Worldgen, 3 × 3 chunks | 589,824 cells | — | — | ~131 ms load / ~128 ms reload |
 | Cohort, 1M citizens | — | — | — | ~0.21 ms/tick |
+| Active agents, 2k sparse | — | — | — | ~0.19 ms/tick |
+| Active agents, 2k dense | — | — | — | ~0.90 ms/tick |
 | Terrain mesh, 256 m chunk | 65,536 cells | — | 83,994 quads | ~1.41 ms |
 | Terrain LOD 2, 256 m chunk | 65,536 cells | — | 25,327 quads | ~0.39 ms |
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
@@ -134,6 +144,7 @@ GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_strea
 cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort
+cargo run --release -p townsmith-bench --bin agents
 cargo run --release -p townsmith-bench --bin terrain
 cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
 ```

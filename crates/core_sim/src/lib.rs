@@ -11,8 +11,9 @@ pub mod district;
 pub mod sim;
 
 pub use active::{
-    ActiveAgent, ActiveAgentSim, Pcg32, SpatialHash, ARRIVAL_RADIUS, DEFAULT_AGENT_COUNT,
-    DEFAULT_WORLD_SIZE, MAX_NEIGHBORS, SEPARATION_RADIUS, TICK_DT,
+    ActiveAgent, ActiveAgentSim, NeighborStats, Pcg32, SpatialHash, ARRIVAL_RADIUS,
+    DEFAULT_AGENT_COUNT, DEFAULT_WORLD_SIZE, MAX_NEIGHBORS, MIN_WORLD_SIZE, SEPARATION_RADIUS,
+    TICK_DT,
 };
 pub use cohort::{Cohort, Need, NEED_COUNT};
 pub use district::DistrictServices;

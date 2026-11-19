@@ -231,6 +231,9 @@ cargo run --release -p townsmith-bench --bin worldgen
 # 1M cohort tick microbenchmark
 cargo run --release -p townsmith-bench --bin cohort
 
+# 2,000 active-agent tick benchmark (sparse + dense)
+cargo run --release -p townsmith-bench --bin agents
+
 # Terrain mesh microbenchmark
 cargo run --release -p townsmith-bench --bin terrain
 

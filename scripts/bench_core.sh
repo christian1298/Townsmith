@@ -15,6 +15,7 @@ for run in $(seq 1 "$RUNS"); do
 	"$ROOT/target/release/worldgen" > "$TMP/worldgen_$run.json"
 	"$ROOT/target/release/terrain" > "$TMP/terrain_$run.json"
 	"$ROOT/target/release/cohort" > "$TMP/cohort_$run.json"
+	"$ROOT/target/release/agents" > "$TMP/agents_$run.json"
 done
 
 python3 - "$TMP" "$OUT_DIR/phase0_core_summary.json" "$RUNS" <<'PY'
@@ -58,6 +59,10 @@ result = {
         "terrain_lod_4_ms": median("terrain", "lod_4_median_ms"),
         "cohort_tick_ms": median("cohort", "tick_ms_median"),
         "cohort_tick_p95_ms": median("cohort", "tick_ms_p95"),
+        "active_tick_ms": median("agents", "tick_ms_median"),
+        "active_tick_p95_ms": median("agents", "tick_ms_p95"),
+        "active_dense_tick_ms": median("agents", "dense_tick_ms_median"),
+        "active_dense_tick_p95_ms": median("agents", "dense_tick_ms_p95"),
     },
 }
 out.parent.mkdir(parents=True, exist_ok=True)

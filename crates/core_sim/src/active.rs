@@ -16,6 +16,14 @@ pub const TICK_DT: f32 = 0.1;
 pub const DEFAULT_AGENT_COUNT: usize = 2_000;
 /// Side length of the default square agent world, in meters.
 pub const DEFAULT_WORLD_SIZE: f32 = 128.0;
+/// Smallest square world accepted by [`ActiveAgentSim::with_world_size`], in
+/// meters.
+///
+/// The spawn target rule needs [`MIN_TARGET_DISTANCE`] of room on both sides of
+/// a spawn position, plus [`SPAWN_MARGIN`] at both world edges:
+/// `2 * SPAWN_MARGIN + 2 * MIN_TARGET_DISTANCE`. Smaller worlds fall back to
+/// [`DEFAULT_WORLD_SIZE`], where the target rule is always satisfiable.
+pub const MIN_WORLD_SIZE: f32 = 2.0 * SPAWN_MARGIN + 2.0 * MIN_TARGET_DISTANCE;
 /// Distance at which an agent stops steering toward its target.
 pub const ARRIVAL_RADIUS: f32 = 0.5;
 /// Radius at which agents push each other apart.
@@ -38,6 +46,13 @@ const SPAWN_MARGIN: f32 = 2.0;
 const MIN_TARGET_DISTANCE: f32 = 8.0;
 /// Uniform hash cell size, in meters.
 const SPATIAL_CELL_SIZE: f32 = 4.0;
+/// Hard cap on the number of cells along either axis.
+///
+/// The grid is a flat `Vec<Vec<CellEntry>>`, so `cols * rows` must stay small
+/// enough to allocate and index safely for any world size. Larger worlds are
+/// clamped to their edge cells, the same rule used for out-of-bounds
+/// positions. 256 × 256 = 65,536 cells is ~1.5 MB of empty buckets.
+const MAX_CELLS_PER_AXIS: usize = 256;
 /// Squared distance below which two agents are treated as coincident.
 const COINCIDENT_DISTANCE_SQUARED: f32 = 1.0e-12;
 
@@ -131,6 +146,9 @@ struct CellEntry {
 impl SpatialHash {
     /// Create a hash covering `width` × `height` meters with roughly
     /// `cell_size`-meter cells.
+    ///
+    /// Each axis is capped at 256 cells, so very large worlds share one edge
+    /// cell per direction instead of allocating without bound.
     #[must_use]
     pub fn new(cell_size: f32, width: f32, height: f32) -> Self {
         let cell_size = if cell_size.is_finite() && cell_size > 0.0 {
@@ -148,8 +166,8 @@ impl SpatialHash {
         } else {
             1.0
         };
-        let cols = ((width / cell_size).ceil() as usize).max(1);
-        let rows = ((height / cell_size).ceil() as usize).max(1);
+        let cols = ((width / cell_size).ceil() as usize).clamp(1, MAX_CELLS_PER_AXIS);
+        let rows = ((height / cell_size).ceil() as usize).clamp(1, MAX_CELLS_PER_AXIS);
         Self {
             cell_size,
             cols,
@@ -165,9 +183,18 @@ impl SpatialHash {
         }
     }
 
+    /// Total number of cells (`cols × rows`).
+    #[must_use]
+    pub fn cell_count(&self) -> usize {
+        self.cells.len()
+    }
+
     /// Insert an index at `position`.
     ///
-    /// Positions outside the covered area are clamped to the nearest edge cell.
+    /// Positions outside the covered area are clamped to the nearest edge
+    /// cell. `+∞` maps to the far edge; `-∞` and NaN map to the first cell.
+    /// A NaN position is stored but never returned by [`Self::query_circle`],
+    /// because its distance is NaN and fails the exact filter.
     pub fn insert(&mut self, index: u32, position: [f32; 2]) {
         let (col, row) = self.cell_coord(position[0], position[1]);
         self.cells[row * self.cols + col].push(CellEntry { index, position });
@@ -177,7 +204,9 @@ impl SpatialHash {
     /// insertion order.
     ///
     /// `out` is cleared first. The result is exact: entries in overlapping
-    /// cells that lie outside the circle are filtered out.
+    /// cells that lie outside the circle are filtered out. A non-finite center
+    /// is clamped like an inserted position (`+∞` far edge, `-∞`/NaN first
+    /// cell), and a non-finite `radius` yields no results.
     pub fn query_circle(&self, center: [f32; 2], radius: f32, out: &mut Vec<u32>) {
         out.clear();
         if !radius.is_finite() || radius < 0.0 {
@@ -203,23 +232,46 @@ impl SpatialHash {
     }
 
     fn cell_coord(&self, x: f32, y: f32) -> (usize, usize) {
-        let col = (x / self.cell_size).floor();
-        let row = (y / self.cell_size).floor();
-        let col = if col.is_finite() {
-            (col as usize).min(self.cols - 1)
-        } else {
-            0
-        };
-        let row = if row.is_finite() {
-            (row as usize).min(self.rows - 1)
-        } else {
-            0
-        };
-        (col, row)
+        (
+            axis_cell(x, self.cell_size, self.cols),
+            axis_cell(y, self.cell_size, self.rows),
+        )
     }
 }
 
+/// Map one coordinate to a cell index, clamping non-finite values to an edge.
+fn axis_cell(value: f32, cell_size: f32, len: usize) -> usize {
+    debug_assert!(len > 0);
+    let cell = (value / cell_size).floor();
+    if cell.is_nan() || cell <= 0.0 {
+        return 0;
+    }
+    let last = len - 1;
+    if cell >= last as f32 {
+        return last;
+    }
+    cell as usize
+}
+
+/// Diagnostic neighbor counts for the current agent state.
+///
+/// Counts are exact: every other agent within [`SEPARATION_RADIUS`], without
+/// the [`MAX_NEIGHBORS`] cap. [`Self::at_cap`] reports how many agents have
+/// more neighbors than a tick can consider.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NeighborStats {
+    /// Mean number of neighbors per agent.
+    pub mean: f32,
+    /// Largest neighbor count seen for one agent.
+    pub max: usize,
+    /// Agents with more than [`MAX_NEIGHBORS`] neighbors, so the tick ignores
+    /// the rest.
+    pub at_cap: usize,
+}
+
 /// Active agents, their spatial index, and fixed-timestep steering.
+///
+/// Agent ids are `u32`; a simulation holds fewer than `u32::MAX` agents.
 #[derive(Debug, Clone)]
 pub struct ActiveAgentSim {
     agents: Vec<ActiveAgent>,
@@ -239,10 +291,17 @@ impl ActiveAgentSim {
 
     /// Create `agent_count` agents in a square world of `world_size` meters.
     ///
-    /// Invalid or too-small world sizes fall back to [`DEFAULT_WORLD_SIZE`].
+    /// World sizes below [`MIN_WORLD_SIZE`] (or non-finite sizes) fall back to
+    /// [`DEFAULT_WORLD_SIZE`]. The minimum guarantees that a spawn position has
+    /// room for a target [`MIN_TARGET_DISTANCE`] away on the x axis in either
+    /// direction, without relying on wrap-around.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `agent_count` exceeds `u32::MAX`, since ids are `u32`.
     #[must_use]
     pub fn with_world_size(agent_count: usize, seed: u64, world_size: f32) -> Self {
-        let world_size = if world_size.is_finite() && world_size > SPAWN_MARGIN * 2.0 {
+        let world_size = if world_size.is_finite() && world_size >= MIN_WORLD_SIZE {
             world_size
         } else {
             DEFAULT_WORLD_SIZE
@@ -250,7 +309,7 @@ impl ActiveAgentSim {
 
         let mut rng = Pcg32::new(seed);
         let agents = (0..agent_count)
-            .map(|index| spawn_agent(index as u32, &mut rng, world_size))
+            .map(|index| spawn_agent(agent_id(index), &mut rng, world_size))
             .collect();
 
         Self {
@@ -269,13 +328,13 @@ impl ActiveAgentSim {
 
         self.grid.clear();
         for (index, agent) in self.agents.iter().enumerate() {
-            self.grid.insert(index as u32, agent.position);
+            self.grid.insert(agent_id(index), agent.position);
         }
 
         self.steering.clear();
         self.steering.reserve(self.agents.len());
         for (index, agent) in self.agents.iter().enumerate() {
-            let desired =
+            let (desired, _) =
                 desired_velocity(index, agent, &self.agents, &self.grid, &mut self.neighbors);
             self.steering.push(desired);
         }
@@ -287,6 +346,46 @@ impl ActiveAgentSim {
             agent.position[0] += agent.velocity[0] * TICK_DT;
             agent.position[1] += agent.velocity[1] * TICK_DT;
             clamp_to_world(agent, self.world_size);
+        }
+    }
+
+    /// Compute exact neighbor statistics for the current state.
+    ///
+    /// Diagnostic use only: this rebuilds the spatial hash and allocates, so it
+    /// is not part of the per-tick path.
+    #[must_use]
+    pub fn neighbor_stats(&self) -> NeighborStats {
+        if self.agents.is_empty() {
+            return NeighborStats {
+                mean: 0.0,
+                max: 0,
+                at_cap: 0,
+            };
+        }
+
+        let mut grid = SpatialHash::new(SPATIAL_CELL_SIZE, self.world_size, self.world_size);
+        for (index, agent) in self.agents.iter().enumerate() {
+            grid.insert(agent_id(index), agent.position);
+        }
+
+        let mut scratch = Vec::new();
+        let mut total = 0usize;
+        let mut max = 0usize;
+        let mut at_cap = 0usize;
+        for (index, agent) in self.agents.iter().enumerate() {
+            grid.query_circle(agent.position, SEPARATION_RADIUS, &mut scratch);
+            let neighbors = scratch.iter().filter(|&&id| id as usize != index).count();
+            total += neighbors;
+            max = max.max(neighbors);
+            if neighbors > MAX_NEIGHBORS {
+                at_cap += 1;
+            }
+        }
+
+        NeighborStats {
+            mean: total as f32 / self.agents.len() as f32,
+            max,
+            at_cap,
         }
     }
 
@@ -321,6 +420,14 @@ impl ActiveAgentSim {
     }
 }
 
+/// Convert an agent index to its stable `u32` id.
+///
+/// One simulation holds fewer than `u32::MAX` agents; this conversion fails
+/// loudly instead of truncating if that invariant is ever violated.
+fn agent_id(index: usize) -> u32 {
+    u32::try_from(index).expect("active agent count exceeds u32::MAX")
+}
+
 fn spawn_agent(id: u32, rng: &mut Pcg32, world_size: f32) -> ActiveAgent {
     let usable = world_size - 2.0 * SPAWN_MARGIN;
     let position = [
@@ -345,13 +452,17 @@ fn spawn_agent(id: u32, rng: &mut Pcg32, world_size: f32) -> ActiveAgent {
     }
 }
 
+/// Desired velocity for one agent, plus the number of neighbors considered.
+///
+/// The neighbor count is returned for tests and diagnostics; the tick ignores
+/// it. It is capped at [`MAX_NEIGHBORS`].
 fn desired_velocity(
     index: usize,
     agent: &ActiveAgent,
     agents: &[ActiveAgent],
     grid: &SpatialHash,
     neighbors: &mut Vec<u32>,
-) -> [f32; 2] {
+) -> ([f32; 2], usize) {
     let to_target = [
         agent.target[0] - agent.position[0],
         agent.target[1] - agent.position[1],
@@ -399,9 +510,12 @@ fn desired_velocity(
         }
     }
 
-    let push_length = (push[0] * push[0] + push[1] * push[1]).sqrt();
-    if push_length > 0.0 {
-        let scale = agent.speed * SEPARATION_STRENGTH / push_length;
+    // Apply the raw weighted sum: the linear weight sets both the direction and
+    // the magnitude of the push. Normalizing here would make a 1.99 m neighbor
+    // push as hard as a 0.2 m one. The final clamp below bounds the result to
+    // the agent's walking speed.
+    if push[0] != 0.0 || push[1] != 0.0 {
+        let scale = agent.speed * SEPARATION_STRENGTH;
         desired[0] += push[0] * scale;
         desired[1] += push[1] * scale;
     }
@@ -412,7 +526,7 @@ fn desired_velocity(
         desired[0] *= scale;
         desired[1] *= scale;
     }
-    desired
+    (desired, considered)
 }
 
 fn clamp_to_world(agent: &mut ActiveAgent, world_size: f32) {
@@ -444,6 +558,18 @@ mod tests {
             velocity: [0.0, 0.0],
             target: [x + 10.0, y],
             speed: 1.4,
+        }
+    }
+
+    /// An agent with no steering: its target is its own position, so any
+    /// desired velocity comes from separation alone.
+    fn stationary_agent(id: u32, position: [f32; 2], speed: f32) -> ActiveAgent {
+        ActiveAgent {
+            id,
+            position,
+            velocity: [0.0, 0.0],
+            target: position,
+            speed,
         }
     }
 
@@ -483,7 +609,7 @@ mod tests {
     fn agents_move_toward_their_targets() {
         let mut sim = ActiveAgentSim::new(1, 7);
         let before = sim.agents()[0].distance_to_target();
-        assert!(before > MIN_TARGET_DISTANCE);
+        assert!(before >= MIN_TARGET_DISTANCE);
 
         sim.tick();
 
@@ -491,6 +617,170 @@ mod tests {
         assert!(after < before, "expected {after} < {before}");
         assert!(sim.agents()[0].velocity[0].is_finite());
         assert!(sim.agents()[0].velocity[1].is_finite());
+    }
+
+    #[test]
+    fn zero_agents_tick_is_a_no_op() {
+        let mut sim = ActiveAgentSim::new(0, 99);
+        assert!(sim.is_empty());
+        assert_eq!(sim.agent_count(), 0);
+
+        for _ in 0..10 {
+            sim.tick();
+        }
+        assert_eq!(sim.tick_count(), 10);
+        assert!(sim.agents().is_empty());
+
+        let stats = sim.neighbor_stats();
+        assert_eq!(
+            stats,
+            NeighborStats {
+                mean: 0.0,
+                max: 0,
+                at_cap: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn separation_falls_off_with_distance() {
+        fn push_magnitude(distance: f32) -> f32 {
+            let agent = stationary_agent(0, [1.0, 1.0], 0.5);
+            let other = stationary_agent(1, [1.0 + distance, 1.0], 0.5);
+            let agents = vec![agent, other];
+            let mut grid = SpatialHash::new(4.0, 16.0, 16.0);
+            for (index, agent) in agents.iter().enumerate() {
+                grid.insert(u32::try_from(index).unwrap(), agent.position);
+            }
+
+            let mut scratch = Vec::new();
+            let (desired, considered) =
+                desired_velocity(0, &agents[0], &agents, &grid, &mut scratch);
+            assert_eq!(considered, 1);
+            assert!(desired[0] < 0.0, "push should point away from the neighbor");
+            (desired[0] * desired[0] + desired[1] * desired[1]).sqrt()
+        }
+
+        // Weight is 1 - d / radius; the raw weighted sum is scaled by
+        // speed * SEPARATION_STRENGTH before the final speed clamp.
+        let near = push_magnitude(0.75);
+        let far = push_magnitude(1.9);
+        let expected_near = 0.5 * SEPARATION_STRENGTH * (1.0 - 0.75 / SEPARATION_RADIUS);
+        let expected_far = 0.5 * SEPARATION_STRENGTH * (1.0 - 1.9 / SEPARATION_RADIUS);
+        assert!(
+            (near - expected_near).abs() < 1.0e-5,
+            "near push {near} != {expected_near}"
+        );
+        assert!(
+            (far - expected_far).abs() < 1.0e-5,
+            "far push {far} != {expected_far}"
+        );
+        assert!(
+            near > far * 5.0,
+            "near push {near} should be much stronger than far push {far}"
+        );
+
+        // A touching neighbor exceeds the speed clamp; the result is bounded by
+        // speed instead of growing without limit.
+        let touching = push_magnitude(0.2);
+        assert!((touching - 0.5).abs() < 1.0e-5, "touching push {touching}");
+    }
+
+    #[test]
+    fn coincident_agents_push_apart_deterministically() {
+        let agents = vec![
+            stationary_agent(0, [5.0, 5.0], 0.5),
+            stationary_agent(1, [5.0, 5.0], 0.5),
+            stationary_agent(2, [5.0, 5.0], 0.5),
+        ];
+        let mut grid = SpatialHash::new(4.0, 16.0, 16.0);
+        for (index, agent) in agents.iter().enumerate() {
+            grid.insert(u32::try_from(index).unwrap(), agent.position);
+        }
+
+        let mut scratch = Vec::new();
+        let desired: Vec<[f32; 2]> = (0..agents.len())
+            .map(|index| {
+                let (velocity, _) =
+                    desired_velocity(index, &agents[index], &agents, &grid, &mut scratch);
+                velocity
+            })
+            .collect();
+
+        // The lower id is pushed toward -x, the higher toward +x, and the
+        // middle agent's two pushes cancel.
+        assert!(desired[0][0] < 0.0, "agent 0 should move toward -x");
+        assert_eq!(desired[1], [0.0, 0.0], "middle agent should cancel out");
+        assert!(desired[2][0] > 0.0, "agent 2 should move toward +x");
+        for velocity in &desired {
+            assert!(velocity[0].is_finite());
+            assert!(velocity[1].is_finite());
+        }
+    }
+
+    #[test]
+    fn neighbor_cap_limits_considered_neighbors() {
+        let count = MAX_NEIGHBORS + 4;
+        let agents: Vec<ActiveAgent> = (0..count)
+            .map(|id| stationary_agent(u32::try_from(id).unwrap(), [2.0, 2.0], 0.5))
+            .collect();
+        let mut grid = SpatialHash::new(4.0, 16.0, 16.0);
+        for (index, agent) in agents.iter().enumerate() {
+            grid.insert(u32::try_from(index).unwrap(), agent.position);
+        }
+
+        let mut scratch = Vec::new();
+        let (desired, considered) = desired_velocity(0, &agents[0], &agents, &grid, &mut scratch);
+        assert_eq!(considered, MAX_NEIGHBORS);
+        assert!(desired[0].is_finite());
+        assert!(desired[1].is_finite());
+
+        // Neighbor statistics are exact and report the overflow instead.
+        let sim = ActiveAgentSim {
+            agents,
+            grid,
+            neighbors: Vec::new(),
+            steering: Vec::new(),
+            world_size: 16.0,
+            tick_count: 0,
+        };
+        let stats = sim.neighbor_stats();
+        assert_eq!(stats.max, count - 1);
+        assert_eq!(stats.at_cap, count);
+        assert!((stats.mean - (count - 1) as f32).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn worlds_below_the_minimum_fall_back_to_the_default() {
+        for bad in [
+            MIN_WORLD_SIZE - 0.5,
+            16.0,
+            0.0,
+            -8.0,
+            f32::NAN,
+            f32::INFINITY,
+        ] {
+            let sim = ActiveAgentSim::with_world_size(8, 1, bad);
+            assert_eq!(
+                sim.world_size(),
+                DEFAULT_WORLD_SIZE,
+                "world size {bad} should fall back"
+            );
+        }
+    }
+
+    #[test]
+    fn minimum_world_size_guarantees_target_distance() {
+        let sim = ActiveAgentSim::with_world_size(512, 11, MIN_WORLD_SIZE);
+        assert_eq!(sim.world_size(), MIN_WORLD_SIZE);
+        for agent in sim.agents() {
+            let dx = (agent.target[0] - agent.position[0]).abs();
+            assert!(
+                dx + 1.0e-3 >= MIN_TARGET_DISTANCE,
+                "x offset {dx} is below {MIN_TARGET_DISTANCE}"
+            );
+            assert!(agent.distance_to_target() + 1.0e-3 >= MIN_TARGET_DISTANCE);
+        }
     }
 
     #[test]
@@ -542,12 +832,52 @@ mod tests {
         }
 
         let mut scratch = Vec::new();
-        let desired = desired_velocity(0, &agents[0], &agents, &grid, &mut scratch);
+        let (desired, considered) = desired_velocity(0, &agents[0], &agents, &grid, &mut scratch);
+        assert_eq!(considered, 1);
         assert!(desired[0] < 0.0, "agent 0 should be pushed away from +x");
         assert!(desired[0].abs() <= agents[0].speed);
         assert!(desired[1].abs() <= agents[0].speed);
         assert!(desired[0].is_finite());
         assert!(desired[1].is_finite());
+    }
+
+    #[test]
+    fn spatial_hash_clamps_non_finite_coordinates() {
+        let grid = SpatialHash::new(4.0, 16.0, 16.0);
+        assert_eq!(grid.cell_coord(f32::INFINITY, f32::INFINITY), (3, 3));
+        assert_eq!(
+            grid.cell_coord(f32::NEG_INFINITY, f32::NEG_INFINITY),
+            (0, 0)
+        );
+        assert_eq!(grid.cell_coord(f32::NAN, f32::NAN), (0, 0));
+        assert_eq!(grid.cell_coord(1.0e9, -1.0e9), (3, 0));
+
+        let mut grid = grid;
+        grid.insert(0, [f32::INFINITY, 4.0]);
+        grid.insert(1, [f32::NEG_INFINITY, 4.0]);
+        grid.insert(2, [f32::NAN, 4.0]);
+
+        // Non-finite distances never satisfy the exact circle filter, but the
+        // query and insert must not panic or loop.
+        let mut out = Vec::new();
+        grid.query_circle([f32::INFINITY, 4.0], 1.0, &mut out);
+        assert!(out.is_empty());
+        grid.query_circle([f32::NAN, f32::NAN], 1.0, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn spatial_hash_caps_extreme_world_sizes() {
+        let mut grid = SpatialHash::new(4.0, 1.0e30, 1.0e30);
+        assert_eq!(grid.cell_count(), MAX_CELLS_PER_AXIS * MAX_CELLS_PER_AXIS);
+
+        grid.insert(0, [1.0e30, 1.0e30]);
+        let mut out = Vec::new();
+        grid.query_circle([1.0e30, 1.0e30], 1.0, &mut out);
+        assert_eq!(out, vec![0]);
+
+        grid.query_circle([-1.0e30, -1.0e30], 1.0, &mut out);
+        assert!(out.is_empty());
     }
 
     #[test]
