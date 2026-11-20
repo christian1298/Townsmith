@@ -40,8 +40,8 @@ The slice follows accepted decisions:
 | **2A.3** | GDExtension placement/save/load API and headless smoke | **Done** — PR #46 |
 | **2A.4** | Streamed-world scene, preview, rotate/place/save/load controls | **Done** — PR #47, see [[42 - World Placement Bridge]] |
 | **2B** | Terrain edit deltas applied to streamed chunks, saved/reloaded | **Done** — PR #48, see [[43 - Terrain Edits]] |
-| **2C** | Mayor camera, selection, mode switch at a door | **This PR** — see [[44 - Mayor Mode]] |
-| **2D** | Construction site v0: phased progress, materials, crews | Next |
+| **2C** | Mayor camera, selection, mode switch at a door | **Done** — PR #49, see [[44 - Mayor Mode]] |
+| **2D** | Construction site v0: phased progress, materials, crews | **In progress** — core model |
 | **2E** | Roads, lots, settlement boundaries, zoning | Planned |
 
 Each stage is a separate branch, worktree, and PR. Do not mix 2A with terrain editing or construction state. 2A is split so geometry, persistence, the bridge, and the shell each stay reviewable.
@@ -57,6 +57,7 @@ Each stage is a separate branch, worktree, and PR. Do not mix 2A with terrain ed
 - Save/load of `seed + placements + terrain deltas` as JSON; blueprint packages are referenced by path.
 - Height edits, dirty-chunk remeshing, and delta save/load (2B).
 - A Mayor camera, right-click building selection with an inspection highlight, and a first-person door transition back to Mayor (2C).
+- A deterministic construction state machine with seven phases, shared crew/material pools, and JSON state (2D core).
 - A headless smoke that places the acceptance house, verifies water, overlap, and rotation rejection, saves, clears, reloads, compares the placement checksum, and confirms a failed load leaves the store untouched. Slope rules stay covered by the core placement tests.
 
 ### Out
