@@ -47,7 +47,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with real 10 cm building detail is tractable. The box-city MultiMesh path is measured well above target on an RTX 4080; the target 3060-class run and voxel building LOD remain. See [[03 - Voxel and Scale]], [[23 - City Rendering Benchmark]], and [[09 - Open Questions]]. |
-| Next action | Add prop placement, undo/redo, EN/DE editor strings, then run the 21-house slice benchmark. Keep the 3060-class 1M gate for Phase 5. See [[26 - Vertical Slice Spec]]. |
+| Next action | Add prop placement and room selection/stats panel, EN/DE editor strings, then run the 21-house slice benchmark. Keep the 3060-class 1M gate for Phase 5. See [[26 - Vertical Slice Spec]]. |
 
 > [!warning] This is a plan, not a commitment
 > Numbers in these docs are **planning targets**, not measured results. Anything marked *Assumption* or *Proposed* must be validated before it becomes an accepted decision.
@@ -153,7 +153,7 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 ## Next actions
 
-1. Add prop placement and room selection/stats panel; rooms/stats metadata and the overlay are done.
+1. Add prop placement and room selection/stats panel; rooms/stats metadata, the overlay, and undo/redo are done.
 2. Add undo/redo and dirty-chunk remeshing.
 3. Add English/German editor UI tables and the language selector.
 4. Run the 21-house / 60 FPS slice benchmark.
@@ -198,3 +198,4 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 | [[32 - Blueprint Save Load]] | Editor `.tsbp` save/load bridge, UI, smoke, limits | You work on blueprint persistence |
 | [[33 - Blueprint Room Metadata]] | Save-time rooms, materials, capacity/jobs in `.tsbp` | You work on blueprint gameplay metadata |
 | [[34 - Room Overlay]] | Editor room boxes/labels, bridge bounds/centers, smoke | You work on room visualization |
+| [[35 - Editor Undo Redo]] | Single-edit undo/redo, history shape, smoke | You work on editor history |

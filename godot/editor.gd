@@ -71,6 +71,9 @@ var _save_dialog: FileDialog
 var _load_dialog: FileDialog
 var _room_overlay: Node3D
 var _room_overlay_on := false
+var _history: Array = []
+var _redo: Array = []
+const MAX_HISTORY := 500
 
 func _ready() -> void:
 	_core = TownsmithCore.new()
@@ -102,6 +105,9 @@ func _ready() -> void:
 
 	if _is_room_overlay_smoke():
 		_run_room_overlay_smoke()
+		return
+	if _is_undo_smoke():
+		_run_undo_smoke()
 		return
 	if _is_editor_smoke():
 		_run_editor_smoke()
@@ -135,6 +141,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 		if key == KEY_R:
 			_toggle_room_overlay()
+			return
+		if event.ctrl_pressed and key == KEY_Z:
+			_undo_last()
+			return
+		if event.ctrl_pressed and key == KEY_Y:
+			_redo_last()
 			return
 		for index in MATERIALS.size():
 			if key == KEY_1 + index:
@@ -217,7 +229,7 @@ func _remove_under_crosshair() -> void:
 		_set_status("The pad is not editable; place a voxel first")
 		return
 	var cell: Vector3i = hit["cell"]
-	if not _core.editor_set_voxel(cell.x, cell.y, cell.z, 0):
+	if not _set_voxel_with_history(cell, 0):
 		_set_status("Remove rejected at %s" % cell)
 		return
 	_on_edit_applied("Removed %s at %s" % [_material_name(int(hit.get("material", 0))), cell])
@@ -239,7 +251,7 @@ func _place_under_crosshair() -> void:
 	if int(_core.editor_get_voxel(cell.x, cell.y, cell.z)) != 0:
 		_set_status("Placement cell is occupied")
 		return
-	if not _core.editor_set_voxel(cell.x, cell.y, cell.z, _active_material):
+	if not _set_voxel_with_history(cell, _active_material):
 		_set_status("Place rejected at %s" % cell)
 		return
 	_on_edit_applied("Placed %s at %s" % [_material_name(_active_material), cell])
@@ -248,6 +260,42 @@ func _place_under_crosshair() -> void:
 ##
 ## Repeated edits inside the 250 ms window keep sliding the deadline, so a
 ## short burst of clicks results in one remesh instead of one per click.
+## Apply one voxel edit and record it for undo/redo.
+func _set_voxel_with_history(cell: Vector3i, material: int) -> bool:
+	var old := int(_core.editor_get_voxel(cell.x, cell.y, cell.z))
+	if old == material:
+		return true
+	if not _core.editor_set_voxel(cell.x, cell.y, cell.z, material):
+		return false
+	_push_history({"x": cell.x, "y": cell.y, "z": cell.z, "old": old, "new": material})
+	return true
+
+func _push_history(change: Dictionary) -> void:
+	_history.append([change])
+	_redo.clear()
+	if _history.size() > MAX_HISTORY:
+		_history.pop_front()
+
+func _undo_last() -> void:
+	if _history.is_empty():
+		_set_status("Nothing to undo")
+		return
+	var batch: Array = _history.pop_back()
+	for change in batch:
+		_core.editor_set_voxel(change["x"], change["y"], change["z"], change["old"])
+	_redo.append(batch)
+	_on_edit_applied("Undo")
+
+func _redo_last() -> void:
+	if _redo.is_empty():
+		_set_status("Nothing to redo")
+		return
+	var batch: Array = _redo.pop_back()
+	for change in batch:
+		_core.editor_set_voxel(change["x"], change["y"], change["z"], change["new"])
+	_history.append(batch)
+	_on_edit_applied("Redo")
+
 func _on_edit_applied(message: String) -> void:
 	_remesh_pending = true
 	_remesh_due_msec = Time.get_ticks_msec() + REMESH_DEBOUNCE_MS
@@ -451,7 +499,7 @@ func _build_ui() -> void:
 	help.text = "\n".join(PackedStringArray([
 		"WASD move   Space/Ctrl up/down   Shift boost   Esc release mouse",
 		"Left click remove   Right click place   Keys 1-5 select material",
-		"R room overlay   F5 save blueprint   F9 load blueprint   Mesh rebuilds 250 ms after edit",
+		"R room overlay   Ctrl+Z undo   Ctrl+Y redo   F5 save   F9 load   Remesh 250 ms after edit",
 	]))
 
 	var blueprint_bar := HBoxContainer.new()
@@ -664,6 +712,8 @@ func _load_blueprint(path: String) -> bool:
 		_volume_voxels = Vector3i(voxels[0], voxels[1], voxels[2])
 	_voxel_size_m = float(size.get("voxel_size_m", _voxel_size_m))
 	_blueprint_name.text = str(result.get("name", _blueprint_name.text))
+	_history.clear()
+	_redo.clear()
 	_remesh_pending = false
 	_rebuild_volume_mesh()
 	_update_palette_label()
@@ -770,8 +820,34 @@ func _is_editor_smoke() -> bool:
 func _is_room_overlay_smoke() -> bool:
 	return OS.get_cmdline_user_args().has("--room-overlay-smoke")
 
+func _is_undo_smoke() -> bool:
+	return OS.get_cmdline_user_args().has("--undo-smoke")
+
 func _is_blueprint_smoke() -> bool:
 	return OS.get_cmdline_user_args().has("--blueprint-smoke")
+
+## Headless contract check for undo/redo.
+func _run_undo_smoke() -> void:
+	var cell := Vector3i(1, 1, 1)
+	var status := "ok"
+	if not _set_voxel_with_history(cell, 1):
+		status = "set_failed"
+	elif int(_core.editor_get_voxel(cell.x, cell.y, cell.z)) != 1:
+		status = "set_read"
+	else:
+		_undo_last()
+		if int(_core.editor_get_voxel(cell.x, cell.y, cell.z)) != 0:
+			status = "undo_failed"
+		else:
+			_redo_last()
+			if int(_core.editor_get_voxel(cell.x, cell.y, cell.z)) != 1:
+				status = "redo_failed"
+	print("UNDO_SMOKE undo=%s redo=%s status=%s" % [
+		"ok" if status == "ok" else "fail",
+		"ok" if status == "ok" else "fail",
+		status,
+	])
+	get_tree().quit(0 if status == "ok" else 1)
 
 ## Headless contract check for the room overlay.
 ##
