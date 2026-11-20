@@ -369,6 +369,21 @@ impl VoxelVolume {
         self.solid_count() == 0
     }
 
+    /// Insert a fully decoded chunk at `chunk`.
+    ///
+    /// The chunk coordinate must be inside the configured volume. Existing
+    /// content at that coordinate is replaced. Blueprint loading uses this to
+    /// restore non-empty chunks without replaying every voxel.
+    pub fn insert_chunk(&mut self, chunk: ChunkPos, data: VoxelChunk) -> Result<(), VoxelError> {
+        let index = self.chunk_index(chunk).ok_or(VoxelError::OutOfBounds {
+            x: chunk.x as usize * CHUNK_SIZE,
+            y: chunk.y as usize * CHUNK_SIZE,
+            z: chunk.z as usize * CHUNK_SIZE,
+        })?;
+        self.chunks[index] = Some(data);
+        Ok(())
+    }
+
     /// Read-only view of an allocated chunk.
     #[must_use]
     pub fn chunk_at(&self, chunk: ChunkPos) -> Option<&VoxelChunk> {
@@ -699,6 +714,18 @@ mod tests {
         let mesh = volume.mesh();
         assert_eq!(mesh.quad_count(), 10);
         assert_indices_in_bounds(&mesh);
+    }
+
+    #[test]
+    fn insert_chunk_replaces_existing_chunk_and_rejects_out_of_bounds() {
+        let mut volume = VoxelVolume::new(VolumeConfig::new(2, 1, 2).unwrap()).unwrap();
+        let mut chunk = VoxelChunk::new();
+        chunk.set(1, 2, 3, 7).unwrap();
+        volume.insert_chunk(ChunkPos::new(1, 0, 1), chunk).unwrap();
+        assert_eq!(volume.get_voxel(VolumePos::new(33, 2, 35)).unwrap(), 7);
+        assert!(volume
+            .insert_chunk(ChunkPos::new(2, 0, 0), VoxelChunk::new())
+            .is_err());
     }
 
     #[test]
