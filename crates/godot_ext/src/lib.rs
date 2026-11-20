@@ -1153,10 +1153,6 @@ impl TownsmithCore {
         result.set("ok", true);
         result.set("seed", seed as i64);
         result.set("count", store.roads.len() as i64);
-        result.set(
-            "checksum",
-            &GString::from(&format!("{:016x}", store.checksum())),
-        );
         result.set("road", &road_to_dictionary(&road).to_variant());
         result
     }
@@ -2600,7 +2596,7 @@ fn road_to_dictionary(road: &RoadSegment) -> VarDictionary {
         &PackedInt32Array::from(road.end.to_vec()).to_variant(),
     );
     result.set("width_m", i64::from(road.width_m));
-    result.set("length_m", i64::from(road.length_m()));
+    result.set("length_m", road.length_m());
     result.set(
         "center",
         &PackedFloat32Array::from(road.center().to_vec()).to_variant(),

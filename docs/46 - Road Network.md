@@ -74,7 +74,7 @@ Coordinates are centreline cells in metres on the 1 m grid. `start` and `end` mu
 | Width | 2..=24 m |
 | Coordinates | `abs(x)`, `abs(z)` ≤ 1,000,000 m |
 | Water | Every sampled centre and width-edge cell must be above `WATER_LEVEL_M = 24` |
-| Rise/fall | `max_height - min_height ≤ 8 m` across the sampled width |
+| Rise/fall | `max_height - min_height ≤ 8 m` across the sampled segment (centreline plus width edges) |
 | Capacity | ≤ 200,000 segments per save |
 | Load | Known format version, unique ids, monotonic `next_id`, valid geometry |
 
@@ -100,14 +100,14 @@ The world save gains an optional `roads` object:
 }
 ```
 
-Old saves without `roads` load as an empty network. A road store whose seed differs from the world is rejected. The world save result also reports `roads` count and `road_checksum`.
+Old saves without `roads` load with the road store closed (`roads()` reports `open=false`). A road store whose seed differs from the world is rejected. The world save result also reports `roads` count and `road_checksum`.
 
 ## 5. Bridge API
 
 | Method | Returns | Purpose |
 |---|---|---|
 | `road_validate(seed, x1, z1, x2, z2, width)` | `Dictionary` | Validate without mutating; `{ok, length_m, width_m}` or `{ok:false, error_code, error}` |
-| `road_add(...)` | `Dictionary` | Validate and append; `{ok, seed, count, checksum, road}` |
+| `road_add(...)` | `Dictionary` | Validate and append; `{ok, seed, count, road}` |
 | `roads()` | `Dictionary` | `open`, `seed`, `next_id`, `count`, `checksum`, `roads[]` |
 | `road_count()` | `int` | Segment count |
 | `road_checksum()` | `String` | Stable checksum |
@@ -120,10 +120,10 @@ The first successful road opens a placement store for the same seed if none exis
 
 ## 6. Smoke
 
-The existing streamed-world smoke adds:
+The existing streamed-world smoke adds, before any placement:
 
-- a water-crossing segment at `(120,128)..(136,128)`, rejected with `water`;
-- a flat segment `(180,125)..(200,125)`, width 8;
+- a water-crossing segment at `(120,128)..(136,128)`, rejected with `water`; the world and road stores stay closed;
+- a flat segment `(180,125)..(200,125)`, width 8; it opens the placement store for the seed with zero placements;
 - save → clear roads/deltas/placements → load;
 - road count and checksum restored.
 
@@ -135,9 +135,9 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok bui
 
 ## 7. Tests
 
-- `core_city::road`: 6 tests — geometry, water/rise rejection, JSON/checksum, duplicate/next-id rejection, remove/clear.
-- `core_city`: 40 tests.
-- Workspace: **229 tests + 1 doctest**.
+- `core_city::road`: 8 tests — geometry, width-edge water/rise rejection, extreme-coordinate overflow, JSON/checksum, duplicate/next-id rejection, remove/clear.
+- `core_city`: 42 tests.
+- Workspace: **231 tests + 1 doctest**.
 - Godot: `WORLD_SCENE ... roads=ok ... status=ok`.
 
 ## 8. Limits

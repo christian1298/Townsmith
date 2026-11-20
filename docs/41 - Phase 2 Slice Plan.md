@@ -22,7 +22,7 @@ The M2 proof is **“the world is open”**. This slice proves the first half of
 
 > A player can fly over the procedural world, place a saved blueprint on a valid site, save the world, quit, reload, and see the same building in the same place.
 
-It does **not** prove settlements, roads, zoning, construction crews, or simulation. Those are later Phase 2 slices.
+The plan has grown past the original M2 proof: it now covers placement, terrain deltas, the Mayor view, construction v0, and the road data path. Settlements, zoning, road drawing, traffic, and simulation remain later Phase 2 slices.
 
 The slice follows accepted decisions:
 
@@ -54,20 +54,19 @@ Each stage is a separate branch, worktree, and PR. Do not mix placement, terrain
 
 - `core_city::placement`: pure placement records and terrain validation (2A.1); store, JSON roundtrip, and checksum (2A.2).
 - GDExtension APIs to place, validate, list, clear, save, and load placements.
-- A `world_placement` Godot scene with streamed terrain, a fly camera, and a green/red placement ghost.
-- A placement preview that samples terrain under a camera-forward target and shows valid/invalid, plus the first placed-node rebuild path.
-- Save/load of `seed + placements + terrain deltas` as JSON; blueprint packages are referenced by path.
+- A `world_placement` Godot scene with streamed terrain, a Mayor orbit camera, and a green/red placement ghost.
+- A placement preview that samples terrain under the Mayor target and shows valid/invalid, plus the placed-node rebuild path.
+- Save/load of `seed + placements + terrain deltas + construction + roads` as JSON; blueprint packages are referenced by path.
 - Height edits, dirty-chunk remeshing, and delta save/load (2B).
 - A Mayor camera, right-click building selection with an inspection highlight, and a first-person door transition back to Mayor (2C).
 - A construction site per placement with phased progress, shared crew/material pools, save/load, and a visible partial building (2D).
 - A straight, axis-aligned road network with terrain validation and world save/load (2E.1).
-- A phased construction site created by placement, with a shared crew pool, material stockpile, partial visuals, completion, and save/load (2D; [[45 - Construction Sites]]).
 - A headless smoke that places the acceptance house, verifies water, overlap, and rotation rejection, saves, clears, reloads, compares the placement checksum, and confirms a failed load leaves the store untouched. Slope rules stay covered by the core placement tests.
 
 ### Out
 
-- Roads, access checks, lots, zoning, settlements.
-- Construction phases, materials delivery, crews, budgets.
+- Road meshes/draw tools, access checks, lots, zoning, settlement boundaries, traffic, utilities.
+- Construction workers, vehicles, deliveries, budgets, and inspections.
 - Blueprint library UI, thumbnails, content-addressed package storage.
 - Multiplayer authority and command validation.
 - Collision, pathfinding, citizens, or simulation.

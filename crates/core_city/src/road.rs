@@ -31,6 +31,9 @@ pub const MAX_ROAD_SLOPE_M: u16 = 8;
 /// Hard cap for one save.
 pub const MAX_ROADS: usize = 200_000;
 
+/// Largest id representable by the GDScript bridge.
+pub const MAX_ROAD_ID: u64 = i64::MAX as u64;
+
 /// One straight road segment on the 1 m grid.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoadSegment {
@@ -47,8 +50,8 @@ pub struct RoadSegment {
 impl RoadSegment {
     /// Segment length in metres. One axis is always zero.
     #[must_use]
-    pub fn length_m(&self) -> i32 {
-        (self.end[0] - self.start[0]).abs() + (self.end[1] - self.start[1]).abs()
+    pub fn length_m(&self) -> i64 {
+        i64::from(self.end[0] - self.start[0]).abs() + i64::from(self.end[1] - self.start[1]).abs()
     }
 
     /// Centre of the segment in the horizontal plane.
@@ -88,7 +91,7 @@ pub enum RoadError {
     /// The segment is too long for one piece.
     TooLong {
         /// Requested length.
-        length: i32,
+        length: i64,
     },
     /// Width is outside the allowed range.
     InvalidWidth {
@@ -251,7 +254,10 @@ impl RoadStore {
     ) -> Result<RoadSegment, RoadError> {
         self.validate(request, height_at)?;
         let id = self.next_id;
-        self.next_id = id.checked_add(1).ok_or(RoadError::IdExhausted)?;
+        self.next_id = id
+            .checked_add(1)
+            .filter(|next| *next <= MAX_ROAD_ID)
+            .ok_or(RoadError::IdExhausted)?;
         let segment = RoadSegment {
             id,
             start: request.start,
@@ -296,10 +302,10 @@ impl RoadStore {
                 version: self.format_version,
             });
         }
-        if self.next_id == 0 {
+        if self.next_id == 0 || self.next_id > MAX_ROAD_ID {
             return Err(RoadError::InvalidNextId {
                 next_id: self.next_id,
-                max_id: 0,
+                max_id: MAX_ROAD_ID,
             });
         }
         if self.roads.len() > MAX_ROADS {
@@ -312,7 +318,6 @@ impl RoadStore {
                 return Err(RoadError::DuplicateId { id: road.id });
             }
             max_id = max_id.max(road.id);
-            validate_record(road, self.next_id)?;
         }
         if self.next_id <= max_id {
             return Err(RoadError::InvalidNextId {
@@ -320,13 +325,16 @@ impl RoadStore {
                 max_id,
             });
         }
+        for road in &self.roads {
+            validate_record(road, self.next_id)?;
+        }
         Ok(())
     }
 
     /// Stable FNV-1a checksum over the canonical JSON.
     #[must_use]
     pub fn checksum(&self) -> u64 {
-        let bytes = serde_json::to_vec(self).unwrap_or_default();
+        let bytes = serde_json::to_vec(self).expect("road store serialization cannot fail");
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
         for byte in bytes {
             hash ^= u64::from(byte);
@@ -337,10 +345,10 @@ impl RoadStore {
 }
 
 fn validate_record(road: &RoadSegment, next_id: u64) -> Result<(), RoadError> {
-    if road.id == 0 || road.id >= next_id {
+    if road.id == 0 || road.id > MAX_ROAD_ID || road.id >= next_id {
         return Err(RoadError::InvalidRecord {
             id: road.id,
-            reason: "id is outside the next_id range",
+            reason: "id is outside the JSON-safe next_id range",
         });
     }
     let request = RoadRequest {
@@ -355,24 +363,6 @@ fn validate_record(road: &RoadSegment, next_id: u64) -> Result<(), RoadError> {
 }
 
 fn validate_geometry(request: &RoadRequest) -> Result<(), RoadError> {
-    let dx = request.end[0] - request.start[0];
-    let dz = request.end[1] - request.start[1];
-    if (dx == 0) == (dz == 0) {
-        return Err(if dx == 0 && dz == 0 {
-            RoadError::ZeroLength
-        } else {
-            RoadError::NotAxisAligned
-        });
-    }
-    let length = dx.abs() + dz.abs();
-    if length > MAX_ROAD_LENGTH_M {
-        return Err(RoadError::TooLong { length });
-    }
-    if !(MIN_ROAD_WIDTH_M..=MAX_ROAD_WIDTH_M).contains(&request.width_m) {
-        return Err(RoadError::InvalidWidth {
-            width: request.width_m,
-        });
-    }
     let limit = MAX_WORLD_COORD_M as i64;
     if request
         .start
@@ -381,6 +371,24 @@ fn validate_geometry(request: &RoadRequest) -> Result<(), RoadError> {
         .any(|value| u64::from(value.unsigned_abs()) > limit as u64)
     {
         return Err(RoadError::CoordinateOutOfRange);
+    }
+    let dx = i64::from(request.end[0]) - i64::from(request.start[0]);
+    let dz = i64::from(request.end[1]) - i64::from(request.start[1]);
+    if (dx == 0) == (dz == 0) {
+        return Err(if dx == 0 && dz == 0 {
+            RoadError::ZeroLength
+        } else {
+            RoadError::NotAxisAligned
+        });
+    }
+    let length = dx.abs() + dz.abs();
+    if length > i64::from(MAX_ROAD_LENGTH_M) {
+        return Err(RoadError::TooLong { length });
+    }
+    if !(MIN_ROAD_WIDTH_M..=MAX_ROAD_WIDTH_M).contains(&request.width_m) {
+        return Err(RoadError::InvalidWidth {
+            width: request.width_m,
+        });
     }
     Ok(())
 }
@@ -521,6 +529,43 @@ mod tests {
     }
 
     #[test]
+    fn samples_the_width_edges_as_well_as_the_centreline() {
+        let store = RoadStore::new(1);
+        let x_road = request(true);
+        let x_edge_water = |_x: i64, z: i64| if z == 104 { 20 } else { 40 };
+        assert_eq!(
+            store
+                .validate(&x_road, x_edge_water)
+                .expect_err("x edge")
+                .code(),
+            "water"
+        );
+        let z_road = request(false);
+        let z_edge_water = |x: i64, _z: i64| if x == 104 { 20 } else { 40 };
+        assert_eq!(
+            store
+                .validate(&z_road, z_edge_water)
+                .expect_err("z edge")
+                .code(),
+            "water"
+        );
+    }
+
+    #[test]
+    fn rejects_extreme_coordinates_without_overflow() {
+        let store = RoadStore::new(1);
+        let extreme = RoadRequest {
+            start: [i32::MIN, 0],
+            end: [i32::MAX, 0],
+            width_m: 8,
+        };
+        assert_eq!(
+            store.validate(&extreme, flat).expect_err("extreme").code(),
+            "coordinate_out_of_range"
+        );
+    }
+
+    #[test]
     fn json_round_trip_and_checksum() {
         let mut store = RoadStore::new(2026);
         store.add(&request(true), flat).expect("road");
@@ -548,7 +593,7 @@ mod tests {
             RoadStore::from_json(&bad_next.to_json_pretty().expect("json"))
                 .expect_err("next")
                 .code(),
-            "invalid_record"
+            "invalid_next_id"
         );
     }
 

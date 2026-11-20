@@ -928,6 +928,17 @@ func _run_scene_smoke() -> void:
 	if not rotation_ok and status == "ok":
 		status = "rotation_failed:" + preview_error
 
+	if status == "ok":
+		var bad_road: Dictionary = core.road_add(SEED, 120, 128, 136, 128, 8)
+		var empty_after_reject := not bool(core.world_placements().get("open", true))
+		var added_road: Dictionary = core.road_add(SEED, 180, 125, 200, 125, 8)
+		road_ok = not bool(bad_road.get("ok", true)) and empty_after_reject
+		road_ok = road_ok and bool(added_road.get("ok", false)) and core.road_count() == 1
+		road_ok = road_ok and bool(core.world_placements().get("open", false))
+		road_ok = road_ok and core.world_placement_count() == 0
+		if not road_ok:
+			status = "road_failed:" + str(added_road.get("error_code", bad_road.get("error_code", "")))
+
 	edit_ok = _edit_target(1) and core.terrain_delta_count() == 1 and absf(core.world_height_at(SEED, FIXTURE_X, FIXTURE_Z) - 42.0) < 0.001 and streamer.dirty_count() > 0
 	var border_touched := _touched_chunks(Vector2i(0, 0), 0, 255)
 	edit_ok = edit_ok and border_touched.size() == 3 and border_touched.has(Vector2i(-1, 0)) and border_touched.has(Vector2i(0, 1))
@@ -945,14 +956,6 @@ func _run_scene_smoke() -> void:
 		place_ok = absf(node.rotation_degrees.y - 90.0) < 0.001 and _foundation_matches_bounds(node)
 	if not place_ok and status == "ok":
 		status = "place_failed:" + preview_error
-
-	if status == "ok":
-		var bad_road: Dictionary = core.road_validate(SEED, 120, 128, 136, 128, 8)
-		road_ok = not bool(bad_road.get("ok", true)) and str(bad_road.get("error_code", "")) == "water"
-		var added_road: Dictionary = core.road_add(SEED, 180, 125, 200, 125, 8)
-		road_ok = road_ok and bool(added_road.get("ok", false)) and core.road_count() == 1
-		if not road_ok:
-			status = "road_failed:" + str(added_road.get("error_code", bad_road.get("error_code", "")))
 
 	if status == "ok":
 		var site := _construction_site_for(1)
