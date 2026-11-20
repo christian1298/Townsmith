@@ -32,8 +32,8 @@ The full feature list is in [[08 - Roadmap]]. This plan cuts it into reviewable 
 
 | Stage | Deliverable | Status |
 |---|---|---|
-| **3.1** | City ledger: completed buildings → population, housing, jobs, employment, happiness | **This PR** |
-| **3.2** | Households and move-in: vacant homes fill over time; simple needs and happiness | Planned |
+| **3.1** | City ledger: completed buildings → population, housing, jobs, employment, happiness | **Done** — PR #56 |
+| **3.2** | Households and move-in: vacant homes fill over time; simple needs and happiness | Next |
 | **3.3** | Jobs and wages: assign residents to job slots, commute distance, income | Planned |
 | **3.4** | Primary industries: lumberjack, farmer, hunter with visible loops and storage | Planned |
 | **3.5** | Utilities: water or power first, coverage, shortages, happiness/production effects | Planned |
