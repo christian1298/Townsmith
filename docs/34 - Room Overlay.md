@@ -74,7 +74,7 @@ Detection is ~2 ms for the test house and runs only on toggle/rebuild. The overl
 
 - Room bounds are the floor-band interior rectangle, not the true room volume, and exclude walls.
 - Overlay boxes can clip walls/stairs; they are a diagnostic, not final art.
-- No room selection, hover, or per-room inspection yet.
+- Room selection and per-room inspection are in [[37 - Room Stats Panel]].
 - Props are now placeable; rooms show bedroom/kitchen/bathroom/office when relevant props exist.
 - English strings only until localization.
 - Room detection remains 2D per 3 m band; see [[31 - Room Detection]].
@@ -82,7 +82,7 @@ Detection is ~2 ms for the test house and runs only on toggle/rebuild. The overl
 ## 6. Next
 
 1. Prop placement so room types/capacity are real.
-2. Room selection and stats panel.
+2. Click-to-select and room editing actions.
 3. Undo/redo.
 4. EN/DE strings.
 5. 21-house performance pass.

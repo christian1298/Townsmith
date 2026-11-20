@@ -154,6 +154,9 @@ pub struct RoomRecord {
     /// Number of beds in the room.
     #[serde(default)]
     pub beds: u32,
+    /// Number of desks in the room, contributing job slots.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub desks: u32,
     /// Number of door material voxels adjacent to the room at the sampled
     /// layer.
     #[serde(default)]
@@ -335,6 +338,7 @@ pub fn detect_rooms(
             area_m2,
             volume_m3: area_m2 * FLOOR_BAND_M,
             beds: room.beds,
+            desks: room.desks,
             doors: room.doors,
             windows: room.windows,
         });
@@ -557,6 +561,10 @@ fn count_materials(volume: &VoxelVolume) -> (BTreeMap<String, u64>, u64) {
         .map(|(id, count)| (format!("material:{id}"), count))
         .collect();
     (materials, solid_voxels)
+}
+
+const fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 fn building_class(rooms: &[RoomRecord], resident_capacity: u32, job_slots: u32) -> &'static str {
