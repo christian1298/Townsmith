@@ -1,9 +1,13 @@
-//! Deterministic synthetic city layouts for rendering benchmarks.
+//! Synthetic city layouts and world-placement rules.
 //!
 //! Townsmith's Phase 0 rendering work needs a repeatable city that stresses the
 //! MultiMesh path at several scales before terrain, roads, and simulation are
 //! involved. This crate builds that city from a seed: box-shaped buildings on a
 //! street grid, split into Early, Mid, and Late tiers.
+//!
+//! Phase 2 adds [`placement`]: the validated instance of a saved blueprint on
+//! the terrain, including slope, water, and overlap checks. Persistence lives in
+//! a follow-up module so the geometry rules can be reviewed on their own.
 //!
 //! The crate is engine-agnostic and has no dependencies. It does not read
 //! terrain, generate road geometry, place citizens, or render anything. A shell
@@ -27,8 +31,16 @@
 
 #![forbid(unsafe_code)]
 
+pub mod placement;
+
 use std::error::Error;
 use std::fmt;
+
+pub use placement::{
+    footprint_for, normalize_rotation, validate_placement, Placement, PlacementError,
+    PlacementPlan, PlacementRequest, MAX_BUILDING_HEIGHT_M, MAX_FOOTPRINT_M, MAX_SLOPE_M,
+    MAX_WORLD_COORD_M, PLACEMENT_GAP_M, WATER_LEVEL_M,
+};
 
 /// Floor-to-floor height used by the synthetic layout, in meters.
 pub const FLOOR_HEIGHT_M: f32 = 3.0;
