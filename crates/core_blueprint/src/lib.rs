@@ -25,4 +25,4 @@ pub use limits::{MAX_CHUNKS, MAX_METADATA_BYTES, MAX_SOLID_VOXELS, MAX_VOXEL_STR
 pub use metadata::{
     BlueprintMetadata, BlueprintStats, Dependencies, PropRecord, RoomRecord, FORMAT_VERSION,
 };
-pub use package::{load_tsbp, save_tsbp, Blueprint};
+pub use package::{load_tsbp, save_tsbp, save_tsbp_with_hash, Blueprint};

@@ -20,9 +20,7 @@ use godot::classes::mesh::{ArrayType, PrimitiveType};
 use godot::classes::{ArrayMesh, SurfaceTool};
 use godot::prelude::*;
 
-use core_blueprint::{
-    compute_hash, encode_voxels, load_tsbp, save_tsbp, Blueprint, BlueprintMetadata,
-};
+use core_blueprint::{load_tsbp, save_tsbp_with_hash, Blueprint, BlueprintMetadata};
 use core_city::{CityLayout, CityTier};
 use core_voxel::coords::{MaterialId, CHUNK_SIZE, VOXEL_SIZE_M};
 use core_voxel::demo;
@@ -472,7 +470,7 @@ impl TownsmithCore {
             .unwrap_or_else(|error| error.into_inner());
         let Some(state) = guard.as_ref() else {
             result.set("created", false);
-            result.set("error", "no_editor_volume");
+            result.set("error", "no editor volume is open");
             return result;
         };
 
@@ -679,7 +677,7 @@ impl TownsmithCore {
             .unwrap_or_else(|error| error.into_inner());
         let Some(state) = guard.as_ref() else {
             result.set("created", false);
-            result.set("error", "no_editor_volume");
+            result.set("error", "no editor volume is open");
             return result;
         };
 
@@ -727,6 +725,11 @@ impl TownsmithCore {
             result.set("error", "blueprint name is empty");
             return result;
         }
+        if id.len() > 200 || name.len() > 200 {
+            result.set("ok", false);
+            result.set("error", "blueprint id and name must be at most 200 bytes");
+            return result;
+        }
 
         let volume = {
             let guard = self
@@ -735,23 +738,15 @@ impl TownsmithCore {
                 .unwrap_or_else(|error| error.into_inner());
             let Some(state) = guard.as_ref() else {
                 result.set("ok", false);
-                result.set("error", "no_editor_volume");
+                result.set("error", "no editor volume is open");
                 return result;
             };
             state.volume.clone()
         };
 
         let metadata = BlueprintMetadata::new(id, name);
-        let mut blueprint = Blueprint::new(metadata, volume);
-        let voxels = match encode_voxels(&blueprint.volume) {
-            Ok(voxels) => voxels,
-            Err(error) => {
-                result.set("ok", false);
-                result.set("error", error.to_string());
-                return result;
-            }
-        };
-        let hash = match compute_hash(&blueprint.metadata, &voxels) {
+        let blueprint = Blueprint::new(metadata, volume);
+        let hash = match save_tsbp_with_hash(&path, &blueprint) {
             Ok(hash) => hash,
             Err(error) => {
                 result.set("ok", false);
@@ -759,12 +754,6 @@ impl TownsmithCore {
                 return result;
             }
         };
-        blueprint.metadata.content_hash = hash.clone();
-        if let Err(error) = save_tsbp(&path, &blueprint) {
-            result.set("ok", false);
-            result.set("error", error.to_string());
-            return result;
-        }
 
         result.set("ok", true);
         result.set("path", path.to_string_lossy().to_string());
@@ -837,7 +826,20 @@ fn blueprint_path_from_arg(raw: &str) -> Result<PathBuf, String> {
         return Err("blueprint path is empty".to_string());
     }
     let path = PathBuf::from(trimmed);
-    if path.extension().and_then(|ext| ext.to_str()) != Some("tsbp") {
+    if !path.is_absolute() {
+        return Err("blueprint path must be absolute".to_string());
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("blueprint path must not contain '..'".to_string());
+    }
+    let extension_ok = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("tsbp"));
+    if !extension_ok {
         return Err("blueprint path must end with .tsbp".to_string());
     }
     Ok(path)
@@ -1211,10 +1213,13 @@ mod tests {
     }
 
     #[test]
-    fn blueprint_path_requires_a_tsbp_extension() {
+    fn blueprint_path_requires_an_absolute_tsbp_path() {
         assert!(blueprint_path_from_arg(" /tmp/house.tsbp ").is_ok());
+        assert!(blueprint_path_from_arg("/tmp/house.TSBP").is_ok());
         assert!(blueprint_path_from_arg("").is_err());
         assert!(blueprint_path_from_arg("   ").is_err());
+        assert!(blueprint_path_from_arg("house.tsbp").is_err());
+        assert!(blueprint_path_from_arg("/tmp/../house.tsbp").is_err());
         assert!(blueprint_path_from_arg("/tmp/house.zip").is_err());
         assert!(blueprint_path_from_arg("/tmp/house").is_err());
     }

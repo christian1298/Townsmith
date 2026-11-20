@@ -3,8 +3,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use core_blueprint::{
-    compute_hash, encode_voxels, load_tsbp, save_tsbp, Blueprint, BlueprintError,
-    BlueprintMetadata, FORMAT_VERSION,
+    compute_hash, encode_voxels, load_tsbp, save_tsbp, save_tsbp_with_hash, Blueprint,
+    BlueprintError, BlueprintMetadata, FORMAT_VERSION,
 };
 use core_voxel::volume::{VolumeConfig, VolumePos, VoxelVolume};
 
@@ -70,6 +70,18 @@ fn roundtrip_preserves_volume_and_hash() {
         .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
         .collect();
     assert!(leftovers.is_empty());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn save_with_hash_returns_the_file_hash() {
+    let dir = temp_dir("save-hash");
+    let path = dir.join("hash.tsbp");
+    let blueprint = test_blueprint();
+    let returned = save_tsbp_with_hash(&path, &blueprint).expect("save");
+    let loaded = load_tsbp(&path).expect("load");
+
+    assert_eq!(returned, loaded.metadata.content_hash);
     fs::remove_dir_all(dir).unwrap();
 }
 

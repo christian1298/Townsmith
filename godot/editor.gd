@@ -4,14 +4,14 @@ extends Node3D
 ##
 ## This is the first playable editor: a default 5 x 3 x 5 chunk volume on a
 ## neutral pad, a fly camera, crosshair raycast edits, a five-material
-## palette, and a debounced whole-volume remesh. Edits live only in this
-## session; blueprint save/load is the next slice step.
+## palette, a debounced whole-volume remesh, and `.tsbp` save/load.
 ##
 ## Run it with:
 ##   godot --path godot res://editor.tscn
 ##
 ## Headless smoke:
 ##   godot --headless --path godot res://editor.tscn -- --editor-smoke
+##   godot --headless --path godot res://editor.tscn -- --blueprint-smoke
 ##
 ## See `docs/30 - Editor Shell.md` for the controls and rules.
 
@@ -77,6 +77,9 @@ func _ready() -> void:
 		push_error("Editor: failed to create the default editor volume")
 		if _is_editor_smoke():
 			print("EDITOR_SMOKE solid=0 quads=0 surfaces=0 status=create_failed")
+			get_tree().quit(1)
+		elif _is_blueprint_smoke():
+			print("BLUEPRINT_SMOKE solid=0 hash= status=create_failed")
 			get_tree().quit(1)
 		return
 
@@ -381,7 +384,11 @@ func _build_ui() -> void:
 	load_button.pressed.connect(_open_load_dialog)
 	blueprint_bar.add_child(load_button)
 
-	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(BLUEPRINT_DIR))
+	var directory_error := DirAccess.make_dir_recursive_absolute(
+		ProjectSettings.globalize_path(BLUEPRINT_DIR))
+	if directory_error != OK:
+		push_warning("Could not create blueprint directory %s: %s" % [
+			BLUEPRINT_DIR, error_string(directory_error)])
 
 	_save_dialog = FileDialog.new()
 	_save_dialog.title = "Save Blueprint"
@@ -518,6 +525,8 @@ func _on_load_file_selected(path: String) -> void:
 	_restore_mouse_after_dialog()
 
 func _restore_mouse_after_dialog() -> void:
+	if _blueprint_name != null:
+		_blueprint_name.release_focus()
 	if DisplayServer.get_name() != "headless":
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
@@ -533,7 +542,7 @@ func _save_blueprint(path: String) -> bool:
 		_set_status("Save failed: %s" % str(result.get("error", "unknown error")))
 		push_error("Blueprint save failed: %s" % str(result.get("error", "unknown error")))
 		return false
-	_set_status("Saved %s  hash=%s" % [name, str(result.get("hash", ""))])
+	_set_status("Saved %s  hash=%s" % [name, _short_hash(str(result.get("hash", "")))])
 	print("BLUEPRINT_SAVED path=%s hash=%s solid=%d" % [
 		str(result.get("path", path)),
 		str(result.get("hash", "")),
@@ -555,11 +564,13 @@ func _load_blueprint(path: String) -> bool:
 	var voxels: PackedInt32Array = size.get("voxels", PackedInt32Array())
 	if voxels.size() == 3:
 		_volume_voxels = Vector3i(voxels[0], voxels[1], voxels[2])
+	_voxel_size_m = float(size.get("voxel_size_m", _voxel_size_m))
+	_blueprint_name.text = str(result.get("name", _blueprint_name.text))
 	_remesh_pending = false
 	_rebuild_volume_mesh()
 	_update_palette_label()
 	_set_status("Loaded %s  hash=%s" % [
-		str(result.get("name", "blueprint")), str(result.get("hash", ""))])
+		str(result.get("name", "blueprint")), _short_hash(str(result.get("hash", "")))])
 	print("BLUEPRINT_LOADED path=%s hash=%s solid=%d rooms=%d" % [
 		str(result.get("path", path)),
 		str(result.get("hash", "")),
@@ -568,9 +579,14 @@ func _load_blueprint(path: String) -> bool:
 	])
 	return true
 
+func _short_hash(hash: String) -> String:
+	return hash.substr(0, 19) + "..." if hash.length() > 22 else hash
+
 func _slug(text: String) -> String:
+	var normalized := text.strip_edges().to_lower()
+	normalized = normalized.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
 	var cleaned := ""
-	for character in text.strip_edges().to_lower():
+	for character in normalized:
 		if (character >= "a" and character <= "z") or (character >= "0" and character <= "9"):
 			cleaned += character
 		elif character == " " or character == "-" or character == "_":
@@ -608,6 +624,12 @@ func _run_blueprint_smoke() -> void:
 			status = "save_hash"
 
 	if status == "ok":
+		if not _core.editor_clear():
+			status = "clear_failed"
+		elif int(_core.editor_volume_stats().get("solid_voxels", -1)) != 0:
+			status = "clear_not_empty"
+
+	if status == "ok":
 		loaded = _core.editor_load_blueprint(global_path)
 		if not bool(loaded.get("ok", false)):
 			status = "load_failed"
@@ -620,6 +642,13 @@ func _run_blueprint_smoke() -> void:
 		var bounds: PackedFloat32Array = loaded.get("bounds", PackedFloat32Array())
 		if status == "ok" and bounds.size() != 3:
 			status = "load_bounds"
+		elif status == "ok":
+			for value in bounds:
+				if not is_finite(value):
+					status = "load_bounds_value"
+					break
+		if status == "ok" and not str(loaded.get("hash", "")).begins_with("blake3:"):
+			status = "load_hash_prefix"
 
 	if status == "ok":
 		var mesh: ArrayMesh = _core.build_editor_volume_mesh()

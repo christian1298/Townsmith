@@ -43,6 +43,14 @@ impl Blueprint {
 /// Windows an existing destination is removed before the retry, so the final
 /// overwrite is not atomic.
 pub fn save_tsbp(path: &Path, blueprint: &Blueprint) -> Result<(), BlueprintError> {
+    save_tsbp_with_hash(path, blueprint).map(|_| ())
+}
+
+/// Save a blueprint atomically and return the content hash written to disk.
+///
+/// This avoids encoding the voxel stream twice when a caller needs the hash
+/// (for example, the editor save result).
+pub fn save_tsbp_with_hash(path: &Path, blueprint: &Blueprint) -> Result<String, BlueprintError> {
     let voxels = encode_voxels(&blueprint.volume)?;
     if voxels.len() > MAX_VOXEL_STREAM_BYTES {
         return Err(BlueprintError::TooLarge {
@@ -62,7 +70,8 @@ pub fn save_tsbp(path: &Path, blueprint: &Blueprint) -> Result<(), BlueprintErro
         });
     }
     validate_metadata(&metadata)?;
-    metadata.content_hash = compute_hash(&metadata, &voxels)?;
+    let content_hash = compute_hash(&metadata, &voxels)?;
+    metadata.content_hash = content_hash.clone();
     let json = serde_json::to_vec_pretty(&metadata)?;
     if json.len() > MAX_METADATA_BYTES {
         return Err(BlueprintError::TooLarge {
@@ -82,7 +91,7 @@ pub fn save_tsbp(path: &Path, blueprint: &Blueprint) -> Result<(), BlueprintErro
         let _ = fs::remove_file(&temp);
         return Err(error.into());
     }
-    Ok(())
+    Ok(content_hash)
 }
 
 fn write_package(path: &Path, json: &[u8], voxels: &[u8]) -> Result<(), BlueprintError> {

@@ -52,7 +52,7 @@ The save path clones the volume under the editor lock, then writes the package o
 - After load, the volume bounds/voxel size are refreshed and the mesh is rebuilt immediately.
 - Opening a dialog releases mouse capture; closing or selecting recaptures it.
 
-The file dialogs are non-native so the flow works consistently in windowed and headless builds.
+The file dialogs are non-native for consistent behavior in windowed builds. Headless runs use the `--blueprint-smoke` path instead of constructing dialogs.
 
 ## 3. Headless smoke
 
@@ -82,7 +82,7 @@ The hash depends on the smoke volume, not the golden test-house hash.
 - `Blueprint::new` synchronizes bounds and solid count from the volume.
 - `save_tsbp` recomputes the canonical hash, writes `blueprint.json` + `voxels.bin`, and stores the zip uncompressed in v1.
 - `load_tsbp` verifies version, hash, bounds, solid count, dependencies, duplicate entries, and size limits.
-- The editor currently saves metadata without rooms/props/stats; those are the next slice step.
+- The editor writes default stats and empty rooms/props; room-derived metadata is the next slice step.
 - A failed save leaves the previous file untouched (atomic temp + rename).
 - A failed load leaves the current editor volume untouched.
 
@@ -90,10 +90,12 @@ The hash depends on the smoke volume, not the golden test-house hash.
 
 - No thumbnail generation yet.
 - No room/prop/stat metadata is written by the editor yet.
-- No overwrite confirmation beyond the file dialog.
+- The file dialog handles overwrite confirmation; there is no separate library-level confirmation.
 - No save-as versioning or library index; the path is the identity.
 - The full volume is cloned for save; a very large volume doubles memory briefly.
 - Loading replaces the current volume without an undo prompt.
+- Save clones and encodes the full volume on the main thread; a large blueprint blocks for the duration.
+- The editor pad/origin is fixed for the default volume; a blueprint with a different volume size loads centered on that origin rather than rebuilding the pad.
 - No localization for the new UI strings yet.
 - Native file dialogs are disabled for deterministic behavior.
 
