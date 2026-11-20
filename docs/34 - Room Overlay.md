@@ -52,10 +52,11 @@ tags:
 
 ## 3. Smoke
 
-`smoke_editor.sh` now runs two headless contracts:
+`smoke_editor.sh` now runs three headless contracts:
 
 1. `EDITOR_SMOKE` — build/place/read/mesh/raycast.
-2. `ROOM_OVERLAY_SMOKE` — build a sealed room, detect it, toggle the overlay, assert one room and at least one overlay node.
+2. `ROOM_OVERLAY_SMOKE` — build a sealed room, detect it, toggle the overlay, assert one room and exactly two overlay nodes.
+3. `UNDO_SMOKE` — set/remove, undo, redo.
 
 Current output:
 
@@ -67,7 +68,7 @@ Nodes = one translucent box + one label.
 
 ## 4. Performance
 
-Detection is ~2 ms for the test house and runs only on toggle/rebuild. The overlay creates a handful of nodes per room, not per voxel. A pathological volume with thousands of rooms would need pooling or a single combined mesh.
+Detection is ~2 ms for the test house and runs only on toggle/rebuild. The overlay creates a handful of nodes per room, not per voxel. A pathological volume with thousands of rooms would need pooling or a single combined mesh. The undo/redo smoke also validates the overlay/test paths but not visual placement.
 
 ## 5. Limitations
 

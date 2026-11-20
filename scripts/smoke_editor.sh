@@ -64,3 +64,23 @@ if [[ "$ROOMS" != "1" || "$NODES" != "2" || "$STATUS" != "ok" ]]; then
 	echo "Room overlay smoke contract mismatch: $LINE" >&2
 	exit 1
 fi
+
+set +e
+OUTPUT="$(timeout 60s "$GODOT_BIN" --headless --path "$ROOT/godot" res://editor.tscn -- --undo-smoke 2>&1)"
+GODOT_STATUS=$?
+set -e
+printf '%s\n' "$OUTPUT"
+if [[ $GODOT_STATUS -ne 0 ]]; then
+	echo "Undo smoke failed: Godot exited with status $GODOT_STATUS" >&2
+	exit 1
+fi
+LINE="$(grep "UNDO_SMOKE " <<<"$OUTPUT" | tail -1 || true)"
+if [[ -z "$LINE" ]]; then
+	echo "Undo smoke failed: no marker" >&2
+	exit 1
+fi
+STATUS="$(sed -n 's/.*status=\([a-z_]*\).*/\1/p' <<<"$LINE")"
+if [[ "$STATUS" != "ok" ]]; then
+	echo "Undo smoke contract mismatch: $LINE" >&2
+	exit 1
+fi
