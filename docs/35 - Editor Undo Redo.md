@@ -52,6 +52,8 @@ UNDO_SMOKE undo=ok redo=ok status=ok
 
 The smoke covers setting from air, undoing to air, redoing the material, removing a voxel, undoing the removal, and redoing it. The undo/redo flags are independent.
 
+`--acceptance-smoke` additionally applies 500 deterministic random edits, saves the result, undoes all 500, and redoes all 500. The saved content hashes match before/after, so the replay is lossless; see [[40 - Slice Acceptance Results]].
+
 ## 4. Limitations
 
 - Only place/remove single-voxel edits are recorded; paint, boxes, copy/paste, and blueprint loads are not undoable yet.
@@ -62,8 +64,6 @@ The smoke covers setting from air, undoing to air, redoing the material, removin
 
 ## 5. Next
 
-1. Prop placement.
-2. Multi-voxel edit transactions and prop undo.
-3. EN/DE strings.
-4. Dirty-chunk remeshing.
-5. 21-house performance pass.
+1. Multi-voxel edit transactions and prop undo.
+2. Dirty-chunk remeshing.
+3. Selection/copy/paste/rotate/mirror once those tools land.

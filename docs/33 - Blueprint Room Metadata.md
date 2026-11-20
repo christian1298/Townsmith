@@ -34,7 +34,7 @@ The room pass runs on save only, not on every voxel edit.
 
 - `rooms[]` with `id`, `type`, `floor`, `area_m2`, `volume_m3`, `beds`, `doors`, `windows`.
 - `materials` keyed `material:{id}` for v0; a content registry will replace these keys with namespaced material ids.
-- `stats.resident_capacity`, `stats.job_slots`, `stats.class`.
+- `stats.resident_capacity`, `stats.job_slots`, `stats.class`, `stats.material_cost`.
 
 Props are written from the editor prop list; room types/capacity now reflect placed beds, stoves, toilets, and desks.
 
@@ -48,6 +48,7 @@ Props are written from the editor prop list; room types/capacity now reflect pla
   resident_capacity,
   job_slots,
   class,
+  material_cost,
   solid_voxels,
   materials: { "material:1": 1234, ... }
 }

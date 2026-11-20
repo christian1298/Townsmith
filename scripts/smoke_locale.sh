@@ -28,7 +28,7 @@ if [[ -z "$LINE" ]]; then
 fi
 KEYS="$(sed -n 's/.*keys=\([0-9][0-9]*\).*/\1/p' <<<"$LINE")"
 STATUS="$(sed -n 's/.*status=\([a-z_]*\).*/\1/p' <<<"$LINE")"
-if [[ "$KEYS" -lt 80 || "$STATUS" != "ok" ]]; then
+if [[ "$KEYS" != "95" || "$STATUS" != "ok" ]]; then
 	echo "Locale smoke contract mismatch: $LINE" >&2
 	exit 1
 fi

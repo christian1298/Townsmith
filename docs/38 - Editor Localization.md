@@ -48,7 +48,7 @@ GODOT=/path/to/godot ./scripts/smoke_locale.sh
 
 Checks:
 
-- EN/DE key parity (currently **93 keys** each).
+- EN/DE key parity (currently **95 keys** each).
 - placeholder parity for every key.
 - required room/material/prop/status keys.
 - missing-key marker behavior.
@@ -56,17 +56,20 @@ Checks:
 - representative rendered strings contain no `!key!` or unresolved `{0}`.
 - German room name check (`Schlafzimmer`).
 
+`./scripts/smoke_layout.sh` additionally builds the real editor UI and checks 16 fixed-width labels/buttons against their minimum text size in EN and DE. It catches text-expansion regressions; it is not a pixel screenshot.
+
 Output:
 
 ```text
-LOCALE_SMOKE en=ok de=ok keys=93 status=ok
+LOCALE_SMOKE en=ok de=ok keys=95 status=ok
+LAYOUT_SMOKE en=ok de=ok checks=16 status=ok
 ```
 
 ## 4. Limitations
 
 - This is a slice-local table, not the compiled moddable language-pack pipeline.
 - Missing keys intentionally render `!key!`; D-022's production fallback chain is not implemented yet.
-- No font/layout screenshot test for German text expansion yet.
+- No font/layout screenshot test for German text expansion yet; the headless width budget is the current guard.
 - Server/admin messages and developer logs remain English.
 - Content names (materials/props) are still editor-local; the future content registry will own them.
 

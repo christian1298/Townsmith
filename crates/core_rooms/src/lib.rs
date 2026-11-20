@@ -29,6 +29,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod demo;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use core_voxel::{MaterialId, VolumePos, VoxelVolume, AIR, VOXEL_SIZE_M};
@@ -530,7 +532,12 @@ fn prop_voxel(prop: &PropInput) -> Option<(usize, usize, usize)> {
     ))
 }
 
-fn count_materials(volume: &VoxelVolume) -> (BTreeMap<String, u64>, u64) {
+/// Count non-air voxels per material and in total.
+///
+/// Keys are `material:{id}`; the map is sorted by id. Shells use this to price
+/// a volume without repeating room detection, which is the expensive part.
+#[must_use]
+pub fn count_materials(volume: &VoxelVolume) -> (BTreeMap<String, u64>, u64) {
     let config = volume.config();
     let mut by_id: BTreeMap<MaterialId, u64> = BTreeMap::new();
     let mut solid_voxels = 0u64;

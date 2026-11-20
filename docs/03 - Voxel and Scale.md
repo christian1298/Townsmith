@@ -2,7 +2,7 @@
 title: Voxel and Scale
 project: Townsmith
 status: accepted
-updated: 2026-11-19
+updated: 2026-11-20
 tags:
   - townsmith
   - voxel
@@ -199,6 +199,8 @@ Materials are data, not code:
 - **Story/height limits live on the structural system**, not the material alone. See [[17 - Materials and Structure]].
 - `fire_risk` and `insulation` feed simulation.
 - Mods can add materials without touching the mesher.
+
+The vertical slice uses five placeholder palette prices in abstract cost units per litre: timber 0.4, stone 0.9, roof 0.7, glass 1.8, door 2.5; unknown/modded materials fall back to 1.0. These values only make the cost stat and `.tsbp` metadata deterministic. See [[40 - Slice Acceptance Results]].
 
 ### Blueprint limits (proposal)
 

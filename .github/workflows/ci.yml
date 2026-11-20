@@ -130,6 +130,16 @@ jobs:
         run: |
           set -o pipefail
           bash ./scripts/smoke_slice.sh 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
+      - name: Run slice acceptance smoke
+        shell: bash
+        run: |
+          set -o pipefail
+          bash ./scripts/smoke_acceptance.sh 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
+      - name: Run EN/DE layout smoke
+        shell: bash
+        run: |
+          set -o pipefail
+          bash ./scripts/smoke_layout.sh 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
       - name: Upload smoke log
         if: always()
         uses: actions/upload-artifact@v4

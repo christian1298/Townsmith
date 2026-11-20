@@ -19,20 +19,20 @@ tags:
 
 | Path | Purpose | Status |
 |---|---|---|
-| `crates/core_voxel` | 32³ chunk, palette/RLE, greedy mesher, chunked volume + cross-chunk meshing | Working, 50 tests |
+| `crates/core_voxel` | 32³ chunk, palette/RLE, greedy mesher, chunked volume + cross-chunk meshing | Working, 52 tests |
 | `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming, terrain mesh + LOD + seam skirts | Working, 58 tests |
 | `crates/core_sim` | 1M-scale cohort simulation plus deterministic 2,000 active agents | Working, 26 tests |
 | `crates/core_city` | Deterministic synthetic Early/Mid/Late city layouts for rendering benchmarks | Working, 10 tests |
-| `crates/core_blueprint` | `.tsbp` v1 package: zip, metadata, RLE voxel stream, BLAKE3 hash | Working, 9 tests |
-| `crates/core_rooms` | Room detection, props, capacity/jobs, material stats, room bounds | Working, 10 tests |
+| `crates/core_blueprint` | `.tsbp` v1 package: zip, metadata, RLE voxel stream, BLAKE3 hash | Working, 10 tests |
+| `crates/core_rooms` | Room detection, props, capacity/jobs, material stats, shared acceptance fixture, room bounds | Working, 12 tests + 1 doctest |
 | `crates/server` | Headless cohort tick harness (no GPU, no socket yet) | Working |
 | `crates/bench` | Voxel, volume, worldgen, terrain, cohort, active-agent, city-layout, and rooms microbenchmarks | Working |
 | `benchmarks/` | Route JSON, results, and benchmark notes | Harness v0 |
 | `scripts/bench_core.sh` | 3-run core benchmark aggregation | Working |
 | `scripts/bench_godot.sh` | 3-run Godot flyover aggregation | Working; headless frame times are not representative |
-| `crates/godot_ext` | Godot 4.7 GDExtension bridge with terrain workers, city layout, editable volume, blueprint, and room APIs | Working, 14 tests + headless smoke |
-| `godot/` | Terrain/city previews plus the first-person editor, blueprint save/load, and room overlay | Working |
-| `scripts/` | Build, check, run, and smoke commands | Working |
+| `crates/godot_ext` | Godot 4.7 GDExtension bridge with terrain workers, city layout, editable volume, blueprint, room, copy-mesh, and acceptance APIs | Working, 16 tests + headless smoke |
+| `godot/` | Terrain/city previews plus the first-person editor, blueprint save/load, room overlay, EN/DE UI, and slice acceptance | Working |
+| `scripts/` | Build, check, run, smoke, and acceptance commands | Working |
 
 The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`, and `server` have no Godot dependency.
 
@@ -56,7 +56,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 
 - `VoxelVolume` default is 5 × 3 × 5 chunks = 16 m × 9.6 m × 16 m.
 - Lazy chunk allocation; cross-chunk face culling and greedy merging into one mesh.
-- 49 core_voxel tests; 2-story shell benchmark ~75 ms / 293 quads / 266k solid voxels.
+- 52 core_voxel tests; 2-story shell benchmark ~75 ms / 293 quads / 266k solid voxels.
 - Whole-volume meshing is for load/save and room detection, not per-click remeshing. See [[27 - Voxel Volume]].
 
 ### Godot bridge
@@ -162,7 +162,15 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 | Terrain LOD 2, 256 m chunk | 65,536 cells | — | 25,327 quads | ~0.39 ms |
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **179 tests**: 51 voxel, 58 world, 26 simulation, 10 city, 9 blueprint, 10 rooms, and 15 bridge tests.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **185 tests + 1 doctest**: 52 voxel, 58 world, 26 simulation, 10 city, 10 blueprint, 12 rooms, 16 bridge, and 1 server test.
+
+### Vertical slice acceptance
+
+- `core_rooms::demo::acceptance_house()` is the shared 8 × 6 × 6 m two-story fixture: kitchen, bathroom, two bedrooms, 8 props, 64,224 solid voxels.
+- The bridge exposes `editor_build_acceptance_house()`, `material_cost` stats, and `build_blueprint_mesh(path)` for the copy-placement check.
+- `--acceptance-smoke` saves, reloads, places a mesh copy, and replays 500 deterministic edits through undo/redo with content-hash equality.
+- `--layout-smoke` builds the real EN/DE UI and checks 16 fixed-width controls against their minimum text size.
+- Results, commands, and the cost model are recorded in [[40 - Slice Acceptance Results]].
 
 ## 3. Known limitations
 
@@ -180,12 +188,10 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 
 ## 4. Next steps
 
-1. Add room bounds/centers and the editor overlay.
-2. Add prop placement so room types/capacity are meaningful.
-3. Add undo/redo and the blueprint library/thumbnail.
-4. Add English/German editor UI tables and the language selector.
-5. Run the 21-house / 60 FPS slice benchmark.
-6. Keep the 3060-class 1M performance gate open for Phase 5.
+1. Record the 30-minute human playtest and top three usability issues (Q-101).
+2. Carry the slice baseline into Phase 2: open-world streaming, build-anywhere placement, and Mayor Mode.
+3. Deferred Phase 2 editor work: paint/pick, brushes, selection/copy/rotate/mirror, structural v0, thumbnails, AO/texture arrays.
+4. Keep the 3060-class 1M performance gate open for Phase 5.
 
 ## 5. Commands
 
@@ -202,6 +208,12 @@ GODOT=/path/to/godot ./scripts/smoke_city.sh
 VOXEL_INSTANCES=200 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_voxel_instances.json
 GODOT=/path/to/godot ./scripts/smoke_voxel.sh
 GODOT=/path/to/godot ./scripts/smoke_volume.sh
+GODOT=/path/to/godot ./scripts/smoke_editor.sh
+GODOT=/path/to/godot ./scripts/smoke_blueprint.sh
+GODOT=/path/to/godot ./scripts/smoke_locale.sh
+GODOT=/path/to/godot ./scripts/smoke_layout.sh
+GODOT=/path/to/godot ./scripts/smoke_acceptance.sh
+GODOT=/path/to/godot ./scripts/smoke_slice.sh
 cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort

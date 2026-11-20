@@ -202,6 +202,20 @@ fn rejects_missing_entries_and_bad_zip() {
 }
 
 #[test]
+fn material_cost_roundtrips_and_zero_stays_omitted() {
+    let dir = temp_dir("cost");
+    let path = dir.join("cost.tsbp");
+    let mut blueprint = test_blueprint();
+    assert_eq!(blueprint.metadata.stats.material_cost, 0.0);
+
+    blueprint.metadata.stats.material_cost = 12.5;
+    save_tsbp(&path, &blueprint).expect("save");
+    let loaded = load_tsbp(&path).expect("load");
+    assert_eq!(loaded.metadata.stats.material_cost, 12.5);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn golden_checksum_is_stable() {
     let blueprint = test_blueprint();
     let voxels = encode_voxels(&blueprint.volume).unwrap();

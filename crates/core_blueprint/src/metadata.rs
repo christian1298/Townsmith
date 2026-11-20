@@ -56,6 +56,12 @@ pub struct BlueprintStats {
     /// Class band, such as `lower_middle`.
     #[serde(default)]
     pub class: String,
+    /// Estimated material cost in abstract cost units.
+    ///
+    /// Zero is omitted from the canonical JSON so packages written before the
+    /// field existed keep their content hash.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub material_cost: f64,
 }
 
 impl Default for BlueprintStats {
@@ -64,8 +70,13 @@ impl Default for BlueprintStats {
             resident_capacity: 0,
             job_slots: 0,
             class: "lower_middle".to_string(),
+            material_cost: 0.0,
         }
     }
+}
+
+fn is_zero_f64(value: &f64) -> bool {
+    *value == 0.0
 }
 
 /// Content dependencies required to load the blueprint.

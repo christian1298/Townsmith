@@ -2,7 +2,7 @@
 title: Roadmap
 project: Townsmith
 status: draft
-updated: 2026-11-19
+updated: 2026-11-20
 tags:
   - townsmith
   - roadmap
@@ -77,8 +77,8 @@ tags:
 
 ### Phase 1 — Architect Mode core (6–8 weeks)
 
-> [!success] Vertical slice progress — 2026-11-20
-> The multi-chunk `VoxelVolume`, the GDExtension editor bridge, and `.tsbp` v1 save/load are merged. Remaining slice work: room detection/stats, the first-person editor shell, English/German editor UI, and the 21-house performance pass. See [[26 - Vertical Slice Spec]], [[27 - Voxel Volume]], [[28 - Blueprint Package]], and [[29 - Volume Editor Bridge]].
+> [!success] Vertical slice — technical acceptance passed 2026-11-20
+> The multi-chunk `VoxelVolume`, GDExtension editor bridge, `.tsbp` v1 save/load, rooms/props/stats, EN/DE UI, and 21-house benchmark are merged. The §6 exit criteria pass in `--acceptance-smoke`; results are in [[40 - Slice Acceptance Results]]. Open: the 30-minute human playtest (Q-101) and deferred editor features (paint/pick, brushes, selection/transform, thumbnail, structural v0, AO/texture arrays). See [[26 - Vertical Slice Spec]], [[27 - Voxel Volume]], [[28 - Blueprint Package]], and [[29 - Volume Editor Bridge]].
 
 **Goals**
 - A first-person voxel editor that is pleasant to use.
@@ -103,9 +103,12 @@ tags:
 - Build a 2-story house with 2 bedrooms, a kitchen, and a bathroom.
 - Save it, reload it, and place a copy.
 - The stats panel reports capacity, cost, and rooms correctly.
-- 60 FPS with the house and 20 copies in view.
+- 60 FPS with the house and 21 copies in view.
 - No data loss on undo/redo or save/load.
 - The editor UI switches between English and German without missing keys or clipped text.
+
+> [!note] Exit status
+> All six criteria pass technically; the 21-house result is 6,195 FPS avg / 4,484 1% low on an RTX 4080. The slice is not fully closed until the human playtest records the top three usability issues (Q-101). Deferred features above move to Phase 2.
 
 ### Phase 2 — Open world and Mayor Mode (8–10 weeks)
 

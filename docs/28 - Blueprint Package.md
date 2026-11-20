@@ -45,7 +45,7 @@ Fields:
   "materials": {},
   "rooms": [],
   "props": [],
-  "stats": { "resident_capacity": 4, "job_slots": 0, "class": "lower_middle" },
+  "stats": { "resident_capacity": 4, "job_slots": 0, "class": "lower_middle", "material_cost": 1234.5 },
   "dependencies": { "game": ">=0.1.0", "mods": [], "resource_packs": [] },
   "content_hash": "blake3:..."
 }

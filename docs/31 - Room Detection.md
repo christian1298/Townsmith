@@ -36,6 +36,7 @@ use core_rooms::{detect_rooms, PropInput, RoomMaterials};
 use core_voxel::VoxelVolume;
 
 let stats = detect_rooms(&volume, &RoomMaterials::new(1, 2, 3, 4, 5), &props);
+let (materials, solid_voxels) = core_rooms::count_materials(&volume);
 ```
 
 Outputs:
@@ -67,7 +68,7 @@ Priority when multiple props are present:
 
 `cargo run --release -p townsmith-bench --bin rooms`
 
-Deterministic two-story 8 × 6 × 6 m house in the default 5 × 3 × 5 volume:
+The fixture is `core_rooms::demo::acceptance_house()`, shared with `--acceptance-smoke`: a deterministic two-story 8 × 6 × 6 m house in the default 5 × 3 × 5 volume.
 
 | Metric | Value |
 |---|---:|
@@ -78,15 +79,15 @@ Deterministic two-story 8 × 6 × 6 m house in the default 5 × 3 × 5 volume:
 | Job slots | 2 |
 | Solid voxels | 64,224 |
 | Material kinds | 5 |
-| Detection median | ~2.13 ms |
-| Detection min/max | ~2.12 / 2.15 ms |
-| Checksum | `4d510d5679afa13a` |
+| Material counts | timber 35,296 · stone 9,600 · roof 18,112 · glass 640 · door 576 |
+| Detection median | ~2–4 ms |
+| Checksum | `fbcb9cb23421966a` |
 
-Well inside the 50 ms target.
+Well inside the 50 ms target. Material cost is priced by the shell (`godot_ext`), not by the detector; see [[40 - Slice Acceptance Results]].
 
 ## 5. Tests
 
-`core_rooms` has 10 integration tests + 1 doctest:
+`core_rooms` has 12 tests + 1 doctest:
 
 - empty volume → no rooms;
 - one enclosed room with wall/floor/ceiling;
@@ -96,7 +97,8 @@ Well inside the 50 ms target.
 - props assign bedroom/kitchen/bathroom/office/living/dining, capacity/jobs, priority;
 - props outside rooms ignored;
 - exact material and solid counts;
-- deterministic output and stable IDs.
+- deterministic output and stable IDs;
+- acceptance fixture determinism and the exact slice room mix (2 bedrooms, kitchen, bathroom).
 
 ## 6. Limitations
 

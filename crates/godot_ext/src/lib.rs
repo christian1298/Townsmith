@@ -5,6 +5,7 @@
 //! Terrain generation and meshing run on Rust worker threads; all Godot
 //! resource creation stays on the main thread.
 
+use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -26,7 +27,8 @@ use core_blueprint::{
 };
 use core_city::{CityLayout, CityTier};
 use core_rooms::{
-    detect_rooms, PropInput, PropKind, RoomBounds, RoomMaterials, RoomStats, FLOOR_BAND_M,
+    count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
+    RoomMaterials, RoomStats, FLOOR_BAND_M,
 };
 use core_voxel::coords::{MaterialId, AIR, CHUNK_SIZE, VOXEL_SIZE_M};
 use core_voxel::demo;
@@ -45,6 +47,40 @@ const EDITOR_FLOOR: u16 = 2;
 const EDITOR_CEILING: u16 = 3;
 const EDITOR_WINDOW: u16 = 4;
 const EDITOR_DOOR: u16 = 5;
+
+/// Placeholder slice prices in abstract cost units per litre.
+///
+/// The vertical slice has no economy yet, so these values only make the cost
+/// stat and `.tsbp` metadata meaningful and deterministic. Unknown/modded
+/// materials fall back to `1.0` per litre. See `docs/26` and `docs/03`.
+const MATERIAL_COST_PER_LITER: [(MaterialId, f64); 5] = [
+    (EDITOR_WALL, 0.4),
+    (EDITOR_FLOOR, 0.9),
+    (EDITOR_CEILING, 0.7),
+    (EDITOR_WINDOW, 1.8),
+    (EDITOR_DOOR, 2.5),
+];
+
+/// Price the `material:{id}` counts returned by [`count_materials`].
+fn slice_material_cost(materials: &BTreeMap<String, u64>) -> f64 {
+    materials
+        .iter()
+        .map(|(key, count)| {
+            let id = key
+                .strip_prefix("material:")
+                .and_then(|value| value.parse::<MaterialId>().ok());
+            let price = id
+                .and_then(|id| {
+                    MATERIAL_COST_PER_LITER
+                        .iter()
+                        .find(|(material, _)| *material == id)
+                        .map(|(_, price)| *price)
+                })
+                .unwrap_or(1.0);
+            price * *count as f64
+        })
+        .sum()
+}
 
 fn editor_room_materials() -> RoomMaterials {
     RoomMaterials::new(
@@ -159,6 +195,7 @@ fn blueprint_from_editor_volume(
         resident_capacity: stats.resident_capacity,
         job_slots: stats.job_slots,
         class: stats.class.clone(),
+        material_cost: slice_material_cost(&stats.materials),
     };
     let mut ordered: Vec<&EditorProp> = props.iter().collect();
     ordered.sort_by_key(|prop| (prop.cell[1], prop.cell[2], prop.cell[0]));
@@ -224,6 +261,7 @@ fn room_stats_to_dictionary(stats: &RoomStats) -> VarDictionary {
     result.set("job_slots", stats.job_slots as i64);
     result.set("class", stats.class.clone());
     result.set("solid_voxels", stats.solid_voxels as i64);
+    result.set("material_cost", slice_material_cost(&stats.materials));
     let mut materials = VarDictionary::new();
     for (key, value) in &stats.materials {
         materials.set(key.clone(), *value as i64);
@@ -840,6 +878,48 @@ impl TownsmithCore {
         true
     }
 
+    /// Replace the editor volume with the deterministic acceptance house.
+    ///
+    /// The fixture lives in `core_rooms::demo`: 8 m × 6 m × 6 m, two floors,
+    /// kitchen, bathroom, two bedrooms, doors, windows, and eight props. It is
+    /// shared by the room benchmark and the end-to-end slice smoke so the
+    /// acceptance numbers cannot drift between them.
+    ///
+    /// Returns `false` when no editor volume exists.
+    ///
+    /// **Main thread only.**
+    #[func]
+    fn editor_build_acceptance_house(&self) -> bool {
+        let mut guard = self
+            .editor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if guard.is_none() {
+            return false;
+        }
+        let mut state = EditorState::new(room_demo::acceptance_house());
+        state.props = room_demo::acceptance_props()
+            .into_iter()
+            .filter_map(|prop| {
+                let cell = [
+                    (prop.position[0] / VOXEL_SIZE_M).floor(),
+                    (prop.position[1] / VOXEL_SIZE_M).floor(),
+                    (prop.position[2] / VOXEL_SIZE_M).floor(),
+                ];
+                if cell.iter().any(|value| *value < 0.0) {
+                    return None;
+                }
+                Some(EditorProp {
+                    kind: prop.kind,
+                    cell: [cell[0] as u32, cell[1] as u32, cell[2] as u32],
+                    rotation: 0.0,
+                })
+            })
+            .collect();
+        *guard = Some(state);
+        true
+    }
+
     /// Remove every allocated chunk from the editor volume.
     ///
     /// Returns `false` when no editor volume exists. The volume keeps its
@@ -950,7 +1030,9 @@ impl TownsmithCore {
 
         result.set("created", true);
         volume_config_to_dictionary(state.volume.config(), &mut result);
+        let (materials, _) = count_materials(&state.volume);
         result.set("solid_voxels", state.volume.solid_count() as i64);
+        result.set("material_cost", slice_material_cost(&materials));
         result.set("allocated_chunks", state.volume.chunks_allocated() as i64);
         result.set("chunk_capacity", MAX_CHUNKS as i64);
         result.set("mesh_dirty", state.mesh_dirty);
@@ -1162,6 +1244,7 @@ impl TownsmithCore {
         result.set("path", path.to_string_lossy().to_string());
         result.set("hash", hash);
         result.set("solid_voxels", blueprint.metadata.solid_voxels as i64);
+        result.set("material_cost", blueprint.metadata.stats.material_cost);
         result.set(
             "bounds",
             &PackedFloat32Array::from(blueprint.metadata.bounds_m.to_vec()).to_variant(),
@@ -1200,6 +1283,8 @@ impl TownsmithCore {
 
         let hash = blueprint.metadata.content_hash.clone();
         let solid_voxels = blueprint.metadata.solid_voxels;
+        let (materials, _) = count_materials(&blueprint.volume);
+        let material_cost = slice_material_cost(&materials);
         let bounds = PackedFloat32Array::from(blueprint.metadata.bounds_m.to_vec());
         let rooms = blueprint.metadata.rooms.len() as i64;
         let name = blueprint.metadata.name.clone();
@@ -1246,12 +1331,48 @@ impl TownsmithCore {
         result.set("path", path.to_string_lossy().to_string());
         result.set("hash", hash);
         result.set("solid_voxels", solid_voxels as i64);
+        result.set("material_cost", material_cost);
         result.set("bounds", &bounds.to_variant());
         result.set("rooms", rooms);
         result.set("props", loaded_props as i64);
         result.set("name", name);
         result.set("id", id);
         result
+    }
+
+    /// Load a `.tsbp` package and return its mesh without touching the editor.
+    ///
+    /// Used by the slice acceptance scene to place a blueprint **copy** next
+    /// to the edited volume: the package is validated and hashed by
+    /// [`load_tsbp`], then meshed exactly like the editor volume. Returns an
+    /// empty `ArrayMesh` on an invalid path or package; call
+    /// [`Self::editor_load_blueprint`] first when a readable error is needed.
+    ///
+    /// **Synchronous and main-thread only.** Whole-volume greedy meshing is
+    /// ~75 ms for the acceptance house; call once per placed copy at load.
+    #[func]
+    fn build_blueprint_mesh(&self, path: GString) -> Gd<ArrayMesh> {
+        let path = match blueprint_path_from_arg(&path.to_string()) {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("Townsmith: blueprint mesh rejected: {error}");
+                return ArrayMesh::new_gd();
+            }
+        };
+        let blueprint = match load_tsbp(&path) {
+            Ok(blueprint) => blueprint,
+            Err(error) => {
+                eprintln!("Townsmith: blueprint mesh load failed: {error}");
+                return ArrayMesh::new_gd();
+            }
+        };
+        match voxel_mesh_to_godot(&blueprint.volume.mesh()) {
+            Ok(mesh) => mesh,
+            Err(message) => {
+                eprintln!("Townsmith: {message}");
+                ArrayMesh::new_gd()
+            }
+        }
     }
 }
 
@@ -1639,6 +1760,14 @@ mod tests {
         assert_eq!(material_from_args(65_535), Some(65_535));
         assert_eq!(material_from_args(-1), None);
         assert_eq!(material_from_args(65_536), None);
+    }
+
+    #[test]
+    fn slice_cost_prices_the_acceptance_house() {
+        let volume = room_demo::acceptance_house();
+        let (materials, solid) = count_materials(&volume);
+        assert_eq!(solid, 64_224);
+        assert!((slice_material_cost(&materials) - 38_028.8).abs() < 1e-6);
     }
 
     #[test]
