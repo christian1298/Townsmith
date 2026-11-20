@@ -31,6 +31,10 @@ tags:
 | `editor_get_voxel(x, y, z)` | `int` | Material id, or `-1` on error. |
 | `build_editor_volume_mesh()` | `ArrayMesh` | One packed-array surface for the whole volume. |
 | `editor_volume_stats()` | `Dictionary` | Solid voxels, allocated chunks, mesh stats, last mesh time. |
+| `editor_place_prop(kind, x, y, z, rotation)` | `bool` | Place/replace a functional prop in an empty cell. |
+| `editor_remove_prop_at(x, y, z)` | `bool` | Remove the prop at an exact cell. |
+| `editor_props()` | `Dictionary` | `ok` plus `props[]` with kind/id/cell/rotation. |
+| `editor_clear_props()` | `bool` | Remove props without touching voxels. |
 
 All methods are **main-thread only**. They mutate bridge state; the internal `Mutex` makes the Godot class safe to hold, not a threading license.
 

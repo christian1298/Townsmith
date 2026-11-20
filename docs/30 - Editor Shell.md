@@ -13,7 +13,7 @@ tags:
 # 30 — Editor Shell
 
 > [!info] What this note is
-> The first playable first-person editor shell: `godot/editor.tscn` and its scripts. It uses the volume API from [[29 - Volume Editor Bridge]] to place and remove 10 cm voxels in the default volume. It is the camera, palette, raycast, and remesh half of [[26 - Vertical Slice Spec]] §3. Blueprint save/load is in [[32 - Blueprint Save Load]]; the room overlay is in [[34 - Room Overlay]]; undo/redo is in [[35 - Editor Undo Redo]]; prop placement is still open.
+> The first playable first-person editor shell: `godot/editor.tscn` and its scripts. It uses the volume API from [[29 - Volume Editor Bridge]] to place and remove 10 cm voxels in the default volume. It is the camera, palette, raycast, and remesh half of [[26 - Vertical Slice Spec]] §3. Blueprint save/load is in [[32 - Blueprint Save Load]]; the room overlay is in [[34 - Room Overlay]]; undo/redo is in [[35 - Editor Undo Redo]]; prop placement is in [[36 - Editor Props]].
 
 ## 1. What runs
 
@@ -47,9 +47,10 @@ GODOT=/path/to/godot ./scripts/run_godot.sh   # defaults to main.tscn
 | `Space` / `Ctrl` | Fly up / down |
 | `Shift` | Move at 3× speed |
 | `Esc` | Release the mouse; left click recaptures |
-| Left click | Remove the first solid voxel under the crosshair |
-| Right click | Place the active material in the empty cell before the hit |
+| Left click | Remove the hit voxel, or the prop in the placement cell when a prop is selected |
+| Right click | Place the active material or prop in the empty cell before the hit |
 | `1` … `5` | Select timber, stone, roof, glass, door |
+| `6` … `9` | Select bed, stove, toilet, desk prop |
 | `R` | Toggle the room overlay |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo the last voxel edit |
 | Mouse wheel | Unbound in v0 |
@@ -129,7 +130,7 @@ Current output:
 
 ```text
 EDITOR_SMOKE solid=257 quads=14 surfaces=1 status=ok
-ROOM_OVERLAY_SMOKE rooms=1 nodes=2 status=ok
+ROOM_OVERLAY_SMOKE rooms=1 nodes=2 type=bedroom capacity=1 status=ok
 UNDO_SMOKE undo=ok redo=ok status=ok
 ```
 
@@ -140,9 +141,8 @@ CI runs the script in the Godot headless smoke job after `smoke_volume.sh`.
 ## 8. Limitations
 
 - **Single-edit undo only.** Place/remove are undoable; multi-voxel tools and blueprint loads are not. See [[35 - Editor Undo Redo]].
-- **No room overlay or room-derived stats yet.** See [[31 - Room Detection]] for the core detector.
+- **Room overlay is available**, but there is no room selection or separate room-stats panel yet.
 - **No walk mode or collision.** The camera flies; there is no gravity, capsule, or ground contact.
-- **Undo/redo is single-edit only.** Place/remove are undoable; paint, boxes, and load are not.
 - **No per-material rendering.** All voxels share one neutral material override.
 - **One-voxel brush.** There is no 2×2×2/3×3×3 brush, paint, pick, box, copy/paste, rotate, or mirror.
 - **Whole-volume remesh.** Every rebuild remeshes the entire 16 × 9.6 × 16 m volume on the main thread; no dirty-chunk path or worker yet.
@@ -157,4 +157,4 @@ CI runs the script in the Godot headless smoke job after `smoke_volume.sh`.
 2. Dirty-chunk remesh and a worker-thread mesh path.
 3. Undo/redo and edit batches at the bridge boundary.
 4. Multi-material mesh surfaces from the content registry so the palette is visible.
-5. Ghost preview, brush sizes, paint/pick, and room stats.
+5. Ghost preview, brush sizes, paint/pick, prop rotation, and room stats.

@@ -21,11 +21,14 @@ use godot::classes::{ArrayMesh, SurfaceTool};
 use godot::prelude::*;
 
 use core_blueprint::{
-    load_tsbp, save_tsbp_with_hash, Blueprint, BlueprintMetadata, BlueprintStats, RoomRecord,
+    load_tsbp, save_tsbp_with_hash, Blueprint, BlueprintMetadata, BlueprintStats, PropRecord,
+    RoomRecord,
 };
 use core_city::{CityLayout, CityTier};
-use core_rooms::{detect_rooms, RoomBounds, RoomMaterials, RoomStats, FLOOR_BAND_M};
-use core_voxel::coords::{MaterialId, CHUNK_SIZE, VOXEL_SIZE_M};
+use core_rooms::{
+    detect_rooms, PropInput, PropKind, RoomBounds, RoomMaterials, RoomStats, FLOOR_BAND_M,
+};
+use core_voxel::coords::{MaterialId, AIR, CHUNK_SIZE, VOXEL_SIZE_M};
 use core_voxel::demo;
 use core_voxel::mesh::{greedy_mesh, MeshBuffers};
 use core_voxel::volume::{VolumeConfig, VolumePos, VoxelVolume, MAX_CHUNKS, MAX_CHUNKS_PER_AXIS};
@@ -53,9 +56,89 @@ fn editor_room_materials() -> RoomMaterials {
     )
 }
 
+fn prop_kind_from_code(code: i64) -> Option<PropKind> {
+    match code {
+        0 => Some(PropKind::Bed),
+        1 => Some(PropKind::Stove),
+        2 => Some(PropKind::Toilet),
+        3 => Some(PropKind::Shower),
+        4 => Some(PropKind::Sink),
+        5 => Some(PropKind::Table),
+        6 => Some(PropKind::Sofa),
+        7 => Some(PropKind::Desk),
+        8 => Some(PropKind::Other),
+        _ => None,
+    }
+}
+
+fn prop_code(kind: PropKind) -> i64 {
+    match kind {
+        PropKind::Bed => 0,
+        PropKind::Stove => 1,
+        PropKind::Toilet => 2,
+        PropKind::Shower => 3,
+        PropKind::Sink => 4,
+        PropKind::Table => 5,
+        PropKind::Sofa => 6,
+        PropKind::Desk => 7,
+        PropKind::Other => 8,
+    }
+}
+
+fn prop_id(kind: PropKind) -> &'static str {
+    match kind {
+        PropKind::Bed => "base:bed_single",
+        PropKind::Stove => "base:stove",
+        PropKind::Toilet => "base:toilet",
+        PropKind::Shower => "base:shower",
+        PropKind::Sink => "base:sink",
+        PropKind::Table => "base:table",
+        PropKind::Sofa => "base:sofa",
+        PropKind::Desk => "base:desk",
+        PropKind::Other => "base:prop",
+    }
+}
+
+fn prop_kind_from_id(id: &str) -> Option<PropKind> {
+    match id {
+        "base:bed_single" | "base:bed_double" => Some(PropKind::Bed),
+        "base:stove" | "base:oven" => Some(PropKind::Stove),
+        "base:toilet" => Some(PropKind::Toilet),
+        "base:shower" => Some(PropKind::Shower),
+        "base:sink" => Some(PropKind::Sink),
+        "base:table" => Some(PropKind::Table),
+        "base:sofa" => Some(PropKind::Sofa),
+        "base:desk" => Some(PropKind::Desk),
+        "base:prop" => Some(PropKind::Other),
+        _ => None,
+    }
+}
+
+fn prop_input(prop: &EditorProp) -> PropInput {
+    PropInput::new(
+        prop_id(prop.kind),
+        prop.kind,
+        [
+            (prop.cell[0] as f32 + 0.5) * VOXEL_SIZE_M,
+            prop.cell[1] as f32 * VOXEL_SIZE_M,
+            (prop.cell[2] as f32 + 0.5) * VOXEL_SIZE_M,
+        ],
+    )
+}
+
+fn editor_props_input(props: &[EditorProp]) -> Vec<PropInput> {
+    props.iter().map(prop_input).collect()
+}
+
 /// Build blueprint metadata from the editor volume, including detected rooms.
-fn blueprint_from_editor_volume(id: String, name: String, volume: VoxelVolume) -> Blueprint {
-    let stats = detect_rooms(&volume, &editor_room_materials(), &[]);
+fn blueprint_from_editor_volume(
+    id: String,
+    name: String,
+    volume: VoxelVolume,
+    props: &[EditorProp],
+) -> Blueprint {
+    let inputs = editor_props_input(props);
+    let stats = detect_rooms(&volume, &editor_room_materials(), &inputs);
     let mut metadata = BlueprintMetadata::new(id, name);
     metadata.materials = stats.materials.clone();
     metadata.rooms = stats
@@ -77,6 +160,20 @@ fn blueprint_from_editor_volume(id: String, name: String, volume: VoxelVolume) -
         job_slots: stats.job_slots,
         class: stats.class.clone(),
     };
+    let mut ordered: Vec<&EditorProp> = props.iter().collect();
+    ordered.sort_by_key(|prop| (prop.cell[1], prop.cell[2], prop.cell[0]));
+    metadata.props = ordered
+        .into_iter()
+        .map(|prop| PropRecord {
+            id: prop_id(prop.kind).to_string(),
+            position: [
+                (prop.cell[0] as f32 + 0.5) * VOXEL_SIZE_M,
+                prop.cell[1] as f32 * VOXEL_SIZE_M,
+                (prop.cell[2] as f32 + 0.5) * VOXEL_SIZE_M,
+            ],
+            rotation: prop.rotation,
+        })
+        .collect();
     Blueprint::new(metadata, volume)
 }
 
@@ -296,8 +393,16 @@ fn worker_loop(jobs: Arc<Mutex<Receiver<TerrainJob>>>, results: Sender<TerrainRe
 /// The volume itself is single-threaded in practice; the `Mutex` in
 /// [`TownsmithCore`] keeps the Godot class `Sync` and makes accidental
 /// cross-thread access safe rather than undefined.
+#[derive(Debug, Clone)]
+struct EditorProp {
+    kind: PropKind,
+    cell: [u32; 3],
+    rotation: f32,
+}
+
 struct EditorState {
     volume: VoxelVolume,
+    props: Vec<EditorProp>,
     mesh_builds: u64,
     mesh_dirty: bool,
     last_mesh_quads: usize,
@@ -310,6 +415,7 @@ impl EditorState {
     fn new(volume: VoxelVolume) -> Self {
         Self {
             volume,
+            props: Vec::new(),
             mesh_builds: 0,
             // A newly created volume has no mesh yet, so consumers that act on
             // the dirty flag must build the initial surface.
@@ -691,6 +797,7 @@ impl TownsmithCore {
             return false;
         };
         state.volume.clear();
+        state.props.clear();
         state.mark_dirty();
         true
     }
@@ -796,6 +903,115 @@ impl TownsmithCore {
         result
     }
 
+    /// Place a functional prop in an empty editor voxel cell.
+    ///
+    /// `kind` is `0` bed, `1` stove, `2` toilet, `3` shower, `4` sink, `5`
+    /// table, `6` sofa, `7` desk, `8` other. Replaces any prop already at the
+    /// same cell. Props do not change the voxel mesh.
+    ///
+    /// **Main thread only.**
+    #[func]
+    fn editor_place_prop(&self, kind: i64, x: i64, y: i64, z: i64, rotation: f64) -> bool {
+        let Some(kind) = prop_kind_from_code(kind) else {
+            return false;
+        };
+        let Some(pos) = volume_pos_from_args(x, y, z) else {
+            return false;
+        };
+        let mut guard = self
+            .editor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(state) = guard.as_mut() else {
+            return false;
+        };
+        if state.volume.get_voxel(pos).ok() != Some(AIR) {
+            return false;
+        }
+        if !rotation.is_finite() {
+            return false;
+        }
+        let cell = [pos.x, pos.y, pos.z];
+        state.props.retain(|prop| prop.cell != cell);
+        state.props.push(EditorProp {
+            kind,
+            cell,
+            rotation: (rotation as f32).rem_euclid(360.0),
+        });
+        true
+    }
+
+    /// Remove a prop at an exact editor voxel cell.
+    ///
+    /// Returns whether a prop was removed.
+    ///
+    /// **Main thread only.**
+    #[func]
+    fn editor_remove_prop_at(&self, x: i64, y: i64, z: i64) -> bool {
+        let Some(pos) = volume_pos_from_args(x, y, z) else {
+            return false;
+        };
+        let mut guard = self
+            .editor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(state) = guard.as_mut() else {
+            return false;
+        };
+        let before = state.props.len();
+        state
+            .props
+            .retain(|prop| prop.cell != [pos.x, pos.y, pos.z]);
+        state.props.len() != before
+    }
+
+    /// List placed props as `{ kind, id, x, y, z, rotation }` dictionaries.
+    ///
+    /// **Main thread only.**
+    #[func]
+    fn editor_props(&self) -> VarDictionary {
+        let mut result = VarDictionary::new();
+        let guard = self
+            .editor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(state) = guard.as_ref() else {
+            result.set("ok", false);
+            result.set("error", "no editor volume is open");
+            return result;
+        };
+        let mut props: Array<VarDictionary> = Array::new();
+        for prop in &state.props {
+            let mut item = VarDictionary::new();
+            item.set("kind", prop_code(prop.kind));
+            item.set("id", prop_id(prop.kind));
+            item.set("x", prop.cell[0] as i64);
+            item.set("y", prop.cell[1] as i64);
+            item.set("z", prop.cell[2] as i64);
+            item.set("rotation", f64::from(prop.rotation));
+            props.push(&item);
+        }
+        result.set("ok", true);
+        result.set("props", &props.to_variant());
+        result
+    }
+
+    /// Remove all props without touching voxels.
+    ///
+    /// **Main thread only.**
+    #[func]
+    fn editor_clear_props(&self) -> bool {
+        let mut guard = self
+            .editor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(state) = guard.as_mut() else {
+            return false;
+        };
+        state.props.clear();
+        true
+    }
+
     /// Detect rooms and stats for the current editor volume.
     ///
     /// Returns `{ rooms, resident_capacity, job_slots, class, solid_voxels,
@@ -814,15 +1030,19 @@ impl TownsmithCore {
             result.set("error", "no editor volume is open");
             return result;
         };
-        let mut result =
-            room_stats_to_dictionary(&detect_rooms(&state.volume, &editor_room_materials(), &[]));
+        let inputs = editor_props_input(&state.props);
+        let mut result = room_stats_to_dictionary(&detect_rooms(
+            &state.volume,
+            &editor_room_materials(),
+            &inputs,
+        ));
         result.set("ok", true);
         result
     }
 
     /// Save the current editor volume as a `.tsbp` package.
     ///
-    /// Returns `{ ok, path, hash, solid_voxels, bounds, rooms }` on success and
+    /// Returns `{ ok, path, hash, solid_voxels, bounds, rooms, props }` on success and
     /// `{ ok: false, error }` on failure. The volume is cloned before the file
     /// write so the editor lock is not held during I/O.
     ///
@@ -856,7 +1076,7 @@ impl TownsmithCore {
             return result;
         }
 
-        let volume = {
+        let (volume, props) = {
             let guard = self
                 .editor
                 .lock()
@@ -866,10 +1086,10 @@ impl TownsmithCore {
                 result.set("error", "no editor volume is open");
                 return result;
             };
-            state.volume.clone()
+            (state.volume.clone(), state.props.clone())
         };
 
-        let blueprint = blueprint_from_editor_volume(id, name, volume);
+        let blueprint = blueprint_from_editor_volume(id, name, volume, &props);
         let hash = match save_tsbp_with_hash(&path, &blueprint) {
             Ok(hash) => hash,
             Err(error) => {
@@ -888,12 +1108,13 @@ impl TownsmithCore {
             &PackedFloat32Array::from(blueprint.metadata.bounds_m.to_vec()).to_variant(),
         );
         result.set("rooms", blueprint.metadata.rooms.len() as i64);
+        result.set("props", props.len() as i64);
         result
     }
 
     /// Load a `.tsbp` package into the editor, replacing the current volume.
     ///
-    /// Returns `{ ok, path, hash, solid_voxels, bounds, rooms, name, id }` on
+    /// Returns `{ ok, path, hash, solid_voxels, bounds, rooms, props, name, id }` on
     /// success and `{ ok: false, error }` on failure.
     ///
     /// **Main thread only.**
@@ -925,11 +1146,42 @@ impl TownsmithCore {
         let name = blueprint.metadata.name.clone();
         let id = blueprint.metadata.id.clone();
 
+        let mut state = EditorState::new(blueprint.volume);
+        let dims = state.volume.config().voxels();
+        state.props = blueprint
+            .metadata
+            .props
+            .iter()
+            .filter_map(|prop| {
+                let kind = prop_kind_from_id(&prop.id)?;
+                let x = (prop.position[0] / VOXEL_SIZE_M).floor();
+                let y = (prop.position[1] / VOXEL_SIZE_M).floor();
+                let z = (prop.position[2] / VOXEL_SIZE_M).floor();
+                if x < 0.0 || y < 0.0 || z < 0.0 {
+                    return None;
+                }
+                let cell = [x as u32, y as u32, z as u32];
+                if cell[0] as usize >= dims[0]
+                    || cell[1] as usize >= dims[1]
+                    || cell[2] as usize >= dims[2]
+                {
+                    return None;
+                }
+                Some(EditorProp {
+                    kind,
+                    cell,
+                    rotation: prop.rotation,
+                })
+            })
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        state.props.retain(|prop| seen.insert(prop.cell));
+        let loaded_props = state.props.len();
         let mut guard = self
             .editor
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        *guard = Some(EditorState::new(blueprint.volume));
+        *guard = Some(state);
 
         result.set("ok", true);
         result.set("path", path.to_string_lossy().to_string());
@@ -937,6 +1189,7 @@ impl TownsmithCore {
         result.set("solid_voxels", solid_voxels as i64);
         result.set("bounds", &bounds.to_variant());
         result.set("rooms", rooms);
+        result.set("props", loaded_props as i64);
         result.set("name", name);
         result.set("id", id);
         result
@@ -1410,24 +1663,35 @@ mod tests {
             .expect("window");
 
         let solid = u64::from(volume.solid_count());
+        let props = vec![EditorProp {
+            kind: PropKind::Bed,
+            cell: [10, 1, 10],
+            rotation: 0.0,
+        }];
         let blueprint = blueprint_from_editor_volume(
             "local:test_room".to_string(),
             "Test Room".to_string(),
             volume,
+            &props,
         );
         assert_eq!(blueprint.metadata.rooms.len(), 1);
         let room = &blueprint.metadata.rooms[0];
         assert_eq!(room.id, "room_0");
-        assert_eq!(room.room_type, "empty");
+        assert_eq!(room.room_type, "bedroom");
         assert_eq!(room.floor, 0);
         assert!((room.area_m2 - 14.44).abs() < 0.001);
         assert!((room.volume_m3 - 43.32).abs() < 0.001);
-        assert_eq!(room.beds, 0);
+        assert_eq!(room.beds, 1);
         assert_eq!(room.doors, 1);
         assert_eq!(room.windows, 1);
         assert_eq!(blueprint.metadata.solid_voxels, solid);
         assert_eq!(blueprint.metadata.bounds_m, [6.4, 3.2, 6.4]);
-        assert!(blueprint.metadata.props.is_empty());
+        assert_eq!(blueprint.metadata.props.len(), 1);
+        assert_eq!(blueprint.metadata.props[0].id, "base:bed_single");
+        let position = blueprint.metadata.props[0].position;
+        assert!((position[0] - 1.05).abs() < 1e-6);
+        assert!((position[1] - 0.1).abs() < 1e-6);
+        assert!((position[2] - 1.05).abs() < 1e-6);
         assert_eq!(
             blueprint.metadata.materials,
             [
@@ -1440,9 +1704,9 @@ mod tests {
             .into_iter()
             .collect()
         );
-        assert_eq!(blueprint.metadata.stats.resident_capacity, 0);
+        assert_eq!(blueprint.metadata.stats.resident_capacity, 1);
         assert_eq!(blueprint.metadata.stats.job_slots, 0);
-        assert_eq!(blueprint.metadata.stats.class, "lower_middle");
+        assert_eq!(blueprint.metadata.stats.class, "middle");
 
         let path = std::env::temp_dir().join(format!(
             "townsmith_room_metadata_{}.tsbp",
@@ -1455,6 +1719,24 @@ mod tests {
         assert_eq!(loaded.metadata.rooms, blueprint.metadata.rooms);
         assert_eq!(loaded.metadata.materials, blueprint.metadata.materials);
         assert_eq!(loaded.metadata.stats, blueprint.metadata.stats);
+        assert_eq!(loaded.metadata.props, blueprint.metadata.props);
+    }
+
+    #[test]
+    fn prop_ids_round_trip() {
+        for kind in [
+            PropKind::Bed,
+            PropKind::Stove,
+            PropKind::Toilet,
+            PropKind::Shower,
+            PropKind::Sink,
+            PropKind::Table,
+            PropKind::Sofa,
+            PropKind::Desk,
+            PropKind::Other,
+        ] {
+            assert_eq!(prop_kind_from_id(prop_id(kind)), Some(kind));
+        }
     }
 
     #[test]

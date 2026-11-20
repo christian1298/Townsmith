@@ -42,6 +42,12 @@ const MATERIALS := [
 	{"id": 4, "name": "glass"},
 	{"id": 5, "name": "door"},
 ]
+const PROPS := [
+	{"kind": 0, "name": "bed"},
+	{"kind": 1, "name": "stove"},
+	{"kind": 2, "name": "toilet"},
+	{"kind": 7, "name": "desk"},
+]
 const SMOKE_FLOOR_VOXELS := 16
 const SMOKE_SET_CELL := Vector3i(4, 1, 4)
 const SMOKE_FLOOR_SOLID := 256
@@ -72,6 +78,9 @@ var _save_dialog: FileDialog
 var _load_dialog: FileDialog
 var _room_overlay: Node3D
 var _room_overlay_on := false
+var _prop_root: Node3D
+var _prop_nodes: Dictionary = {}
+var _active_prop := -1
 var _history: Array[Array] = []
 var _redo: Array[Array] = []
 
@@ -118,6 +127,7 @@ func _ready() -> void:
 
 	_build_shell()
 	_build_ui()
+	_refresh_prop_nodes()
 	_update_palette_label()
 	_refresh_stats_label()
 	if DisplayServer.get_name() != "headless":
@@ -142,6 +152,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		if key == KEY_R:
 			_toggle_room_overlay()
 			return
+		for index in PROPS.size():
+			if key == KEY_6 + index:
+				_select_prop(int(PROPS[index]["kind"]))
+				return
 		# Use keycode (layout-aware), not physical_keycode: on QWERTZ the
 		# labelled Z/Y keys sit at the opposite physical positions.
 		if event.ctrl_pressed and event.keycode == KEY_Z:
@@ -168,9 +182,15 @@ func _unhandled_input(event: InputEvent) -> void:
 				_set_status("Esc releases the mouse")
 			return
 		if event.button_index == MOUSE_BUTTON_LEFT:
-			_remove_under_crosshair()
+			if _active_prop >= 0:
+				_remove_prop_under_crosshair()
+			else:
+				_remove_under_crosshair()
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
-			_place_under_crosshair()
+			if _active_prop >= 0:
+				_place_prop_under_crosshair()
+			else:
+				_place_under_crosshair()
 
 ## Cast from the crosshair to the first solid voxel.
 ##
@@ -257,6 +277,103 @@ func _place_under_crosshair() -> void:
 		_set_status("Place rejected at %s" % cell)
 		return
 	_on_edit_applied("Placed %s at %s" % [_material_name(_active_material), cell])
+
+func _place_prop_under_crosshair() -> void:
+	var hit := _raycast(_camera.global_position, -_camera.global_transform.basis.z)
+	if not bool(hit.get("hit", false)) or not bool(hit.get("has_place", false)):
+		_set_status("No empty cell for a prop")
+		return
+	var cell: Vector3i = hit["place"]
+	if not _core.editor_place_prop(_active_prop, cell.x, cell.y, cell.z, 0.0):
+		_set_status("Prop placement rejected at %s" % cell)
+		return
+	_add_prop_node(_active_prop, cell)
+	if _room_overlay_on:
+		_rebuild_room_overlay()
+	_set_status("Placed %s at %s" % [_prop_name(_active_prop), cell])
+
+func _remove_prop_under_crosshair() -> void:
+	var hit := _raycast(_camera.global_position, -_camera.global_transform.basis.z)
+	if not bool(hit.get("hit", false)) or not bool(hit.get("has_place", false)):
+		_set_status("No prop cell in reach")
+		return
+	var cell: Vector3i = hit["place"]
+	if not _core.editor_remove_prop_at(cell.x, cell.y, cell.z):
+		_set_status("No prop at %s" % cell)
+		return
+	var key := _prop_key(cell)
+	var node: Node = _prop_nodes.get(key)
+	if node != null:
+		node.queue_free()
+		_prop_nodes.erase(key)
+	if _room_overlay_on:
+		_rebuild_room_overlay()
+	_set_status("Removed prop at %s" % cell)
+
+func _refresh_prop_nodes() -> void:
+	if _prop_root == null:
+		return
+	for child in _prop_root.get_children():
+		child.queue_free()
+	_prop_nodes.clear()
+	var result: Dictionary = _core.editor_props()
+	if not bool(result.get("ok", false)):
+		return
+	var props: Array = result.get("props", [])
+	for prop in props:
+		var cell := Vector3i(int(prop.get("x", 0)), int(prop.get("y", 0)), int(prop.get("z", 0)))
+		_add_prop_node(int(prop.get("kind", 8)), cell)
+
+func _add_prop_node(kind: int, cell: Vector3i) -> void:
+	if _prop_root == null:
+		return
+	var size := _prop_size(kind)
+	var box := BoxMesh.new()
+	box.size = size
+	var instance := MeshInstance3D.new()
+	instance.mesh = box
+	instance.material_override = _flat_material(_prop_color(kind))
+	instance.position = _volume_origin + Vector3(
+		(cell.x + 0.5) * VOXEL_SIZE_M,
+		cell.y * VOXEL_SIZE_M + size.y * 0.5,
+		(cell.z + 0.5) * VOXEL_SIZE_M,
+	)
+	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var key := _prop_key(cell)
+	var previous: Node = _prop_nodes.get(key)
+	if previous != null:
+		previous.queue_free()
+	_prop_root.add_child(instance)
+	_prop_nodes[key] = instance
+
+func _prop_key(cell: Vector3i) -> String:
+	return "%d:%d:%d" % [cell.x, cell.y, cell.z]
+
+func _prop_size(kind: int) -> Vector3:
+	match kind:
+		0:
+			return Vector3(1.0, 0.5, 1.9)
+		1:
+			return Vector3(0.9, 0.9, 0.7)
+		2:
+			return Vector3(0.5, 0.7, 0.7)
+		7:
+			return Vector3(1.2, 0.8, 0.7)
+		_:
+			return Vector3(0.6, 0.6, 0.6)
+
+func _prop_color(kind: int) -> Color:
+	match kind:
+		0:
+			return Color(0.45, 0.65, 1.0)
+		1:
+			return Color(0.9, 0.55, 0.25)
+		2:
+			return Color(0.3, 0.85, 0.85)
+		7:
+			return Color(0.75, 0.55, 1.0)
+		_:
+			return Color(0.7, 0.7, 0.7)
 
 ## Mark the mesh stale and push the rebuild deadline out.
 ##
@@ -454,6 +571,10 @@ func _build_shell() -> void:
 	_volume_mesh.material_override = _flat_material(VOXEL_COLOR)
 	add_child(_volume_mesh)
 
+	_prop_root = Node3D.new()
+	_prop_root.name = "EditorProps"
+	add_child(_prop_root)
+
 	_camera = EditorCamera.new()
 	_camera.name = "FlyCamera"
 	_camera.far = 256.0
@@ -598,10 +719,18 @@ func _flat_material(color: Color) -> StandardMaterial3D:
 
 func _select_material(id: int) -> void:
 	_active_material = id
+	_active_prop = -1
 	_update_palette_label()
 	var material_name := _material_name(id)
 	print("Editor material: %d %s" % [id, material_name])
 	_set_status("Material %d: %s" % [id, material_name])
+
+func _select_prop(kind: int) -> void:
+	_active_prop = kind
+	_update_palette_label()
+	var name := _prop_name(kind)
+	print("Editor prop: %d %s" % [kind, name])
+	_set_status("Prop: %s  (right click place, left click remove)" % name)
 
 func _update_palette_label() -> void:
 	if _palette_label == null:
@@ -609,8 +738,14 @@ func _update_palette_label() -> void:
 	var lines := PackedStringArray(["Materials  (keys 1-5)"])
 	for entry in MATERIALS:
 		var id := int(entry["id"])
-		var marker := ">" if id == _active_material else " "
+		var marker := ">" if id == _active_material and _active_prop < 0 else " "
 		lines.append("%s %d  %s" % [marker, id, str(entry["name"])])
+	lines.append("Props  (keys 6-9)")
+	for index in PROPS.size():
+		var entry: Dictionary = PROPS[index]
+		var kind := int(entry["kind"])
+		var marker := ">" if kind == _active_prop else " "
+		lines.append("%s %d  %s" % [marker, 6 + index, str(entry["name"])])
 	_palette_label.text = "\n".join(lines)
 
 func _refresh_stats_label(build_ms: float = -1.0) -> void:
@@ -644,6 +779,12 @@ func _material_name(id: int) -> String:
 		if int(entry["id"]) == id:
 			return str(entry["name"])
 	return "unknown"
+
+func _prop_name(kind: int) -> String:
+	for entry in PROPS:
+		if int(entry["kind"]) == kind:
+			return str(entry["name"])
+	return "prop"
 
 func _world_to_cell(world: Vector3) -> Vector3i:
 	var local := (world - _volume_origin) / _voxel_size_m
@@ -727,6 +868,7 @@ func _load_blueprint(path: String) -> bool:
 	_redo.clear()
 	_remesh_pending = false
 	_rebuild_volume_mesh()
+	_refresh_prop_nodes()
 	_update_palette_label()
 	_set_status("Loaded %s  hash=%s" % [
 		str(result.get("name", "blueprint")), _short_hash(str(result.get("hash", "")))])
@@ -770,6 +912,8 @@ func _run_blueprint_smoke() -> void:
 		status = "fill_failed"
 	elif not _core.editor_set_voxel(SMOKE_SET_CELL.x, SMOKE_SET_CELL.y, SMOKE_SET_CELL.z, 1):
 		status = "set_failed"
+	elif not _core.editor_place_prop(0, 1, 1, 1, 0.0):
+		status = "prop_failed"
 
 	var saved: Dictionary = {}
 	var loaded: Dictionary = {}
@@ -781,6 +925,8 @@ func _run_blueprint_smoke() -> void:
 			status = "save_solid"
 		elif not str(saved.get("hash", "")).begins_with("blake3:"):
 			status = "save_hash"
+		elif int(saved.get("props", -1)) != 1:
+			status = "save_props"
 
 	if status == "ok":
 		if not _core.editor_clear():
@@ -798,6 +944,10 @@ func _run_blueprint_smoke() -> void:
 			status = "load_hash"
 		elif int(loaded.get("rooms", -1)) != 0:
 			status = "load_rooms"
+		elif int(loaded.get("props", -1)) != 1:
+			status = "load_props"
+		elif int(_core.editor_props().get("props", []).size()) != 1:
+			status = "load_prop_state"
 		var bounds: PackedFloat32Array = loaded.get("bounds", PackedFloat32Array())
 		if status == "ok" and bounds.size() != 3:
 			status = "load_bounds"
@@ -818,8 +968,9 @@ func _run_blueprint_smoke() -> void:
 			status = "load_stats"
 
 	DirAccess.remove_absolute(global_path)
-	print("BLUEPRINT_SMOKE solid=%d hash=%s status=%s" % [
+	print("BLUEPRINT_SMOKE solid=%d props=%d hash=%s status=%s" % [
 		int(loaded.get("solid_voxels", 0)),
+		int(loaded.get("props", 0)),
 		str(loaded.get("hash", "")),
 		status,
 	])
@@ -898,6 +1049,8 @@ func _run_room_overlay_smoke() -> void:
 		status = "door_failed"
 	elif not _core.editor_set_voxel(0, 15, 10, 4):
 		status = "window_failed"
+	elif not _core.editor_place_prop(0, 10, 1, 10, 0.0):
+		status = "bed_failed"
 	else:
 		_toggle_room_overlay()
 		var stats: Dictionary = _core.editor_room_stats()
@@ -906,13 +1059,18 @@ func _run_room_overlay_smoke() -> void:
 			status = "stats_failed"
 		elif rooms.size() != 1:
 			status = "room_count"
+		elif str(rooms[0].get("type", "")) != "bedroom":
+			status = "room_type"
+		elif int(stats.get("resident_capacity", 0)) != 1:
+			status = "capacity"
 		elif _room_overlay == null or _room_overlay.get_child_count() < 1:
 			status = "overlay_nodes"
 		else:
-			print("ROOM_OVERLAY_SMOKE rooms=%d nodes=%d status=ok" % [
-				rooms.size(), _room_overlay.get_child_count()])
+			print("ROOM_OVERLAY_SMOKE rooms=%d nodes=%d type=%s capacity=%d status=ok" % [
+				rooms.size(), _room_overlay.get_child_count(),
+				str(rooms[0].get("type", "")), int(stats.get("resident_capacity", 0))])
 	if status != "ok":
-		print("ROOM_OVERLAY_SMOKE rooms=0 nodes=0 status=%s" % status)
+		print("ROOM_OVERLAY_SMOKE rooms=0 nodes=0 type=none capacity=0 status=%s" % status)
 		get_tree().quit(1)
 		return
 	get_tree().quit(0)

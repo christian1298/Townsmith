@@ -162,7 +162,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 | Terrain LOD 2, 256 m chunk | 65,536 cells | — | 25,327 quads | ~0.39 ms |
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **177 tests**: 50 voxel, 58 world, 26 simulation, 10 city, 9 blueprint, 10 rooms, and 14 bridge tests.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **178 tests**: 50 voxel, 58 world, 26 simulation, 10 city, 9 blueprint, 10 rooms, and 15 bridge tests.
 
 ## 3. Known limitations
 

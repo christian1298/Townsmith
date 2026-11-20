@@ -11,3 +11,6 @@ pub const MAX_CHUNKS: usize = core_voxel::volume::MAX_CHUNKS;
 
 /// Maximum solid voxels in one package (8M).
 pub const MAX_SOLID_VOXELS: u64 = 8_000_000;
+
+/// Maximum functional props in one package.
+pub const MAX_PROPS: usize = 10_000;

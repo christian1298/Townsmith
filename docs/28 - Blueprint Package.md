@@ -53,7 +53,7 @@ Fields:
 
 - `bounds_m` must match the volume configuration.
 - `solid_voxels` must match the decoded stream.
-- `rooms` is filled by editor save-time room detection; `props` remains schema-ready until prop placement lands.
+- `rooms` is filled by editor save-time room detection; `props` is written from the editor prop list and restored on load.
 - `materials` is a provisional key → count map until the content registry lands.
 - `dependencies` is parsed; non-empty mod/resource-pack lists produce a readable `MissingDependency` error in v1 (no resolver yet). The game constraint is not enforced by the current semantic check.
 

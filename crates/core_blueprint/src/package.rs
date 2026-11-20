@@ -224,6 +224,12 @@ fn validate_metadata(metadata: &BlueprintMetadata) -> Result<(), BlueprintError>
             )));
         }
     }
+    if metadata.props.len() > crate::limits::MAX_PROPS {
+        return Err(BlueprintError::TooLarge {
+            what: "props",
+            limit: crate::limits::MAX_PROPS as u64,
+        });
+    }
     for prop in &metadata.props {
         if prop.position.iter().any(|value| !value.is_finite()) || !prop.rotation.is_finite() {
             return Err(BlueprintError::Format(format!(
