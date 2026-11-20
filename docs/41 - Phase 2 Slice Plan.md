@@ -35,19 +35,22 @@ The slice follows accepted decisions:
 
 | Stage | Deliverable | Status |
 |---|---|---|
-| **2A** | Placement model, terrain validation, world save/load, visible demo | **First implementation PR** |
+| **2A.1** | Placement records and terrain validation | **First implementation PR** |
+| **2A.2** | Placement store, JSON save format, checksum | Next |
+| **2A.3** | GDExtension placement/save/load API and headless smoke | Planned |
+| **2A.4** | Streamed-world scene, preview, rotate/place/save/load controls | Planned |
 | **2B** | Terrain edit deltas applied to streamed chunks, saved/reloaded | Planned |
 | **2C** | Mayor camera, selection, mode switch at a door | Planned |
 | **2D** | Construction site v0: phased progress, materials, crews | Planned |
 | **2E** | Roads, lots, settlement boundaries, zoning | Planned |
 
-Each stage is a separate branch, worktree, and PR. Do not mix 2A with terrain editing or construction state.
+Each stage is a separate branch, worktree, and PR. Do not mix 2A with terrain editing or construction state. 2A is split so geometry, persistence, the bridge, and the shell each stay reviewable.
 
 ## 3. Stage 2A scope
 
 ### In
 
-- `core_city::placement`: pure placement records, validation, store, JSON roundtrip, checksum.
+- `core_city::placement`: pure placement records and terrain validation (2A.1); store, JSON roundtrip, and checksum (2A.2).
 - GDExtension APIs to place, validate, list, clear, save, and load placements.
 - A `world_placement` Godot scene with streamed terrain and a fly camera.
 - A placement preview that samples terrain under a camera-forward target and shows valid/invalid.
@@ -245,11 +248,13 @@ Add the world placement smoke to the Linux Godot job. Windows keeps the Rust gat
 
 ## 11. Next
 
-1. Implement 2A in a worktree; keep the core placement store free of Godot types.
-2. Add the world save/load smoke and update CI.
-3. Record the result in a new results note when 2A is merged.
-4. Start 2B: expose `StreamingWorld` deltas to the bridge and remesh dirty chunks.
-5. Revisit Q-011 once a real building sits on a slope; record the chosen foundation policy.
+1. Implement 2A.1 in a worktree; keep the validation rules free of Godot types.
+2. Add the placement store and JSON persistence in 2A.2.
+3. Add the bridge and world save/load smoke in 2A.3; update CI.
+4. Add the streamed-world scene and preview in 2A.4.
+5. Record the result in a new results note when 2A is merged.
+6. Start 2B: expose `StreamingWorld` deltas to the bridge and remesh dirty chunks.
+7. Revisit Q-011 once a real building sits on a slope; record the chosen foundation policy.
 
 ## 12. Links
 

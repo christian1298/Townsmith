@@ -80,7 +80,9 @@ These are warm-up + five-iteration medians; rendering performance is measured in
 
 ## 6. Tests
 
-`core_city` has 10 tests:
+`core_city` has 17 tests: 10 for the synthetic layouts and 7 for the world-placement validation module in [[41 - Phase 2 Slice Plan]].
+
+Layout tests:
 
 - exact target counts (200 / 10,000 / 100,000);
 - same seed → identical layout;
@@ -90,6 +92,8 @@ These are warm-up + five-iteration medians; rendering performance is measured in
 - tier scaling;
 - sequential unique IDs;
 - whole-floor heights and valid colors.
+
+Placement tests cover flat placement, rotation, water, slope, overlap/gap, invalid requests, and rotation normalization.
 
 ## 7. Limitations
 
