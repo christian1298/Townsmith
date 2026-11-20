@@ -24,6 +24,11 @@ var mayor_camera
 var architect_camera
 var mode := "mayor"
 var placed_root: Node3D
+var road_root: Node3D
+var road_nodes: Dictionary = {}
+var road_material: StandardMaterial3D
+var road_mode := false
+var road_start := Vector2i(-999999, -999999)
 var selection_box: MeshInstance3D
 var selected_id := -1
 
@@ -65,6 +70,7 @@ func _ready() -> void:
 	_setup_ui()
 	_setup_ghost()
 	_setup_selection()
+	_setup_roads()
 	if _ensure_blueprint():
 		_refresh_preview(true)
 	else:
@@ -111,6 +117,11 @@ func _unhandled_input(event: InputEvent) -> void:
 		if event.physical_keycode == KEY_ESCAPE:
 			if mode == "architect":
 				_return_to_mayor()
+			elif road_mode:
+				road_mode = false
+				road_start = Vector2i(-999999, -999999)
+				_set_modal("", false)
+				_update_hud()
 			else:
 				_set_modal("", false)
 				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -132,6 +143,12 @@ func _unhandled_input(event: InputEvent) -> void:
 					_update_hud()
 				KEY_DELETE:
 					_clear_placements()
+				KEY_G:
+					_toggle_road_mode()
+				KEY_BACKSPACE:
+					core.road_clear()
+					_rebuild_roads()
+					_update_hud()
 				KEY_ENTER, KEY_KP_ENTER:
 					_enter_architect()
 				KEY_F5:
@@ -151,7 +168,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			if first_click_guard:
 				first_click_guard = false
 				return
-			_place_at_target()
+			if road_mode:
+				_road_click(event.position)
+			else:
+				_place_at_target()
 		elif mode == "architect" and event.button_index == MOUSE_BUTTON_LEFT:
 			if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -315,6 +335,15 @@ func _setup_selection() -> void:
 	material.albedo_color = Color(1.0, 0.82, 0.2, 0.22)
 	selection_box.material_override = material
 	add_child(selection_box)
+
+func _setup_roads() -> void:
+	road_root = Node3D.new()
+	road_root.name = "Roads"
+	add_child(road_root)
+	road_material = StandardMaterial3D.new()
+	road_material.albedo_color = Color(0.22, 0.23, 0.24)
+	road_material.roughness = 1.0
+	road_material.metallic = 0.0
 
 func _ensure_blueprint() -> bool:
 	if not FileAccess.file_exists(blueprint_path):
@@ -652,6 +681,106 @@ func _touched_chunks(chunk: Vector2i, local_x: int, local_z: int) -> Array[Vecto
 		touched.append(chunk + Vector2i(0, 1))
 	return touched
 
+func _toggle_road_mode() -> void:
+	road_mode = not road_mode
+	road_start = Vector2i(-999999, -999999)
+	if road_mode:
+		_set_modal("Road mode: click start, then end · 8 m wide · Esc cancels", false)
+	else:
+		_set_modal("", false)
+	_update_hud()
+
+func _road_click(screen: Vector2) -> bool:
+	var point := _road_ground_point(screen)
+	var cell := Vector2i(roundi(point.x), roundi(point.y))
+	if road_start.x == -999999:
+		road_start = cell
+		_set_modal("Road start (%d, %d) · click the end" % [cell.x, cell.y], false)
+		return true
+	var end := cell
+	if absi(end.x - road_start.x) >= absi(end.y - road_start.y):
+		end.y = road_start.y
+	else:
+		end.x = road_start.x
+	if end == road_start:
+		_set_modal("Road needs a non-zero length", true)
+		return false
+	var ok := _add_road(road_start.x, road_start.y, end.x, end.y)
+	if ok:
+		_set_modal("Road %d m at (%d, %d)..(%d, %d)" % [
+			absi(end.x - road_start.x) + absi(end.y - road_start.y),
+			road_start.x, road_start.y, end.x, end.y
+		], false)
+		road_start = Vector2i(-999999, -999999)
+	return ok
+
+func _add_road(x1: int, z1: int, x2: int, z2: int) -> bool:
+	var result: Dictionary = core.road_add(SEED, x1, z1, x2, z2, 8)
+	if not bool(result.get("ok", false)):
+		_set_modal("Road rejected: " + str(result.get("error_code", "unknown")), true)
+		return false
+	_rebuild_roads()
+	_update_hud()
+	return true
+
+func _rebuild_roads() -> void:
+	for node in road_nodes.values():
+		if is_instance_valid(node):
+			node.free()
+	road_nodes.clear()
+	var state: Dictionary = core.roads()
+	for road in state.get("roads", []):
+		_add_road_node(road)
+
+func _add_road_node(road: Dictionary) -> void:
+	var id := int(road.get("id", -1))
+	if id < 0 or road_nodes.has(id):
+		return
+	var center: PackedFloat32Array = road.get("center", PackedFloat32Array())
+	var start: PackedInt32Array = road.get("start", PackedInt32Array())
+	var end: PackedInt32Array = road.get("end", PackedInt32Array())
+	var width := float(road.get("width_m", 8))
+	var length := float(road.get("length_m", 0))
+	if center.size() != 2 or start.size() != 2 or end.size() != 2 or length <= 0.0:
+		return
+	var ground: float = core.world_height_at(SEED, center[0], center[1])
+	if ground < 0.0:
+		return
+	var box := BoxMesh.new()
+	if bool(road.get("runs_along_x", false)):
+		box.size = Vector3(length + 0.2, 0.2, width)
+	else:
+		box.size = Vector3(width, 0.2, length + 0.2)
+	var node := MeshInstance3D.new()
+	node.mesh = box
+	node.material_override = road_material
+	node.position = Vector3(center[0], ground + 0.12, center[1])
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	road_root.add_child(node)
+	road_nodes[id] = node
+
+func _road_ground_point(screen: Vector2) -> Vector2:
+	var origin := camera.project_ray_origin(screen)
+	var direction := camera.project_ray_normal(screen).normalized()
+	for distance in range(0, 600, 2):
+		var point := origin + direction * float(distance)
+		var height: float = core.world_height_at(SEED, point.x, point.z)
+		if height >= 0.0 and point.y <= height + 0.5:
+			return Vector2(point.x, point.z)
+	return Vector2(mayor_camera.target.x, mayor_camera.target.z)
+
+func _road_node_matches(road: Dictionary) -> bool:
+	var id := int(road.get("id", -1))
+	var node: MeshInstance3D = road_nodes.get(id)
+	if not is_instance_valid(node) or not (node.mesh is BoxMesh):
+		return false
+	var box := node.mesh as BoxMesh
+	var width := float(road.get("width_m", 8))
+	var length := float(road.get("length_m", 0))
+	if bool(road.get("runs_along_x", false)):
+		return absf(box.size.x - (length + 0.2)) < 0.001 and absf(box.size.z - width) < 0.001
+	return absf(box.size.x - width) < 0.001 and absf(box.size.z - (length + 0.2)) < 0.001
+
 func _place_at_target() -> bool:
 	if not preview_valid or blueprint_mesh == null:
 		_set_modal("Cannot place: " + preview_error, true)
@@ -846,6 +975,7 @@ func _load_world() -> bool:
 		return false
 	_clear_selection()
 	_clear_placed_nodes()
+	_rebuild_roads()
 	streamer.invalidate_all()
 	var state: Dictionary = core.world_placements()
 	var construction_index := _construction_index()
@@ -931,13 +1061,17 @@ func _run_scene_smoke() -> void:
 	if status == "ok":
 		var bad_road: Dictionary = core.road_add(SEED, 120, 128, 136, 128, 8)
 		var empty_after_reject := not bool(core.world_placements().get("open", true))
-		var added_road: Dictionary = core.road_add(SEED, 180, 125, 200, 125, 8)
+		var road_added := _add_road(180, 125, 200, 125)
+		var roads_state: Dictionary = core.roads()
+		var road_list: Array = roads_state.get("roads", [])
 		road_ok = not bool(bad_road.get("ok", true)) and empty_after_reject
-		road_ok = road_ok and bool(added_road.get("ok", false)) and core.road_count() == 1
+		road_ok = road_ok and road_added and core.road_count() == 1
+		road_ok = road_ok and road_nodes.size() == 1
+		road_ok = road_ok and road_list.size() == 1 and _road_node_matches(road_list[0])
 		road_ok = road_ok and bool(core.world_placements().get("open", false))
 		road_ok = road_ok and core.world_placement_count() == 0
 		if not road_ok:
-			status = "road_failed:" + str(added_road.get("error_code", bad_road.get("error_code", "")))
+			status = "road_failed:" + str(bad_road.get("error_code", ""))
 
 	edit_ok = _edit_target(1) and core.terrain_delta_count() == 1 and absf(core.world_height_at(SEED, FIXTURE_X, FIXTURE_Z) - 42.0) < 0.001 and streamer.dirty_count() > 0
 	var border_touched := _touched_chunks(Vector2i(0, 0), 0, 255)
@@ -1023,7 +1157,8 @@ func _run_scene_smoke() -> void:
 		else:
 			core.terrain_clear_deltas()
 			core.road_clear()
-			if core.terrain_delta_count() != 0 or core.road_count() != 0:
+			_rebuild_roads()
+			if core.terrain_delta_count() != 0 or core.road_count() != 0 or road_nodes.size() != 0:
 				status = "delta_clear_failed"
 			load_ok = _load_world() and core.world_placement_count() == 1 and placed_root.get_child_count() == 1
 			if load_ok:
@@ -1035,6 +1170,11 @@ func _run_scene_smoke() -> void:
 				load_ok = load_ok and core.terrain_deltas_seed() == SEED
 				load_ok = load_ok and core.road_count() == 1
 				load_ok = load_ok and str(core.road_checksum()) == road_checksum
+				load_ok = load_ok and road_nodes.size() == 1
+				if core.road_count() == 1:
+					var roads_state: Dictionary = core.roads()
+					var road_list: Array = roads_state.get("roads", [])
+					load_ok = load_ok and road_list.size() == 1 and _road_node_matches(road_list[0])
 				load_ok = load_ok and construction_nodes.has(1) and not placed_nodes.is_empty()
 				var loaded_site := _construction_site_for(1)
 				load_ok = load_ok and absf(float(loaded_site.get("progress", -1.0)) - saved_site_progress) < 0.001

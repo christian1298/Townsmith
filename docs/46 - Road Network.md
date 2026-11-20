@@ -25,13 +25,14 @@ In:
 - stable ids, JSON persistence, checksum;
 - inclusion in the world save beside placements, construction, and deltas;
 - bridge validate/add/list/remove/clear APIs;
+- flat road meshes in `world_placement.tscn` and a two-click draw mode;
 - a headless road roundtrip in the world-scene smoke.
 
 Out:
 
 - curved roads, lanes, sidewalks, medians, intersections, bridges, tunnels;
 - lot generation/frontage, zoning, settlement boundaries;
-- road meshes or draw tools in the scene;
+- lots, zoning, and settlement boundaries;
 - utilities, traffic, vehicles, pathfinding, pedestrians;
 - road overlap or junction rules.
 
@@ -102,7 +103,22 @@ The world save gains an optional `roads` object:
 
 Old saves without `roads` load with the road store closed (`roads()` reports `open=false`). A road store whose seed differs from the world is rejected. The world save result also reports `roads` count and `road_checksum`.
 
-## 5. Bridge API
+## 5. Scene tool
+
+In Mayor Mode:
+
+- `G` toggles road mode.
+- The first left click records the start cell under the cursor.
+- The second left click snaps the end to the dominant X or Z axis.
+- The road is validated and added; a rejected road leaves the start point active so the player can click again.
+- `Esc` cancels the start point, then leaves road mode.
+- `Backspace` clears every road segment.
+- Roads render as flat 0.2 m boxes at the sampled centre height, with a 0.1 m lift. The box is `length + 0.2 × width` (or `width × length + 0.2`).
+- The HUD reports the road count.
+
+The tool is deliberately two-click and axis-snapped. There is no drag preview, curve, or junction editor.
+
+## 6. Bridge API
 
 | Method | Returns | Purpose |
 |---|---|---|
@@ -118,14 +134,15 @@ A road dictionary contains `id`, `start`, `end`, `width_m`, `length_m`, `center`
 
 The first successful road opens a placement store for the same seed if none exists, so the world save always has a seed owner. A rejected first road does not leave an empty store behind.
 
-## 6. Smoke
+## 7. Smoke
 
 The existing streamed-world smoke adds, before any placement:
 
 - a water-crossing segment at `(120,128)..(136,128)`, rejected with `water`; the world and road stores stay closed;
 - a flat segment `(180,125)..(200,125)`, width 8; it opens the placement store for the seed with zero placements;
+- a road mesh node with the expected box extents;
 - save → clear roads/deltas/placements → load;
-- road count and checksum restored.
+- road count, checksum, and mesh restored.
 
 Marker:
 
@@ -133,26 +150,27 @@ Marker:
 WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok build=ok done=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
-## 7. Tests
+## 8. Tests
 
 - `core_city::road`: 8 tests — geometry, width-edge water/rise rejection, extreme-coordinate overflow, JSON/checksum, duplicate/next-id rejection, remove/clear.
 - `core_city`: 42 tests.
 - Workspace: **231 tests + 1 doctest**.
 - Godot: `WORLD_SCENE ... roads=ok ... status=ok`.
 
-## 8. Limits
+## 9. Limits
 
 - Only axis-aligned segments; no curves or diagonal snapping.
 - No junction/intersection model or overlap rejection.
 - No lot frontage or zoning yet.
-- No road mesh or draw tool in the scene; the smoke verifies the data/bridge path.
+- Roads are flat boxes, not terrain-conforming strips; slopes show gaps/overhangs at the ends.
+- The draw tool is fixed at 8 m wide; width/lane selection is later.
 - Slope limit is total rise, not grade per metre; long mountain roads will be rejected.
 - No utilities, sidewalks, lanes, traffic, or vehicles.
 - The 200,000-segment cap is a save guard, not a measured performance limit.
 
-## 9. Next
+## 10. Next
 
-1. Draw/render straight roads in `world_placement.tscn` and show intersections.
-2. Generate lots along frontage and add zoning (2E.2).
-3. Add settlement boundaries and ownership (2E.3).
-4. Replace the fixed rise limit with a grade/curve model and add junctions.
+1. Generate lots along frontage and add zoning (2E.3).
+2. Add settlement boundaries and ownership (2E.4).
+3. Add road width selection, intersections, and terrain-conforming strips.
+4. Replace the fixed rise limit with a grade/curve model.
