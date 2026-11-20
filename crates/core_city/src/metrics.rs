@@ -23,7 +23,7 @@ pub struct CitySummary {
     pub employed: u64,
     /// Residents without a job.
     pub unemployed: u64,
-    /// Population-weighted happiness signal, 0..=1.
+    /// First happiness signal, 0..=1. Zero when there are no residents.
     pub happiness: f32,
     /// Completed buildings represented in the ledger.
     pub completed_buildings: usize,
@@ -70,12 +70,10 @@ pub fn summarize(
         0.0
     } else {
         let employment = employed as f32 / population as f32;
-        let occupancy = if housing_capacity == 0 {
-            0.0
-        } else {
-            population as f32 / housing_capacity as f32
-        };
-        (0.45 + 0.35 * employment + 0.20 * occupancy).clamp(0.0, 1.0)
+        // 3.1 has no vacancy: population equals completed housing capacity.
+        // Keep the signal employment-only until 3.2 adds an independent
+        // occupancy input; a dead occupancy term would be misleading.
+        (0.55 + 0.45 * employment).clamp(0.0, 1.0)
     };
     let construction_sites = construction
         .sites
@@ -163,6 +161,30 @@ mod tests {
         assert_eq!(summary.construction_sites, 1);
         assert_eq!(summary.completed_buildings, 0);
         assert_eq!(summary.happiness, 0.0);
+    }
+
+    #[test]
+    fn a_placement_without_a_site_is_ignored() {
+        let mut placements = PlacementStore::new(2026);
+        placements.placements.push(placement(1, 4, 4));
+        let summary = summarize(&placements, &ConstructionStore::new(4, 1_000_000), 0);
+        assert_eq!(summary, CitySummary::default());
+    }
+
+    #[test]
+    fn a_jobs_only_city_has_no_population_or_happiness() {
+        let mut placements = PlacementStore::new(2026);
+        placements.placements.push(placement(1, 0, 5));
+        let mut construction = ConstructionStore::new(4, 1_000_000);
+        construction.add_site(1, 100).expect("site");
+        construction.sites.get_mut(&1).expect("site").phase = ConstructionPhase::Complete;
+
+        let summary = summarize(&placements, &construction, 0);
+        assert_eq!(summary.population, 0);
+        assert_eq!(summary.jobs, 5);
+        assert_eq!(summary.employed, 0);
+        assert_eq!(summary.happiness, 0.0);
+        assert_eq!(summary.completed_buildings, 1);
     }
 
     #[test]

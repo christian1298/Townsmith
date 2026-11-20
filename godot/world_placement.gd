@@ -764,7 +764,10 @@ func _update_hud() -> void:
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
 	var construction: Dictionary = core.construction_summary()
 	var city: Dictionary = core.city_summary()
-	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d · jobs %d (%d employed) · happiness %.0f%%\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
+	var happiness_text := "—"
+	if int(city.get("population", 0)) > 0:
+		happiness_text = "%.0f%%" % (float(city.get("happiness", 0.0)) * 100.0)
+	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d · jobs %d (%d employed) · happiness %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
 		selected_line,
 		int(target_x),
 		int(target_z),
@@ -779,7 +782,7 @@ func _update_hud() -> void:
 		int(city.get("housing_capacity", 0)),
 		int(city.get("jobs", 0)),
 		int(city.get("employed", 0)),
-		float(city.get("happiness", 0.0)) * 100.0,
+		happiness_text,
 		int(construction.get("active", 0)),
 		int(construction.get("stalled", 0)),
 		int(construction.get("crew_capacity", 0)),
@@ -1348,7 +1351,8 @@ func _run_scene_smoke() -> void:
 	var return_ok := false
 	var build_ok := false
 	var build_done_ok := false
-	var occupancy_ok := false
+	var occupancy_before_ok := false
+	var occupancy_after_ok := false
 	var save_ok := false
 	var clear_ok := false
 	var load_ok := false
@@ -1442,7 +1446,11 @@ func _run_scene_smoke() -> void:
 		var after_site := _construction_site_for(1)
 		build_ok = build_ok and float(after_site.get("progress", 0.0)) > before_progress
 		var city_before: Dictionary = core.city_summary()
-		occupancy_ok = int(city_before.get("population", -1)) == 0 and int(city_before.get("construction_sites", -1)) == 1
+		occupancy_before_ok = int(city_before.get("population", -1)) == 0
+		occupancy_before_ok = occupancy_before_ok and int(city_before.get("housing_capacity", -1)) == 0
+		occupancy_before_ok = occupancy_before_ok and int(city_before.get("jobs", -1)) == 0
+		occupancy_before_ok = occupancy_before_ok and int(city_before.get("completed_buildings", -1)) == 0
+		occupancy_before_ok = occupancy_before_ok and int(city_before.get("construction_sites", -1)) == 1
 		if not build_ok:
 			status = "construction_failed"
 
@@ -1567,16 +1575,16 @@ func _run_scene_smoke() -> void:
 				build_done_ok = build_done_ok and finished_mesh != null and finished_mesh.material_override == placed_material
 				build_done_ok = build_done_ok and absf(finished_mesh.scale.y - 1.0) < 0.001
 				var city_after: Dictionary = core.city_summary()
-				occupancy_ok = occupancy_ok and int(city_after.get("population", -1)) == 2
-				occupancy_ok = occupancy_ok and int(city_after.get("housing_capacity", -1)) == 2
-				occupancy_ok = occupancy_ok and int(city_after.get("jobs", -1)) == 2
-				occupancy_ok = occupancy_ok and int(city_after.get("employed", -1)) == 2
-				occupancy_ok = occupancy_ok and int(city_after.get("completed_buildings", -1)) == 1
-				occupancy_ok = occupancy_ok and int(city_after.get("construction_sites", -1)) == 0
-				occupancy_ok = occupancy_ok and float(city_after.get("happiness", 0.0)) > 0.99
+				occupancy_after_ok = int(city_after.get("population", -1)) == 2
+				occupancy_after_ok = occupancy_after_ok and int(city_after.get("housing_capacity", -1)) == 2
+				occupancy_after_ok = occupancy_after_ok and int(city_after.get("jobs", -1)) == 2
+				occupancy_after_ok = occupancy_after_ok and int(city_after.get("employed", -1)) == 2
+				occupancy_after_ok = occupancy_after_ok and int(city_after.get("completed_buildings", -1)) == 1
+				occupancy_after_ok = occupancy_after_ok and int(city_after.get("construction_sites", -1)) == 0
+				occupancy_after_ok = occupancy_after_ok and float(city_after.get("happiness", 0.0)) > 0.99
 				if not build_done_ok:
 					status = "construction_complete_failed"
-				elif not occupancy_ok:
+				elif not (occupancy_before_ok and occupancy_after_ok):
 					status = "occupancy_failed"
 			if not load_ok:
 				status = "load_failed"
@@ -1621,7 +1629,7 @@ func _run_scene_smoke() -> void:
 		"ok" if settlement_ok else "failed",
 		"ok" if build_ok else "failed",
 		"ok" if build_done_ok else "failed",
-		"ok" if occupancy_ok else "failed",
+		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if select_ok else "failed",
 		"ok" if enter_ok else "failed",
 		"ok" if return_ok else "failed",

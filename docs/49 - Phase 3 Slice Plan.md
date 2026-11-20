@@ -52,7 +52,7 @@ Each stage is a separate branch, worktree, and PR. Keep simulation deterministic
   - completed construction sites only;
   - population = completed residential capacity;
   - housing capacity, jobs, employed, unemployed;
-  - a first happiness signal from employment and occupancy;
+  - a first happiness signal from employment;
   - completed buildings, active construction sites, settlement count.
 - `TownsmithCore.city_summary()` for the shell.
 - HUD city line: population / housing, jobs / employed, happiness.
@@ -96,8 +96,10 @@ pub fn summarize(
 - Population is `sum(resident_capacity)`; jobs are `sum(job_slots)`.
 - `employed = min(population, jobs)`; `unemployed = population - employed`.
 - Happiness is a **placeholder**:
-  `0.45 + 0.35 * employment + 0.20 * occupancy`, clamped to 0..1.
-  With full occupancy and full employment it is 1.0; with no population it is 0.0.
+  `0.55 + 0.45 * employment`, clamped to 0..1.
+  With full employment it is 1.0; with no population it is 0.0.
+  There is no independent occupancy term in 3.1 because population equals
+  completed housing capacity; 3.2 adds vacancy and real needs.
 - The bridge reads placements/construction/settlements under separate locks because the summary is read-only and the shell is main-threaded. Do not mutate during a summary refresh.
 
 ## 5. Verification
@@ -106,14 +108,18 @@ pub fn summarize(
 - `cargo test --workspace`.
 - `smoke_world_scene.sh`:
   - before completion: population 0, construction sites 1;
-  - after completion: population 2, housing 2, jobs 2, employed 2, completed buildings 1, happiness > 0.99;
+  - after completion: population 2, housing 2, jobs 2, employed 2,
+    completed buildings 1, active construction sites 0, happiness > 0.99;
   - marker includes `occupancy=ok`.
+- `cargo clippy --workspace --all-targets -- -D warnings`.
+- `cargo fmt --all -- --check`.
 
 ## 6. Limits
 
 - Happiness is a placeholder, not a needs model.
 - No individual citizens or households yet.
 - No persistence; a load recomputes the same summary from saved placements and sites.
+- The ledger is derived. Clearing construction sites while placements remain makes the standing city report zero population; guard this before exposing construction_clear as player-facing UI.
 - The bridge clones placements/construction for each HUD refresh. Fine for the slice; the 100k-building dashboard needs a cached/incremental summary.
 - English-only developer HUD.
 

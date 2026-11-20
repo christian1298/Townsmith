@@ -1815,28 +1815,23 @@ impl TownsmithCore {
     /// completed construction sites contribute population or jobs.
     #[func]
     fn city_summary(&self) -> VarDictionary {
-        let placements = {
-            let guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
-            guard.as_ref().cloned()
-        };
-        let construction = {
-            let guard = self
-                .construction
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            guard.clone()
-        };
-        let settlements = {
-            let guard = self
-                .settlements
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            guard.as_ref().map_or(0, SettlementStore::count)
-        };
+        // Hold the three stores in the established world -> construction ->
+        // settlement order so the HUD cannot read a torn placement/site
+        // snapshot. `summarize` only needs references, so no clone is needed.
+        let placements = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        let construction = self
+            .construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let settlements = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let settlement_count = settlements.as_ref().map_or(0, SettlementStore::count);
         let summary = placements
             .as_ref()
             .map_or_else(CitySummary::default, |placements| {
-                summarize(placements, &construction, settlements)
+                summarize(placements, &construction, settlement_count)
             });
         let mut result = VarDictionary::new();
         result.set("ok", true);
