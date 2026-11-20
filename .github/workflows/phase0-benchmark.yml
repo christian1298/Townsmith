@@ -15,50 +15,80 @@ on:
         description: "Allow headless structural runs (not render-representative)"
         type: boolean
         default: false
-      report_only:
-        description: "Aggregate existing result summaries without running Godot"
-        type: boolean
-        default: false
+
+permissions:
+  contents: read
 
 concurrency:
-  group: phase0-benchmark
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   benchmark:
     name: Phase 0 target matrix
     # Prefer the registered self-hosted Linux runner. It is the machine with
-    # the display/GPU used for real frame-time measurements.
+    # the display/GPU used for real frame-time measurements. Give this runner a
+    # dedicated label (for example `phase0-gpu`) if more Linux runners join.
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 60
+    env:
+      # The runner service usually has no DISPLAY. Set the repository variable
+      # PHASE0_DISPLAY (and/or PHASE0_WAYLAND_DISPLAY) if :0 is wrong.
+      DISPLAY: ${{ inputs.allow_headless && '' || vars.PHASE0_DISPLAY || ':0' }}
+      WAYLAND_DISPLAY: ${{ inputs.allow_headless && '' || vars.PHASE0_WAYLAND_DISPLAY }}
+      GODOT: ${{ vars.GODOT }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Resolve Godot
-        if: ${{ !inputs.report_only }}
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -n "${GODOT:-}" && -x "${GODOT}" ]]; then
-            echo "Using GODOT=$GODOT"
+          if [[ -n "${GODOT:-}" ]] && command -v "$GODOT" >/dev/null 2>&1; then
+            GODOT_BIN="$(command -v "$GODOT")"
+          elif [[ -n "${GODOT:-}" && -x "$GODOT" ]]; then
+            GODOT_BIN="$GODOT"
           elif command -v godot >/dev/null 2>&1; then
-            echo "GODOT=$(command -v godot)" >> "$GITHUB_ENV"
-          elif [[ -x /home/chris/.local/bin/godot ]]; then
-            echo "GODOT=/home/chris/.local/bin/godot" >> "$GITHUB_ENV"
+            GODOT_BIN="$(command -v godot)"
           else
-            echo "Godot not found. Set the GODOT_BIN repository variable or install Godot on the runner." >&2
+            echo "Godot not found. Set the GODOT repository variable or install Godot on the runner." >&2
             exit 1
           fi
+          echo "GODOT=$GODOT_BIN" >> "$GITHUB_ENV"
+          echo "Using GODOT=$GODOT_BIN"
 
       - name: Verify tools
-        if: ${{ !inputs.report_only }}
         shell: bash
         run: |
           set -euo pipefail
           cargo --version
+          python3 --version
           "$GODOT" --version
+          if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+            echo "No display environment. Re-run with allow_headless for a structural check, or set PHASE0_DISPLAY." >&2
+            exit 3
+          fi
           echo "DISPLAY=${DISPLAY:-}"
           echo "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-}"
+
+      - name: Validate dispatch inputs
+        shell: bash
+        env:
+          RUNS: ${{ inputs.runs }}
+          DURATION: ${{ inputs.duration }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$RUNS" =~ ^[1-9][0-9]*$ && "$DURATION" =~ ^[1-9][0-9]*$ ]]; then
+            echo "runs and duration must be positive integers" >&2
+            exit 2
+          fi
+          if (( RUNS * (DURATION + 3) * 5 > 2400 )); then
+            echo "Requested matrix is too long for the 60-minute job timeout: runs=$RUNS duration=$DURATION" >&2
+            exit 2
+          fi
 
       - name: Run Phase 0 matrix
         shell: bash
@@ -66,16 +96,14 @@ jobs:
           RUNS: ${{ inputs.runs }}
           DURATION: ${{ inputs.duration }}
           ALLOW_HEADLESS: ${{ inputs.allow_headless && '1' || '0' }}
-          REPORT_ONLY: ${{ inputs.report_only && '1' || '0' }}
         run: |
-          set -o pipefail
           bash ./scripts/bench_phase0.sh 2>&1 | tee "$RUNNER_TEMP/phase0-benchmark.log"
 
       - name: Upload benchmark log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: phase0-benchmark-log-${{ github.run_id }}
+          name: phase0-benchmark-log-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/phase0-benchmark.log
           if-no-files-found: warn
 
@@ -83,9 +111,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: phase0-benchmark-results-${{ github.run_id }}
+          name: phase0-benchmark-results-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             benchmarks/results/phase0_target_*.json
             benchmarks/results/phase0_core_summary.json
             benchmarks/results/godot_*_summary.json
-          if-no-files-found: warn
+          if-no-files-found: error

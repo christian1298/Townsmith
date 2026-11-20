@@ -78,8 +78,8 @@ trap 'rm -rf "$TMP"' EXIT
 
 # Ensure the extension is registered in a clean worktree. Godot 4.7 can abort
 # the first headless import while creating the project cache; retry once.
-if ! "$GODOT_BIN" --headless --path "$ROOT/godot" --import >/dev/null 2>&1; then
-	"$GODOT_BIN" --headless --path "$ROOT/godot" --import >/dev/null
+if ! timeout "$GODOT_TIMEOUT" "$GODOT_BIN" --headless --path "$ROOT/godot" --import >/dev/null 2>&1; then
+	timeout "$GODOT_TIMEOUT" "$GODOT_BIN" --headless --path "$ROOT/godot" --import >/dev/null
 fi
 
 GODOT_FLAGS=()
