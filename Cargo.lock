@@ -240,6 +240,7 @@ version = "0.1.0"
 dependencies = [
  "core_blueprint",
  "core_city",
+ "core_rooms",
  "core_voxel",
  "core_world",
  "godot",
