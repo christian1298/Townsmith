@@ -82,7 +82,7 @@ func _process(delta: float) -> void:
 	construction_tick_accum += delta
 	if construction_tick_accum >= 0.25:
 		_advance_construction(construction_tick_accum)
-		construction_tick_accum = 0.0
+		construction_tick_accum = fmod(construction_tick_accum, 0.25)
 	if mode == "mayor" and mayor_camera != null:
 		var ground: float = core.world_height_at(
 			SEED, mayor_camera.target.x, mayor_camera.target.z
@@ -668,12 +668,21 @@ func _place_at_target() -> bool:
 	_refresh_preview(true)
 	return true
 
-func _add_placement_visual(placement: Dictionary) -> void:
-	var site := _construction_site_for(int(placement.get("id", -1)))
+func _add_placement_visual(placement: Dictionary, site_override: Dictionary = {}) -> void:
+	var site := site_override
+	if site.is_empty():
+		site = _construction_site_for(int(placement.get("id", -1)))
 	if site.is_empty() or bool(site.get("complete", false)):
 		_add_placement_node(placement)
 	else:
 		_add_construction_node(placement, site)
+
+func _construction_index() -> Dictionary:
+	var index: Dictionary = {}
+	var state: Dictionary = core.construction_sites()
+	for site in state.get("sites", []):
+		index[int(site.get("id", -1))] = site
+	return index
 
 func _construction_site_for(id: int) -> Dictionary:
 	if id < 0:
@@ -780,7 +789,7 @@ func _refresh_construction_visuals() -> void:
 		var mesh: MeshInstance3D = entry.get("mesh")
 		var label: Label3D = entry.get("label")
 		if is_instance_valid(mesh):
-			mesh.scale.y = maxf(float(site.get("progress", 0.0)), 0.01)
+			mesh.scale.y = clampf(float(site.get("progress", 0.0)), 0.02, 0.98)
 		if is_instance_valid(label):
 			label.text = _construction_label(site)
 
@@ -838,8 +847,11 @@ func _load_world() -> bool:
 	_clear_placed_nodes()
 	streamer.invalidate_all()
 	var state: Dictionary = core.world_placements()
+	var construction_index := _construction_index()
 	for placement in state.get("placements", []):
-		_add_placement_visual(placement)
+		_add_placement_visual(
+			placement, construction_index.get(int(placement.get("id", -1)), {})
+		)
 	if placed_nodes.size() != int(state.get("count", -1)):
 		_set_modal(
 			"Loaded %d placement(s) but rebuilt %d" % [
@@ -990,6 +1002,7 @@ func _run_scene_smoke() -> void:
 		var edit_checksum := str(core.terrain_delta_checksum())
 		_clear_placements()
 		clear_ok = core.world_placement_count() == 0 and placed_root.get_child_count() == 0
+		clear_ok = clear_ok and core.construction_summary().sites == 0
 		if not clear_ok:
 			status = "clear_failed"
 		else:
@@ -1007,11 +1020,21 @@ func _run_scene_smoke() -> void:
 				load_ok = load_ok and construction_nodes.has(1) and not placed_nodes.is_empty()
 				var loaded_site := _construction_site_for(1)
 				load_ok = load_ok and absf(float(loaded_site.get("progress", -1.0)) - saved_site_progress) < 0.001
+				var loaded_entry: Dictionary = construction_nodes.get(1, {})
+				var loaded_mesh: MeshInstance3D = loaded_entry.get("mesh")
+				var loaded_label: Label3D = loaded_entry.get("label")
+				load_ok = load_ok and is_instance_valid(loaded_mesh)
+				load_ok = load_ok and absf(loaded_mesh.scale.y - saved_site_progress) < 0.01
+				load_ok = load_ok and is_instance_valid(loaded_label) and loaded_label.text.contains("%")
 			if load_ok:
 				_advance_construction(1000.0)
 				var done_site := _construction_site_for(1)
 				build_done_ok = bool(done_site.get("complete", false)) and construction_nodes.is_empty()
 				build_done_ok = build_done_ok and placed_nodes.has(1) and placed_root.get_child_count() == 1
+				build_done_ok = build_done_ok and _foundation_matches_bounds(placed_root.get_child(0))
+				var finished_mesh := placed_root.get_child(0).get_child(0) as MeshInstance3D
+				build_done_ok = build_done_ok and finished_mesh != null and finished_mesh.material_override == placed_material
+				build_done_ok = build_done_ok and absf(finished_mesh.scale.y - 1.0) < 0.001
 				if not build_done_ok:
 					status = "construction_complete_failed"
 			if not load_ok:

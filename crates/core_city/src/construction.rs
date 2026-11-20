@@ -224,7 +224,7 @@ impl ConstructionSite {
         self.phase = phase;
         self.phase_progress = 0.0;
         self.crew_required = phase.crew_required();
-        self.crew_assigned = self.crew_assigned.min(self.crew_required);
+        self.crew_assigned = 0;
         self.stall_reason = None;
     }
 }
@@ -340,6 +340,10 @@ impl ConstructionStore {
     }
 
     /// Advance all sites by `delta_seconds`.
+    ///
+    /// Crew is assigned per phase. A large step still needs the next phase's
+    /// crew before it can cross that boundary; it cannot fast-forward through
+    /// phases with a smaller pool.
     pub fn tick(&mut self, delta_seconds: f64) -> ConstructionTick {
         let dt = delta_seconds.clamp(0.0, MAX_TICK_SECONDS) as f32;
         let mut report = ConstructionTick::default();
@@ -361,9 +365,15 @@ impl ConstructionStore {
                 site.stall_reason = None;
                 continue;
             }
-            let crew = site.crew_required.min(remaining_crew);
-            site.crew_assigned = crew;
-            remaining_crew -= crew;
+
+            let required = site.crew_required;
+            let mut site_crew = required.min(remaining_crew);
+            if site_crew < required {
+                site.crew_assigned = site_crew;
+                site.stall_reason = Some("crew".to_string());
+                continue;
+            }
+            remaining_crew -= site_crew;
 
             let rate = (site.materials_required as f64 / f64::from(site.total_s.max(1.0))).max(1.0);
             let wanted = (rate * f64::from(dt)).ceil() as u64;
@@ -375,11 +385,9 @@ impl ConstructionStore {
             remaining_materials -= delivered;
             site.elapsed_s = (site.elapsed_s + dt).min(site.total_s * 4.0);
 
-            if crew < site.crew_required {
-                site.stall_reason = Some("crew".to_string());
-                continue;
-            }
             if site.materials_delivered < site.phase_material_target() {
+                remaining_crew += site_crew;
+                site.crew_assigned = 0;
                 site.stall_reason = Some("materials".to_string());
                 continue;
             }
@@ -388,7 +396,16 @@ impl ConstructionStore {
             while left > 0.0 && !site.is_complete() {
                 let duration = site.total_s * site.phase.weight();
                 if duration <= f32::EPSILON {
-                    site.set_phase(site.phase.next());
+                    let next = site.phase.next();
+                    site.set_phase(next);
+                    site.crew_assigned = site_crew;
+                    report.phase_changed.push(site.placement_id);
+                    if next.is_complete() {
+                        remaining_crew += site_crew;
+                        site.crew_assigned = 0;
+                        site.phase_progress = 1.0;
+                        report.completed.push(site.placement_id);
+                    }
                     continue;
                 }
                 let needed = (1.0 - site.phase_progress) * duration;
@@ -398,26 +415,52 @@ impl ConstructionStore {
                 } else {
                     left -= needed;
                     let next = site.phase.next();
+                    let next_required = next.crew_required();
+                    if site_crew < next_required {
+                        let extra = next_required - site_crew;
+                        if extra > remaining_crew {
+                            site.set_phase(next);
+                            site.crew_assigned = site_crew;
+                            site.stall_reason = Some("crew".to_string());
+                            break;
+                        }
+                        remaining_crew -= extra;
+                        site_crew += extra;
+                    } else if site_crew > next_required {
+                        remaining_crew += site_crew - next_required;
+                        site_crew = next_required;
+                    }
                     site.set_phase(next);
+                    site.crew_assigned = site_crew;
                     report.phase_changed.push(site.placement_id);
                     if next.is_complete() {
+                        remaining_crew += site_crew;
+                        site.crew_assigned = 0;
                         site.phase_progress = 1.0;
                         report.completed.push(site.placement_id);
                         break;
                     }
                     if site.materials_delivered < site.phase_material_target() {
+                        remaining_crew += site_crew;
+                        site.crew_assigned = 0;
                         site.stall_reason = Some("materials".to_string());
                         break;
                     }
                 }
             }
-            if !site.is_complete() && site.stall_reason.is_none() {
-                site.stall_reason = None;
-            }
+
             if site.is_complete() {
                 site.crew_assigned = 0;
                 site.phase_progress = 1.0;
                 site.stall_reason = None;
+            } else {
+                if site.crew_assigned > site.crew_required {
+                    remaining_crew += site.crew_assigned - site.crew_required;
+                    site.crew_assigned = site.crew_required;
+                }
+                if site.crew_assigned < site.crew_required {
+                    site.stall_reason = Some("crew".to_string());
+                }
             }
         }
 
@@ -579,6 +622,27 @@ mod tests {
         assert_eq!(report.stalled, 1);
         assert_eq!(site(&store, 1).stall_reason.as_deref(), Some("crew"));
         assert_eq!(site(&store, 1).phase, ConstructionPhase::Survey);
+    }
+
+    #[test]
+    fn large_step_cannot_skip_crew_requirements() {
+        let mut store = ConstructionStore::new(1, 1_000_000);
+        store.add_site(1, 64_224).expect("site");
+        let report = store.tick(1_000.0);
+        assert!(report.completed.is_empty());
+        let site = site(&store, 1);
+        assert!(!site.is_complete());
+        assert_eq!(site.phase, ConstructionPhase::Foundation);
+        assert_eq!(site.stall_reason.as_deref(), Some("crew"));
+    }
+
+    #[test]
+    fn crew_stall_does_not_consume_materials() {
+        let mut store = ConstructionStore::new(0, 100_000);
+        store.add_site(1, 10_000).expect("site");
+        store.tick(1_000.0);
+        assert_eq!(store.materials_stock, 100_000);
+        assert_eq!(site(&store, 1).materials_delivered, 0);
     }
 
     #[test]

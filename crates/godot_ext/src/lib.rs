@@ -5,7 +5,7 @@
 //! Terrain generation and meshing run on Rust worker threads; all Godot
 //! resource creation stays on the main thread.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -959,6 +959,9 @@ impl TownsmithCore {
                     if let Some(store) = guard.as_mut() {
                         store.remove(placement.id);
                     }
+                    if created {
+                        *guard = None;
+                    }
                     return placement_simple_error("construction_failed", error.to_string());
                 }
                 let mut result = VarDictionary::new();
@@ -1204,18 +1207,17 @@ impl TownsmithCore {
             Ok(path) => path,
             Err(error) => return placement_simple_error("invalid_save_path", error),
         };
-        let store = {
-            let guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
-            guard.as_ref().cloned()
+        let (store, construction) = {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            let construction = self
+                .construction
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            (world.as_ref().cloned(), construction.clone())
         };
         let Some(store) = store else {
             return placement_simple_error("no_world", "no world placement store is open");
         };
-        let construction = self
-            .construction
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
         let json = match store.to_json_pretty() {
             Ok(json) => json,
             Err(error) => return placement_error_result(&error),
@@ -1247,13 +1249,9 @@ impl TownsmithCore {
         } else {
             json
         };
-        let json = if construction.site_count() > 0 {
-            match attach_construction(&json, &construction) {
-                Ok(json) => json,
-                Err(error) => return placement_simple_error("save_failed", error),
-            }
-        } else {
-            json
+        let json = match attach_construction(&json, &construction) {
+            Ok(json) => json,
+            Err(error) => return placement_simple_error("save_failed", error),
         };
         if json.len() > MAX_WORLD_SAVE_BYTES as usize {
             return placement_simple_error(
@@ -1341,6 +1339,7 @@ impl TownsmithCore {
                 ),
             );
         }
+        let mut solid_by_id: BTreeMap<u64, u64> = BTreeMap::new();
         for placement in &store.placements {
             let package_path = match blueprint_path_from_arg(&placement.blueprint_path) {
                 Ok(path) => path,
@@ -1371,6 +1370,7 @@ impl TownsmithCore {
                     ),
                 );
             }
+            solid_by_id.insert(placement.id, package.metadata.solid_voxels);
             if package.metadata.id != placement.blueprint_id
                 || package.metadata.name != placement.name
                 || package.metadata.bounds_m != placement.bounds_m
@@ -1386,15 +1386,25 @@ impl TownsmithCore {
                 );
             }
         }
+        let placement_ids: BTreeSet<u64> = store
+            .placements
+            .iter()
+            .map(|placement| placement.id)
+            .collect();
         for placement in &store.placements {
             if construction.site(placement.id).is_none() {
-                if let Err(error) = construction.add_site(placement.id, placement.solid_voxels) {
+                let solid_voxels = if placement.solid_voxels > 0 {
+                    placement.solid_voxels
+                } else {
+                    *solid_by_id.get(&placement.id).unwrap_or(&1)
+                };
+                if let Err(error) = construction.add_site(placement.id, solid_voxels) {
                     return placement_simple_error("construction_failed", error.to_string());
                 }
             }
         }
         for id in construction.sites.keys() {
-            if !store.placements.iter().any(|placement| placement.id == *id) {
+            if !placement_ids.contains(id) {
                 return placement_simple_error(
                     "construction_orphan",
                     format!("construction site {id} has no placement"),
@@ -1420,15 +1430,17 @@ impl TownsmithCore {
                 );
             }
         }
-        *self
+        let mut construction_guard = self
             .construction
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = construction;
-        *guard = Some(store);
-        *self
+            .unwrap_or_else(|error| error.into_inner());
+        let mut deltas_guard = self
             .terrain_deltas
             .write()
-            .unwrap_or_else(|error| error.into_inner()) = deltas;
+            .unwrap_or_else(|error| error.into_inner());
+        *construction_guard = construction;
+        *guard = Some(store);
+        *deltas_guard = deltas;
         *self
             .terrain_seed
             .lock()
@@ -3055,6 +3067,28 @@ mod tests {
             .expect("placement json");
         let deltas = terrain_deltas_from_world_json(&json).expect("read deltas");
         assert!(deltas.is_empty());
+    }
+
+    #[test]
+    fn construction_json_round_trips_through_world_save() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_site(7, 64_224).expect("site");
+        store.tick(10.0);
+        let json = attach_construction("{}", &store).expect("attach");
+        let decoded = construction_from_world_json(&json)
+            .expect("parse")
+            .expect("construction field");
+        assert_eq!(decoded, store);
+        assert_eq!(decoded.checksum(), store.checksum());
+    }
+
+    #[test]
+    fn construction_json_rejects_unknown_version() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_site(7, 10_000).expect("site");
+        store.format_version = 99;
+        let json = attach_construction("{}", &store).expect("attach");
+        assert!(construction_from_world_json(&json).is_err());
     }
 
     #[test]

@@ -90,7 +90,7 @@ A site advances only when both conditions are met. Phase progress is clamped and
 
 ## 4. Persistence
 
-`world_save` adds a `construction` object to the existing world JSON:
+`world_save` always adds a `construction` object to the existing world JSON, even when there are no sites, so the crew pool and material stock survive a save/load:
 
 ```json
 {
@@ -116,9 +116,9 @@ A site advances only when both conditions are met. Phase progress is clamped and
 ```
 
 - `world_load` validates the construction object before replacing anything.
-- Every placement must have a site; missing sites are created for older saves.
+- Every placement must have a site; missing sites are created for older saves. If an old placement has no `solid_voxels`, the loader backfills it from the verified package metadata, not from a 1 L placeholder.
 - A site without a placement is `construction_orphan`.
-- Old 2A/2B saves without the field load with a default crew pool and sites created at 0%.
+- Old 2A/2B saves without the field load with a default crew pool and sites created at 0% using the package solid count.
 - `world_clear_placements` clears sites; removing one placement removes its site.
 - The construction checksum is reported by `construction_summary` and `world_save`.
 
@@ -174,13 +174,14 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok build=ok don
 - Construction advances with frame time; pause/time controls are not wired yet (D-021).
 - Construction visuals are a scaled translucent mesh, not a true partial-voxel build.
 - No demolition, renovation, or blueprint upgrade projects.
+- The store is capped at 100,000 sites (`MAX_SITES`); a larger legacy save cannot be loaded and a new placement beyond the cap is rolled back with `construction_failed`.
 - No multiplayer authority validation for construction commands.
 
 ## 9. Tests
 
-- `core_city::construction`: 9 tests covering phase start, completion, crew stall, material stall, shared crew, monotonic progress, duplicate ids, JSON/checksum, and malformed state.
-- `core_city`: 32 tests.
-- Workspace: **217 tests + 1 doctest**.
+- `core_city::construction`: 11 tests covering phase start, completion, crew stall, material stall, no material drain while crew-stalled, large-step crew enforcement, shared crew, monotonic progress, duplicate ids, JSON/checksum, and malformed state.
+- `core_city`: 34 tests.
+- Workspace: **221 tests + 1 doctest**.
 - Godot headless: `WORLD_SCENE ... build=ok done=ok ... status=ok`.
 
 ## 10. Next
