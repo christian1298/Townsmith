@@ -262,6 +262,7 @@ GODOT=/path/to/godot ./scripts/smoke_editor.sh
 GODOT=/path/to/godot ./scripts/smoke_locale.sh
 GODOT=/path/to/godot ./scripts/smoke_layout.sh
 GODOT=/path/to/godot ./scripts/smoke_acceptance.sh
+GODOT=/path/to/godot ./scripts/smoke_world_placement.sh
 GODOT=/path/to/godot ./scripts/smoke_blueprint.sh
 
 # 200 real voxel-hut instances
