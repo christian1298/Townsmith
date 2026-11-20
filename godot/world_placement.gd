@@ -9,6 +9,7 @@ extends Node3D
 
 const TerrainStreamer = preload("res://terrain_streamer.gd")
 const EditorCamera = preload("res://editor_camera.gd")
+const MayorCamera = preload("res://mayor_camera.gd")
 
 const SEED := 2026
 const TARGET_DISTANCE_M := 24.0
@@ -20,7 +21,12 @@ const DEFAULT_SAVE := "world.json"
 var core
 var streamer
 var camera: Camera3D
+var mayor_camera
+var architect_camera
+var mode := "mayor"
 var placed_root: Node3D
+var selection_box: MeshInstance3D
+var selected_id := -1
 
 var ghost: Node3D
 var ghost_mesh: MeshInstance3D
@@ -54,6 +60,7 @@ func _ready() -> void:
 	_setup_world()
 	_setup_ui()
 	_setup_ghost()
+	_setup_selection()
 	if _ensure_blueprint():
 		_refresh_preview(true)
 	else:
@@ -65,16 +72,29 @@ func _ready() -> void:
 		return
 
 	if DisplayServer.get_name() != "headless":
-		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 func _process(_delta: float) -> void:
+	if mode == "mayor" and mayor_camera != null:
+		var ground: float = core.world_height_at(
+			SEED, mayor_camera.target.x, mayor_camera.target.z
+		)
+		if ground >= 0.0:
+			mayor_camera.target.y = ground
+		mayor_camera.refresh()
 	if blueprint_mesh == null or not is_instance_valid(camera):
 		return
-	var forward := -camera.global_transform.basis.z
-	forward.y = 0.0
-	if forward.length_squared() < 0.0001:
+	if mode == "architect":
 		return
-	var target := camera.global_position + forward.normalized() * TARGET_DISTANCE_M
+	var target: Vector3
+	if mode == "mayor":
+		target = mayor_camera.target
+	else:
+		var forward := -camera.global_transform.basis.z
+		forward.y = 0.0
+		if forward.length_squared() < 0.0001:
+			return
+		target = camera.global_position + forward.normalized() * TARGET_DISTANCE_M
 	var cell := Vector2i(floori(target.x), floori(target.z))
 	if cell == last_cell:
 		return
@@ -85,30 +105,48 @@ func _process(_delta: float) -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
-		match event.physical_keycode:
-			KEY_R:
-				rotation_deg = (rotation_deg + 90) % 360
-				_refresh_preview(true)
-			KEY_X:
-				_edit_target(1)
-			KEY_Z:
-				_edit_target(-1)
-			KEY_DELETE:
-				_clear_placements()
-			KEY_F5:
-				_save_world()
-			KEY_F9:
-				_load_world()
-			KEY_ESCAPE:
+		if event.physical_keycode == KEY_M and mode == "architect":
+			_return_to_mayor()
+			return
+		if event.physical_keycode == KEY_ESCAPE:
+			if mode == "architect":
+				_return_to_mayor()
+			else:
 				_set_modal("", false)
 				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 				_update_hud()
-	elif event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-		if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
-			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-			_set_modal("", false)
+			return
+		if mode == "mayor":
+			match event.physical_keycode:
+				KEY_R:
+					rotation_deg = (rotation_deg + 90) % 360
+					_refresh_preview(true)
+				KEY_X:
+					_edit_target(1)
+				KEY_Z:
+					_edit_target(-1)
+				KEY_DELETE:
+					_clear_placements()
+				KEY_ENTER, KEY_KP_ENTER:
+					_enter_architect()
+				KEY_F5:
+					_save_world()
+				KEY_F9:
+					_load_world()
 		else:
+			match event.physical_keycode:
+				KEY_F5:
+					_save_world()
+				KEY_F9:
+					_load_world()
+	elif event is InputEventMouseButton and event.pressed:
+		if mode == "mayor" and event.button_index == MOUSE_BUTTON_RIGHT:
+			_select_at_screen(event.position)
+		elif mode == "mayor" and event.button_index == MOUSE_BUTTON_LEFT:
 			_place_at_target()
+		elif mode == "architect" and event.button_index == MOUSE_BUTTON_LEFT:
+			if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 func _resolve_paths() -> void:
 	var user_dir := OS.get_user_data_dir().path_join("world_placement")
@@ -159,13 +197,20 @@ func _setup_world() -> void:
 	streamer.core = core
 	add_child(streamer)
 
-	camera = EditorCamera.new()
-	camera.position = Vector3(FIXTURE_X, 62.0, FIXTURE_Z + 26.0)
-	camera.far = 1500.0
-	camera.move_speed_mps = 24.0
-	add_child(camera)
-	camera.look_at(Vector3(FIXTURE_X, 41.0, FIXTURE_Z))
-	camera.sync_look_from_rotation()
+	mayor_camera = MayorCamera.new()
+	add_child(mayor_camera)
+	mayor_camera.focus(Vector3(FIXTURE_X, 41.0, FIXTURE_Z), 90.0)
+	mayor_camera.current = true
+	camera = mayor_camera
+
+	architect_camera = EditorCamera.new()
+	architect_camera.position = Vector3(FIXTURE_X, 43.0, FIXTURE_Z + 12.0)
+	architect_camera.far = 1500.0
+	architect_camera.move_speed_mps = 8.0
+	add_child(architect_camera)
+	architect_camera.look_at(Vector3(FIXTURE_X, 42.0, FIXTURE_Z))
+	architect_camera.sync_look_from_rotation()
+	architect_camera.current = false
 	streamer.bind_camera(camera)
 
 	var light := DirectionalLight3D.new()
@@ -244,6 +289,19 @@ func _setup_ghost() -> void:
 	foundation_material.albedo_color = Color(0.45, 0.45, 0.42)
 	foundation_material.roughness = 1.0
 	foundation_material.metallic = 0.0
+
+func _setup_selection() -> void:
+	selection_box = MeshInstance3D.new()
+	selection_box.name = "Selection"
+	selection_box.visible = false
+	selection_box.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var material := StandardMaterial3D.new()
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	material.albedo_color = Color(1.0, 0.82, 0.2, 0.22)
+	selection_box.material_override = material
+	add_child(selection_box)
 
 func _ensure_blueprint() -> bool:
 	if not FileAccess.file_exists(blueprint_path):
@@ -330,14 +388,30 @@ func _update_ghost_color() -> void:
 func _update_hud() -> void:
 	if hud == null:
 		return
-	var name := str(blueprint_info.get("name", "none"))
+	var blueprint_name := str(blueprint_info.get("name", "none"))
 	var rooms := int(blueprint_info.get("rooms", 0))
 	var capacity := int(blueprint_info.get("resident_capacity", 0))
-	hud.text = "Townsmith — World Placement  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD fly · Shift boost · Space/Ctrl up/down · R rotate · X raise · Z lower · LMB place · Del clear · F5 save · F9 load · Esc release mouse" % [
-		SEED, name, rooms, capacity,
-	]
+	var selected := _selected_placement()
+	var selected_line := "Selected: none"
+	if not selected.is_empty():
+		selected_line = "Selected #%d: %s  ·  %d rooms  ·  capacity %d  ·  %d jobs" % [
+			selected_id,
+			str(selected.get("name", "?")),
+			rooms,
+			int(selected.get("resident_capacity", 0)),
+			int(selected.get("job_slots", 0)),
+		]
+	if mode == "architect":
+		hud.text = "Townsmith — Architect Mode (view)  (seed %d)\nBlueprint: %s\nFirst-person view at the selected door · M / Esc returns to Mayor" % [
+			SEED, blueprint_name,
+		]
+	else:
+		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower\nLMB place · RMB select · Enter enter building · F5 save · F9 load" % [
+			SEED, blueprint_name, rooms, capacity,
+		]
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
-	status_label.text = "Target (%d, %d)  rotation %d°  %s\nPlacements: %d   Terrain edits: %d   Save: %s" % [
+	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Terrain edits: %d   Save: %s" % [
+		selected_line,
 		int(target_x),
 		int(target_z),
 		rotation_deg,
@@ -346,6 +420,161 @@ func _update_hud() -> void:
 		core.terrain_delta_count(),
 		save_path,
 	]
+
+func _selected_placement() -> Dictionary:
+	if selected_id < 0:
+		return {}
+	var state: Dictionary = core.world_placements()
+	for placement in state.get("placements", []):
+		if int(placement.get("id", -1)) == selected_id:
+			return placement
+	return {}
+
+func _select_at_screen(screen: Vector2) -> bool:
+	var id := _pick_placement_at(screen)
+	if id < 0:
+		_clear_selection()
+		return false
+	return _select_placement(id)
+
+func _select_placement(id: int) -> bool:
+	selected_id = id
+	var placement := _selected_placement()
+	if placement.is_empty():
+		_clear_selection()
+		return false
+	var center: PackedFloat32Array = placement.get("center", PackedFloat32Array())
+	var footprint: PackedFloat32Array = placement.get("footprint", PackedFloat32Array())
+	var bounds: PackedFloat32Array = placement.get("bounds", PackedFloat32Array())
+	if center.size() != 3 or footprint.size() != 2 or bounds.size() != 3:
+		_clear_selection()
+		return false
+	var box := BoxMesh.new()
+	box.size = Vector3(footprint[0] + 0.4, bounds[1] + 0.4, footprint[1] + 0.4)
+	selection_box.mesh = box
+	selection_box.position = Vector3(
+		center[0], center[1] + bounds[1] * 0.5, center[2]
+	)
+	selection_box.visible = true
+	_update_hud()
+	return true
+
+func _clear_selection() -> void:
+	selected_id = -1
+	if selection_box != null:
+		selection_box.visible = false
+	_update_hud()
+
+func _pick_placement_at(screen: Vector2) -> int:
+	if camera == null:
+		return -1
+	var origin := camera.project_ray_origin(screen)
+	var direction := camera.project_ray_normal(screen).normalized()
+	var state: Dictionary = core.world_placements()
+	var best := INF
+	var best_id := -1
+	for placement in state.get("placements", []):
+		var center: PackedFloat32Array = placement.get("center", PackedFloat32Array())
+		var footprint: PackedFloat32Array = placement.get("footprint", PackedFloat32Array())
+		var bounds: PackedFloat32Array = placement.get("bounds", PackedFloat32Array())
+		if center.size() != 3 or footprint.size() != 2 or bounds.size() != 3:
+			continue
+		var min_point := Vector3(
+			center[0] - footprint[0] * 0.5,
+			center[1],
+			center[2] - footprint[1] * 0.5
+		)
+		var max_point := Vector3(
+			center[0] + footprint[0] * 0.5,
+			center[1] + bounds[1],
+			center[2] + footprint[1] * 0.5
+		)
+		var hit := _ray_aabb(origin, direction, min_point, max_point)
+		if hit >= 0.0 and hit < best:
+			best = hit
+			best_id = int(placement.get("id", -1))
+	return best_id
+
+func _ray_aabb(
+	origin: Vector3, direction: Vector3, min_point: Vector3, max_point: Vector3
+) -> float:
+	var t_min := -INF
+	var t_max := INF
+	for axis in range(3):
+		if absf(direction[axis]) < 0.000001:
+			if origin[axis] < min_point[axis] or origin[axis] > max_point[axis]:
+				return -1.0
+			continue
+		var inverse := 1.0 / direction[axis]
+		var t1 := (min_point[axis] - origin[axis]) * inverse
+		var t2 := (max_point[axis] - origin[axis]) * inverse
+		if t1 > t2:
+			var swap := t1
+			t1 = t2
+			t2 = swap
+		t_min = maxf(t_min, t1)
+		t_max = minf(t_max, t2)
+		if t_min > t_max:
+			return -1.0
+	if t_min >= 0.0:
+		return t_min
+	return t_max if t_max >= 0.0 else -1.0
+
+func _door_position(placement: Dictionary) -> Vector3:
+	var center: PackedFloat32Array = placement.get("center", PackedFloat32Array())
+	var footprint: PackedFloat32Array = placement.get("footprint", PackedFloat32Array())
+	if center.size() != 3 or footprint.size() != 2:
+		return Vector3.ZERO
+	var rotation := deg_to_rad(float(placement.get("rotation_deg", 0)))
+	var front := Vector3(0.0, 0.0, 1.0).rotated(Vector3.UP, rotation)
+	var distance := maxf(footprint[0], footprint[1]) * 0.5 + 2.0
+	return Vector3(center[0], center[1], center[2]) + front * distance
+
+func _enter_architect() -> bool:
+	if mode != "mayor":
+		return false
+	var placement := _selected_placement()
+	if placement.is_empty():
+		_set_modal("Select a building first (right-click)", true)
+		return false
+	var door := _door_position(placement)
+	var center: PackedFloat32Array = placement.get("center", PackedFloat32Array())
+	var ground: float = core.world_height_at(SEED, door.x, door.z)
+	if ground < 0.0:
+		ground = center[1] if center.size() == 3 else 0.0
+	architect_camera.global_position = Vector3(door.x, ground + 1.7, door.z)
+	if center.size() == 3:
+		architect_camera.look_at(
+			Vector3(center[0], center[1] + 1.5, center[2]), Vector3.UP
+		)
+	architect_camera.sync_look_from_rotation()
+	architect_camera.current = true
+	mayor_camera.current = false
+	camera = architect_camera
+	mode = "architect"
+	streamer.bind_camera(architect_camera)
+	ghost.visible = false
+	selection_box.visible = false
+	if DisplayServer.get_name() != "headless":
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_set_modal("Architect view at the door · M returns to Mayor · voxel editing uses the workshop editor", false)
+	_update_hud()
+	return true
+
+func _return_to_mayor() -> bool:
+	if mode != "architect":
+		return false
+	mode = "mayor"
+	camera = mayor_camera
+	mayor_camera.current = true
+	architect_camera.current = false
+	streamer.bind_camera(mayor_camera)
+	ghost.visible = true
+	selection_box.visible = selected_id >= 0
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_set_modal("", false)
+	_refresh_preview(true)
+	return true
 
 func _edit_target(delta: int) -> bool:
 	var current: float = core.world_height_at(SEED, target_x, target_z)
@@ -443,6 +672,7 @@ func _clear_placed_nodes() -> void:
 	placed_nodes.clear()
 
 func _clear_placements() -> void:
+	_clear_selection()
 	_clear_placed_nodes()
 	core.world_clear_placements()
 	_set_modal("", false)
@@ -467,6 +697,7 @@ func _load_world() -> bool:
 		_set_modal("Load failed: " + str(result.get("error_code", result.get("error", ""))), true)
 		_update_hud()
 		return false
+	_clear_selection()
 	_clear_placed_nodes()
 	streamer.invalidate_all()
 	var state: Dictionary = core.world_placements()
@@ -513,6 +744,9 @@ func _run_scene_smoke() -> void:
 	var rotation_ok := false
 	var edit_ok := false
 	var place_ok := false
+	var select_ok := false
+	var enter_ok := false
+	var return_ok := false
 	var save_ok := false
 	var clear_ok := false
 	var load_ok := false
@@ -560,6 +794,27 @@ func _run_scene_smoke() -> void:
 		status = "place_failed:" + preview_error
 
 	if status == "ok":
+		mayor_camera.focus(Vector3(FIXTURE_X, 42.0, FIXTURE_Z), 60.0)
+		mayor_camera.current = true
+		architect_camera.current = false
+		camera = mayor_camera
+		var screen := camera.unproject_position(Vector3(FIXTURE_X, 44.0, FIXTURE_Z))
+		select_ok = _select_at_screen(screen) and selected_id >= 0 and selection_box.visible
+		if select_ok:
+			enter_ok = _enter_architect() and mode == "architect" and camera == architect_camera
+			if enter_ok:
+				var door := _door_position(_selected_placement())
+				enter_ok = absf(architect_camera.global_position.x - door.x) < 0.001
+				enter_ok = enter_ok and absf(architect_camera.global_position.z - door.z) < 0.001
+				return_ok = _return_to_mayor() and mode == "mayor" and camera == mayor_camera
+		if not select_ok:
+			status = "select_failed"
+		elif not enter_ok:
+			status = "enter_failed"
+		elif not return_ok:
+			status = "return_failed"
+
+	if status == "ok":
 		save_ok = _save_world()
 		if not save_ok:
 			status = "save_failed"
@@ -605,13 +860,16 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
 		"ok" if rotation_ok else "failed",
 		"ok" if edit_ok else "failed",
 		"ok" if place_ok else "failed",
+		"ok" if select_ok else "failed",
+		"ok" if enter_ok else "failed",
+		"ok" if return_ok else "failed",
 		"ok" if save_ok else "failed",
 		"ok" if load_ok else "failed",
 		"ok" if status == "ok" else "failed",

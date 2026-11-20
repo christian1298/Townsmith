@@ -118,7 +118,7 @@ The preview revalidates at the new height, so a cut/fill that creates an illegal
 Recorded marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 `smoke_world_placement.sh` remains the bridge-only regression.
@@ -145,6 +145,6 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok save=ok load
 
 ## 9. Next
 
-1. 2C: Mayor camera, selection, and mode switching at a door.
+1. 2C: Mayor camera, selection, and mode switching at a door ([[44 - Mayor Mode]]).
 2. 2D: construction sites and material delivery.
 3. Later: terrain brushes, undo, delta compaction, server replication, and cut/fill foundations.

@@ -144,7 +144,7 @@ GODOT=/path/to/godot ./scripts/smoke_world_scene.sh
 `WORLD_SCENE` exercises the green/red ghost, water rejection, a 90° ghost rotation, a terrain edit and dirty chunk, placing at the fixture site, save/load of placements + deltas, rebuilding the placed node and foundation, and a failed load leaving the scene untouched. Terrain-edit details are in [[43 - Terrain Edits]]. Recorded marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 ## 5. Scene
@@ -185,4 +185,4 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 
 1. Replace absolute package paths with a content-addressed library beside the save.
 2. Move placement into a construction site (2D).
-3. Add Mayor Mode camera/selection (2C).
+3. Add Mayor Mode camera/selection (2C; see [[44 - Mayor Mode]]).
