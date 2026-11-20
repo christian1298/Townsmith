@@ -148,7 +148,7 @@ CI runs the script in the Godot headless smoke job after `smoke_volume.sh`.
 - **One-voxel brush.** There is no 2×2×2/3×3×3 brush, paint, pick, box, copy/paste, rotate, or mirror.
 - **Whole-volume remesh.** Every rebuild remeshes the entire 16 × 9.6 × 16 m volume on the main thread; no dirty-chunk path or worker yet.
 - **Room view is read-only.** Press R for boxes, labels, and the stats panel; there is no click-to-select, structural overlay, or cost panel yet.
-- **Localization is not wired.** The overlay strings are literal English; key-based strings arrive with [[16 - Localization]].
+- **Localization is wired** for the editor HUD, room panel, palette, save/load, and statuses; see [[38 - Editor Localization]]. Some log/error strings intentionally stay English for developers.
 - **Mouse capture is not focus-aware.** Losing window focus while captured is not handled beyond `Esc`.
 - **Single scene, no menus.** Launching the scene drops straight into the camera; there is no start screen, settings, or rebind UI.
 
