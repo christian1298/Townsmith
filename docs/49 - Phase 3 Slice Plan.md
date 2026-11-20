@@ -37,7 +37,7 @@ The full feature list is in [[08 - Roadmap]]. This plan cuts it into reviewable 
 | **3.3** | Jobs and wages: assign residents to job slots, commute distance, income | **Done** — PR #60, see [[51 - Jobs and Wages]] |
 | **3.4** | Primary industries: lumberjack, farmer, hunter with visible loops and storage | **Done** — PR #64, see [[54 - Primary Industries]] |
 | **3.5** | Utilities: water or power first, coverage, shortages, happiness/production effects | **Done** — PR #65, see [[55 - Utilities]] |
-| **3.6** | Economy: taxes, upkeep, construction draw-down, loans, bankruptcy | **Partial** — PR #62, treasury/taxes; draw-down and consequences are next |
+| **3.6** | Economy: taxes, upkeep, construction draw-down, loans, bankruptcy | **This PR** — see [[53 - Treasury and Taxes]] |
 | **3.7** | Traffic: road graph, flow fields, visual vehicles | Planned |
 | **3.8** | Dashboard and advisor: city metrics, district panel, notifications | Planned |
 | **3.9** | Headless 30-day runner and regression metrics | **Partial** — PR #61, city-loop runner; see [[52 - Headless City Loop]] |
@@ -202,7 +202,7 @@ See [[54 - Primary Industries]] for rates, structs, tick order, persistence, HUD
 - `cargo test -p core_city` — industry, staffing, and food-replenishment tests.
 - `cargo test --workspace`.
 - `smoke_world_scene.sh` — industry site, production, supply, beacon, save/clear/load; marker `industry=ok` (checked by the script).
-- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `e0d935b2a4421285`.
+- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `1d78a3cac4fb0f22`.
 - clippy and fmt.
 
 ## 6e. Stage 3.5 scope
@@ -232,15 +232,47 @@ See [[55 - Utilities]] for rates, formulas, tick order, persistence, HUD, tests,
 ### Verification
 
 - `cargo test -p core_city` — utilities, population service, industry power tests.
-- `cargo test --workspace` — **321 tests + 1 doctest (322 passed)**.
+- `cargo test --workspace` — **330 tests + 1 doctest (331 passed)**.
 - `smoke_world_scene.sh` — water/power service, needs recovery, production, persistence, beacons; marker `utilities=ok` (checked by the script).
-- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `e0d935b2a4421285`.
+- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `1d78a3cac4fb0f22`.
+- clippy and fmt.
+
+## 6f. Stage 3.6 scope
+
+### In
+
+- Construction draw-down: successful placement charges the blueprint material cost and records `construction_spent`.
+- Affordability and bankruptcy gates for placement and borrowing.
+- Loans with simple daily interest, scheduled principal, per-loan and total-debt limits.
+- Tax policy presets in the shell and `economy_borrow`.
+- HUD balance, daily net, tax, debt, and bankruptcy state.
+- World save/load with loans; old saves load debt-free.
+- World-scene smoke coverage for spending, borrowing, tax recovery, and persistence; marker `economy=ok`.
+- 30-day runner with construction spend, a 100,000 loan, and a day-15 tax recovery.
+
+### Out
+
+- Per-phase construction billing, refunds, or asset sales.
+- Bonds, grants, trade, subsidies, service funding, or district taxes.
+- Household rent/food spending or net household income.
+- Liquidation, takeover, or forced bankruptcy consequences.
+- Variable-rate or renegotiable loans.
+
+### Data
+
+See [[53 - Treasury and Taxes]] for the ledger, loan model, formulas, controls, tests, and limits.
+
+### Verification
+
+- `cargo test -p core_city` — economy construction, loan, bankruptcy, and old-save tests.
+- `cargo test --workspace` — **330 tests + 1 doctest (331 passed)**.
+- `smoke_world_scene.sh` — placement charge, loan, tax recovery, save/load; marker `economy=ok` (checked by the script).
+- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `1d78a3cac4fb0f22`.
 - clippy and fmt.
 
 ## 7. Next
 
-1. 3.6: construction draw-down, loans, and bankruptcy consequences.
-2. 3.7: road graph and traffic.
+1. 3.7: road graph and traffic.
 3. 3.8: dashboard and advisor, including utility shortages.
 4. Materialize a few named citizens for selection and stories.
 5. Keep the 500-citizen/50-building 60 FPS gate visible from the first slice.

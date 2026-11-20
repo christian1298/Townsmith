@@ -118,14 +118,14 @@ The streamed placement shell adds a lot layer under the buildings:
 Marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok occupancy=ok industry=ok utilities=ok economy=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 ## 7. Tests
 
-- `core_city`: 7 lot tests + 1 road-frontage test; core_city **117 tests**.
-- `godot_ext`: 2 lot JSON tests; bridge **40 tests**.
-- Workspace: **321 tests + 1 doctest**.
+- `core_city`: 7 lot tests + 1 road-frontage test; core_city **125 tests**.
+- `godot_ext`: 2 lot JSON tests; bridge **41 tests**.
+- Workspace: **330 tests + 1 doctest**.
 
 ## 8. Limits
 

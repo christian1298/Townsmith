@@ -16,6 +16,13 @@ const FIXTURE_X := 169.0
 const FIXTURE_Z := 125.0
 const DEFAULT_BLUEPRINT := "acceptance_house.tsbp"
 const DEFAULT_SAVE := "world.json"
+const STARTING_TREASURY := 100000.0
+const LOAN_AMOUNT := 50000.0
+const TAX_POLICIES := [
+	{"name": "low", "resident": 4.0, "business": 2.0},
+	{"name": "standard", "resident": 8.0, "business": 4.0},
+	{"name": "high", "resident": 20.0, "business": 8.0},
+]
 
 var core
 var streamer
@@ -191,6 +198,10 @@ func _unhandled_input(event: InputEvent) -> void:
 					_cycle_industry()
 				KEY_U:
 					_cycle_utility()
+				KEY_T:
+					_cycle_tax_policy()
+				KEY_L:
+					_borrow()
 				KEY_V:
 					core.construction_add_materials(10000)
 					_update_hud()
@@ -764,6 +775,35 @@ func _cycle_utility() -> void:
 	_refresh_utility_visuals()
 	_update_hud()
 
+func _cycle_tax_policy() -> void:
+	var state: Dictionary = core.economy_state()
+	var resident := float(state.get("tax_per_resident_per_day", 8.0))
+	var business := float(state.get("business_tax_per_job_per_day", 4.0))
+	var index := -1
+	for i in TAX_POLICIES.size():
+		var policy: Dictionary = TAX_POLICIES[i]
+		if absf(float(policy["resident"]) - resident) < 0.01 and absf(float(policy["business"]) - business) < 0.01:
+			index = i
+			break
+	var next: Dictionary = TAX_POLICIES[(index + 1) % TAX_POLICIES.size()]
+	var result: Dictionary = core.economy_set_taxes(
+		SEED, float(next["resident"]), float(next["business"])
+	)
+	if not bool(result.get("ok", false)):
+		_set_modal("Tax change failed: " + str(result.get("error_code", "")), true)
+		return
+	_set_modal("Tax policy: %s" % str(next["name"]), false)
+	_update_hud()
+
+func _borrow() -> void:
+	var result: Dictionary = core.economy_borrow(SEED, LOAN_AMOUNT)
+	if not bool(result.get("ok", false)):
+		_set_modal("Loan rejected: " + str(result.get("error_code", "")), true)
+		_update_hud()
+		return
+	_set_modal("Borrowed %.0f · debt %.0f" % [LOAN_AMOUNT, float(result.get("debt", 0.0))], false)
+	_update_hud()
+
 func _found_settlement() -> bool:
 	var state: Dictionary = core.settlements()
 	var used: Dictionary = {}
@@ -1014,7 +1054,7 @@ func _update_hud() -> void:
 			SEED, blueprint_name,
 		]
 	else:
-		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew on/off · I industry · U utility · V +10k materials · F5 save · F9 load" % [
+		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew on/off · I industry · U utility · T tax · L loan · V +10k materials · F5 save · F9 load" % [
 			SEED, blueprint_name, rooms, capacity,
 		]
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
@@ -1031,6 +1071,10 @@ func _update_hud() -> void:
 			float(economy.get("tax_per_resident_per_day", 0.0)),
 			float(economy.get("business_tax_per_job_per_day", 0.0)),
 		]
+		if float(economy.get("debt", 0.0)) > 0.001:
+			treasury_text += " · debt %.0f" % float(economy.get("debt", 0.0))
+		if bool(economy.get("bankrupt", false)):
+			treasury_text = "BANKRUPT · " + treasury_text
 	var industry: Dictionary = core.industry_state()
 	var industry_text := "—"
 	if bool(industry.get("open", false)):
@@ -1661,6 +1705,7 @@ func _run_scene_smoke() -> void:
 	var occupancy_after_ok := false
 	var industry_ok := false
 	var utility_ok := false
+	var economy_ok := false
 	var save_ok := false
 	var clear_ok := false
 	var load_ok := false
@@ -1678,6 +1723,10 @@ func _run_scene_smoke() -> void:
 	target_z = 128.0
 	_refresh_preview(true)
 	water_ok = not preview_valid and preview_error == "water" and ghost_material.albedo_color.r > ghost_material.albedo_color.g
+	var water_place: Dictionary = core.world_place_blueprint(SEED, blueprint_path, 128.0, 128.0, 0)
+	var economy_after_reject: Dictionary = core.economy_state()
+	water_ok = water_ok and not bool(water_place.get("ok", true))
+	water_ok = water_ok and not bool(economy_after_reject.get("open", true))
 	if not water_ok and status == "ok":
 		status = "water_failed:" + preview_error
 
@@ -1742,6 +1791,13 @@ func _run_scene_smoke() -> void:
 	if place_ok:
 		var node := placed_root.get_child(0)
 		place_ok = absf(node.rotation_degrees.y - 90.0) < 0.001 and _foundation_matches_bounds(node)
+		var economy_after_place: Dictionary = core.economy_state()
+		var construction_spent := float(economy_after_place.get("construction_spent", 0.0))
+		var expected_cost := float(blueprint_info.get("material_cost", -1.0))
+		place_ok = place_ok and bool(economy_after_place.get("open", false))
+		place_ok = place_ok and expected_cost > 0.0
+		place_ok = place_ok and absf(construction_spent - expected_cost) < 0.01
+		place_ok = place_ok and absf(float(economy_after_place.get("balance", 0.0)) - (STARTING_TREASURY - expected_cost)) < 0.01
 	if not place_ok and status == "ok":
 		status = "place_failed:" + preview_error
 
@@ -1965,8 +2021,20 @@ func _run_scene_smoke() -> void:
 				occupancy_after_ok = occupancy_after_ok and float(economy_after.get("balance", 100000.0)) < 100000.0
 				occupancy_after_ok = occupancy_after_ok and float(economy_after.get("daily_net", 0.0)) < 0.0
 				occupancy_after_ok = occupancy_after_ok and not bool(economy_after.get("bankrupt", true))
-				var economy_balance := float(economy_after.get("balance", 0.0))
-				var economy_net := float(economy_after.get("daily_net", 0.0))
+				var balance_before_loan := float(economy_after.get("balance", 0.0))
+				var loan_state: Dictionary = core.economy_borrow(SEED, LOAN_AMOUNT)
+				var tax_state: Dictionary = core.economy_set_taxes(SEED, 100.0, 8.0)
+				var economy_recovered: Dictionary = core.economy_state()
+				economy_ok = bool(loan_state.get("ok", false)) and bool(tax_state.get("ok", false))
+				economy_ok = economy_ok and absf(
+					float(economy_recovered.get("balance", 0.0)) - (balance_before_loan + LOAN_AMOUNT)
+				) < 0.01
+				economy_ok = economy_ok and float(economy_recovered.get("debt", 0.0)) > 49999.0
+				economy_ok = economy_ok and float(economy_recovered.get("daily_net", 0.0)) > 0.0
+				occupancy_after_ok = occupancy_after_ok and economy_ok
+				var economy_balance := float(economy_recovered.get("balance", 0.0))
+				var economy_net := float(economy_recovered.get("daily_net", 0.0))
+				var economy_debt := float(economy_recovered.get("debt", 0.0))
 				if occupancy_after_ok:
 					var population_checksum: String = str(core.population_checksum())
 					var economy_checksum: String = str(core.economy_checksum())
@@ -2001,6 +2069,7 @@ func _run_scene_smoke() -> void:
 					occupancy_after_ok = occupancy_after_ok and bool(economy_persisted.get("open", false))
 					occupancy_after_ok = occupancy_after_ok and absf(float(economy_persisted.get("balance", 0.0)) - economy_balance) < 0.01
 					occupancy_after_ok = occupancy_after_ok and absf(float(economy_persisted.get("daily_net", 0.0)) - economy_net) < 0.01
+					occupancy_after_ok = occupancy_after_ok and absf(float(economy_persisted.get("debt", 0.0)) - economy_debt) < 0.01
 					occupancy_after_ok = occupancy_after_ok and not bool(economy_persisted.get("bankrupt", true))
 					var industry_persisted: Dictionary = core.industry_state()
 					occupancy_after_ok = occupancy_after_ok and bool(industry_persisted.get("open", false))
@@ -2067,7 +2136,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s occupancy=%s industry=%s utilities=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s occupancy=%s industry=%s utilities=%s economy=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -2082,6 +2151,7 @@ func _run_scene_smoke() -> void:
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",
+		"ok" if economy_ok else "failed",
 		"ok" if select_ok else "failed",
 		"ok" if enter_ok else "failed",
 		"ok" if return_ok else "failed",

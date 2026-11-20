@@ -1,5 +1,5 @@
 ---
-title: Treasury and Taxes
+title: Treasury, Loans, and Construction
 project: Townsmith
 status: active
 updated: 2026-11-20
@@ -8,31 +8,35 @@ tags:
   - phase-3
   - economy
   - treasury
+  - loans
 ---
 
-# 53 — Treasury and Taxes
+# 53 — Treasury, Loans, and Construction
 
 > [!info] What this note is
-> Phase 3.6a: a cash-flow ledger on top of the existing city loop. Residents and jobs pay taxes; employed workers receive wages; completed buildings cost upkeep. It is not the full economy yet.
+> Phase 3.6 completes the first economy loop: construction spends real money, loans bridge a cash gap, bankruptcy blocks new spending, and taxes can pull a city back. It is still a city-level ledger, not household finance.
 
 ## 1. Scope
 
 In:
 
-- `core_city::economy::Economy` with balance, tax rates, upkeep, elapsed days, construction spending, and a bankruptcy flag.
-- Taxes: resident tax + business tax per employed job.
-- Expenses: gross wages + per-building upkeep.
-- Persistence in the world JSON, with seed checks and old-save fallback.
-- HUD treasury line.
-- Scene smoke: balance moves after completion and survives save/load.
+- `core_city::economy::Economy` with balance, tax rates, upkeep, construction spending, loans, elapsed days, and bankruptcy.
+- Construction draw-down: a successful placement charges its blueprint material cost.
+- Affordability and bankruptcy gates: no new placement when the city cannot pay, and no new borrowing when bankrupt.
+- Fixed-rate loans with daily interest and scheduled principal repayment.
+- Tax policy changes as the recovery lever; default, low, and high presets in the shell.
+- Persistence in the world JSON, old saves load with no debt.
+- HUD, controls, smoke checks, and a 30-day recovery scenario in the runner.
 
 Out:
 
-- Construction draw-down from placement cost (the `charge_construction` hook exists but is not wired).
-- Loans, bonds, grants, trade, subsidies, and service funding.
-- Net income, rent, food cost, or household spending.
-- Unemployment benefits, wages by trade, or taxes by district/settlement.
-- Bankruptcy consequences (the flag is recorded, not enforced).
+- Construction payments spread across phases; the full material cost is charged when placement succeeds.
+- Refunds, cancel/rebuild accounting, or sale of buildings.
+- Bonds, grants, trade, subsidies, or a credit market.
+- Service funding by building type, district budgets, or settlement taxes.
+- Household rent, food cost, net income, or private spending.
+- Bankruptcy consequences beyond blocking new placements and loans: no liquidation, takeover, or forced asset sale.
+- Loan defaults, variable rates, or renegotiation.
 
 ## 2. Defaults
 
@@ -44,8 +48,13 @@ Out:
 | Upkeep | 5 / completed building / day |
 | Wage | 20 / worker / day (from [[51 - Jobs and Wages]]) |
 | Bankruptcy threshold | −50,000 |
+| Loan rate | 0.05% / day |
+| Loan term | 365 days |
+| Loan amount | 50,000 in the shell; 50,000–250,000 in the runner |
+| Maximum debt | 500,000 |
+| Maximum loans | 8 |
 
-A new city starts at 100,000. Rates can be set from 0 to 100; invalid input is clamped.
+A new city starts at 100,000. Tax rates can be set from 0 to 100; invalid input is clamped. A loan's principal is fixed at signing, with simple daily interest and equal principal payments.
 
 ## 3. Tick
 
@@ -54,80 +63,148 @@ For `dt` seconds:
 ```text
 days = dt / 86,400
 income = (population × resident_tax + employed × business_tax) × days
-expenses = (employed × 20 + completed_buildings × upkeep) × days
+operating = (employed × 20 + completed_buildings × upkeep) × days
+loan_interest = Σ(outstanding_balance × rate_per_day) × days
+loan_principal = Σ(min(payment_per_day, outstanding_balance) × days)
+expenses = operating + loan_interest + loan_principal
 balance += income − expenses
 days_elapsed += days
 bankrupt = balance <= −50,000
 ```
 
-The acceptance house after completion: 2 residents, 2 employed, 1 building.
+Each loan's balance falls by its principal payment; interest is paid from the treasury and does not capitalize. A paid-off loan is removed.
 
-- income = 2 × 8 + 2 × 4 = 24/day
-- expenses = 2 × 20 + 1 × 5 = 45/day
-- net = **−21/day**
+## 4. Construction
 
-The 30-day runner (50 houses, 500 residents/jobs) runs at **−4,250/day**, ends at **−27,500**, and is not yet bankrupt.
+`world_place_blueprint` now:
 
-## 4. Bridge
+1. checks the existing treasury, or the 100,000 starting balance when none exists;
+2. rejects a bankrupt city (`bankrupt`);
+3. rejects a placement the balance cannot cover (`insufficient_funds`);
+4. places the building and creates its construction site;
+5. opens the treasury if needed, charges the blueprint `material_cost`, and records it in `construction_spent`.
+
+A rejected placement does not open a treasury, so a failed first placement cannot pin the world to that seed. If the charge races with another spend, the placement and site are rolled back and the call returns `insufficient_funds`.
+
+The acceptance house costs **38,028.80**; placing it leaves **61,971.20** before operating costs.
+
+A removed building does not refund construction spending. Clearing all placements keeps the treasury and debt, because the city's money is independent of its buildings.
+
+## 5. Loans
+
+`Economy::take_loan(amount, rate_per_day, term_days)`:
+
+- rejects a bankrupt city;
+- limits principal to 250,000 per loan and 500,000 total debt;
+- limits the rate to 0..=1% per day and the term to 1..=3,650 days;
+- adds the principal to cash immediately;
+- sets `payment_per_day = amount / term_days`.
+
+The bridge exposes `economy_borrow(seed, amount)` with the default rate and term. The shell borrows **50,000** per press.
+
+## 6. Bankruptcy and recovery
+
+`bankrupt` is true when the balance is at or below **−50,000**.
+
+Consequences:
+
+- new construction placements are rejected;
+- new loans are rejected.
+
+There is no liquidation or forced sale. The player recovers by raising taxes, waiting for tax income, or both. The shell's `T` key cycles low (4/2), standard (8/4), and high (20/8) resident/business rates.
+
+The acceptance house at standard taxes runs at **−21/day** before debt service. After a 50,000 loan it runs at about **−183/day**; high taxes (100/8 in the smoke) turn it positive at the small two-resident scale.
+
+## 7. 30-day result
+
+The runner now charges **3,000 per house** (150,000 total), takes a **100,000** construction loan, starts at standard taxes, and switches to **20/4** at day 15.
+
+| Metric | Value |
+|---|---:|
+| Population / jobs | 500 / 500 |
+| Construction cost | 150,000 |
+| Loan | 100,000 |
+| Minimum balance | **−18,610** at day 15 |
+| Balance after 30 days | **2,822** |
+| Debt after 30 days | 91,781 |
+| Daily net after recovery | **+1,430** |
+| Bankrupt | no |
+| Happiness | 1.00 |
+| Food / water / rest | 1.00 / 1.00 / 1.00 |
+
+The city dips below zero but stays above the bankruptcy threshold, then returns positive after the tax change. This is the first version of “near-bankruptcy is recoverable” rather than a proof that the default tax rate is balanced.
+
+City checksum: `1d78a3cac4fb0f22`. Economy checksum: `f57d4378435f03ee`.
+
+## 8. Bridge
 
 | Method | Purpose |
 |---|---|
-| `economy_state()` | `open`, seed, balance, rates, construction spent, days, daily net, bankrupt, checksum |
-| `economy_tick(seed, seconds)` | Advance taxes/wages/upkeep using the current city ledger |
+| `economy_state()` | `open`, seed, balance, rates, construction spent, days, debt, loan count, interest/payment per day, daily net, bankrupt, can borrow, checksum |
+| `economy_tick(seed, seconds)` | Advance taxes, wages, upkeep, and loan service |
 | `economy_set_taxes(seed, resident, business)` | Set rates; creates the ledger if needed |
+| `economy_borrow(seed, amount)` | Borrow with the default rate and term |
 | `economy_checksum()` | Stable FNV checksum |
 | `economy_clear()` | Close and clear the ledger |
 
 `economy_tick` reads the city summary first (population, employed, completed buildings), then locks the treasury. It holds no city locks while charging the treasury.
 
-## 5. Save/load
+## 9. Save/load
 
-`world_save` writes an optional `economy` object. `world_load`:
+`world_save` writes an optional `economy` object, including outstanding loans. `world_load`:
 
 - parses and validates the object;
-- rejects a seed different from `expected_seed`;
+- rejects a seed different from the expected seed;
 - replaces the treasury with the rest of the world only after all stores validate;
 - leaves it closed for old saves without the field.
 
-`world_clear_placements` intentionally leaves the treasury intact; clearing buildings does not erase the city's money.
+Old economy saves without `loans` load with no debt. Loan balances, rates, and payments are validated on load. A corrupt debt total or invalid rate is rejected as `invalid_economy`.
 
-## 6. HUD and smoke
-
-The HUD adds:
+## 10. HUD and controls
 
 ```text
-Treasury: 99999 balance · -21/day · tax 8/4
+Treasury: 61971 balance · -21/day · tax 8/4
+Treasury: 111971 balance · -183/day · tax 8/4 · debt 50000
+Treasury: 100 balance · +9/day · tax 100/8 · debt 50000
+BANKRUPT · -50000 balance · +0/day · tax 20/8 · debt 0
 ```
+
+- `T` cycles tax policy.
+- `L` borrows 50,000.
+- The status panel shows debt when non-zero and prefixes `BANKRUPT`.
 
 The world-scene smoke checks:
 
-- the ledger opens during the construction/population advance;
-- balance is below the 100,000 starting value and daily net is negative for the acceptance house;
-- treasury checksum survives save → clear → load;
-- the ledger is still open after load.
+- a rejected first placement leaves the treasury closed (no seed-poisoning side effect);
+- placement charged exactly the blueprint `material_cost` and debited the same amount;
+- the acceptance house starts negative at standard taxes;
+- borrowing 50,000 raises cash and debt by exactly the same amount;
+- high taxes turn daily net positive;
+- save → clear → load preserves balance, daily net, debt, and treasury checksum;
+- marker `economy=ok` (checked by `scripts/smoke_world_scene.sh`).
 
-The existing `occupancy=ok` marker covers these assertions; no new marker field.
+## 11. Tests
 
-## 7. Tests
+- `core_city::economy`: 14 tests — starting balance, income/expenses, clamped rates, bankruptcy, construction affordability, loan cash/interest/repayment, payoff, bankruptcy borrowing block, payment underflow, debt limit, daily net, JSON/checksum, old-save debt default, invalid balance.
+- `godot_ext`: 41 tests, including economy JSON/loan roundtrip, old-save loans default, and invalid balance.
+- `core_city` total **125**; bridge **41**; workspace **330 tests + 1 doctest**.
+- `city_loop` bin test asserts construction spending, debt, positive final balance, and no bankruptcy.
+- 30-day city-loop checksum: `1d78a3cac4fb0f22`.
 
-- `core_city::economy`: 6 tests — starting balance, income/expenses, clamped rates, bankruptcy flag, JSON/checksum, invalid balance.
-- `godot_ext`: 2 new tests — economy JSON roundtrip/old-save closed, invalid balance rejected.
-- `core_city` total **117**; bridge **40**; workspace **321 tests + 1 doctest**.
-- `city_loop` bin test includes balance/economy checksum.
-- 30-day city-loop checksum: `e0d935b2a4421285` (with primary industries and utilities).
+## 12. Limits
 
-## 8. Limits
-
-- No construction draw-down in the bridge path yet.
-- No enforcement when bankrupt; the flag is informational.
-- Tax rates are global, not per settlement/district.
-- Wages are gross and fixed; no household spending or rent.
-- The economy tick uses the derived ledger, so clearing construction sites can drop population/income immediately.
+- Construction is charged in full at placement, not drawn down by phase.
+- No refunds, cancellation accounting, or asset sales.
+- Loan interest is simple and fixed; no default, restructuring, or market rates.
+- Bankruptcy only blocks new placements and loans; existing sites and services continue.
+- Taxes are global; no district/settlement rates or service funding.
+- Wages remain a treasury expense and gross; no household rent or spending.
+- The smoke's tiny two-resident city needs extreme taxes to show a positive net; the 50-house runner is the meaningful recovery case.
 - English-only developer HUD.
 
-## 9. Next
+## 13. Next
 
-1. Charge placement material cost at construction start and record it in `construction_spent`.
-2. Add loans and a simple bankruptcy consequence.
-3. Add service funding/upkeep per building type.
-4. Use the utility-backed 30-day runner ([[55 - Utilities]]) as the baseline before tuning the final balance.
+1. 3.7: road graph, traffic, and road-distance commute.
+2. 3.8: dashboard and advisor, including loan/debt and tax controls.
+3. Service funding and per-building upkeep once service buildings exist.
+4. Balance the default tax/wage rates against the 30-day and 1M-scale runners.

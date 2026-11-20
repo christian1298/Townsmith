@@ -32,7 +32,8 @@ use core_city::{
     LotRequest, LotStore, Placement, PlacementError, PlacementRequest, PlacementStore, RoadError,
     RoadRequest, RoadSegment, RoadStore, Settlement, SettlementError, SettlementRequest,
     SettlementStore, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
-    MAX_WORLD_COORD_M,
+    DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT,
+    MAX_WORLD_COORD_M, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -950,6 +951,43 @@ impl TownsmithCore {
                 );
             }
         }
+        {
+            let economy = self
+                .economy
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if economy.as_ref().is_some_and(|economy| economy.seed != seed) {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the treasury belongs to a different seed",
+                );
+            }
+            if let Some(economy) = economy.as_ref() {
+                if economy.bankrupt {
+                    return placement_simple_error(
+                        "bankrupt",
+                        "the city is bankrupt and cannot start new construction",
+                    );
+                }
+                if !economy.can_afford(request.material_cost) {
+                    return placement_simple_error(
+                        "insufficient_funds",
+                        format!(
+                            "construction needs {:.0} but the treasury has {:.0}",
+                            request.material_cost, economy.balance
+                        ),
+                    );
+                }
+            } else if request.material_cost > STARTING_BALANCE {
+                return placement_simple_error(
+                    "insufficient_funds",
+                    format!(
+                        "construction needs {:.0} but a new treasury has {:.0}",
+                        request.material_cost, STARTING_BALANCE
+                    ),
+                );
+            }
+        }
         let created = guard.is_none();
         let placed = {
             let store = guard.get_or_insert_with(|| PlacementStore::new(seed));
@@ -981,6 +1019,30 @@ impl TownsmithCore {
                         *guard = None;
                     }
                     return placement_simple_error("construction_failed", error.to_string());
+                }
+                let charged = {
+                    let mut economy = self
+                        .economy
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    let economy = economy.get_or_insert_with(|| Economy::new(seed));
+                    economy.try_charge_construction(request.material_cost)
+                };
+                if !charged {
+                    if let Some(store) = guard.as_mut() {
+                        store.remove(placement.id);
+                    }
+                    self.construction
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .remove_site(placement.id);
+                    if created {
+                        *guard = None;
+                    }
+                    return placement_simple_error(
+                        "insufficient_funds",
+                        "the treasury changed while placing; construction was cancelled",
+                    );
                 }
                 let mut result = VarDictionary::new();
                 result.set("ok", true);
@@ -2143,6 +2205,16 @@ impl TownsmithCore {
                 );
                 result.set("construction_spent", economy.construction_spent);
                 result.set("days_elapsed", economy.days_elapsed);
+                result.set("debt", economy.debt());
+                result.set("loan_count", economy.loans.len() as i64);
+                result.set("loan_interest_per_day", economy.loan_interest_per_day());
+                result.set("loan_payment_per_day", economy.loan_payment_per_day());
+                result.set(
+                    "can_borrow",
+                    !economy.bankrupt
+                        && economy.loans.len() < MAX_LOANS
+                        && economy.debt() < MAX_TOTAL_DEBT,
+                );
                 result.set(
                     "daily_net",
                     economy.daily_net(population, employed, buildings),
@@ -2199,6 +2271,9 @@ impl TownsmithCore {
         result.set("expenses", tick.expenses);
         result.set("balance", tick.balance);
         result.set("days_elapsed", tick.days_elapsed);
+        result.set("loan_interest", tick.loan_interest);
+        result.set("loan_principal", tick.loan_principal);
+        result.set("debt", tick.debt);
         result.set("bankrupt", tick.bankrupt);
         result.set(
             "checksum",
@@ -2239,6 +2314,44 @@ impl TownsmithCore {
             economy.set_taxes(resident, business);
         }
         drop(guard);
+        self.economy_state()
+    }
+
+    /// Borrow `amount` with the default rate and term.
+    #[func]
+    fn economy_borrow(&self, seed: i64, amount: f64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(store) = world.as_ref() {
+                if store.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the placement store belongs to a different seed",
+                    );
+                }
+            }
+        }
+        {
+            let mut guard = self
+                .economy
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if guard.as_ref().is_some_and(|economy| economy.seed != seed) {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the treasury belongs to a different seed",
+                );
+            }
+            let economy = guard.get_or_insert_with(|| Economy::new(seed));
+            if let Err(error) =
+                economy.take_loan(amount, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS)
+            {
+                return placement_simple_error("loan_rejected", error.to_string());
+            }
+        }
         self.economy_state()
     }
 
@@ -5773,13 +5886,38 @@ mod tests {
     #[test]
     fn economy_world_json_round_trips_and_old_saves_are_closed() {
         let mut economy = Economy::new(2026);
+        economy
+            .take_loan(
+                40_000.0,
+                core_city::DEFAULT_LOAN_RATE_PER_DAY,
+                core_city::DEFAULT_LOAN_TERM_DAYS,
+            )
+            .expect("loan");
         economy.tick(3600.0, 50, 40, 10);
         let json = attach_economy("{}", &economy).expect("attach");
         let decoded = economy_from_world_json(&json)
             .expect("parse")
             .expect("present");
         assert!((decoded.balance - economy.balance).abs() < 0.001);
+        assert!((decoded.debt() - economy.debt()).abs() < 0.001);
         assert!(economy_from_world_json("{}").expect("old save").is_none());
+    }
+
+    #[test]
+    fn economy_world_json_accepts_pre_loan_saves() {
+        let mut economy = Economy::new(2026);
+        economy.tick(3600.0, 50, 40, 10);
+        let json = attach_economy("{}", &economy).expect("attach");
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("json");
+        value["economy"]
+            .as_object_mut()
+            .expect("economy object")
+            .remove("loans");
+        let decoded = economy_from_world_json(&value.to_string())
+            .expect("parse")
+            .expect("present");
+        assert!(decoded.loans.is_empty());
+        assert_eq!(decoded.debt(), 0.0);
     }
 
     #[test]
