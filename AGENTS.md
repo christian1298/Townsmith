@@ -259,6 +259,7 @@ CITY_TIER=late GODOT=/path/to/godot ./scripts/bench_godot.sh 1 5 benchmarks/rout
 GODOT=/path/to/godot ./scripts/smoke_city.sh
 GODOT=/path/to/godot ./scripts/smoke_volume.sh
 GODOT=/path/to/godot ./scripts/smoke_editor.sh
+GODOT=/path/to/godot ./scripts/smoke_blueprint.sh
 
 # 200 real voxel-hut instances
 VOXEL_INSTANCES=200 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_voxel_instances.json
