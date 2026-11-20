@@ -38,15 +38,15 @@ The slice follows accepted decisions:
 | **2A.1** | Placement records and terrain validation | **Done** — PR #44 |
 | **2A.2** | Placement store, JSON save format, checksum | **Done** — PR #45 |
 | **2A.3** | GDExtension placement/save/load API and headless smoke | **Done** — PR #46 |
-| **2A.4** | Streamed-world scene, preview, rotate/place/save/load controls | **This PR** — see [[42 - World Placement Bridge]] |
-| **2B** | Terrain edit deltas applied to streamed chunks, saved/reloaded | **This PR** — see [[43 - Terrain Edits]] |
-| **2C** | Mayor camera, selection, mode switch at a door | Planned |
-| **2D** | Construction site v0: phased progress, materials, crews | Planned |
+| **2A.4** | Streamed-world scene, preview, rotate/place/save/load controls | **Done** — PR #47, see [[42 - World Placement Bridge]] |
+| **2B** | Terrain edit deltas applied to streamed chunks, saved/reloaded | **Done** — PR #48, see [[43 - Terrain Edits]] |
+| **2C** | Mayor camera, selection, mode switch at a door | **This PR** — see [[44 - Mayor Mode]] |
+| **2D** | Construction site v0: phased progress, materials, crews | Next |
 | **2E** | Roads, lots, settlement boundaries, zoning | Planned |
 
 Each stage is a separate branch, worktree, and PR. Do not mix 2A with terrain editing or construction state. 2A is split so geometry, persistence, the bridge, and the shell each stay reviewable.
 
-## 3. Stage 2A/2B scope
+## 3. Stage 2A–2C scope
 
 ### In
 
@@ -56,6 +56,7 @@ Each stage is a separate branch, worktree, and PR. Do not mix 2A with terrain ed
 - A placement preview that samples terrain under a camera-forward target and shows valid/invalid, plus the first placed-node rebuild path.
 - Save/load of `seed + placements + terrain deltas` as JSON; blueprint packages are referenced by path.
 - Height edits, dirty-chunk remeshing, and delta save/load (2B).
+- A Mayor camera, right-click building selection with an inspection highlight, and a first-person door transition back to Mayor (2C).
 - A headless smoke that places the acceptance house, verifies water, overlap, and rotation rejection, saves, clears, reloads, compares the placement checksum, and confirms a failed load leaves the store untouched. Slope rules stay covered by the core placement tests.
 
 ### Out
@@ -65,6 +66,7 @@ Each stage is a separate branch, worktree, and PR. Do not mix 2A with terrain ed
 - Blueprint library UI, thumbnails, content-addressed package storage.
 - Multiplayer authority and command validation.
 - Collision, pathfinding, citizens, or simulation.
+- Voxel editing inside a placed building; the workshop editor handoff and blueprint versioning are a later slice.
 
 ## 4. Data model
 
@@ -255,7 +257,7 @@ Add the world placement smoke to the Linux Godot job. Windows keeps the Rust gat
 4. ~~Add the streamed-world scene and preview in 2A.4.~~ Done.
 5. ~~Record the result in a new results note when 2A is merged.~~ Done — [[42 - World Placement Bridge]] and [[43 - Terrain Edits]].
 6. ~~Start 2B: expose terrain deltas and remesh dirty chunks.~~ Done; see [[43 - Terrain Edits]].
-7. Start 2C: Mayor camera, selection, and mode switching at a door.
+7. Start 2C: Mayor camera, selection, and mode switching at a door (this slice: [[44 - Mayor Mode]]).
 8. Revisit Q-011 once a real building sits on a slope; record the chosen foundation policy.
 
 ## 12. Links
