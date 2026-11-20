@@ -1,0 +1,91 @@
+name: Phase 0 Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "Runs per route"
+        required: true
+        default: "3"
+      duration:
+        description: "Measured seconds per route"
+        required: true
+        default: "30"
+      allow_headless:
+        description: "Allow headless structural runs (not render-representative)"
+        type: boolean
+        default: false
+      report_only:
+        description: "Aggregate existing result summaries without running Godot"
+        type: boolean
+        default: false
+
+concurrency:
+  group: phase0-benchmark
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: Phase 0 target matrix
+    # Prefer the registered self-hosted Linux runner. It is the machine with
+    # the display/GPU used for real frame-time measurements.
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve Godot
+        if: ${{ !inputs.report_only }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${GODOT:-}" && -x "${GODOT}" ]]; then
+            echo "Using GODOT=$GODOT"
+          elif command -v godot >/dev/null 2>&1; then
+            echo "GODOT=$(command -v godot)" >> "$GITHUB_ENV"
+          elif [[ -x /home/chris/.local/bin/godot ]]; then
+            echo "GODOT=/home/chris/.local/bin/godot" >> "$GITHUB_ENV"
+          else
+            echo "Godot not found. Set the GODOT_BIN repository variable or install Godot on the runner." >&2
+            exit 1
+          fi
+
+      - name: Verify tools
+        if: ${{ !inputs.report_only }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo --version
+          "$GODOT" --version
+          echo "DISPLAY=${DISPLAY:-}"
+          echo "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-}"
+
+      - name: Run Phase 0 matrix
+        shell: bash
+        env:
+          RUNS: ${{ inputs.runs }}
+          DURATION: ${{ inputs.duration }}
+          ALLOW_HEADLESS: ${{ inputs.allow_headless && '1' || '0' }}
+          REPORT_ONLY: ${{ inputs.report_only && '1' || '0' }}
+        run: |
+          set -o pipefail
+          bash ./scripts/bench_phase0.sh 2>&1 | tee "$RUNNER_TEMP/phase0-benchmark.log"
+
+      - name: Upload benchmark log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase0-benchmark-log-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase0-benchmark.log
+          if-no-files-found: warn
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase0-benchmark-results-${{ github.run_id }}
+          path: |
+            benchmarks/results/phase0_target_*.json
+            benchmarks/results/phase0_core_summary.json
+            benchmarks/results/godot_*_summary.json
+          if-no-files-found: warn

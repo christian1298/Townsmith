@@ -298,6 +298,8 @@ townsmith-bench --server \
 
 ### CI
 
+- Run the Phase 0 matrix through `.github/workflows/phase0-benchmark.yml` on the **self-hosted Linux runner first** (`self-hosted`, `Linux`, `X64`). It is the machine with the display/GPU used for real frame-time measurements. The workflow is manually dispatched, accepts runs/duration/headless/report-only inputs, and uploads the combined `phase0_target_*.json` plus route summaries as artifacts.
+- Keep GitHub-hosted runners for correctness CI; use the self-hosted runner for display-backed performance runs.
 - Run the benchmark suite on a fixed runner (or a small hardware matrix).
 - Compare against `benchmarks/baselines/<scene>/<hardware>.json`.
 - Fail the build if:
