@@ -33,6 +33,7 @@
 
 pub mod construction;
 pub mod placement;
+pub mod road;
 
 use std::error::Error;
 use std::fmt;
@@ -46,6 +47,10 @@ pub use placement::{
     footprint_for, normalize_rotation, validate_placement, Placement, PlacementError,
     PlacementPlan, PlacementRequest, PlacementStore, MAX_BUILDING_HEIGHT_M, MAX_FOOTPRINT_M,
     MAX_SLOPE_M, MAX_WORLD_COORD_M, PLACEMENT_GAP_M, WATER_LEVEL_M, WORLD_SAVE_FORMAT_VERSION,
+};
+pub use road::{
+    RoadError, RoadRequest, RoadSegment, RoadStore, MAX_ROADS, MAX_ROAD_LENGTH_M, MAX_ROAD_SLOPE_M,
+    MAX_ROAD_WIDTH_M, MIN_ROAD_WIDTH_M, ROAD_FORMAT_VERSION,
 };
 
 /// Floor-to-floor height used by the synthetic layout, in meters.

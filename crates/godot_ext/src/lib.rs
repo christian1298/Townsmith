@@ -28,7 +28,8 @@ use core_blueprint::{
 };
 use core_city::{
     normalize_rotation, CityLayout, CityTier, ConstructionSite, ConstructionStore, Placement,
-    PlacementError, PlacementRequest, PlacementStore, MAX_WORLD_COORD_M,
+    PlacementError, PlacementRequest, PlacementStore, RoadError, RoadRequest, RoadSegment,
+    RoadStore, MAX_WORLD_COORD_M,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -500,6 +501,7 @@ struct TownsmithCore {
     editor: Mutex<Option<EditorState>>,
     world: Mutex<Option<PlacementStore>>,
     construction: Mutex<ConstructionStore>,
+    roads: Mutex<Option<RoadStore>>,
     terrain_deltas: Arc<RwLock<DeltaStore>>,
     terrain_seed: Mutex<Option<u64>>,
 }
@@ -511,6 +513,7 @@ impl Default for TownsmithCore {
             editor: Mutex::new(None),
             world: Mutex::new(None),
             construction: Mutex::new(ConstructionStore::default()),
+            roads: Mutex::new(None),
             terrain_deltas: Arc::new(RwLock::new(DeltaStore::new())),
             terrain_seed: Mutex::new(None),
         }
@@ -1030,6 +1033,213 @@ impl TownsmithCore {
         GString::from(&format!("{checksum:016x}"))
     }
 
+    /// Validate a straight road without mutating the world.
+    #[func]
+    fn road_validate(
+        &self,
+        seed: i64,
+        x1: i64,
+        z1: i64,
+        x2: i64,
+        z2: i64,
+        width: i64,
+    ) -> VarDictionary {
+        let seed = match u64::try_from(seed) {
+            Ok(seed) => seed,
+            Err(_) => {
+                return placement_simple_error("invalid_seed", "road seed must be non-negative")
+            }
+        };
+        let request = match road_request_from_args(x1, z1, x2, z2, width) {
+            Ok(request) => request,
+            Err(error) => return error,
+        };
+        {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(store) = world.as_ref() {
+                if store.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the world belongs to a different seed",
+                    );
+                }
+            }
+        }
+        let roads = self.roads.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = roads.as_ref() {
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the road store belongs to a different seed",
+                );
+            }
+        }
+        let result = match roads.as_ref() {
+            Some(store) => store.validate(&request, |x, z| {
+                self.terrain_height_for_seed(seed, TerrainPos::new(x, z))
+            }),
+            None => RoadStore::new(seed).validate(&request, |x, z| {
+                self.terrain_height_for_seed(seed, TerrainPos::new(x, z))
+            }),
+        };
+        match result {
+            Ok(()) => {
+                let mut result = VarDictionary::new();
+                result.set("ok", true);
+                result.set("length_m", road_length(&request));
+                result.set("width_m", i64::from(request.width_m));
+                result
+            }
+            Err(error) => road_error_result(&error),
+        }
+    }
+
+    /// Add one straight road after terrain validation.
+    #[func]
+    fn road_add(&self, seed: i64, x1: i64, z1: i64, x2: i64, z2: i64, width: i64) -> VarDictionary {
+        let seed = match u64::try_from(seed) {
+            Ok(seed) => seed,
+            Err(_) => {
+                return placement_simple_error("invalid_seed", "road seed must be non-negative")
+            }
+        };
+        let request = match road_request_from_args(x1, z1, x2, z2, width) {
+            Ok(request) => request,
+            Err(error) => return error,
+        };
+        let mut world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = world.as_ref() {
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the world belongs to a different seed",
+                );
+            }
+        }
+        let created_world = world.is_none();
+        let mut roads = self.roads.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = roads.as_ref() {
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the road store belongs to a different seed",
+                );
+            }
+        }
+        let created_roads = roads.is_none();
+        let result = {
+            let store = roads.get_or_insert_with(|| RoadStore::new(seed));
+            store.add(&request, |x, z| {
+                self.terrain_height_for_seed(seed, TerrainPos::new(x, z))
+            })
+        };
+        let road = match result {
+            Ok(road) => road,
+            Err(error) => {
+                if created_roads {
+                    *roads = None;
+                }
+                if created_world {
+                    *world = None;
+                }
+                return road_error_result(&error);
+            }
+        };
+        if created_world {
+            *world = Some(PlacementStore::new(seed));
+        }
+        let store = roads.as_ref().expect("a successful add keeps a road store");
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("seed", seed as i64);
+        result.set("count", store.roads.len() as i64);
+        result.set("road", &road_to_dictionary(&road).to_variant());
+        result
+    }
+
+    /// Current road network.
+    #[func]
+    fn roads(&self) -> VarDictionary {
+        let store = self.roads.lock().unwrap_or_else(|error| error.into_inner());
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        match store.as_ref() {
+            Some(store) => {
+                let mut roads: Array<VarDictionary> = Array::new();
+                for road in &store.roads {
+                    roads.push(&road_to_dictionary(road));
+                }
+                result.set("open", true);
+                result.set("seed", store.seed as i64);
+                result.set("next_id", store.next_id as i64);
+                result.set("count", store.roads.len() as i64);
+                result.set(
+                    "checksum",
+                    &GString::from(&format!("{:016x}", store.checksum())),
+                );
+                result.set("roads", &roads.to_variant());
+            }
+            None => {
+                result.set("open", false);
+                result.set("seed", 0);
+                result.set("next_id", 1);
+                result.set("count", 0);
+                result.set("checksum", &GString::from("0000000000000000"));
+                result.set("roads", &Array::<VarDictionary>::new().to_variant());
+            }
+        }
+        result
+    }
+
+    /// Number of road segments.
+    #[func]
+    fn road_count(&self) -> i64 {
+        self.roads
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map_or(0, |store| store.roads.len() as i64)
+    }
+
+    /// Stable road checksum.
+    #[func]
+    fn road_checksum(&self) -> GString {
+        let checksum = self
+            .roads
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map_or(0, RoadStore::checksum);
+        GString::from(&format!("{checksum:016x}"))
+    }
+
+    /// Remove every road segment.
+    #[func]
+    fn road_clear(&self) -> bool {
+        if let Some(store) = self
+            .roads
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_mut()
+        {
+            store.clear();
+        }
+        true
+    }
+
+    /// Remove one road by id.
+    #[func]
+    fn road_remove(&self, id: i64) -> bool {
+        let Ok(id) = u64::try_from(id) else {
+            return false;
+        };
+        self.roads
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_mut()
+            .is_some_and(|store| store.remove(id))
+    }
+
     /// Remove every placement. The seed and an empty store stay open.
     #[func]
     fn world_clear_placements(&self) -> bool {
@@ -1207,13 +1417,18 @@ impl TownsmithCore {
             Ok(path) => path,
             Err(error) => return placement_simple_error("invalid_save_path", error),
         };
-        let (store, construction) = {
+        let (store, construction, roads) = {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             let construction = self
                 .construction
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            (world.as_ref().cloned(), construction.clone())
+            let roads = self.roads.lock().unwrap_or_else(|error| error.into_inner());
+            (
+                world.as_ref().cloned(),
+                construction.clone(),
+                roads.as_ref().cloned(),
+            )
         };
         let Some(store) = store else {
             return placement_simple_error("no_world", "no world placement store is open");
@@ -1253,6 +1468,21 @@ impl TownsmithCore {
             Ok(json) => json,
             Err(error) => return placement_simple_error("save_failed", error),
         };
+        let json = match roads.as_ref() {
+            Some(roads) => {
+                if roads.seed != store.seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "roads belong to a different seed",
+                    );
+                }
+                match attach_roads(&json, roads) {
+                    Ok(json) => json,
+                    Err(error) => return placement_simple_error("save_failed", error),
+                }
+            }
+            None => json,
+        };
         if json.len() > MAX_WORLD_SAVE_BYTES as usize {
             return placement_simple_error(
                 "save_too_large",
@@ -1273,12 +1503,23 @@ impl TownsmithCore {
         result.set("terrain_edits", deltas_count as i64);
         result.set("construction_sites", construction.site_count() as i64);
         result.set(
+            "roads",
+            roads.as_ref().map_or(0, |roads| roads.roads.len()) as i64,
+        );
+        result.set(
             "checksum",
             &GString::from(&format!("{:016x}", store.checksum())),
         );
         result.set(
             "construction_checksum",
             &GString::from(&format!("{:016x}", construction.checksum())),
+        );
+        result.set(
+            "road_checksum",
+            &GString::from(&format!(
+                "{:016x}",
+                roads.as_ref().map_or(0, RoadStore::checksum)
+            )),
         );
         result.set(
             "terrain_checksum",
@@ -1326,6 +1567,22 @@ impl TownsmithCore {
             Ok(None) => ConstructionStore::default(),
             Err((code, error)) => return placement_simple_error(code, error),
         };
+        let roads = match roads_from_world_json(&json) {
+            Ok(Some(store)) => Some(store),
+            Ok(None) => None,
+            Err((code, error)) => return placement_simple_error(code, error),
+        };
+        if let Some(roads) = roads.as_ref() {
+            if roads.seed != expected_seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    format!(
+                        "roads use seed {} but this world is {expected_seed}",
+                        roads.seed
+                    ),
+                );
+            }
+        }
         let store = match PlacementStore::from_json(&json) {
             Ok(store) => store,
             Err(error) => return placement_error_result(&error),
@@ -1419,6 +1676,8 @@ impl TownsmithCore {
         let checksum = store.checksum();
         let construction_count = construction.site_count();
         let construction_checksum = construction.checksum();
+        let road_count = roads.as_ref().map_or(0, |roads| roads.roads.len());
+        let road_checksum = roads.as_ref().map_or(0, RoadStore::checksum);
         let deltas_count = deltas.edit_count();
         let deltas_checksum = deltas.checksum();
         let mut guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
@@ -1434,11 +1693,13 @@ impl TownsmithCore {
             .construction
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let mut roads_guard = self.roads.lock().unwrap_or_else(|error| error.into_inner());
         let mut deltas_guard = self
             .terrain_deltas
             .write()
             .unwrap_or_else(|error| error.into_inner());
         *construction_guard = construction;
+        *roads_guard = roads;
         *guard = Some(store);
         *deltas_guard = deltas;
         *self
@@ -1453,6 +1714,7 @@ impl TownsmithCore {
         result.set("count", count);
         result.set("terrain_edits", deltas_count as i64);
         result.set("construction_sites", construction_count as i64);
+        result.set("roads", road_count as i64);
         result.set("checksum", &GString::from(&format!("{checksum:016x}")));
         result.set(
             "terrain_checksum",
@@ -1461,6 +1723,10 @@ impl TownsmithCore {
         result.set(
             "construction_checksum",
             &GString::from(&format!("{construction_checksum:016x}")),
+        );
+        result.set(
+            "road_checksum",
+            &GString::from(&format!("{road_checksum:016x}")),
         );
         result
     }
@@ -2265,6 +2531,80 @@ impl TownsmithCore {
     }
 }
 
+fn road_request_from_args(
+    x1: i64,
+    z1: i64,
+    x2: i64,
+    z2: i64,
+    width: i64,
+) -> Result<RoadRequest, VarDictionary> {
+    let Ok(start_x) = i32::try_from(x1) else {
+        return Err(placement_simple_error(
+            "coordinate_out_of_range",
+            "road start X is out of range",
+        ));
+    };
+    let Ok(start_z) = i32::try_from(z1) else {
+        return Err(placement_simple_error(
+            "coordinate_out_of_range",
+            "road start Z is out of range",
+        ));
+    };
+    let Ok(end_x) = i32::try_from(x2) else {
+        return Err(placement_simple_error(
+            "coordinate_out_of_range",
+            "road end X is out of range",
+        ));
+    };
+    let Ok(end_z) = i32::try_from(z2) else {
+        return Err(placement_simple_error(
+            "coordinate_out_of_range",
+            "road end Z is out of range",
+        ));
+    };
+    let Ok(width) = u8::try_from(width) else {
+        return Err(placement_simple_error(
+            "invalid_width",
+            "road width must be 2..=24 m",
+        ));
+    };
+    Ok(RoadRequest {
+        start: [start_x, start_z],
+        end: [end_x, end_z],
+        width_m: width,
+    })
+}
+
+fn road_length(request: &RoadRequest) -> i64 {
+    i64::from((request.end[0] - request.start[0]).abs())
+        + i64::from((request.end[1] - request.start[1]).abs())
+}
+
+fn road_error_result(error: &RoadError) -> VarDictionary {
+    placement_simple_error(error.code(), error.to_string())
+}
+
+fn road_to_dictionary(road: &RoadSegment) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("id", road.id as i64);
+    result.set(
+        "start",
+        &PackedInt32Array::from(road.start.to_vec()).to_variant(),
+    );
+    result.set(
+        "end",
+        &PackedInt32Array::from(road.end.to_vec()).to_variant(),
+    );
+    result.set("width_m", i64::from(road.width_m));
+    result.set("length_m", road.length_m());
+    result.set(
+        "center",
+        &PackedFloat32Array::from(road.center().to_vec()).to_variant(),
+    );
+    result.set("runs_along_x", road.runs_along_x());
+    result
+}
+
 fn placement_simple_error(code: &str, message: impl Into<String>) -> VarDictionary {
     let message = message.into();
     let mut result = VarDictionary::new();
@@ -2421,6 +2761,27 @@ fn construction_from_world_json(
     store
         .validate()
         .map_err(|error| ("invalid_construction", error.to_string()))?;
+    Ok(Some(store))
+}
+
+fn attach_roads(json: &str, store: &RoadStore) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    value["roads"] = serde_json::to_value(store).map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+}
+
+fn roads_from_world_json(json: &str) -> Result<Option<RoadStore>, (&'static str, String)> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| ("invalid_json", error.to_string()))?;
+    let Some(raw) = value.get("roads") else {
+        return Ok(None);
+    };
+    let store: RoadStore = serde_json::from_value(raw.clone())
+        .map_err(|error| ("invalid_roads", error.to_string()))?;
+    store
+        .validate_loaded()
+        .map_err(|error| ("invalid_roads", error.to_string()))?;
     Ok(Some(store))
 }
 
@@ -3089,6 +3450,31 @@ mod tests {
         store.format_version = 99;
         let json = attach_construction("{}", &store).expect("attach");
         assert!(construction_from_world_json(&json).is_err());
+    }
+
+    #[test]
+    fn road_json_round_trips_through_world_save() {
+        let mut store = RoadStore::new(2026);
+        let request = RoadRequest {
+            start: [180, 125],
+            end: [200, 125],
+            width_m: 8,
+        };
+        store.add(&request, |_, _| 40).expect("road");
+        let json = attach_roads("{}", &store).expect("attach");
+        let decoded = roads_from_world_json(&json)
+            .expect("parse")
+            .expect("roads field");
+        assert_eq!(decoded, store);
+        assert_eq!(decoded.checksum(), store.checksum());
+    }
+
+    #[test]
+    fn road_json_rejects_unknown_version() {
+        let mut store = RoadStore::new(2026);
+        store.format_version = 99;
+        let json = attach_roads("{}", &store).expect("attach");
+        assert!(roads_from_world_json(&json).is_err());
     }
 
     #[test]
