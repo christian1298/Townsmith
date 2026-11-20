@@ -35,6 +35,7 @@ pub mod construction;
 pub mod lot;
 pub mod placement;
 pub mod road;
+pub mod settlement;
 
 use std::error::Error;
 use std::fmt;
@@ -56,6 +57,11 @@ pub use placement::{
 pub use road::{
     RoadError, RoadRequest, RoadSegment, RoadStore, MAX_ROADS, MAX_ROAD_LENGTH_M, MAX_ROAD_SLOPE_M,
     MAX_ROAD_WIDTH_M, MIN_ROAD_WIDTH_M, ROAD_FORMAT_VERSION,
+};
+pub use settlement::{
+    Settlement, SettlementError, SettlementRequest, SettlementStore, MAX_SETTLEMENTS,
+    MAX_SETTLEMENT_ID, MAX_SETTLEMENT_NAME_CHARS, MAX_SETTLEMENT_OWNER_CHARS,
+    MAX_SETTLEMENT_RADIUS_M, MIN_SETTLEMENT_RADIUS_M, SETTLEMENT_FORMAT_VERSION,
 };
 
 /// Floor-to-floor height used by the synthetic layout, in meters.

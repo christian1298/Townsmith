@@ -34,6 +34,9 @@ var lot_nodes: Dictionary = {}
 var lot_materials: Dictionary = {}
 var lot_mode := false
 var lot_start := Vector2i(-999999, -999999)
+var settlement_root: Node3D
+var settlement_nodes: Dictionary = {}
+var settlement_material: StandardMaterial3D
 var lot_zone := "residential"
 var selection_box: MeshInstance3D
 var selected_id := -1
@@ -78,6 +81,7 @@ func _ready() -> void:
 	_setup_selection()
 	_setup_roads()
 	_setup_lots()
+	_setup_settlements()
 	if _ensure_blueprint():
 		_refresh_preview(true)
 	else:
@@ -162,6 +166,11 @@ func _unhandled_input(event: InputEvent) -> void:
 					_toggle_road_mode()
 				KEY_H:
 					_toggle_lot_mode()
+				KEY_N:
+					if event.shift_pressed:
+						_clear_settlements()
+					else:
+						_found_settlement()
 				KEY_1:
 					if lot_mode:
 						_set_lot_zone("residential")
@@ -496,6 +505,141 @@ func _lot_node_matches(lot: Dictionary) -> bool:
 		and node.material_override == lot_materials.get(zone)
 	)
 
+func _setup_settlements() -> void:
+	settlement_root = Node3D.new()
+	settlement_root.name = "Settlements"
+	add_child(settlement_root)
+	settlement_material = StandardMaterial3D.new()
+	settlement_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	settlement_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	settlement_material.albedo_color = Color(0.95, 0.78, 0.2, 0.95)
+
+func _found_settlement() -> bool:
+	var state: Dictionary = core.settlements()
+	var used: Dictionary = {}
+	for settlement in state.get("settlements", []):
+		used[str(settlement.get("name", "")).to_lower()] = true
+	var index: int = core.settlement_count() + 1
+	var name := "Settlement %d" % index
+	while used.has(name.to_lower()):
+		index += 1
+		name = "Settlement %d" % index
+	var result: Dictionary = core.settlement_found(
+		SEED,
+		name,
+		"player",
+		roundi(target_x),
+		roundi(target_z),
+		64
+	)
+	if not bool(result.get("ok", false)):
+		_set_modal("Settlement rejected: " + str(result.get("error_code", "unknown")), true)
+		_update_hud()
+		return false
+	_add_settlement_node(result.get("settlement", {}))
+	_set_modal("Founded %s" % str(result.get("settlement", {}).get("name", "settlement")), false)
+	_update_hud()
+	return true
+
+func _clear_settlements() -> void:
+	core.settlement_clear()
+	_clear_settlement_nodes()
+	_set_modal("Settlements cleared", false)
+	_update_hud()
+
+func _rebuild_settlements() -> void:
+	_clear_settlement_nodes()
+	var state: Dictionary = core.settlements()
+	for settlement in state.get("settlements", []):
+		_add_settlement_node(settlement)
+
+func _clear_settlement_nodes() -> void:
+	for node in settlement_nodes.values():
+		if is_instance_valid(node):
+			node.free()
+	settlement_nodes.clear()
+
+func _add_settlement_node(settlement: Dictionary) -> void:
+	var id := int(settlement.get("id", -1))
+	if id < 0 or settlement_nodes.has(id):
+		return
+	var center: PackedInt32Array = settlement.get("center", PackedInt32Array())
+	if center.size() != 2:
+		return
+	var ground: float = core.world_height_at(SEED, center[0], center[1])
+	if ground < 0.0:
+		return
+	var radius := float(settlement.get("radius_m", 0))
+	if radius < 1.0:
+		return
+	var root := Node3D.new()
+	root.position = Vector3(center[0], ground, center[1])
+	root.set_meta("radius_m", radius)
+	root.set_meta("owner", str(settlement.get("owner", "player")))
+
+	var ring_mesh := ImmediateMesh.new()
+	ring_mesh.surface_begin(Mesh.PRIMITIVE_LINES, settlement_material)
+	var segments := 64
+	for index in range(segments):
+		var a0 := TAU * float(index) / float(segments)
+		var a1 := TAU * float(index + 1) / float(segments)
+		var p0 := Vector3(cos(a0) * radius, 0.0, sin(a0) * radius)
+		var p1 := Vector3(cos(a1) * radius, 0.0, sin(a1) * radius)
+		var h0: float = core.world_height_at(SEED, root.position.x + p0.x, root.position.z + p0.z)
+		var h1: float = core.world_height_at(SEED, root.position.x + p1.x, root.position.z + p1.z)
+		p0.y = (h0 - ground) + 0.5 if h0 >= 0.0 else 0.5
+		p1.y = (h1 - ground) + 0.5 if h1 >= 0.0 else 0.5
+		ring_mesh.surface_add_vertex(p0)
+		ring_mesh.surface_add_vertex(p1)
+	ring_mesh.surface_end()
+	var ring := MeshInstance3D.new()
+	ring.mesh = ring_mesh
+	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(ring)
+
+	var label := Label3D.new()
+	label.text = "%s\n%s" % [
+		str(settlement.get("name", "Settlement")),
+		str(settlement.get("owner", "player")),
+	]
+	label.position = Vector3(0.0, 5.0, 0.0)
+	label.font_size = 64
+	label.pixel_size = 0.02
+	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	label.no_depth_test = true
+	label.modulate = Color(1.0, 0.9, 0.5)
+	root.add_child(label)
+
+	settlement_root.add_child(root)
+	settlement_nodes[id] = root
+
+func _settlement_node_matches(settlement: Dictionary) -> bool:
+	var id := int(settlement.get("id", -1))
+	var root: Node3D = settlement_nodes.get(id) as Node3D
+	if not is_instance_valid(root) or root.get_child_count() < 2:
+		return false
+	var center: PackedInt32Array = settlement.get("center", PackedInt32Array())
+	if center.size() != 2:
+		return false
+	var ring := root.get_child(0) as MeshInstance3D
+	var label := root.get_child(1) as Label3D
+	if ring == null or not (ring.mesh is ImmediateMesh) or label == null:
+		return false
+	var radius := float(settlement.get("radius_m", -1))
+	var owner := str(settlement.get("owner", ""))
+	var arrays: Array = ring.mesh.surface_get_arrays(0)
+	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	return (
+		ring.mesh.get_surface_count() == 1
+		and vertices.size() == 128
+		and label.text.begins_with(str(settlement.get("name", "")))
+		and label.text.contains(owner)
+		and absf(float(root.get_meta("radius_m", -1)) - radius) < 0.001
+		and str(root.get_meta("owner", "")) == owner
+		and absf(root.position.x - center[0]) < 0.001
+		and absf(root.position.z - center[1]) < 0.001
+	)
+
 func _ensure_blueprint() -> bool:
 	if not FileAccess.file_exists(blueprint_path):
 		if not core.create_editor_volume(0, 0, 0):
@@ -601,17 +745,25 @@ func _update_hud() -> void:
 			int(selected.get("job_slots", 0)),
 			footprint_text,
 		]
+		var center: PackedFloat32Array = selected.get("center", PackedFloat32Array())
+		if center.size() == 3:
+			var owner_info: Dictionary = core.settlement_at(roundi(center[0]), roundi(center[2]))
+			var owner_name := "wilderness"
+			if bool(owner_info.get("found", false)):
+				var settlement: Dictionary = owner_info.get("settlement", {})
+				owner_name = str(settlement.get("name", owner_name))
+			selected_line += "  ·  owner " + owner_name
 	if mode == "architect":
 		hud.text = "Townsmith — Architect View (read-only)  (seed %d)\nBlueprint: %s\nFirst-person view at the selected door · M / Esc returns to Mayor" % [
 			SEED, blueprint_name,
 		]
 	else:
-		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower\nLMB place · RMB select · Enter: enter selected building\nC crew on/off · V +10k materials · F5 save · F9 load" % [
+		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew on/off · V +10k materials · F5 save · F9 load" % [
 			SEED, blueprint_name, rooms, capacity,
 		]
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
 	var construction: Dictionary = core.construction_summary()
-	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Terrain edits: %d   Construction: %d active / %d stalled\nCrew: %d   Materials: %d L   Save: %s" % [
+	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
 		selected_line,
 		int(target_x),
 		int(target_z),
@@ -619,6 +771,8 @@ func _update_hud() -> void:
 		state,
 		core.world_placement_count(),
 		core.road_count(),
+		core.lot_count(),
+		core.settlement_count(),
 		core.terrain_delta_count(),
 		int(construction.get("active", 0)),
 		int(construction.get("stalled", 0)),
@@ -1111,10 +1265,10 @@ func _save_world() -> bool:
 	var result: Dictionary = core.world_save(save_path)
 	var ok := bool(result.get("ok", false))
 	if ok:
-		_set_modal("Saved %d placement(s), %d edit(s), %d site(s), %d road(s), %d lot(s) to %s" % [
+		_set_modal("Saved %d placement(s), %d edit(s), %d site(s), %d road(s), %d lot(s), %d settlement(s) to %s" % [
 			core.world_placement_count(), core.terrain_delta_count(),
 			int(result.get("construction_sites", 0)), core.road_count(),
-			core.lot_count(), save_path
+			core.lot_count(), core.settlement_count(), save_path
 		], false)
 	else:
 		_set_modal("Save failed: " + str(result.get("error_code", result.get("error", ""))), true)
@@ -1131,6 +1285,7 @@ func _load_world() -> bool:
 	_clear_placed_nodes()
 	_rebuild_roads()
 	_rebuild_lots()
+	_rebuild_settlements()
 	streamer.invalidate_all()
 	var state: Dictionary = core.world_placements()
 	var construction_index := _construction_index()
@@ -1181,6 +1336,7 @@ func _run_scene_smoke() -> void:
 	var place_ok := false
 	var road_ok := false
 	var lot_ok := false
+	var settlement_ok := false
 	var select_ok := false
 	var enter_ok := false
 	var return_ok := false
@@ -1238,6 +1394,19 @@ func _run_scene_smoke() -> void:
 		lot_ok = lot_ok and lot_list.size() == 1 and _lot_node_matches(lot_list[0])
 		if not lot_ok:
 			status = "lot_failed:" + str(bad_lot.get("error_code", ""))
+
+		var settlement_found := _found_settlement()
+		var settlement_state: Dictionary = core.settlements()
+		var settlement_list: Array = settlement_state.get("settlements", [])
+		var owner_state: Dictionary = core.settlement_at(int(FIXTURE_X), int(FIXTURE_Z))
+		settlement_ok = settlement_found and core.settlement_count() == 1
+		settlement_ok = settlement_ok and settlement_list.size() == 1
+		settlement_ok = settlement_ok and _settlement_node_matches(settlement_list[0])
+		settlement_ok = settlement_ok and bool(owner_state.get("found", false))
+		var owner_settlement: Dictionary = owner_state.get("settlement", {})
+		settlement_ok = settlement_ok and str(owner_settlement.get("owner", "")) == "player"
+		if not settlement_ok:
+			status = "settlement_failed"
 
 	edit_ok = _edit_target(1) and core.terrain_delta_count() == 1 and absf(core.world_height_at(SEED, FIXTURE_X, FIXTURE_Z) - 42.0) < 0.001 and streamer.dirty_count() > 0
 	var border_touched := _touched_chunks(Vector2i(0, 0), 0, 255)
@@ -1313,10 +1482,12 @@ func _run_scene_smoke() -> void:
 
 	var road_checksum := ""
 	var lot_checksum := ""
+	var settlement_checksum := ""
 	if status == "ok":
 		var edit_checksum := str(core.terrain_delta_checksum())
 		road_checksum = str(core.road_checksum())
 		lot_checksum = str(core.lot_checksum())
+		settlement_checksum = str(core.settlement_checksum())
 		_clear_placements()
 		clear_ok = core.world_placement_count() == 0 and placed_root.get_child_count() == 0
 		clear_ok = clear_ok and core.construction_summary().sites == 0
@@ -1328,10 +1499,13 @@ func _run_scene_smoke() -> void:
 			_rebuild_roads()
 			core.lot_clear()
 			_rebuild_lots()
+			_clear_settlements()
 			if core.terrain_delta_count() != 0 or core.road_count() != 0 or road_nodes.size() != 0:
 				status = "delta_clear_failed"
 			if core.lot_count() != 0 or lot_nodes.size() != 0:
 				status = "lot_clear_failed"
+			if core.settlement_count() != 0 or settlement_nodes.size() != 0:
+				status = "settlement_clear_failed"
 			load_ok = _load_world() and core.world_placement_count() == 1 and placed_root.get_child_count() == 1
 			if load_ok:
 				var node := placed_root.get_child(0)
@@ -1346,6 +1520,9 @@ func _run_scene_smoke() -> void:
 				load_ok = load_ok and core.lot_count() == 1
 				load_ok = load_ok and str(core.lot_checksum()) == lot_checksum
 				load_ok = load_ok and lot_nodes.size() == 1
+				load_ok = load_ok and core.settlement_count() == 1
+				load_ok = load_ok and str(core.settlement_checksum()) == settlement_checksum
+				load_ok = load_ok and settlement_nodes.size() == 1
 				if core.road_count() == 1:
 					var roads_state: Dictionary = core.roads()
 					var road_list: Array = roads_state.get("roads", [])
@@ -1354,6 +1531,14 @@ func _run_scene_smoke() -> void:
 					var lots_state: Dictionary = core.lots()
 					var lot_list: Array = lots_state.get("lots", [])
 					load_ok = load_ok and lot_list.size() == 1 and _lot_node_matches(lot_list[0])
+				if core.settlement_count() == 1:
+					var settlements_state: Dictionary = core.settlements()
+					var settlement_list: Array = settlements_state.get("settlements", [])
+					load_ok = load_ok and settlement_list.size() == 1 and _settlement_node_matches(settlement_list[0])
+					var owner_after: Dictionary = core.settlement_at(int(FIXTURE_X), int(FIXTURE_Z))
+					var owner_record: Dictionary = owner_after.get("settlement", {})
+					load_ok = load_ok and bool(owner_after.get("found", false))
+					load_ok = load_ok and str(owner_record.get("owner", "")) == "player"
 				load_ok = load_ok and construction_nodes.has(1) and not placed_nodes.is_empty()
 				var loaded_site := _construction_site_for(1)
 				load_ok = load_ok and absf(float(loaded_site.get("progress", -1.0)) - saved_site_progress) < 0.001
@@ -1384,6 +1569,8 @@ func _run_scene_smoke() -> void:
 		var before_failed_checksum: String = str(core.terrain_delta_checksum())
 		var before_failed_lots: int = core.lot_count()
 		var before_failed_lot_checksum: String = str(core.lot_checksum())
+		var before_failed_settlements: int = core.settlement_count()
+		var before_failed_settlement_checksum: String = str(core.settlement_checksum())
 		var blueprint_backup := blueprint_path + ".bak"
 		if DirAccess.rename_absolute(blueprint_path, blueprint_backup) != OK:
 			status = "load_guard_backup_failed"
@@ -1395,13 +1582,15 @@ func _run_scene_smoke() -> void:
 				status = "load_failure_changed_deltas"
 			elif core.lot_count() != before_failed_lots or str(core.lot_checksum()) != before_failed_lot_checksum:
 				status = "load_failure_changed_lots"
+			elif core.settlement_count() != before_failed_settlements or str(core.settlement_checksum()) != before_failed_settlement_checksum:
+				status = "load_failure_changed_settlements"
 			if DirAccess.rename_absolute(blueprint_backup, blueprint_path) != OK:
 				status = "load_guard_restore_failed"
 
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s build=%s done=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -1410,6 +1599,7 @@ func _run_scene_smoke() -> void:
 		"ok" if place_ok else "failed",
 		"ok" if road_ok else "failed",
 		"ok" if lot_ok else "failed",
+		"ok" if settlement_ok else "failed",
 		"ok" if build_ok else "failed",
 		"ok" if build_done_ok else "failed",
 		"ok" if select_ok else "failed",

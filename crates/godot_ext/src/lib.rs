@@ -29,7 +29,8 @@ use core_blueprint::{
 use core_city::{
     normalize_rotation, CityLayout, CityTier, ConstructionSite, ConstructionStore, Lot, LotError,
     LotRequest, LotStore, Placement, PlacementError, PlacementRequest, PlacementStore, RoadError,
-    RoadRequest, RoadSegment, RoadStore, Zone, MAX_WORLD_COORD_M,
+    RoadRequest, RoadSegment, RoadStore, Settlement, SettlementError, SettlementRequest,
+    SettlementStore, Zone, MAX_WORLD_COORD_M,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -503,6 +504,7 @@ struct TownsmithCore {
     construction: Mutex<ConstructionStore>,
     roads: Mutex<Option<RoadStore>>,
     lots: Mutex<Option<LotStore>>,
+    settlements: Mutex<Option<SettlementStore>>,
     terrain_deltas: Arc<RwLock<DeltaStore>>,
     terrain_seed: Mutex<Option<u64>>,
 }
@@ -516,6 +518,7 @@ impl Default for TownsmithCore {
             construction: Mutex::new(ConstructionStore::default()),
             roads: Mutex::new(None),
             lots: Mutex::new(None),
+            settlements: Mutex::new(None),
             terrain_deltas: Arc::new(RwLock::new(DeltaStore::new())),
             terrain_seed: Mutex::new(None),
         }
@@ -1451,6 +1454,240 @@ impl TownsmithCore {
             .is_some_and(|store| store.remove(id))
     }
 
+    /// Found a settlement and open the world layer if needed.
+    #[func]
+    fn settlement_found(
+        &self,
+        seed: i64,
+        name: GString,
+        owner: GString,
+        x: i64,
+        z: i64,
+        radius: i64,
+    ) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        let Ok(x) = i32::try_from(x) else {
+            return placement_simple_error(
+                "coordinate_out_of_range",
+                "settlement x must fit a 32-bit world coordinate",
+            );
+        };
+        let Ok(z) = i32::try_from(z) else {
+            return placement_simple_error(
+                "coordinate_out_of_range",
+                "settlement z must fit a 32-bit world coordinate",
+            );
+        };
+        let Ok(radius) = u32::try_from(radius) else {
+            return placement_simple_error("invalid_radius", "settlement radius must be positive");
+        };
+        let request = SettlementRequest {
+            name: name.to_string(),
+            owner: owner.to_string(),
+            center: [x, z],
+            radius_m: radius,
+        };
+        let mut world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = world.as_ref() {
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the world belongs to a different seed",
+                );
+            }
+        }
+        let roads = self.roads.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = roads.as_ref() {
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the road store belongs to a different seed",
+                );
+            }
+        }
+        let lots = self.lots.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = lots.as_ref() {
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the lot store belongs to a different seed",
+                );
+            }
+        }
+        let mut settlements = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = settlements.as_ref() {
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the settlement layer belongs to a different seed",
+                );
+            }
+        }
+        let created_world = world.is_none();
+        let created_settlements = settlements.is_none();
+        let result = {
+            let store = settlements.get_or_insert_with(|| SettlementStore::new(seed));
+            store.found(&request)
+        };
+        match result {
+            Ok(settlement) => {
+                if created_world {
+                    *world = Some(PlacementStore::new(seed));
+                }
+                let store = settlements
+                    .as_ref()
+                    .expect("a successful settlement keeps a store");
+                let mut result = VarDictionary::new();
+                result.set("ok", true);
+                result.set("seed", seed as i64);
+                result.set("count", store.count() as i64);
+                result.set(
+                    "checksum",
+                    &GString::from(&format!("{:016x}", store.checksum())),
+                );
+                result.set(
+                    "settlement",
+                    &settlement_to_dictionary(&settlement).to_variant(),
+                );
+                result
+            }
+            Err(error) => {
+                if created_settlements {
+                    *settlements = None;
+                }
+                if created_world {
+                    *world = None;
+                }
+                settlement_error_result(&error)
+            }
+        }
+    }
+
+    /// Return the active settlement layer.
+    #[func]
+    fn settlements(&self) -> VarDictionary {
+        let store = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        match store.as_ref() {
+            Some(store) => {
+                let mut settlements: Array<VarDictionary> = Array::new();
+                for settlement in store.settlements() {
+                    settlements.push(&settlement_to_dictionary(settlement));
+                }
+                result.set("open", true);
+                result.set("seed", store.seed as i64);
+                result.set("next_id", store.next_id as i64);
+                result.set("count", store.count() as i64);
+                result.set(
+                    "checksum",
+                    &GString::from(&format!("{:016x}", store.checksum())),
+                );
+                result.set("settlements", &settlements.to_variant());
+            }
+            None => {
+                result.set("open", false);
+                result.set("seed", 0);
+                result.set("next_id", 1);
+                result.set("count", 0);
+                result.set("checksum", &GString::from("0000000000000000"));
+                result.set("settlements", &Array::<VarDictionary>::new().to_variant());
+            }
+        }
+        result
+    }
+
+    /// Number of settlements.
+    #[func]
+    fn settlement_count(&self) -> i64 {
+        self.settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map_or(0, |store| store.count() as i64)
+    }
+
+    /// Stable checksum of the settlement layer.
+    #[func]
+    fn settlement_checksum(&self) -> GString {
+        let store = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checksum = store.as_ref().map_or(0, SettlementStore::checksum);
+        GString::from(&format!("{checksum:016x}"))
+    }
+
+    /// Remove every settlement; the seed and next id stay.
+    #[func]
+    fn settlement_clear(&self) -> bool {
+        let mut store = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = store.as_mut() {
+            store.clear();
+        }
+        true
+    }
+
+    /// Remove one settlement by id.
+    #[func]
+    fn settlement_remove(&self, id: i64) -> bool {
+        let Ok(id) = u64::try_from(id) else {
+            return false;
+        };
+        self.settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_mut()
+            .is_some_and(|store| store.remove(id))
+    }
+
+    /// Owner of a world cell, or `{ ok, found: false }`.
+    #[func]
+    fn settlement_at(&self, x: i64, z: i64) -> VarDictionary {
+        if x.unsigned_abs() > 1_000_000 || z.unsigned_abs() > 1_000_000 {
+            return placement_simple_error(
+                "coordinate_out_of_range",
+                "settlement lookup coordinates must be within ±1,000,000 m",
+            );
+        }
+        let (Ok(x), Ok(z)) = (i32::try_from(x), i32::try_from(z)) else {
+            return placement_simple_error(
+                "coordinate_out_of_range",
+                "settlement lookup coordinates must fit 32-bit integers",
+            );
+        };
+        let store = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        match store.as_ref().and_then(|store| store.owner_at(x, z)) {
+            Some(settlement) => {
+                result.set("found", true);
+                result.set(
+                    "settlement",
+                    &settlement_to_dictionary(settlement).to_variant(),
+                );
+            }
+            None => {
+                result.set("found", false);
+            }
+        }
+        result
+    }
+
     /// Remove every placement. The seed and an empty store stay open.
     #[func]
     fn world_clear_placements(&self) -> bool {
@@ -1628,7 +1865,7 @@ impl TownsmithCore {
             Ok(path) => path,
             Err(error) => return placement_simple_error("invalid_save_path", error),
         };
-        let (store, construction, roads, lots) = {
+        let (store, construction, roads, lots, settlements) = {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             let construction = self
                 .construction
@@ -1636,11 +1873,16 @@ impl TownsmithCore {
                 .unwrap_or_else(|error| error.into_inner());
             let roads = self.roads.lock().unwrap_or_else(|error| error.into_inner());
             let lots = self.lots.lock().unwrap_or_else(|error| error.into_inner());
+            let settlements = self
+                .settlements
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             (
                 world.as_ref().cloned(),
                 construction.clone(),
                 roads.as_ref().cloned(),
                 lots.as_ref().cloned(),
+                settlements.as_ref().cloned(),
             )
         };
         let Some(store) = store else {
@@ -1711,6 +1953,21 @@ impl TownsmithCore {
             }
             None => json,
         };
+        let json = match settlements.as_ref() {
+            Some(settlements) => {
+                if settlements.seed != store.seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "settlements belong to a different seed",
+                    );
+                }
+                match attach_settlements(&json, settlements) {
+                    Ok(json) => json,
+                    Err(error) => return placement_simple_error("save_failed", error),
+                }
+            }
+            None => json,
+        };
         if json.len() > MAX_WORLD_SAVE_BYTES as usize {
             return placement_simple_error(
                 "save_too_large",
@@ -1739,6 +1996,10 @@ impl TownsmithCore {
             lots.as_ref().map_or(0, |lots| lots.lots.len()) as i64,
         );
         result.set(
+            "settlements",
+            settlements.as_ref().map_or(0, |store| store.count()) as i64,
+        );
+        result.set(
             "checksum",
             &GString::from(&format!("{:016x}", store.checksum())),
         );
@@ -1758,6 +2019,13 @@ impl TownsmithCore {
             &GString::from(&format!(
                 "{:016x}",
                 lots.as_ref().map_or(0, LotStore::checksum)
+            )),
+        );
+        result.set(
+            "settlement_checksum",
+            &GString::from(&format!(
+                "{:016x}",
+                settlements.as_ref().map_or(0, SettlementStore::checksum)
             )),
         );
         result.set(
@@ -1834,6 +2102,22 @@ impl TownsmithCore {
                     format!(
                         "lots use seed {} but this world is {expected_seed}",
                         lots.seed
+                    ),
+                );
+            }
+        }
+        let settlements = match settlements_from_world_json(&json) {
+            Ok(Some(store)) => Some(store),
+            Ok(None) => None,
+            Err((code, error)) => return placement_simple_error(code, error),
+        };
+        if let Some(settlements) = settlements.as_ref() {
+            if settlements.seed != expected_seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    format!(
+                        "settlements use seed {} but this world is {expected_seed}",
+                        settlements.seed
                     ),
                 );
             }
@@ -1935,6 +2219,8 @@ impl TownsmithCore {
         let road_checksum = roads.as_ref().map_or(0, RoadStore::checksum);
         let lot_count = lots.as_ref().map_or(0, |lots| lots.lots.len());
         let lot_checksum = lots.as_ref().map_or(0, LotStore::checksum);
+        let settlement_count = settlements.as_ref().map_or(0, |store| store.count());
+        let settlement_checksum = settlements.as_ref().map_or(0, SettlementStore::checksum);
         let deltas_count = deltas.edit_count();
         let deltas_checksum = deltas.checksum();
         let mut guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
@@ -1952,6 +2238,10 @@ impl TownsmithCore {
             .unwrap_or_else(|error| error.into_inner());
         let mut roads_guard = self.roads.lock().unwrap_or_else(|error| error.into_inner());
         let mut lots_guard = self.lots.lock().unwrap_or_else(|error| error.into_inner());
+        let mut settlements_guard = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut deltas_guard = self
             .terrain_deltas
             .write()
@@ -1959,6 +2249,7 @@ impl TownsmithCore {
         *construction_guard = construction;
         *roads_guard = roads;
         *lots_guard = lots;
+        *settlements_guard = settlements;
         *guard = Some(store);
         *deltas_guard = deltas;
         *self
@@ -1975,6 +2266,7 @@ impl TownsmithCore {
         result.set("construction_sites", construction_count as i64);
         result.set("roads", road_count as i64);
         result.set("lots", lot_count as i64);
+        result.set("settlements", settlement_count as i64);
         result.set("checksum", &GString::from(&format!("{checksum:016x}")));
         result.set(
             "terrain_checksum",
@@ -1991,6 +2283,10 @@ impl TownsmithCore {
         result.set(
             "lot_checksum",
             &GString::from(&format!("{lot_checksum:016x}")),
+        );
+        result.set(
+            "settlement_checksum",
+            &GString::from(&format!("{settlement_checksum:016x}")),
         );
         result
     }
@@ -2858,6 +3154,23 @@ fn lot_to_dictionary(lot: &Lot) -> VarDictionary {
     result
 }
 
+fn settlement_error_result(error: &SettlementError) -> VarDictionary {
+    placement_simple_error(error.code(), error.to_string())
+}
+
+fn settlement_to_dictionary(settlement: &Settlement) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("id", settlement.id as i64);
+    result.set("name", &GString::from(settlement.name.as_str()));
+    result.set("owner", &GString::from(settlement.owner.as_str()));
+    result.set(
+        "center",
+        &PackedInt32Array::from(settlement.center.to_vec()).to_variant(),
+    );
+    result.set("radius_m", i64::from(settlement.radius_m));
+    result
+}
+
 fn road_request_from_args(
     x1: i64,
     z1: i64,
@@ -3130,6 +3443,29 @@ fn lots_from_world_json(json: &str) -> Result<Option<LotStore>, (&'static str, S
     store
         .validate_loaded()
         .map_err(|error| ("invalid_lots", error.to_string()))?;
+    Ok(Some(store))
+}
+
+fn attach_settlements(json: &str, store: &SettlementStore) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    value["settlements"] = serde_json::to_value(store).map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+}
+
+fn settlements_from_world_json(
+    json: &str,
+) -> Result<Option<SettlementStore>, (&'static str, String)> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| ("invalid_json", error.to_string()))?;
+    let Some(raw) = value.get("settlements") else {
+        return Ok(None);
+    };
+    let store: SettlementStore = serde_json::from_value(raw.clone())
+        .map_err(|error| ("invalid_settlements", error.to_string()))?;
+    store
+        .validate_loaded()
+        .map_err(|error| ("invalid_settlements", error.to_string()))?;
     Ok(Some(store))
 }
 
@@ -3863,6 +4199,45 @@ mod tests {
         store.format_version = 99;
         let json = attach_lots("{}", &store).expect("attach");
         assert!(lots_from_world_json(&json).is_err());
+    }
+
+    #[test]
+    fn settlement_world_json_round_trips_and_old_saves_are_closed() {
+        let mut store = SettlementStore::new(2026);
+        store
+            .found(&SettlementRequest {
+                name: "Riverbend".to_string(),
+                owner: "player".to_string(),
+                center: [10, 20],
+                radius_m: 64,
+            })
+            .expect("settlement");
+        let json = attach_settlements("{}", &store).expect("attach");
+        let decoded = settlements_from_world_json(&json)
+            .expect("parse")
+            .expect("present");
+        assert_eq!(decoded, store);
+        assert!(settlements_from_world_json("{}")
+            .expect("old save")
+            .is_none());
+    }
+
+    #[test]
+    fn settlement_world_json_rejects_bad_next_id() {
+        let mut store = SettlementStore::new(2026);
+        store
+            .found(&SettlementRequest {
+                name: "Riverbend".to_string(),
+                owner: "player".to_string(),
+                center: [10, 20],
+                radius_m: 64,
+            })
+            .expect("settlement");
+        let mut value = serde_json::to_value(&store).expect("value");
+        value["next_id"] = serde_json::json!(1);
+        let json = serde_json::to_string(&value).expect("json");
+        let error = settlements_from_world_json(&json).expect_err("reject");
+        assert_eq!(error.0, "invalid_settlements");
     }
 
     #[test]
