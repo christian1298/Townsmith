@@ -84,9 +84,11 @@ Keyboard/mouse defaults are configurable later. All UI strings are keys from [[1
 
 ## 4. Data model
 
+Implementation status: the volume is in [[27 - Voxel Volume]], the editor shell in [[30 - Editor Shell]], and room detection/stats in [[31 - Room Detection]].
+
 ### Volume
 
-- Default demo volume: **16 m × 9.6 m × 12.8 m** (160 × 96 × 128 voxels; 5 × 3 × 4 chunks of 32³).
+- Default demo volume: **16 m × 9.6 m × 16 m** (160 × 96 × 160 voxels; 5 × 3 × 5 chunks of 32³).
 - Chunked sparse storage; empty chunks are absent.
 - Cross-chunk greedy meshing with neighbor culling; one combined mesh per volume.
 - Blueprint limits remain Q-010: 8M solid voxels, 48 × 48 m footprint, 512 m height, 32 m depth.

@@ -15,6 +15,7 @@ for run in $(seq 1 "$RUNS"); do
 	"$ROOT/target/release/worldgen" > "$TMP/worldgen_$run.json"
 	"$ROOT/target/release/terrain" > "$TMP/terrain_$run.json"
 	"$ROOT/target/release/cohort" > "$TMP/cohort_$run.json"
+	"$ROOT/target/release/rooms" > "$TMP/rooms_$run.json"
 	"$ROOT/target/release/city_layout" > "$TMP/city_layout_$run.json"
 	"$ROOT/target/release/agents" > "$TMP/agents_$run.json"
 	"$ROOT/target/release/volume" > "$TMP/volume_$run.json"
@@ -69,6 +70,7 @@ result = {
         "terrain_lod_4_ms": median("terrain", "lod_4_median_ms"),
         "cohort_tick_ms": median("cohort", "tick_ms_median"),
         "cohort_tick_p95_ms": median("cohort", "tick_ms_p95"),
+        "rooms_detection_ms": median("rooms", "detection_ms"),
         "city_early_ms": median_city("early", "generate_ms_median"),
         "city_mid_ms": median_city("mid", "generate_ms_median"),
         "city_late_ms": median_city("late", "generate_ms_median"),

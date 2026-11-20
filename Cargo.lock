@@ -86,6 +86,14 @@ name = "core_city"
 version = "0.1.0"
 
 [[package]]
+name = "core_rooms"
+version = "0.1.0"
+dependencies = [
+ "core_voxel",
+ "serde",
+]
+
+[[package]]
 name = "core_sim"
 version = "0.1.0"
 
@@ -419,9 +427,11 @@ name = "townsmith-bench"
 version = "0.1.0"
 dependencies = [
  "core_city",
+ "core_rooms",
  "core_sim",
  "core_voxel",
  "core_world",
+ "serde_json",
 ]
 
 [[package]]

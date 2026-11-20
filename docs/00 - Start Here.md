@@ -193,3 +193,5 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 | [[27 - Voxel Volume]] | Chunked editable volume, cross-chunk meshing, limits, benchmark | You edit or mesh buildings |
 | [[28 - Blueprint Package]] | `.tsbp` v1 zip, voxel stream, BLAKE3 hash, save/load security | You save, load, or share a building |
 | [[29 - Volume Editor Bridge]] | GDExtension volume API, packed mesh upload, smoke | You wire the first-person editor |
+| [[30 - Editor Shell]] | First-person editor controls, raycast, palette, debounce, smoke | You work on the editor |
+| [[31 - Room Detection]] | Room flood fill, props, capacity, material stats | You work on rooms or stats |

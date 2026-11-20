@@ -14,8 +14,14 @@ path = "src/main.rs"
 name = "city_layout"
 path = "src/bin/city_layout.rs"
 
+[[bin]]
+name = "rooms"
+path = "src/bin/rooms.rs"
+
 [dependencies]
 core_voxel.workspace = true
 core_world.workspace = true
 core_sim.workspace = true
 core_city.workspace = true
+core_rooms.workspace = true
+serde_json.workspace = true

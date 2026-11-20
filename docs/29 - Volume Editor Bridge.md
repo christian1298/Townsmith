@@ -93,3 +93,8 @@ VOLUME_SMOKE solid=25601 quads=14 vertices=56 surfaces=1 bounds=16.0,9.6,16.0 me
 3. Undo/redo edit batches at the bridge boundary.
 4. First-person editor camera and raycast placement.
 5. Room overlay and stats panel.
+
+
+## 8. Shell integration
+
+`godot/editor.tscn` uses this API for the first-person editor. See [[30 - Editor Shell]].
