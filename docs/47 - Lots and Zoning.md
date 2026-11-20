@@ -125,7 +125,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 
 - `core_city`: 7 lot tests + 1 road-frontage test; core_city **82 tests**.
 - `godot_ext`: 2 lot JSON tests; bridge **32 tests**.
-- Workspace: **277 tests + 1 doctest**.
+- Workspace: **278 tests + 1 doctest**.
 
 ## 8. Limits
 
