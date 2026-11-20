@@ -208,7 +208,9 @@ impl EditorState {
         Self {
             volume,
             mesh_builds: 0,
-            mesh_dirty: false,
+            // A newly created volume has no mesh yet, so consumers that act on
+            // the dirty flag must build the initial surface.
+            mesh_dirty: true,
             last_mesh_quads: 0,
             last_mesh_vertices: 0,
             last_mesh_indices: 0,

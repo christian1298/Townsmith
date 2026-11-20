@@ -2,7 +2,7 @@
 title: Phase 0 Implementation
 project: Townsmith
 status: active
-updated: 2026-11-19
+updated: 2026-11-20
 tags:
   - townsmith
   - implementation
@@ -28,8 +28,8 @@ tags:
 | `benchmarks/` | Route JSON, results, and benchmark notes | Harness v0 |
 | `scripts/bench_core.sh` | 3-run core benchmark aggregation | Working |
 | `scripts/bench_godot.sh` | 3-run Godot flyover aggregation | Working; headless frame times are not representative |
-| `crates/godot_ext` | Godot 4.7 GDExtension bridge with a Rust terrain worker pool and city layout bridge | Working, 6 tests + headless smoke |
-| `godot/` | Preview project; streams terrain and renders synthetic city MultiMeshes | Working |
+| `crates/godot_ext` | Godot 4.7 GDExtension bridge with a Rust terrain worker pool, city layout bridge, and editable volume API | Working, 11 tests + headless smoke |
+| `godot/` | Preview project; streams terrain, renders synthetic city MultiMeshes, and smokes the editable volume | Working |
 | `scripts/` | Build, check, run, and smoke commands | Working |
 
 The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`, and `server` have no Godot dependency.
@@ -160,7 +160,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 | Terrain LOD 2, 256 m chunk | 65,536 cells | — | 25,327 quads | ~0.39 ms |
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **149 tests**: 49 voxel, 58 world, 26 simulation, 10 city, and 6 bridge tests.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **154 tests**: 49 voxel, 58 world, 26 simulation, 10 city, and 11 bridge tests.
 
 ## 3. Known limitations
 

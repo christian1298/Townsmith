@@ -72,6 +72,7 @@ func _run_volume_smoke(core) -> void:
 	elif not core.editor_set_voxel(10, 1, 10, 5):
 		status = "reset_failed"
 
+	var size: Dictionary = core.editor_volume_size_voxels()
 	var mesh: ArrayMesh = core.build_editor_volume_mesh()
 	var stats: Dictionary = core.editor_volume_stats()
 	var bounds: PackedFloat32Array = core.editor_volume_bounds()
@@ -79,13 +80,17 @@ func _run_volume_smoke(core) -> void:
 	var quads := int(stats.get("last_mesh_quads", -1))
 	var vertices := int(stats.get("last_mesh_vertices", -1))
 	var surfaces := mesh.get_surface_count()
-	if solid != 25601:
+	if status == "ok" and not bool(size.get("created", false)):
+		status = "size_missing"
+	elif status == "ok" and size.get("voxels", PackedInt32Array()) != PackedInt32Array([160, 96, 160]):
+		status = "size_mismatch"
+	elif status == "ok" and solid != 25601:
 		status = "solid_mismatch"
-	elif surfaces != 1:
+	elif status == "ok" and surfaces != 1:
 		status = "surface_mismatch"
-	elif quads <= 0 or vertices != quads * 4:
+	elif status == "ok" and (quads != 14 or vertices != 56):
 		status = "mesh_mismatch"
-	elif bounds.size() != 3 or absf(bounds[0] - 16.0) > 0.001 or absf(bounds[1] - 9.6) > 0.001 or absf(bounds[2] - 16.0) > 0.001:
+	elif status == "ok" and (bounds.size() != 3 or absf(bounds[0] - 16.0) > 0.001 or absf(bounds[1] - 9.6) > 0.001 or absf(bounds[2] - 16.0) > 0.001):
 		status = "bounds_mismatch"
 
 	print("VOLUME_SMOKE solid=%d quads=%d vertices=%d surfaces=%d bounds=%.1f,%.1f,%.1f mesh_ms=%.1f status=%s" % [

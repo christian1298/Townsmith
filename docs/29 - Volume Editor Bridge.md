@@ -45,7 +45,7 @@ All methods are **main-thread only**. They mutate bridge state; the internal `Mu
 
 There are no vertex colors and no per-vertex material ids yet; the editor uses one material override. Multi-material surfaces come with the content registry.
 
-The mesh is one surface for the whole volume, including cross-chunk face culling.
+The mesh is one surface for the whole volume, including cross-chunk face culling. Coordinates are volume-local: the volume minimum corner is `(0, 0, 0)`. An empty volume returns an `ArrayMesh` with zero surfaces.
 
 ## 3. Cost
 
@@ -72,7 +72,7 @@ The next optimization is a dirty-chunk remesh: only chunks touched by an edit ar
 GODOT=/path/to/godot ./scripts/smoke_volume.sh
 ```
 
-The smoke creates a default volume, fills a 160 × 1 × 160 floor, sets one voxel, checks inverse, rejects out-of-bounds and invalid materials, clears/refills, builds the mesh, and asserts:
+The smoke creates a default volume, fills a 160 × 1 × 160 floor, sets one voxel, reads it back, rejects out-of-bounds and invalid materials, clears/refills, builds the mesh, and asserts:
 
 - solid voxels `25,601`
 - one surface
@@ -80,7 +80,7 @@ The smoke creates a default volume, fills a 160 × 1 × 160 floor, sets one voxe
 - bounds `16.0, 9.6, 16.0`
 - `status=ok`
 
-Current output:
+The smoke runs in CI after the voxel-instance smoke. Current output:
 
 ```text
 VOLUME_SMOKE solid=25601 quads=14 vertices=56 surfaces=1 bounds=16.0,9.6,16.0 mesh_ms=1395.4 status=ok
