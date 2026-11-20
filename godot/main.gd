@@ -209,7 +209,7 @@ func _run_world_placement_smoke(core) -> void:
 	if status == "ok" and core.world_placement_count() != 0:
 		status = "clear_failed"
 
-	var loaded_world: Dictionary = core.world_load(save_path)
+	var loaded_world: Dictionary = core.world_load(save_path, SEED)
 	if status == "ok" and not bool(loaded_world.get("ok", false)):
 		status = "world_load_failed:" + str(loaded_world.get("error_code", ""))
 	var loaded_checksum := str(core.world_placement_checksum())
@@ -222,7 +222,7 @@ func _run_world_placement_smoke(core) -> void:
 		if DirAccess.rename_absolute(blueprint_path, blueprint_backup) != OK:
 			status = "backup_failed"
 		else:
-			var failed_load: Dictionary = core.world_load(save_path)
+			var failed_load: Dictionary = core.world_load(save_path, SEED)
 			if not bool(failed_load.get("ok", true)) and str(failed_load.get("error_code", "")) != "missing_blueprint":
 				status = "load_missing_not_rejected"
 			elif core.world_placement_count() != 1 or str(core.world_placement_checksum()) != checksum:

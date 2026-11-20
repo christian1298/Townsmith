@@ -23,6 +23,7 @@ tags:
 | Method | Returns | Purpose |
 |---|---|---|
 | `world_validate_placement(seed, path, x, z, rotation)` | `Dictionary` | Load and validate a `.tsbp` site without mutating; `ok`, `center`, `foundation_m`, `footprint`, `rotation_deg`, `bounds`, `blueprint_hash` |
+| `world_blueprint_info(path)` | `Dictionary` | Metadata for the ghost/HUD: id, name, hash, bounds, rooms, capacity, jobs, cost |
 | `world_place_blueprint(seed, path, x, z, rotation)` | `Dictionary` | Validate and append; `ok`, `seed`, `count`, `checksum`, `placement` |
 | `world_placements()` | `Dictionary` | `open`, `seed`, `next_id`, `count`, `checksum`, `placements[]` |
 | `world_placement_count()` | `int` | Placement count |
@@ -30,7 +31,7 @@ tags:
 | `world_clear_placements()` | `bool` | Clear placements; keep the seed |
 | `world_remove_placement(id)` | `bool` | Remove one placement |
 | `world_save(path)` | `Dictionary` | Write world JSON atomically |
-| `world_load(path)` | `Dictionary` | Read JSON, verify structure and every blueprint package |
+| `world_load(path, expected_seed)` | `Dictionary` | Read JSON for one seed, verify structure and every package, replace the store |
 | `world_height_at(seed, x, z)` | `float` | One terrain sample for the preview; `-1.0` on invalid input |
 
 `x` and `z` are the **centre** of the rotated footprint in world metres. The blueprint mesh is volume-local with its minimum corner at `(0, 0, 0)`; a renderer offsets it by `-bounds_m / 2` on X/Z, then rotates around Y. `rotation` is normalized to 0/90/180/270.
@@ -96,7 +97,7 @@ The sampler uses `WorldGenerator::height_at` on the 1 m grid, not the currently 
 - duplicate placement ids;
 - records whose footprint does not match bounds + rotation, or whose foundation, height, centre, or cost is inconsistent;
 - a missing package, an invalid/relative package path, a package whose content hash differs from the placement record, or a package whose id/name/bounds/capacity/jobs do not match the record;
-- a load with a different seed than the active store.
+- a load whose seed differs from `expected_seed` (and from the active store).
 
 The current store is only replaced after the whole file and every package have passed. A failed load leaves the current store untouched.
 
@@ -129,27 +130,54 @@ Recorded marker:
 WORLD_PLACEMENT rooms=4 capacity=2 cost=38028.80 placements=1 foundation=1.0 checksum=... save=ok load=ok mesh=ok status=ok
 ```
 
-## 5. Limits
+The scene has its own smoke:
+
+```bash
+GODOT=/path/to/godot ./scripts/smoke_world_scene.sh
+```
+
+`WORLD_SCENE` exercises the green/red ghost, water rejection, a 90° ghost rotation, placing at the fixture site, save/load, rebuilding the placed node and foundation, and a failed load leaving the scene untouched. Recorded marker:
+
+```text
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok place=ok save=ok load=ok guard=ok status=ok
+```
+
+## 5. Scene
+
+`godot/world_placement.tscn` + `godot/world_placement.gd` is the first playable streamed-world placement shell.
+
+- Streams a 3 × 3 terrain ring around a fly camera (`editor_camera.gd`).
+- The target is 24 m ahead of the camera on the horizontal plane, snapped to the 1 m grid.
+- The ghost is a `Node3D` pivot with the blueprint mesh offset by `-bounds_m / 2` on X/Z. It is green when validation passes and red with the error code when it fails.
+- A transparent foundation box previews the unrotated blueprint footprint × `foundation_m`; the pivot carries the rotation.
+- `R` rotates 90°, left click places, `Delete` clears, `F5` saves, `F9` loads, `Esc` releases the mouse, and left click recaptures it.
+- Placed buildings are rebuilt from the `.tsbp`; each has a mesh child, plus a foundation box when `foundation_m > 0`. The scene does not cache scenes.
+- Validation runs when the 1 m target cell or rotation changes, not every frame. The ghost y comes from the validated centre; an invalid ghost sits on the sampled terrain.
+- The default blueprint is generated once from the shared acceptance house at `user://world_placement/acceptance_house.tsbp`; `--blueprint <absolute.tsbp>` overrides it. The default save is `user://world_placement/world.json`; `--world-save <absolute.json>` overrides it.
+
+The scene is intentionally outside the editor: it tests the open-world path, not voxel authoring.
+
+## 6. Limits
 
 - The world save references **absolute package paths**. It is valid on the same machine but is not portable; a content-addressed local library is a follow-up.
 - Placement is instant. D-023's phased construction site is stage 2D.
-- There is no preview scene or rotate/place input yet; that is stage 2A.4.
 - Terrain edits and dirty-chunk remeshing are stage 2B. The placement save does not include terrain deltas.
 - `world_load` re-verifies package hashes and metadata (id, name, bounds, capacity, jobs) but does not re-run slope/water sampling. Terrain edits can invalidate an old site; the gameplay layer will revalidate before construction.
 - No collision, road access, utility access, or lot ownership yet.
 - The acceptance house's bounds are the whole 16 × 9.6 × 16 m volume, not a tight mesh bound, so its placed footprint is 16 × 16 m.
+- The world-placement scene is a developer shell. Its HUD is English-only until the Phase 2 HUD localization pass; D-022's key-based EN/DE requirement still applies to shipping UI.
 
-## 6. Tests
+## 7. Tests
 
 - `core_city` placement validation and persistence: 13 tests.
 - `godot_ext` save-path validation: 1 new test.
 - Workspace: **199 tests + 1 doctest**.
-- Godot headless: `WORLD_PLACEMENT ... status=ok`.
+- Godot headless: `WORLD_PLACEMENT ... status=ok` and `WORLD_SCENE ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 
-## 7. Next
+## 8. Next
 
-1. Add the streamed-world preview, ghost material, rotate/place input, and mode HUD (2A.4).
+1. Add terrain edit deltas and dirty-chunk remeshing (2B).
 2. Replace absolute package paths with a content-addressed library beside the save.
-3. Add terrain edit deltas and dirty-chunk remeshing (2B).
-4. Move placement into a construction site (2D).
+3. Move placement into a construction site (2D).
+4. Add Mayor Mode camera/selection (2C).

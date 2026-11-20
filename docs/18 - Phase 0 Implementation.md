@@ -214,6 +214,7 @@ GODOT=/path/to/godot ./scripts/smoke_locale.sh
 GODOT=/path/to/godot ./scripts/smoke_layout.sh
 GODOT=/path/to/godot ./scripts/smoke_acceptance.sh
 GODOT=/path/to/godot ./scripts/smoke_world_placement.sh
+GODOT=/path/to/godot ./scripts/smoke_world_scene.sh
 GODOT=/path/to/godot ./scripts/smoke_slice.sh
 cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen

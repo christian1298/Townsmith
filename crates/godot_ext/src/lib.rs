@@ -788,6 +788,56 @@ impl TownsmithCore {
         }
     }
 
+    /// Return metadata for a saved blueprint without touching the world.
+    ///
+    /// The scene uses this to size the placement ghost and show the blueprint
+    /// name, cost, and room count before the first placement.
+    #[func]
+    fn world_blueprint_info(&self, path: GString) -> VarDictionary {
+        let path = match blueprint_path_from_arg(&path.to_string()) {
+            Ok(path) => path,
+            Err(error) => return placement_simple_error("invalid_blueprint_path", error),
+        };
+        let blueprint = match load_tsbp(&path) {
+            Ok(blueprint) => blueprint,
+            Err(error) => {
+                return placement_simple_error(
+                    blueprint_error_code(&error),
+                    format!("{}: {error}", path.display()),
+                )
+            }
+        };
+        let (materials, _) = count_materials(&blueprint.volume);
+        let computed_cost = slice_material_cost(&materials);
+        let stored_cost = blueprint.metadata.stats.material_cost;
+        let material_cost = if stored_cost.is_finite() && stored_cost > 0.0 {
+            stored_cost
+        } else {
+            computed_cost
+        };
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("id", &GString::from(blueprint.metadata.id.as_str()));
+        result.set("name", &GString::from(blueprint.metadata.name.as_str()));
+        result.set(
+            "hash",
+            &GString::from(blueprint.metadata.content_hash.as_str()),
+        );
+        result.set(
+            "bounds",
+            &PackedFloat32Array::from(blueprint.metadata.bounds_m.to_vec()).to_variant(),
+        );
+        result.set("solid_voxels", blueprint.metadata.solid_voxels as i64);
+        result.set("rooms", blueprint.metadata.rooms.len() as i64);
+        result.set(
+            "resident_capacity",
+            i64::from(blueprint.metadata.stats.resident_capacity),
+        );
+        result.set("job_slots", i64::from(blueprint.metadata.stats.job_slots));
+        result.set("material_cost", material_cost);
+        result
+    }
+
     /// Place a `.tsbp` blueprint in the world after validation.
     ///
     /// Returns `{ ok, seed, count, checksum, placement }` on success.
@@ -952,9 +1002,15 @@ impl TownsmithCore {
         result
     }
 
-    /// Read a world placement save and verify its blueprint packages.
+    /// Read a world placement save for `expected_seed` and verify its packages.
     #[func]
-    fn world_load(&self, path: GString) -> VarDictionary {
+    fn world_load(&self, path: GString, expected_seed: i64) -> VarDictionary {
+        let expected_seed = match u64::try_from(expected_seed) {
+            Ok(seed) => seed,
+            Err(_) => {
+                return placement_simple_error("invalid_seed", "world seed must be non-negative")
+            }
+        };
         let path = match world_save_path_from_arg(&path.to_string()) {
             Ok(path) => path,
             Err(error) => return placement_simple_error("invalid_save_path", error),
@@ -980,6 +1036,15 @@ impl TownsmithCore {
             Ok(store) => store,
             Err(error) => return placement_error_result(&error),
         };
+        if store.seed != expected_seed {
+            return placement_simple_error(
+                "seed_mismatch",
+                format!(
+                    "save uses seed {} but this world is {expected_seed}",
+                    store.seed
+                ),
+            );
+        }
         for placement in &store.placements {
             let package_path = match blueprint_path_from_arg(&placement.blueprint_path) {
                 Ok(path) => path,

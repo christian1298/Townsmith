@@ -37,8 +37,8 @@ The slice follows accepted decisions:
 |---|---|---|
 | **2A.1** | Placement records and terrain validation | **Done** — PR #44 |
 | **2A.2** | Placement store, JSON save format, checksum | **Done** — PR #45 |
-| **2A.3** | GDExtension placement/save/load API and headless smoke | **This PR** — see [[42 - World Placement Bridge]] |
-| **2A.4** | Streamed-world scene, preview, rotate/place/save/load controls | Next |
+| **2A.3** | GDExtension placement/save/load API and headless smoke | **Done** — PR #46 |
+| **2A.4** | Streamed-world scene, preview, rotate/place/save/load controls | **This PR** — see [[42 - World Placement Bridge]] |
 | **2B** | Terrain edit deltas applied to streamed chunks, saved/reloaded | Planned |
 | **2C** | Mayor camera, selection, mode switch at a door | Planned |
 | **2D** | Construction site v0: phased progress, materials, crews | Planned |
@@ -52,8 +52,8 @@ Each stage is a separate branch, worktree, and PR. Do not mix 2A with terrain ed
 
 - `core_city::placement`: pure placement records and terrain validation (2A.1); store, JSON roundtrip, and checksum (2A.2).
 - GDExtension APIs to place, validate, list, clear, save, and load placements.
-- A `world_placement` Godot scene with streamed terrain and a fly camera.
-- A placement preview that samples terrain under a camera-forward target and shows valid/invalid.
+- A `world_placement` Godot scene with streamed terrain, a fly camera, and a green/red placement ghost.
+- A placement preview that samples terrain under a camera-forward target and shows valid/invalid, plus the first placed-node rebuild path.
 - Save/load of `seed + placements` as JSON; blueprint packages are referenced by path.
 - A headless smoke that places the acceptance house, verifies water, overlap, and rotation rejection, saves, clears, reloads, compares the placement checksum, and confirms a failed load leaves the store untouched. Slope rules stay covered by the core placement tests.
 
@@ -178,7 +178,7 @@ The foundation is a visual box from `min_height` to `center.y` in 2A. Real terra
 | `world_clear_placements()` | `bool` | Remove all placements |
 | `world_remove_placement(id)` | `bool` | Remove one |
 | `world_save(path)` | `Dictionary` | Write JSON atomically; `ok`, `path`, `seed`, `count`, `checksum` |
-| `world_load(path)` | `Dictionary` | Read JSON, verify seed, packages, and metadata, replace the store; `ok`, `path`, `seed`, `count`, `checksum` |
+| `world_load(path, expected_seed)` | `Dictionary` | Read JSON for one seed, verify packages and metadata, replace the store; `ok`, `path`, `seed`, `count`, `checksum` |
 | `world_height_at(seed, x, z)` | `float` | One terrain sample for the preview/foundation |
 
 `world_load` fails with a readable error if the file is malformed, the format version is unknown, the active world seed is known and differs, or a referenced blueprint is missing or has a different hash. It never partially replaces the current store.
@@ -227,6 +227,7 @@ WORLD_PLACEMENT rooms=4 capacity=2 cost=38028.80 placements=1 foundation=1.0 che
 ### Godot
 
 - `smoke_world_placement.sh` as above.
+- `smoke_world_scene.sh` verifies the scene ghost, water rejection, 90° rotation, placement, save/load, and node/foundation rebuild.
 - `smoke_godot.sh` remains the streaming regression.
 - `smoke_acceptance.sh` remains the editor/blueprint regression.
 
@@ -250,8 +251,8 @@ Add the world placement smoke to the Linux Godot job. Windows keeps the Rust gat
 
 1. Implement 2A.1 in a worktree; keep the validation rules free of Godot types.
 2. Add the placement store and JSON persistence in 2A.2.
-3. Add the bridge and world save/load smoke in 2A.3; update CI.
-4. Add the streamed-world scene and preview in 2A.4.
+3. ~~Add the bridge and world save/load smoke in 2A.3; update CI.~~ Done.
+4. ~~Add the streamed-world scene and preview in 2A.4.~~ Done.
 5. Record the result in a new results note when 2A is merged.
 6. Start 2B: expose `StreamingWorld` deltas to the bridge and remesh dirty chunks.
 7. Revisit Q-011 once a real building sits on a slope; record the chosen foundation policy.
