@@ -82,14 +82,14 @@ The hash depends on the smoke volume, not the golden test-house hash.
 - `Blueprint::new` synchronizes bounds and solid count from the volume.
 - `save_tsbp` recomputes the canonical hash, writes `blueprint.json` + `voxels.bin`, and stores the zip uncompressed in v1.
 - `load_tsbp` verifies version, hash, bounds, solid count, dependencies, duplicate entries, and size limits.
-- The editor writes default stats and empty rooms/props; room-derived metadata is the next slice step.
+- The editor runs room detection on save and writes rooms, material counts, and resident/job stats into the metadata. Props remain empty until prop placement lands.
 - A failed save leaves the previous file untouched (atomic temp + rename).
 - A failed load leaves the current editor volume untouched.
 
 ## 5. Limitations
 
 - No thumbnail generation yet.
-- No room/prop/stat metadata is written by the editor yet.
+- Room metadata is v0: 2D per-band detection, numeric material keys, and no props yet.
 - The file dialog handles overwrite confirmation; there is no separate library-level confirmation.
 - No save-as versioning or library index; the path is the identity.
 - The full volume is cloned for save; a very large volume doubles memory briefly.
@@ -101,8 +101,9 @@ The hash depends on the smoke volume, not the golden test-house hash.
 
 ## 6. Next
 
-1. Populate rooms/props/stats from `core_rooms`.
+1. Add room bounds/centers for the editor overlay.
 2. Room overlay and stats panel in the editor.
-3. Undo/redo before destructive load.
-4. Blueprint library / thumbnail.
-5. EN/DE strings for the save/load UI.
+3. Prop placement so room types/capacity are meaningful.
+4. Undo/redo before destructive load.
+5. Blueprint library / thumbnail.
+6. EN/DE strings for the save/load UI.

@@ -54,8 +54,8 @@ fn editor_room_materials() -> RoomMaterials {
 }
 
 /// Build blueprint metadata from the editor volume, including detected rooms.
-fn blueprint_from_editor_volume(id: String, name: String, volume: &VoxelVolume) -> Blueprint {
-    let stats = detect_rooms(volume, &editor_room_materials(), &[]);
+fn blueprint_from_editor_volume(id: String, name: String, volume: VoxelVolume) -> Blueprint {
+    let stats = detect_rooms(&volume, &editor_room_materials(), &[]);
     let mut metadata = BlueprintMetadata::new(id, name);
     metadata.materials = stats.materials.clone();
     metadata.rooms = stats
@@ -77,7 +77,7 @@ fn blueprint_from_editor_volume(id: String, name: String, volume: &VoxelVolume) 
         job_slots: stats.job_slots,
         class: stats.class.clone(),
     };
-    Blueprint::new(metadata, volume.clone())
+    Blueprint::new(metadata, volume)
 }
 
 fn room_stats_to_dictionary(stats: &RoomStats) -> VarDictionary {
@@ -839,7 +839,7 @@ impl TownsmithCore {
             state.volume.clone()
         };
 
-        let blueprint = blueprint_from_editor_volume(id, name, &volume);
+        let blueprint = blueprint_from_editor_volume(id, name, volume);
         let hash = match save_tsbp_with_hash(&path, &blueprint) {
             Ok(hash) => hash,
             Err(error) => {
@@ -1379,19 +1379,40 @@ mod tests {
             .set_voxel(VolumePos::new(0, 15, 10), EDITOR_WINDOW)
             .expect("window");
 
+        let solid = u64::from(volume.solid_count());
         let blueprint = blueprint_from_editor_volume(
             "local:test_room".to_string(),
             "Test Room".to_string(),
-            &volume,
+            volume,
         );
         assert_eq!(blueprint.metadata.rooms.len(), 1);
-        assert_eq!(blueprint.metadata.rooms[0].doors, 1);
-        assert_eq!(blueprint.metadata.rooms[0].windows, 1);
-        assert!(!blueprint.metadata.materials.is_empty());
+        let room = &blueprint.metadata.rooms[0];
+        assert_eq!(room.id, "room_0");
+        assert_eq!(room.room_type, "empty");
+        assert_eq!(room.floor, 0);
+        assert!((room.area_m2 - 14.44).abs() < 0.001);
+        assert!((room.volume_m3 - 43.32).abs() < 0.001);
+        assert_eq!(room.beds, 0);
+        assert_eq!(room.doors, 1);
+        assert_eq!(room.windows, 1);
+        assert_eq!(blueprint.metadata.solid_voxels, solid);
+        assert_eq!(blueprint.metadata.bounds_m, [6.4, 3.2, 6.4]);
+        assert!(blueprint.metadata.props.is_empty());
         assert_eq!(
-            blueprint.metadata.solid_voxels,
-            u64::from(volume.solid_count())
+            blueprint.metadata.materials,
+            [
+                ("material:1".to_string(), 4522),
+                ("material:2".to_string(), 1600),
+                ("material:3".to_string(), 1600),
+                ("material:4".to_string(), 1),
+                ("material:5".to_string(), 1),
+            ]
+            .into_iter()
+            .collect()
         );
+        assert_eq!(blueprint.metadata.stats.resident_capacity, 0);
+        assert_eq!(blueprint.metadata.stats.job_slots, 0);
+        assert_eq!(blueprint.metadata.stats.class, "lower_middle");
 
         let path = std::env::temp_dir().join(format!(
             "townsmith_room_metadata_{}.tsbp",
@@ -1399,9 +1420,11 @@ mod tests {
         ));
         let hash = save_tsbp_with_hash(&path, &blueprint).expect("save");
         let loaded = load_tsbp(&path).expect("load");
+        let _ = std::fs::remove_file(path);
         assert_eq!(loaded.metadata.content_hash, hash);
         assert_eq!(loaded.metadata.rooms, blueprint.metadata.rooms);
-        let _ = std::fs::remove_file(path);
+        assert_eq!(loaded.metadata.materials, blueprint.metadata.materials);
+        assert_eq!(loaded.metadata.stats, blueprint.metadata.stats);
     }
 
     #[test]

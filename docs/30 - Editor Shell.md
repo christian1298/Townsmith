@@ -138,7 +138,7 @@ CI runs the script in the Godot headless smoke job after `smoke_volume.sh`.
 - **No per-material rendering.** All voxels share one neutral material override.
 - **One-voxel brush.** There is no 2×2×2/3×3×3 brush, paint, pick, box, copy/paste, rotate, or mirror.
 - **Whole-volume remesh.** Every rebuild remeshes the entire 16 × 9.6 × 16 m volume on the main thread; no dirty-chunk path or worker yet.
-- **Room, structural, and cost overlays are absent.** There is no room detection, capacity, or material cost in the shell.
+- **Room, structural, and cost overlays are absent.** Room detection runs on blueprint save and is exposed by `editor_room_stats`, but the shell does not draw an overlay or stats panel yet.
 - **Localization is not wired.** The overlay strings are literal English; key-based strings arrive with [[16 - Localization]].
 - **Mouse capture is not focus-aware.** Losing window focus while captured is not handled beyond `Esc`.
 - **Single scene, no menus.** Launching the scene drops straight into the camera; there is no start screen, settings, or rebind UI.

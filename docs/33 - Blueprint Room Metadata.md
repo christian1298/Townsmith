@@ -65,17 +65,23 @@ It is main-thread only and does not mutate the volume.
 - saves and reloads the `.tsbp`;
 - asserts the loaded rooms and content hash match.
 
-## 5. Limitations
+## 5. Identity and trust
+
+- The content hash covers the derived rooms/materials/stats, so changing the detector or material-key format changes the identity of identical voxels. Version the detector before using hashes as cross-version keys.
+- Derived stats are metadata, not trusted simulation input. The server must re-derive rooms/capacity before they drive gameplay; see the security rule in `AGENTS.md`.
+- A pathological volume with very many tiny rooms can hit the 1 MiB metadata limit and fail save with a readable `TooLarge` error.
+
+## 6. Limitations
 
 - Room detection v0 is 2D per 3 m band; see [[31 - Room Detection]].
 - Props are not placed by the editor yet, so room types/capacity/jobs are limited.
 - Material keys are numeric placeholders until the content registry lands.
-- Detection adds a small save cost (~2 ms for the test house).
+- Detection adds a small save cost; the v0 test-house benchmark is ~2.18 ms (see [[31 - Room Detection]]).
 - The save still blocks the main thread; async save is later.
 
-## 6. Next
+## 7. Next
 
-1. Room overlay in the editor using `editor_room_stats` and room bounds.
+1. Add room bounds/centers to the bridge, then draw the overlay using `editor_room_stats`.
 2. Prop placement so room types/capacity become meaningful.
 3. Content registry material keys.
 4. Thumbnail and library index.
