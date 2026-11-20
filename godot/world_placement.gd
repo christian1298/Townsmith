@@ -97,8 +97,12 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	construction_tick_accum += delta
-	if construction_tick_accum >= 0.25:
-		_advance_construction(construction_tick_accum)
+	var steps := 0
+	while construction_tick_accum >= 0.25 and steps < 8:
+		_advance_construction(0.25)
+		construction_tick_accum -= 0.25
+		steps += 1
+	if construction_tick_accum >= 1.0:
 		construction_tick_accum = fmod(construction_tick_accum, 0.25)
 	if mode == "mayor" and mayor_camera != null:
 		var ground: float = core.world_height_at(
@@ -1583,7 +1587,14 @@ func _run_scene_smoke() -> void:
 				var finished_mesh := placed_root.get_child(0).get_child(0) as MeshInstance3D
 				build_done_ok = build_done_ok and finished_mesh != null and finished_mesh.material_override == placed_material
 				build_done_ok = build_done_ok and absf(finished_mesh.scale.y - 1.0) < 0.001
+				var pacing_ok: bool = core.population_set_rate(1.0)
+				core.population_clear()
+				_advance_construction(0.25)
+				pacing_ok = pacing_ok and int(core.city_summary().get("population", -1)) == 0
+				_advance_construction(2.0)
+				pacing_ok = pacing_ok and int(core.city_summary().get("population", -1)) == 2
 				var city_after: Dictionary = core.city_summary()
+				occupancy_after_ok = occupancy_after_ok and pacing_ok
 				occupancy_after_ok = int(city_after.get("population", -1)) == 2
 				occupancy_after_ok = occupancy_after_ok and int(city_after.get("housing_capacity", -1)) == 2
 				occupancy_after_ok = occupancy_after_ok and int(city_after.get("jobs", -1)) == 2

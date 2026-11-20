@@ -63,7 +63,6 @@ impl Household {
     }
 
     fn clamp_to_capacity(&mut self) {
-        self.capacity = self.capacity.min(1_000_000);
         self.residents = self.residents.min(self.capacity);
         self.workers = self.workers.min(self.residents);
     }

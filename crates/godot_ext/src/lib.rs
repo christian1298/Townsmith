@@ -1844,25 +1844,17 @@ impl TownsmithCore {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let settlement_count = settlements.as_ref().map_or(0, SettlementStore::count);
-        let mut population = self
+        let population = self
             .population
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let summary = match placements.as_ref() {
             Some(placements) => {
-                let slots = completed_slots(placements, &construction);
-                if population
+                let empty_runtime = CityRuntime::new(placements.seed);
+                let runtime = population
                     .as_ref()
-                    .is_some_and(|runtime| runtime.seed != placements.seed)
-                {
-                    *population = None;
-                }
-                let runtime = population.get_or_insert_with(|| {
-                    let mut runtime = CityRuntime::new(placements.seed);
-                    runtime.sync(&slots);
-                    runtime
-                });
-                runtime.sync(&slots);
+                    .filter(|runtime| runtime.seed == placements.seed)
+                    .unwrap_or(&empty_runtime);
                 summarize(placements, &construction, runtime, settlement_count)
             }
             None => CitySummary {
@@ -2099,7 +2091,7 @@ impl TownsmithCore {
             Ok(path) => path,
             Err(error) => return placement_simple_error("invalid_save_path", error),
         };
-        let (store, construction, roads, lots, settlements, population) = {
+        let (store, construction, roads, lots, settlements, mut population) = {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             let construction = self
                 .construction
@@ -2127,6 +2119,12 @@ impl TownsmithCore {
         let Some(store) = store else {
             return placement_simple_error("no_world", "no world placement store is open");
         };
+        if let Some(runtime) = population.as_mut() {
+            runtime.sync(&completed_slots(&store, &construction));
+            if let Err(error) = runtime.validate() {
+                return placement_simple_error("invalid_population", error.to_string());
+            }
+        }
         let json = match store.to_json_pretty() {
             Ok(json) => json,
             Err(error) => return placement_error_result(&error),
@@ -2539,8 +2537,8 @@ impl TownsmithCore {
         *roads_guard = roads;
         *lots_guard = lots;
         *settlements_guard = settlements;
-        *population_guard = Some(population);
         *guard = Some(store);
+        *population_guard = Some(population);
         *deltas_guard = deltas;
         *self
             .terrain_seed
