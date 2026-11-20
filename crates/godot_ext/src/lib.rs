@@ -28,7 +28,7 @@ use core_city::{CityLayout, CityTier};
 use core_rooms::{
     detect_rooms, PropInput, PropKind, RoomBounds, RoomMaterials, RoomStats, FLOOR_BAND_M,
 };
-use core_voxel::coords::{MaterialId, CHUNK_SIZE, VOXEL_SIZE_M};
+use core_voxel::coords::{MaterialId, AIR, CHUNK_SIZE, VOXEL_SIZE_M};
 use core_voxel::demo;
 use core_voxel::mesh::{greedy_mesh, MeshBuffers};
 use core_voxel::volume::{VolumeConfig, VolumePos, VoxelVolume, MAX_CHUNKS, MAX_CHUNKS_PER_AXIS};
@@ -109,6 +109,7 @@ fn prop_kind_from_id(id: &str) -> Option<PropKind> {
         "base:table" => Some(PropKind::Table),
         "base:sofa" => Some(PropKind::Sofa),
         "base:desk" => Some(PropKind::Desk),
+        "base:prop" => Some(PropKind::Other),
         _ => None,
     }
 }
@@ -159,8 +160,10 @@ fn blueprint_from_editor_volume(
         job_slots: stats.job_slots,
         class: stats.class.clone(),
     };
-    metadata.props = props
-        .iter()
+    let mut ordered: Vec<&EditorProp> = props.iter().collect();
+    ordered.sort_by_key(|prop| (prop.cell[1], prop.cell[2], prop.cell[0]));
+    metadata.props = ordered
+        .into_iter()
         .map(|prop| PropRecord {
             id: prop_id(prop.kind).to_string(),
             position: [
@@ -922,7 +925,10 @@ impl TownsmithCore {
         let Some(state) = guard.as_mut() else {
             return false;
         };
-        if state.volume.get_voxel(pos).ok() != Some(0) {
+        if state.volume.get_voxel(pos).ok() != Some(AIR) {
+            return false;
+        }
+        if !rotation.is_finite() {
             return false;
         }
         let cell = [pos.x, pos.y, pos.z];
@@ -930,7 +936,7 @@ impl TownsmithCore {
         state.props.push(EditorProp {
             kind,
             cell,
-            rotation: rotation as f32,
+            rotation: (rotation as f32).rem_euclid(360.0),
         });
         true
     }
@@ -1102,7 +1108,7 @@ impl TownsmithCore {
             &PackedFloat32Array::from(blueprint.metadata.bounds_m.to_vec()).to_variant(),
         );
         result.set("rooms", blueprint.metadata.rooms.len() as i64);
-        result.set("props", blueprint.metadata.props.len() as i64);
+        result.set("props", props.len() as i64);
         result
     }
 
@@ -1168,6 +1174,9 @@ impl TownsmithCore {
                 })
             })
             .collect();
+        let mut seen = std::collections::HashSet::new();
+        state.props.retain(|prop| seen.insert(prop.cell));
+        let loaded_props = state.props.len();
         let mut guard = self
             .editor
             .lock()
@@ -1180,7 +1189,7 @@ impl TownsmithCore {
         result.set("solid_voxels", solid_voxels as i64);
         result.set("bounds", &bounds.to_variant());
         result.set("rooms", rooms);
-        result.set("props", blueprint.metadata.props.len() as i64);
+        result.set("props", loaded_props as i64);
         result.set("name", name);
         result.set("id", id);
         result
@@ -1711,6 +1720,23 @@ mod tests {
         assert_eq!(loaded.metadata.materials, blueprint.metadata.materials);
         assert_eq!(loaded.metadata.stats, blueprint.metadata.stats);
         assert_eq!(loaded.metadata.props, blueprint.metadata.props);
+    }
+
+    #[test]
+    fn prop_ids_round_trip() {
+        for kind in [
+            PropKind::Bed,
+            PropKind::Stove,
+            PropKind::Toilet,
+            PropKind::Shower,
+            PropKind::Sink,
+            PropKind::Table,
+            PropKind::Sofa,
+            PropKind::Desk,
+            PropKind::Other,
+        ] {
+            assert_eq!(prop_kind_from_id(prop_id(kind)), Some(kind));
+        }
     }
 
     #[test]

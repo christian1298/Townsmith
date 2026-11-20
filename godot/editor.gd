@@ -152,9 +152,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		if key == KEY_R:
 			_toggle_room_overlay()
 			return
-		for entry in PROPS:
-			if key == int(entry["kind"]) + 6:
-				_select_prop(int(entry["kind"]))
+		for index in PROPS.size():
+			if key == KEY_6 + index:
+				_select_prop(int(PROPS[index]["kind"]))
 				return
 		# Use keycode (layout-aware), not physical_keycode: on QWERTZ the
 		# labelled Z/Y keys sit at the opposite physical positions.
@@ -339,8 +339,12 @@ func _add_prop_node(kind: int, cell: Vector3i) -> void:
 		(cell.z + 0.5) * VOXEL_SIZE_M,
 	)
 	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var key := _prop_key(cell)
+	var previous: Node = _prop_nodes.get(key)
+	if previous != null:
+		previous.queue_free()
 	_prop_root.add_child(instance)
-	_prop_nodes[_prop_key(cell)] = instance
+	_prop_nodes[key] = instance
 
 func _prop_key(cell: Vector3i) -> String:
 	return "%d:%d:%d" % [cell.x, cell.y, cell.z]
@@ -737,10 +741,11 @@ func _update_palette_label() -> void:
 		var marker := ">" if id == _active_material and _active_prop < 0 else " "
 		lines.append("%s %d  %s" % [marker, id, str(entry["name"])])
 	lines.append("Props  (keys 6-9)")
-	for entry in PROPS:
+	for index in PROPS.size():
+		var entry: Dictionary = PROPS[index]
 		var kind := int(entry["kind"])
 		var marker := ">" if kind == _active_prop else " "
-		lines.append("%s %d  %s" % [marker, kind + 6, str(entry["name"])])
+		lines.append("%s %d  %s" % [marker, 6 + index, str(entry["name"])])
 	_palette_label.text = "\n".join(lines)
 
 func _refresh_stats_label(build_ms: float = -1.0) -> void:
@@ -941,6 +946,8 @@ func _run_blueprint_smoke() -> void:
 			status = "load_rooms"
 		elif int(loaded.get("props", -1)) != 1:
 			status = "load_props"
+		elif int(_core.editor_props().get("props", []).size()) != 1:
+			status = "load_prop_state"
 		var bounds: PackedFloat32Array = loaded.get("bounds", PackedFloat32Array())
 		if status == "ok" and bounds.size() != 3:
 			status = "load_bounds"

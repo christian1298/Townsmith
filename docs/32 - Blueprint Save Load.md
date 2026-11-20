@@ -82,7 +82,7 @@ The hash depends on the smoke volume, not the golden test-house hash.
 - `Blueprint::new` synchronizes bounds and solid count from the volume.
 - `save_tsbp` recomputes the canonical hash, writes `blueprint.json` + `voxels.bin`, and stores the zip uncompressed in v1.
 - `load_tsbp` verifies version, hash, bounds, solid count, dependencies, duplicate entries, and size limits.
-- The editor runs room detection on save and writes rooms, material counts, and resident/job stats into the metadata. Props remain empty until prop placement lands.
+- The editor runs room detection on save and writes rooms, material counts, resident/job stats, and the placed prop list into the metadata. Load restores props before recomputing room stats.
 - A failed save leaves the previous file untouched (atomic temp + rename).
 - A failed load leaves the current editor volume untouched.
 
