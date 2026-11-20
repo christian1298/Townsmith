@@ -28,10 +28,10 @@ use core_blueprint::{
 };
 use core_city::{
     normalize_rotation, summarize, CityLayout, CityRuntime, CitySummary, CityTier,
-    ConstructionSite, ConstructionStore, Home, Lot, LotError, LotRequest, LotStore, Placement,
-    PlacementError, PlacementRequest, PlacementStore, RoadError, RoadRequest, RoadSegment,
-    RoadStore, Settlement, SettlementError, SettlementRequest, SettlementStore, Workplace, Zone,
-    MAX_WORLD_COORD_M,
+    ConstructionSite, ConstructionStore, Economy, Home, Lot, LotError, LotRequest, LotStore,
+    Placement, PlacementError, PlacementRequest, PlacementStore, RoadError, RoadRequest,
+    RoadSegment, RoadStore, Settlement, SettlementError, SettlementRequest, SettlementStore,
+    Workplace, Zone, MAX_WORLD_COORD_M,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -507,6 +507,7 @@ struct TownsmithCore {
     lots: Mutex<Option<LotStore>>,
     settlements: Mutex<Option<SettlementStore>>,
     population: Mutex<Option<CityRuntime>>,
+    economy: Mutex<Option<Economy>>,
     terrain_deltas: Arc<RwLock<DeltaStore>>,
     terrain_seed: Mutex<Option<u64>>,
 }
@@ -522,6 +523,7 @@ impl Default for TownsmithCore {
             lots: Mutex::new(None),
             settlements: Mutex::new(None),
             population: Mutex::new(None),
+            economy: Mutex::new(None),
             terrain_deltas: Arc::new(RwLock::new(DeltaStore::new())),
             terrain_seed: Mutex::new(None),
         }
@@ -2043,6 +2045,148 @@ impl TownsmithCore {
         GString::from(&format!("{checksum:016x}"))
     }
 
+    /// Return the treasury state.
+    #[func]
+    fn economy_state(&self) -> VarDictionary {
+        let summary = self.city_summary();
+        let population = summary
+            .get("population")
+            .map_or(0, |value| value.to::<i64>()) as u64;
+        let employed = summary.get("employed").map_or(0, |value| value.to::<i64>()) as u64;
+        let buildings = summary
+            .get("completed_buildings")
+            .map_or(0, |value| value.to::<i64>()) as u64;
+        let guard = self
+            .economy
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        match guard.as_ref() {
+            Some(economy) => {
+                result.set("open", true);
+                result.set("seed", economy.seed as i64);
+                result.set("balance", economy.balance);
+                result.set("tax_per_resident_per_day", economy.tax_per_resident_per_day);
+                result.set(
+                    "business_tax_per_job_per_day",
+                    economy.business_tax_per_job_per_day,
+                );
+                result.set(
+                    "upkeep_per_building_per_day",
+                    economy.upkeep_per_building_per_day,
+                );
+                result.set("construction_spent", economy.construction_spent);
+                result.set("days_elapsed", economy.days_elapsed);
+                result.set(
+                    "daily_net",
+                    economy.daily_net(population, employed, buildings),
+                );
+                result.set("bankrupt", economy.bankrupt);
+                result.set(
+                    "checksum",
+                    &GString::from(&format!("{:016x}", economy.checksum())),
+                );
+            }
+            None => {
+                result.set("open", false);
+                result.set("seed", 0);
+                result.set("balance", 0.0);
+                result.set("bankrupt", false);
+                result.set("checksum", &GString::from("0000000000000000"));
+            }
+        }
+        result
+    }
+
+    /// Advance taxes, wages, and upkeep by `seconds`.
+    #[func]
+    fn economy_tick(&self, seed: i64, seconds: f64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        if !seconds.is_finite() || !(0.0..=core_city::MAX_ECONOMY_TICK_SECONDS).contains(&seconds) {
+            return placement_simple_error("invalid_delta", "economy delta is outside 0..=86400");
+        }
+        let summary = self.city_summary();
+        let population = summary
+            .get("population")
+            .map_or(0, |value| value.to::<i64>()) as u64;
+        let employed = summary.get("employed").map_or(0, |value| value.to::<i64>()) as u64;
+        let buildings = summary
+            .get("completed_buildings")
+            .map_or(0, |value| value.to::<i64>()) as u64;
+        let mut guard = self
+            .economy
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if guard.as_ref().is_some_and(|economy| economy.seed != seed) {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the treasury belongs to a different seed",
+            );
+        }
+        let economy = guard.get_or_insert_with(|| Economy::new(seed));
+        let tick = economy.tick(seconds, population, employed, buildings);
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("income", tick.income);
+        result.set("expenses", tick.expenses);
+        result.set("balance", tick.balance);
+        result.set("days_elapsed", tick.days_elapsed);
+        result.set("bankrupt", tick.bankrupt);
+        result.set(
+            "checksum",
+            &GString::from(&format!("{:016x}", economy.checksum())),
+        );
+        result
+    }
+
+    /// Set the resident and business tax rates.
+    #[func]
+    fn economy_set_taxes(&self, seed: i64, resident: f64, business: f64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        let mut guard = self
+            .economy
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if guard.as_ref().is_some_and(|economy| economy.seed != seed) {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the treasury belongs to a different seed",
+            );
+        }
+        {
+            let economy = guard.get_or_insert_with(|| Economy::new(seed));
+            economy.set_taxes(resident, business);
+        }
+        drop(guard);
+        self.economy_state()
+    }
+
+    /// Stable treasury checksum.
+    #[func]
+    fn economy_checksum(&self) -> GString {
+        let guard = self
+            .economy
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checksum = guard.as_ref().map_or(0, Economy::checksum);
+        GString::from(&format!("{checksum:016x}"))
+    }
+
+    /// Clear the treasury and keep no open economy.
+    #[func]
+    fn economy_clear(&self) -> bool {
+        *self
+            .economy
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        true
+    }
+
     /// Set the shared crew pool. Values above 64 are rejected.
     #[func]
     fn construction_set_crew(&self, crew_capacity: i64) -> bool {
@@ -2099,7 +2243,7 @@ impl TownsmithCore {
             Ok(path) => path,
             Err(error) => return placement_simple_error("invalid_save_path", error),
         };
-        let (store, construction, roads, lots, settlements, mut population) = {
+        let (store, construction, roads, lots, settlements, mut population, economy) = {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             let construction = self
                 .construction
@@ -2115,6 +2259,10 @@ impl TownsmithCore {
                 .population
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
+            let economy = self
+                .economy
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             (
                 world.as_ref().cloned(),
                 construction.clone(),
@@ -2122,6 +2270,7 @@ impl TownsmithCore {
                 lots.as_ref().cloned(),
                 settlements.as_ref().cloned(),
                 population.as_ref().cloned(),
+                economy.as_ref().cloned(),
             )
         };
         let Some(store) = store else {
@@ -2222,6 +2371,21 @@ impl TownsmithCore {
                     );
                 }
                 match attach_settlements(&json, settlements) {
+                    Ok(json) => json,
+                    Err(error) => return placement_simple_error("save_failed", error),
+                }
+            }
+            None => json,
+        };
+        let json = match economy.as_ref() {
+            Some(economy) => {
+                if economy.seed != store.seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the treasury belongs to a different seed",
+                    );
+                }
+                match attach_economy(&json, economy) {
                     Ok(json) => json,
                     Err(error) => return placement_simple_error("save_failed", error),
                 }
@@ -2407,6 +2571,21 @@ impl TownsmithCore {
                 );
             }
         }
+        let economy = match economy_from_world_json(&json) {
+            Ok(economy) => economy,
+            Err((code, error)) => return placement_simple_error(code, error),
+        };
+        if let Some(economy) = economy.as_ref() {
+            if economy.seed != expected_seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    format!(
+                        "the treasury uses seed {} but this world is {expected_seed}",
+                        economy.seed
+                    ),
+                );
+            }
+        }
         let store = match PlacementStore::from_json(&json) {
             Ok(store) => store,
             Err(error) => return placement_error_result(&error),
@@ -2537,6 +2716,10 @@ impl TownsmithCore {
             .population
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let mut economy_guard = self
+            .economy
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut deltas_guard = self
             .terrain_deltas
             .write()
@@ -2547,6 +2730,7 @@ impl TownsmithCore {
         *settlements_guard = settlements;
         *guard = Some(store);
         *population_guard = Some(population);
+        *economy_guard = economy;
         *deltas_guard = deltas;
         *self
             .terrain_seed
@@ -3847,6 +4031,27 @@ fn settlements_from_world_json(
     Ok(Some(store))
 }
 
+fn attach_economy(json: &str, economy: &Economy) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    value["economy"] = serde_json::to_value(economy).map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+}
+
+fn economy_from_world_json(json: &str) -> Result<Option<Economy>, (&'static str, String)> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| ("invalid_json", error.to_string()))?;
+    let Some(raw) = value.get("economy") else {
+        return Ok(None);
+    };
+    let economy: Economy = serde_json::from_value(raw.clone())
+        .map_err(|error| ("invalid_economy", error.to_string()))?;
+    economy
+        .validate()
+        .map_err(|error| ("invalid_economy", error.to_string()))?;
+    Ok(Some(economy))
+}
+
 fn attach_terrain_deltas(json: &str, bytes: &[u8], checksum: u64) -> Result<String, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(json).map_err(|error| error.to_string())?;
@@ -4598,6 +4803,27 @@ mod tests {
         assert!(settlements_from_world_json("{}")
             .expect("old save")
             .is_none());
+    }
+
+    #[test]
+    fn economy_world_json_round_trips_and_old_saves_are_closed() {
+        let mut economy = Economy::new(2026);
+        economy.tick(3600.0, 50, 40, 10);
+        let json = attach_economy("{}", &economy).expect("attach");
+        let decoded = economy_from_world_json(&json)
+            .expect("parse")
+            .expect("present");
+        assert!((decoded.balance - economy.balance).abs() < 0.001);
+        assert!(economy_from_world_json("{}").expect("old save").is_none());
+    }
+
+    #[test]
+    fn economy_world_json_rejects_invalid_balance() {
+        let mut economy = Economy::new(2026);
+        economy.balance = f64::NAN;
+        let json = serde_json::to_string(&serde_json::json!({"economy": economy})).expect("json");
+        let error = economy_from_world_json(&json).expect_err("reject");
+        assert_eq!(error.0, "invalid_economy");
     }
 
     #[test]

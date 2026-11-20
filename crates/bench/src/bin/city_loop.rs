@@ -5,8 +5,8 @@
 //! step, then prints a stable JSON summary and checksum.
 
 use core_city::{
-    summarize, CityRuntime, ConstructionStore, Home, Placement, PlacementPlan, PlacementRequest,
-    PlacementStore, Workplace,
+    summarize, CityRuntime, ConstructionStore, Economy, Home, Placement, PlacementPlan,
+    PlacementRequest, PlacementStore, Workplace,
 };
 
 const DEFAULT_DAYS: u64 = 30;
@@ -77,6 +77,7 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
 
     let mut runtime = CityRuntime::new(seed);
     runtime.set_move_in_per_second(5.0);
+    let mut economy = Economy::new(seed);
     let step_count = (days as f64 * 86_400.0 / step).ceil() as u64;
     for _ in 0..step_count {
         construction.tick(step);
@@ -109,6 +110,12 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
             })
             .collect::<Vec<_>>();
         runtime.tick_with_workplaces(step, &homes, &workplaces);
+        let completed = construction
+            .sites
+            .values()
+            .filter(|site| site.is_complete())
+            .count() as u64;
+        economy.tick(step, runtime.population(), runtime.workers(), completed);
     }
 
     let summary = summarize(&placements, &construction, &runtime, 0);
@@ -135,6 +142,10 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
         "construction_sites": summary.construction_sites,
         "population_checksum": format!("{:016x}", runtime.checksum()),
         "construction_checksum": format!("{:016x}", construction.checksum()),
+        "balance": economy.balance,
+        "daily_net": economy.daily_net(summary.population, summary.employed, summary.completed_buildings as u64),
+        "bankrupt": economy.bankrupt,
+        "economy_checksum": format!("{:016x}", economy.checksum()),
     });
     let checksum = checksum_json(&result);
     result["checksum"] = serde_json::Value::String(format!("{checksum:016x}"));
@@ -176,7 +187,10 @@ mod tests {
         assert_eq!(result["employed"], 50);
         assert_eq!(result["completed_buildings"], 5);
         assert_eq!(result["construction_sites"], 0);
+        assert!(result["balance"].as_f64().expect("balance") < 100_000.0);
+        assert_eq!(result["bankrupt"], false);
         assert!(result["construction_checksum"].as_str().is_some());
+        assert!(result["economy_checksum"].as_str().is_some());
         assert_eq!(result["checksum"], simulate(1, 5, 60.0)["checksum"]);
     }
 }

@@ -32,6 +32,7 @@
 #![forbid(unsafe_code)]
 
 pub mod construction;
+pub mod economy;
 pub mod lot;
 pub mod metrics;
 pub mod placement;
@@ -46,6 +47,12 @@ pub use construction::{
     total_seconds_for, ConstructionError, ConstructionPhase, ConstructionSite, ConstructionStore,
     ConstructionTick, CONSTRUCTION_FORMAT_VERSION, MAX_SITES as MAX_CONSTRUCTION_SITES,
     MAX_TICK_SECONDS,
+};
+pub use economy::{
+    Economy, EconomyError, EconomyTick, BANKRUPTCY_THRESHOLD, DAY_SECONDS,
+    DEFAULT_BUSINESS_TAX_PER_JOB_PER_DAY, DEFAULT_TAX_PER_RESIDENT_PER_DAY,
+    DEFAULT_UPKEEP_PER_BUILDING_PER_DAY, ECONOMY_FORMAT_VERSION, MAX_ECONOMY_TICK_SECONDS,
+    STARTING_BALANCE,
 };
 pub use lot::{
     Lot, LotError, LotRequest, LotStore, Zone, LOT_FORMAT_VERSION, LOT_ROAD_GAP_M, MAX_LOTS,

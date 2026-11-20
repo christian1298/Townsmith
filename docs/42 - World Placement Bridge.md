@@ -186,7 +186,7 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 
 - `core_city`: placement persistence, construction, roads, lots, and settlements; **75 tests**.
 - `godot_ext`: **32 tests** total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
-- Workspace: **278 tests + 1 doctest**.
+- Workspace: **286 tests + 1 doctest**.
 - Godot headless: `WORLD_PLACEMENT ... status=ok` and `WORLD_SCENE ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 

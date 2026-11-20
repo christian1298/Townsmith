@@ -768,6 +768,17 @@ func _update_hud() -> void:
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
 	var construction: Dictionary = core.construction_summary()
 	var city: Dictionary = core.city_summary()
+	var economy: Dictionary = core.economy_state()
+	var treasury_text := "—"
+	if bool(economy.get("open", false)):
+		var net := float(economy.get("daily_net", 0.0))
+		var net_text := ("+" if net >= 0.0 else "") + "%.0f" % net
+		treasury_text = "%.0f balance · %s/day · tax %.0f/%.0f" % [
+			float(economy.get("balance", 0.0)),
+			net_text,
+			float(economy.get("tax_per_resident_per_day", 0.0)),
+			float(economy.get("business_tax_per_job_per_day", 0.0)),
+		]
 	var happiness_text := "—"
 	var needs_text := "—"
 	if int(city.get("population", 0)) > 0:
@@ -777,7 +788,7 @@ func _update_hud() -> void:
 			float(city.get("water", 0.0)) * 100.0,
 			float(city.get("rest", 0.0)) * 100.0,
 		]
-	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
+	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
 		selected_line,
 		int(target_x),
 		int(target_z),
@@ -797,6 +808,7 @@ func _update_hud() -> void:
 		float(city.get("average_commute_m", 0.0)),
 		float(city.get("daily_wages", 0.0)),
 		needs_text,
+		treasury_text,
 		int(construction.get("active", 0)),
 		int(construction.get("stalled", 0)),
 		int(construction.get("crew_capacity", 0)),
@@ -1258,6 +1270,7 @@ func _advance_construction(seconds: float) -> Dictionary:
 		return {}
 	var report: Dictionary = core.construction_tick(seconds)
 	core.population_tick(SEED, seconds)
+	core.economy_tick(SEED, seconds)
 	_refresh_construction_visuals()
 	_update_hud()
 	return report
@@ -1612,6 +1625,7 @@ func _run_scene_smoke() -> void:
 				occupancy_after_ok = occupancy_after_ok and float(city_after.get("rest", 0.0)) > 0.0
 				if occupancy_after_ok:
 					var population_checksum: String = str(core.population_checksum())
+					var economy_checksum: String = str(core.economy_checksum())
 					var populated := _save_world()
 					core.population_clear()
 					var reloaded := _load_world()
@@ -1629,6 +1643,8 @@ func _run_scene_smoke() -> void:
 						occupancy_after_ok = occupancy_after_ok and absf(float(saved_household.get("commute_m", -1.0))) < 0.001
 						occupancy_after_ok = occupancy_after_ok and absf(float(saved_household.get("income_per_day", 0.0)) - 40.0) < 0.01
 					occupancy_after_ok = occupancy_after_ok and str(core.population_checksum()) == population_checksum
+					occupancy_after_ok = occupancy_after_ok and str(core.economy_checksum()) == economy_checksum
+					occupancy_after_ok = occupancy_after_ok and bool(core.economy_state().get("open", false))
 				if not build_done_ok:
 					status = "construction_complete_failed"
 				elif not (occupancy_before_ok and occupancy_after_ok):
