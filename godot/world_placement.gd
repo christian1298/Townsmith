@@ -431,13 +431,14 @@ func _update_hud() -> void:
 		]
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
 	var construction: Dictionary = core.construction_summary()
-	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Terrain edits: %d   Construction: %d active / %d stalled\nCrew: %d   Materials: %d L   Save: %s" % [
+	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Terrain edits: %d   Construction: %d active / %d stalled\nCrew: %d   Materials: %d L   Save: %s" % [
 		selected_line,
 		int(target_x),
 		int(target_z),
 		rotation_deg,
 		state,
 		core.world_placement_count(),
+		core.road_count(),
 		core.terrain_delta_count(),
 		int(construction.get("active", 0)),
 		int(construction.get("stalled", 0)),
@@ -893,6 +894,7 @@ func _run_scene_smoke() -> void:
 	var rotation_ok := false
 	var edit_ok := false
 	var place_ok := false
+	var road_ok := false
 	var select_ok := false
 	var enter_ok := false
 	var return_ok := false
@@ -943,6 +945,14 @@ func _run_scene_smoke() -> void:
 		place_ok = absf(node.rotation_degrees.y - 90.0) < 0.001 and _foundation_matches_bounds(node)
 	if not place_ok and status == "ok":
 		status = "place_failed:" + preview_error
+
+	if status == "ok":
+		var bad_road: Dictionary = core.road_validate(SEED, 120, 128, 136, 128, 8)
+		road_ok = not bool(bad_road.get("ok", true)) and str(bad_road.get("error_code", "")) == "water"
+		var added_road: Dictionary = core.road_add(SEED, 180, 125, 200, 125, 8)
+		road_ok = road_ok and bool(added_road.get("ok", false)) and core.road_count() == 1
+		if not road_ok:
+			status = "road_failed:" + str(added_road.get("error_code", bad_road.get("error_code", "")))
 
 	if status == "ok":
 		var site := _construction_site_for(1)
@@ -998,8 +1008,10 @@ func _run_scene_smoke() -> void:
 		if not save_ok:
 			status = "save_failed"
 
+	var road_checksum := ""
 	if status == "ok":
 		var edit_checksum := str(core.terrain_delta_checksum())
+		road_checksum = str(core.road_checksum())
 		_clear_placements()
 		clear_ok = core.world_placement_count() == 0 and placed_root.get_child_count() == 0
 		clear_ok = clear_ok and core.construction_summary().sites == 0
@@ -1007,7 +1019,8 @@ func _run_scene_smoke() -> void:
 			status = "clear_failed"
 		else:
 			core.terrain_clear_deltas()
-			if core.terrain_delta_count() != 0:
+			core.road_clear()
+			if core.terrain_delta_count() != 0 or core.road_count() != 0:
 				status = "delta_clear_failed"
 			load_ok = _load_world() and core.world_placement_count() == 1 and placed_root.get_child_count() == 1
 			if load_ok:
@@ -1017,6 +1030,8 @@ func _run_scene_smoke() -> void:
 				load_ok = load_ok and absf(core.world_height_at(SEED, FIXTURE_X, FIXTURE_Z) - 42.0) < 0.001
 				load_ok = load_ok and str(core.terrain_delta_checksum()) == edit_checksum
 				load_ok = load_ok and core.terrain_deltas_seed() == SEED
+				load_ok = load_ok and core.road_count() == 1
+				load_ok = load_ok and str(core.road_checksum()) == road_checksum
 				load_ok = load_ok and construction_nodes.has(1) and not placed_nodes.is_empty()
 				var loaded_site := _construction_site_for(1)
 				load_ok = load_ok and absf(float(loaded_site.get("progress", -1.0)) - saved_site_progress) < 0.001
@@ -1060,13 +1075,14 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s build=%s done=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s build=%s done=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
 		"ok" if rotation_ok else "failed",
 		"ok" if edit_ok else "failed",
 		"ok" if place_ok else "failed",
+		"ok" if road_ok else "failed",
 		"ok" if build_ok else "failed",
 		"ok" if build_done_ok else "failed",
 		"ok" if select_ok else "failed",
