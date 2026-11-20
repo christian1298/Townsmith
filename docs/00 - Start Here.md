@@ -47,7 +47,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with real 10 cm building detail is tractable. The box-city MultiMesh path is measured well above target on an RTX 4080; the target 3060-class run and voxel building LOD remain. See [[03 - Voxel and Scale]], [[23 - City Rendering Benchmark]], and [[09 - Open Questions]]. |
-| Next action | Wire room metadata into the editor stats/overlay, add undo/redo, then run the 21-house slice benchmark. Keep the 3060-class 1M gate for Phase 5. See [[26 - Vertical Slice Spec]]. |
+| Next action | Add prop placement, undo/redo, EN/DE editor strings, then run the 21-house slice benchmark. Keep the 3060-class 1M gate for Phase 5. See [[26 - Vertical Slice Spec]]. |
 
 > [!warning] This is a plan, not a commitment
 > Numbers in these docs are **planning targets**, not measured results. Anything marked *Assumption* or *Proposed* must be validated before it becomes an accepted decision.
@@ -196,3 +196,5 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 | [[30 - Editor Shell]] | First-person editor controls, raycast, palette, debounce, smoke | You work on the editor |
 | [[31 - Room Detection]] | Room flood fill, props, capacity, material stats | You work on rooms or stats |
 | [[32 - Blueprint Save Load]] | Editor `.tsbp` save/load bridge, UI, smoke, limits | You work on blueprint persistence |
+| [[33 - Blueprint Room Metadata]] | Save-time rooms, materials, capacity/jobs in `.tsbp` | You work on blueprint gameplay metadata |
+| [[34 - Room Overlay]] | Editor room boxes/labels, bridge bounds/centers, smoke | You work on room visualization |

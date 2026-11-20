@@ -42,3 +42,25 @@ if [[ -z "$QUADS" || "$QUADS" -lt 1 ]]; then
 	echo "Editor smoke failed: no mesh quads in '$LINE'" >&2
 	exit 1
 fi
+
+set +e
+OUTPUT="$(timeout 60s "$GODOT_BIN" --headless --path "$ROOT/godot" res://editor.tscn -- --room-overlay-smoke 2>&1)"
+GODOT_STATUS=$?
+set -e
+printf '%s\n' "$OUTPUT"
+if [[ $GODOT_STATUS -ne 0 ]]; then
+	echo "Room overlay smoke failed: Godot exited with status $GODOT_STATUS" >&2
+	exit 1
+fi
+LINE="$(grep "ROOM_OVERLAY_SMOKE " <<<"$OUTPUT" | tail -1 || true)"
+if [[ -z "$LINE" ]]; then
+	echo "Room overlay smoke failed: no marker" >&2
+	exit 1
+fi
+ROOMS="$(sed -n 's/.*rooms=\([0-9][0-9]*\).*/\1/p' <<<"$LINE")"
+NODES="$(sed -n 's/.*nodes=\([0-9][0-9]*\).*/\1/p' <<<"$LINE")"
+STATUS="$(sed -n 's/.*status=\([a-z_]*\).*/\1/p' <<<"$LINE")"
+if [[ "$ROOMS" != "1" || "$NODES" -lt 1 || "$STATUS" != "ok" ]]; then
+	echo "Room overlay smoke contract mismatch: $LINE" >&2
+	exit 1
+fi

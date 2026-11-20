@@ -83,7 +83,7 @@ fn blueprint_from_editor_volume(id: String, name: String, volume: VoxelVolume) -
 fn room_stats_to_dictionary(stats: &RoomStats) -> VarDictionary {
     let mut result = VarDictionary::new();
     let mut rooms: Array<VarDictionary> = Array::new();
-    for room in &stats.rooms {
+    for (room, bounds) in stats.rooms.iter().zip(&stats.room_bounds) {
         let mut item = VarDictionary::new();
         item.set("id", room.id.clone());
         item.set("type", room.room_type.clone());
@@ -93,6 +93,25 @@ fn room_stats_to_dictionary(stats: &RoomStats) -> VarDictionary {
         item.set("beds", room.beds as i64);
         item.set("doors", room.doors as i64);
         item.set("windows", room.windows as i64);
+        let bounds_m = [
+            bounds.min_x as f32 * VOXEL_SIZE_M,
+            bounds.min_z as f32 * VOXEL_SIZE_M,
+            (bounds.max_x + 1) as f32 * VOXEL_SIZE_M,
+            (bounds.max_z + 1) as f32 * VOXEL_SIZE_M,
+        ];
+        let center_m = [
+            (bounds.min_x + bounds.max_x + 1) as f32 * 0.5 * VOXEL_SIZE_M,
+            (bounds.floor as f32 + 0.5) * 3.0,
+            (bounds.min_z + bounds.max_z + 1) as f32 * 0.5 * VOXEL_SIZE_M,
+        ];
+        item.set(
+            "bounds_m",
+            &PackedFloat32Array::from(bounds_m.to_vec()).to_variant(),
+        );
+        item.set(
+            "center_m",
+            &PackedFloat32Array::from(center_m.to_vec()).to_variant(),
+        );
         rooms.push(&item);
     }
     result.set("rooms", &rooms.to_variant());
@@ -784,10 +803,14 @@ impl TownsmithCore {
             .unwrap_or_else(|error| error.into_inner());
         let Some(state) = guard.as_ref() else {
             let mut result = VarDictionary::new();
+            result.set("ok", false);
             result.set("error", "no editor volume is open");
             return result;
         };
-        room_stats_to_dictionary(&detect_rooms(&state.volume, &editor_room_materials(), &[]))
+        let mut result =
+            room_stats_to_dictionary(&detect_rooms(&state.volume, &editor_room_materials(), &[]));
+        result.set("ok", true);
+        result
     }
 
     /// Save the current editor volume as a `.tsbp` package.
