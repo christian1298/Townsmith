@@ -58,6 +58,8 @@ pub struct LotStore {
 
 Lot requests are `LotRequest { bounds, zone }`. The store has `validate`, `add`, `remove`, `clear`, pretty JSON, parse/validate, and an FNV-1a checksum.
 
+Validation runs bounds/sides/area → cap → overlap → road frontage → terrain. The first failure is returned, so an overlapping water parcel reports `overlap`.
+
 ## 3. Validation
 
 | Check | Rule |
@@ -66,13 +68,13 @@ Lot requests are `LotRequest { bounds, zone }`. The store has `validate`, `add`,
 | Side | 4–100 m |
 | Area | 16–10,000 m² |
 | Water | every sampled cell is above `WATER_LEVEL_M = 24` |
-| Slope | sampled rise ≤ 2 m on a 2 m grid, including edges |
+| Slope | sampled rise ≤ 2 m on a 2 m grid, including the last cell inside the half-open lot |
 | Overlap | no positive-area overlap; shared edges are allowed |
 | Road frontage | the lot AABB must be within 2 m of a road corridor |
 | Cap | 100,000 lots per save |
 | IDs | positive, unique, below `next_id`, `next_id ≤ i64::MAX` |
 
-Road frontage uses `RoadStore::has_frontage(bounds, gap)`: each segment is expanded by half its width plus the gap, then tested against the lot AABB. It is a conservative parcel check, not a driveway or access simulation.
+Road frontage uses `RoadStore::has_frontage(bounds, gap)`: each segment expands **perpendicular to its axis** by ceil(width/2) plus the gap, with no slack past its endpoints, then tests the lot AABB. This is a parcel corridor check, not a driveway or access simulation.
 
 ## 4. Bridge
 
@@ -86,7 +88,7 @@ Road frontage uses `RoadStore::has_frontage(bounds, gap)`: each segment is expan
 
 `world_save` embeds a `lots` object and reports `lots` + `lot_checksum`. `world_load` accepts old saves without the field (lots closed), verifies the lot seed, and replaces lots with placements, roads, construction, and deltas only after the whole file passes.
 
-Lot loading validates structure and ids but does **not** re-run terrain or road-frontage checks. A later terrain edit or road removal can invalidate an old parcel; the gameplay layer must revalidate before growth.
+Lot loading validates structure, sides/area, ids, and id order, but does **not** re-run terrain, road frontage, or lot-to-lot overlap. A hand-edited save can contain overlapping parcels; a later terrain edit or road removal can invalidate an old parcel. The gameplay layer must revalidate before growth.
 
 ## 5. Scene
 
@@ -109,7 +111,7 @@ The streamed placement shell adds a lot layer under the buildings:
 
 - a lot without road frontage is rejected;
 - a valid lot near the test road is added;
-- exactly one lot node exists and its box matches the bounds;
+- exactly one lot node exists with the expected bounds, centre, and zone material;
 - save/clear/load restores the lot count, checksum, and box;
 - a failed load leaves the lot count and checksum unchanged.
 
@@ -131,7 +133,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 - No building growth, density, height, or use mix.
 - No ownership, tenants, land value, taxes, or services.
 - Lots may overlap roads and placements; only lot-to-lot overlap is checked.
-- Lot load does not revalidate terrain or frontage.
+- Lot load does not revalidate terrain, frontage, or lot-to-lot overlap.
 - HUD is English-only developer UI.
 - 4 m corner snap; no rotation, curves, or irregular parcels.
 

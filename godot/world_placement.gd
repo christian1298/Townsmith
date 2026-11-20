@@ -163,11 +163,14 @@ func _unhandled_input(event: InputEvent) -> void:
 				KEY_H:
 					_toggle_lot_mode()
 				KEY_1:
-					_set_lot_zone("residential")
+					if lot_mode:
+						_set_lot_zone("residential")
 				KEY_2:
-					_set_lot_zone("commercial")
+					if lot_mode:
+						_set_lot_zone("commercial")
 				KEY_3:
-					_set_lot_zone("industrial")
+					if lot_mode:
+						_set_lot_zone("industrial")
 				KEY_BACKSPACE:
 					if lot_mode:
 						core.lot_clear()
@@ -435,7 +438,7 @@ func _add_lot(min_x: int, min_z: int, max_x: int, max_z: int, zone: String) -> b
 	if not bool(result.get("ok", false)):
 		_set_modal("Lot rejected: " + str(result.get("error_code", "unknown")), true)
 		return false
-	_rebuild_lots()
+	_add_lot_node(result.get("lot", {}))
 	_update_hud()
 	return true
 
@@ -481,11 +484,16 @@ func _lot_node_matches(lot: Dictionary) -> bool:
 		return false
 	var box := node.mesh as BoxMesh
 	var bounds: PackedInt32Array = lot.get("bounds", PackedInt32Array())
-	if bounds.size() != 4:
+	var center: PackedFloat32Array = lot.get("center", PackedFloat32Array())
+	if bounds.size() != 4 or center.size() != 2:
 		return false
+	var zone := str(lot.get("zone", "residential"))
 	return (
 		absf(box.size.x - float(bounds[2] - bounds[0])) < 0.001
 		and absf(box.size.z - float(bounds[3] - bounds[1])) < 0.001
+		and absf(node.position.x - center[0]) < 0.001
+		and absf(node.position.z - center[1]) < 0.001
+		and node.material_override == lot_materials.get(zone)
 	)
 
 func _ensure_blueprint() -> bool:
@@ -1103,9 +1111,10 @@ func _save_world() -> bool:
 	var result: Dictionary = core.world_save(save_path)
 	var ok := bool(result.get("ok", false))
 	if ok:
-		_set_modal("Saved %d placement(s), %d terrain edit(s), %d site(s) to %s" % [
+		_set_modal("Saved %d placement(s), %d edit(s), %d site(s), %d road(s), %d lot(s) to %s" % [
 			core.world_placement_count(), core.terrain_delta_count(),
-			int(result.get("construction_sites", 0)), save_path
+			int(result.get("construction_sites", 0)), core.road_count(),
+			core.lot_count(), save_path
 		], false)
 	else:
 		_set_modal("Save failed: " + str(result.get("error_code", result.get("error", ""))), true)

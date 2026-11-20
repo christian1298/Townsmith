@@ -1330,6 +1330,14 @@ impl TownsmithCore {
         let road_store = roads.as_ref().unwrap_or(&empty_roads);
         let created_world = world.is_none();
         let mut lots = self.lots.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = lots.as_ref() {
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the lot store belongs to a different seed",
+                );
+            }
+        }
         let created_lots = lots.is_none();
         let result = {
             let lot_store = lots.get_or_insert_with(|| LotStore::new(seed));

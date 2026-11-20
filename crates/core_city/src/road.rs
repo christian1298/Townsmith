@@ -291,11 +291,23 @@ impl RoadStore {
     pub fn has_frontage(&self, bounds: [i32; 4], gap: i32) -> bool {
         let [min_x, min_z, max_x, max_z] = bounds;
         for road in &self.roads {
-            let half = i32::from(road.width_m) / 2;
-            let road_min_x = road.start[0].min(road.end[0]) - half - gap;
-            let road_max_x = road.start[0].max(road.end[0]) + half + gap;
-            let road_min_z = road.start[1].min(road.end[1]) - half - gap;
-            let road_max_z = road.start[1].max(road.end[1]) + half + gap;
+            // Round odd widths up so the corridor covers the full road.
+            let half = (i32::from(road.width_m) + 1) / 2;
+            let (road_min_x, road_max_x, road_min_z, road_max_z) = if road.runs_along_x() {
+                (
+                    road.start[0].min(road.end[0]),
+                    road.start[0].max(road.end[0]),
+                    road.start[1].min(road.end[1]) - half - gap,
+                    road.start[1].max(road.end[1]) + half + gap,
+                )
+            } else {
+                (
+                    road.start[0].min(road.end[0]) - half - gap,
+                    road.start[0].max(road.end[0]) + half + gap,
+                    road.start[1].min(road.end[1]),
+                    road.start[1].max(road.end[1]),
+                )
+            };
             if road_min_x <= max_x
                 && road_max_x >= min_x
                 && road_min_z <= max_z
@@ -648,9 +660,21 @@ mod tests {
                 |_, _| 40,
             )
             .expect("road");
-        assert!(store.has_frontage([26, -2, 36, 2], 2));
-        assert!(!store.has_frontage([27, -2, 36, 2], 2));
+        assert!(store.has_frontage([18, -2, 30, 2], 2));
+        assert!(!store.has_frontage([21, -2, 30, 2], 2));
         assert!(store.has_frontage([10, 6, 20, 16], 2));
         assert!(!store.has_frontage([10, 7, 20, 16], 2));
+        assert!(!store.has_frontage([21, 6, 31, 16], 2));
+        let mut odd = RoadStore::new(1);
+        odd.add(
+            &RoadRequest {
+                start: [0, 0],
+                end: [20, 0],
+                width_m: 3,
+            },
+            |_, _| 40,
+        )
+        .expect("odd road");
+        assert!(odd.has_frontage([4, 2, 14, 12], 0));
     }
 }

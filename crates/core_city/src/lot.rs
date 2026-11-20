@@ -296,10 +296,6 @@ impl LotStore {
         if self.lots.len() >= MAX_LOTS {
             return Err(LotError::TooMany);
         }
-        if !roads.has_frontage(request.bounds, LOT_ROAD_GAP_M) {
-            return Err(LotError::NoRoadFrontage);
-        }
-        validate_terrain(request.bounds, height_at)?;
         if let Some(existing) = self
             .lots
             .iter()
@@ -307,6 +303,10 @@ impl LotStore {
         {
             return Err(LotError::Overlap { id: existing.id });
         }
+        if !roads.has_frontage(request.bounds, LOT_ROAD_GAP_M) {
+            return Err(LotError::NoRoadFrontage);
+        }
+        validate_terrain(request.bounds, height_at)?;
         Ok(())
     }
 
@@ -473,9 +473,12 @@ fn validate_terrain(bounds: [i32; 4], height_at: impl Fn(i64, i64) -> u16) -> Re
 }
 
 fn axis_points(start: i32, end: i32) -> Vec<i32> {
-    let mut points: Vec<i32> = (start..=end).step_by(2).collect();
-    if points.last() != Some(&end) {
-        points.push(end);
+    // Lot bounds are half-open, so sample `[start, end)` and include the last
+    // cell inside the parcel.
+    let mut points: Vec<i32> = (start..end).step_by(2).collect();
+    let last = end - 1;
+    if points.last() != Some(&last) {
+        points.push(last);
     }
     points
 }
@@ -544,9 +547,13 @@ mod tests {
             store.add(&flat_lot(), water, &roads()),
             Err(LotError::Water { x: 120, z: 130 })
         );
+        // `max_x` is outside the half-open parcel.
+        let max_edge_water = |x: i64, _z: i64| if x == 130 { 24 } else { 40 };
+        assert!(store.add(&flat_lot(), max_edge_water, &roads()).is_ok());
+        let mut steep_store = LotStore::new(2026);
         let steep = |x: i64, _z: i64| if x >= 125 { 43 } else { 40 };
         assert_eq!(
-            store.add(&flat_lot(), steep, &roads()),
+            steep_store.add(&flat_lot(), steep, &roads()),
             Err(LotError::SlopeTooSteep { rise: 3 })
         );
     }
