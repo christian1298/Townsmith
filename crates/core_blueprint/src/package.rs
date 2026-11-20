@@ -61,6 +61,7 @@ pub fn save_tsbp(path: &Path, blueprint: &Blueprint) -> Result<(), BlueprintErro
             limit: MAX_SOLID_VOXELS,
         });
     }
+    validate_metadata(&metadata)?;
     metadata.content_hash = compute_hash(&metadata, &voxels)?;
     let json = serde_json::to_vec_pretty(&metadata)?;
     if json.len() > MAX_METADATA_BYTES {
@@ -78,13 +79,8 @@ pub fn save_tsbp(path: &Path, blueprint: &Blueprint) -> Result<(), BlueprintErro
     }
 
     if let Err(error) = fs::rename(&temp, path) {
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
-            fs::remove_file(path)?;
-            fs::rename(&temp, path)?;
-        } else {
-            let _ = fs::remove_file(&temp);
-            return Err(error.into());
-        }
+        let _ = fs::remove_file(&temp);
+        return Err(error.into());
     }
     Ok(())
 }
@@ -109,6 +105,11 @@ fn write_package(path: &Path, json: &[u8], voxels: &[u8]) -> Result<(), Blueprin
 pub fn load_tsbp(path: &Path) -> Result<Blueprint, BlueprintError> {
     let file = File::open(path)?;
     let mut archive = zip::ZipArchive::new(file)?;
+    if archive.has_duplicate_names() {
+        return Err(BlueprintError::DuplicateEntry(
+            "duplicate package entry".to_string(),
+        ));
+    }
 
     let mut names = HashSet::new();
     for index in 0..archive.len() {
@@ -135,6 +136,7 @@ pub fn load_tsbp(path: &Path) -> Result<Blueprint, BlueprintError> {
             "blueprint is missing content_hash".to_string(),
         ));
     }
+    validate_metadata(&metadata)?;
 
     let voxels = read_entry(&mut archive, VOXEL_ENTRY, MAX_VOXEL_STREAM_BYTES as u64)?;
     let decoded = decode_voxels(&voxels)?;
@@ -172,13 +174,17 @@ pub fn load_tsbp(path: &Path) -> Result<Blueprint, BlueprintError> {
         });
     }
 
-    if !metadata.dependencies.game.is_empty()
-        && metadata.dependencies.game.contains('<')
-        && !metadata.dependencies.game.contains("0.1")
-    {
-        return Err(BlueprintError::MissingDependency(
-            metadata.dependencies.game.clone(),
-        ));
+    if !metadata.dependencies.mods.is_empty() {
+        return Err(BlueprintError::MissingDependency(format!(
+            "mods: {}",
+            metadata.dependencies.mods.join(", ")
+        )));
+    }
+    if !metadata.dependencies.resource_packs.is_empty() {
+        return Err(BlueprintError::MissingDependency(format!(
+            "resource packs: {}",
+            metadata.dependencies.resource_packs.join(", ")
+        )));
     }
 
     Ok(Blueprint {
@@ -187,14 +193,51 @@ pub fn load_tsbp(path: &Path) -> Result<Blueprint, BlueprintError> {
     })
 }
 
+fn validate_metadata(metadata: &BlueprintMetadata) -> Result<(), BlueprintError> {
+    if metadata.id.trim().is_empty() {
+        return Err(BlueprintError::Format("blueprint id is empty".to_string()));
+    }
+    if metadata.name.trim().is_empty() {
+        return Err(BlueprintError::Format(
+            "blueprint name is empty".to_string(),
+        ));
+    }
+    if metadata.bounds_m.iter().any(|value| !value.is_finite()) {
+        return Err(BlueprintError::Format(
+            "blueprint bounds contain a non-finite value".to_string(),
+        ));
+    }
+    for room in &metadata.rooms {
+        if !room.area_m2.is_finite() || !room.volume_m3.is_finite() {
+            return Err(BlueprintError::Format(format!(
+                "room {} contains a non-finite area or volume",
+                room.id
+            )));
+        }
+    }
+    for prop in &metadata.props {
+        if prop.position.iter().any(|value| !value.is_finite()) || !prop.rotation.is_finite() {
+            return Err(BlueprintError::Format(format!(
+                "prop {} contains a non-finite transform",
+                prop.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn read_entry(
     archive: &mut zip::ZipArchive<File>,
     name: &'static str,
     limit: u64,
 ) -> Result<Vec<u8>, BlueprintError> {
-    let mut entry = archive
-        .by_name(name)
-        .map_err(|_| BlueprintError::MissingEntry(name))?;
+    let mut entry = match archive.by_name(name) {
+        Ok(entry) => entry,
+        Err(zip::result::ZipError::FileNotFound) => {
+            return Err(BlueprintError::MissingEntry(name));
+        }
+        Err(error) => return Err(error.into()),
+    };
     let mut data = Vec::new();
     entry.by_ref().take(limit + 1).read_to_end(&mut data)?;
     if data.len() as u64 > limit {

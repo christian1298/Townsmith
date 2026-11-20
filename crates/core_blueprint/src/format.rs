@@ -56,11 +56,17 @@ pub fn encode_voxels(volume: &VoxelVolume) -> Result<Vec<u8>, BlueprintError> {
 
     for (pos, chunk) in chunks {
         let encoded = chunk.encode();
+        let palette_len = u16::try_from(encoded.palette.len()).map_err(|_| {
+            BlueprintError::Format("chunk palette exceeds the u16 length field".to_string())
+        })?;
+        let run_count = u16::try_from(encoded.runs.len()).map_err(|_| {
+            BlueprintError::Format("chunk run count exceeds the u16 length field".to_string())
+        })?;
         out.extend_from_slice(&pos.x.to_le_bytes());
         out.extend_from_slice(&pos.y.to_le_bytes());
         out.extend_from_slice(&pos.z.to_le_bytes());
-        out.extend_from_slice(&(encoded.palette.len() as u16).to_le_bytes());
-        out.extend_from_slice(&(encoded.runs.len() as u16).to_le_bytes());
+        out.extend_from_slice(&palette_len.to_le_bytes());
+        out.extend_from_slice(&run_count.to_le_bytes());
         for material in &encoded.palette {
             out.extend_from_slice(&material.to_le_bytes());
         }

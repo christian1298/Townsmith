@@ -44,6 +44,7 @@ tags:
 | D-024 | Material-based structural limits and composite construction | Accepted | 2026-11-19 | [[17 - Materials and Structure]], [[02 - Game Design]], [[03 - Voxel and Scale]] |
 | D-025 | Basements and sub-ground floors; underground parking later | Accepted | 2026-11-19 | [[17 - Materials and Structure]], [[03 - Voxel and Scale]], [[07 - Simulation and AI]] |
 | D-026 | Workshop-first blueprint authoring; permissioned live editing later | Accepted | 2026-11-19 | [[02 - Game Design]], [[05 - Multiplayer]] |
+| D-027 | `.tsbp` v1 package: zip + JSON + RLE voxels + BLAKE3 hash | Accepted | 2026-11-20 | [[28 - Blueprint Package]], [[03 - Voxel and Scale]] |
 
 ---
 
@@ -1161,6 +1162,49 @@ The core fantasy is first-person authorship: the player builds a structure voxel
 ### Review trigger
 
 Phase 2 workshop/editor; Phase 6 multiplayer live-edit permissions.
+
+---
+
+## D-027 — `.tsbp` v1 package format
+
+**Status:** Accepted · **Date:** 2026-11-20 · **Affects:** [[28 - Blueprint Package]], [[03 - Voxel and Scale]], [[26 - Vertical Slice Spec]]
+
+### Context
+
+The vertical slice needs one persistence unit for a building: voxels, metadata, rooms, props, stats, dependencies, and a content hash. The target shape in [[03 - Voxel and Scale]] calls for a zip package. The editor also needs a format that validates aggressively enough to load shared blueprints without crashing or path traversal.
+
+### Decision
+
+- `.tsbp` v1 is a zip with `blueprint.json`, `voxels.bin`, and an optional ignored `thumbnail.png`.
+- `voxels.bin` v1 stores only non-empty 32³ chunks, sorted by `(x, y, z)`, using the existing palette + RLE `EncodedChunk` layout.
+- v1 uses zip `Stored`; zstd/deflate shipping is a future format version.
+- The content hash is BLAKE3 over a domain tag, canonical metadata JSON with `content_hash` cleared, and the voxel stream. It is a semantic hash, not a byte hash of the zip.
+- Loads verify version, bounds, solid count, chunk coordinates, palette/RLE, trailing bytes, finite metadata, duplicate zip entries, and the hash.
+- Saves are temp-file + rename; a failed write never leaves a partial target.
+- v1 caps metadata at 1 MiB, the voxel stream at 64 MiB, and solid voxels at 8M.
+
+### Consequences
+
+**Positive**
+- One file can be saved, loaded, hashed, and shared.
+- Validation catches corrupt or hostile packages before they reach the editor.
+- Blueprint versioning and content-addressed storage can build on the hash.
+
+**Negative**
+- Stored-only zip is larger than zstd/deflate.
+- No mod/resource-pack resolver yet; non-empty dependency lists are rejected.
+- Semantic hashing drops unknown JSON fields rather than authenticating raw bytes.
+- Whole-package save/load is not incremental.
+
+### Alternatives considered
+
+- **Loose JSON + binary sidecar:** easy to inspect, easy to partially corrupt, no single-file library unit.
+- **SQLite blob:** good for the world save, awkward for sharing a single blueprint.
+- **zstd immediately:** smaller, but adds a format-version and dependency surface before the slice needs it.
+
+### Review trigger
+
+Room detection/stats PR (fills metadata), thumbnail PR, and the first compressed format version.
 
 ---
 

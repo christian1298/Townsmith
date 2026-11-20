@@ -100,7 +100,7 @@ Keyboard/mouse defaults are configurable later. All UI strings are keys from [[1
 A room record contains:
 
 ```json
-{ "id": "room_0", "type": "bedroom", "floor": 1, "area_m2": 12.4, "volume_m3": 34.1, "beds": 2, "doors": 1, "windows": 2 }
+{ "id": "room_0", "type": "bedroom", "floor": 0, "area_m2": 12.4, "volume_m3": 34.1, "beds": 2, "doors": 1, "windows": 2 }
 ```
 
 Room detection runs on demand (save, overlay toggle, stats refresh), not per voxel edit. Target: < 50 ms for the test house.
@@ -112,11 +112,11 @@ Target format from [[03 - Voxel and Scale]]:
 ```text
 river_house_01.tsbp (zip)
 ├── blueprint.json
-├── voxels.bin      # chunked palette + RLE, zstd
+├── voxels.bin      # chunked palette + RLE (v1 Stored inside the zip)
 └── thumbnail.png
 ```
 
-`blueprint.json` v0 fields:
+`blueprint.json` v1 fields (implemented in [[28 - Blueprint Package]]):
 
 ```json
 {
@@ -125,7 +125,7 @@ river_house_01.tsbp (zip)
   "name": "River House",
   "author": "player",
   "tags": ["residential", "wood"],
-  "bounds": { "x": 16.0, "y": 6.4, "z": 12.8 },
+  "bounds_m": [16.0, 9.6, 16.0],
   "solid_voxels": 0,
   "materials": {},
   "rooms": [],
@@ -136,7 +136,7 @@ river_house_01.tsbp (zip)
 }
 ```
 
-Compression/hash can be staged: the first PR may ship uncompressed RLE inside the zip, then add zstd/BLAKE3 before the slice is accepted.
+v1 ships BLAKE3 and a Stored zip; zstd (and deflate) are future format versions. See [[28 - Blueprint Package]] for the exact binary layout and hash domain.
 
 ## 5. Demo plot and test house
 

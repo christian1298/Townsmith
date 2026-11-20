@@ -375,10 +375,11 @@ impl VoxelVolume {
     /// content at that coordinate is replaced. Blueprint loading uses this to
     /// restore non-empty chunks without replaying every voxel.
     pub fn insert_chunk(&mut self, chunk: ChunkPos, data: VoxelChunk) -> Result<(), VoxelError> {
+        let origin = chunk.origin_voxels();
         let index = self.chunk_index(chunk).ok_or(VoxelError::OutOfBounds {
-            x: chunk.x as usize * CHUNK_SIZE,
-            y: chunk.y as usize * CHUNK_SIZE,
-            z: chunk.z as usize * CHUNK_SIZE,
+            x: usize::try_from(origin[0]).unwrap_or(usize::MAX),
+            y: usize::try_from(origin[1]).unwrap_or(usize::MAX),
+            z: usize::try_from(origin[2]).unwrap_or(usize::MAX),
         })?;
         self.chunks[index] = Some(data);
         Ok(())

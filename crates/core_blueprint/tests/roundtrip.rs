@@ -104,6 +104,24 @@ fn hash_is_stable_and_depends_on_voxels() {
 }
 
 #[test]
+fn rejects_non_finite_metadata_on_save() {
+    let dir = temp_dir("nan");
+    let path = dir.join("nan.tsbp");
+    let mut blueprint = test_blueprint();
+    blueprint.metadata.props.push(core_blueprint::PropRecord {
+        id: "base:bad".to_string(),
+        position: [f32::NAN, 0.0, 0.0],
+        rotation: 0.0,
+    });
+    assert!(matches!(
+        save_tsbp(&path, &blueprint),
+        Err(BlueprintError::Format(_))
+    ));
+    assert!(!path.exists());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn rejects_unknown_entries() {
     let dir = temp_dir("entries");
     let unknown = dir.join("unknown.tsbp");

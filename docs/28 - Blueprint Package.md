@@ -24,7 +24,7 @@ river_house_01.tsbp (zip)
 └── thumbnail.png      # optional, ignored by v1
 ```
 
-- Unknown entries, directories, duplicate names, and path traversal are rejected.
+- Unknown entries, directories, duplicate zip names, and path traversal are rejected.
 - `blueprint.json` is capped at 1 MiB.
 - `voxels.bin` is capped at 64 MiB.
 - Solid voxels are capped at 8M.
@@ -55,7 +55,7 @@ Fields:
 - `solid_voxels` must match the decoded stream.
 - `rooms` and `props` are schema-ready; room detection fills them in a later PR.
 - `materials` is a provisional key → count map until the content registry lands.
-- `dependencies` is parsed; missing mods/resource packs produce a readable dependency error path rather than a panic.
+- `dependencies` is parsed; non-empty mod/resource-pack lists produce a readable `MissingDependency` error in v1 (no resolver yet). The game constraint is not enforced by the current semantic check.
 
 ## 3. `voxels.bin` v1
 
@@ -90,7 +90,7 @@ BLAKE3 over:
 2. Length-prefixed canonical metadata JSON with `content_hash` cleared.
 3. Length-prefixed `voxels.bin`.
 
-Stored as `blake3:<hex>` and verified on load.
+Stored as `blake3:<hex>` and verified on load. This is a **semantic** hash: unknown JSON fields are dropped on load and are not authenticated.
 
 Golden test hash for the small two-floor test volume:
 
@@ -102,9 +102,9 @@ blake3:9f5bcd407d25c5b5204315c873faa1321dfb5dd969c9a22d2322f7502f95a070
 
 - Save writes a temp file in the destination directory, syncs, then renames.
 - A failed save removes the temp file and never leaves a partial target.
-- Windows overwrite removes the destination before the retry; document that this final overwrite is not atomic.
+- Rename replaces the destination atomically on the same filesystem. The destination directory is not fsynced; a machine crash immediately after rename may lose the new package, but a failed write does not replace the old one.
 - Load validates format version, metadata, bounds, solid count, chunk coordinates, palette/RLE, hash, and trailing bytes.
-- Missing dependencies are surfaced as `BlueprintError::MissingDependency` (v1 only has a conservative game-version check; the full resolver comes with mods).
+- Missing mods/resource packs are surfaced as `BlueprintError::MissingDependency`; the game version expression is parsed but not enforced in v1. The full resolver comes with the content registry.
 
 ## 6. API
 
@@ -131,7 +131,7 @@ let loaded = load_tsbp(path)?;
 ## 8. Limitations
 
 - No zstd/deflate yet; v1 uses zip `Stored`.
-- No thumbnail generation yet; the entry is allowed but ignored.
+- No thumbnail generation yet; the entry is allowed but ignored and has no size cap in v1.
 - Room/prop data is schema-ready, not generated.
 - Material keys are provisional until the content registry.
 - No mod/resource-pack resolver yet.
