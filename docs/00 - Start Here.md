@@ -47,7 +47,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with real 10 cm building detail is tractable. The box-city MultiMesh path is measured well above target on an RTX 4080; the target 3060-class run and voxel building LOD remain. See [[03 - Voxel and Scale]], [[23 - City Rendering Benchmark]], and [[09 - Open Questions]]. |
-| Next action | Add prop placement and room selection/stats panel, EN/DE editor strings, then run the 21-house slice benchmark. Keep the 3060-class 1M gate for Phase 5. See [[26 - Vertical Slice Spec]]. |
+| Next action | Add room selection/stats panel, EN/DE editor strings, then run the 21-house slice benchmark. Keep the 3060-class 1M gate for Phase 5. See [[26 - Vertical Slice Spec]]. |
 
 > [!warning] This is a plan, not a commitment
 > Numbers in these docs are **planning targets**, not measured results. Anything marked *Assumption* or *Proposed* must be validated before it becomes an accepted decision.
@@ -153,8 +153,8 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 ## Next actions
 
-1. Add prop placement and room selection/stats panel; rooms/stats metadata, the overlay, and undo/redo are done.
-2. Add dirty-chunk remeshing and prop placement.
+1. Add room selection/stats panel; rooms/stats metadata, the overlay, undo/redo, and prop placement are done.
+2. Add dirty-chunk remeshing and prop rotation/undo.
 3. Add English/German editor UI tables and the language selector.
 4. Run the 21-house / 60 FPS slice benchmark.
 5. Keep the 3060-class 1M performance gate open for Phase 5; D-003 is accepted for the architecture.
@@ -199,3 +199,4 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 | [[33 - Blueprint Room Metadata]] | Save-time rooms, materials, capacity/jobs in `.tsbp` | You work on blueprint gameplay metadata |
 | [[34 - Room Overlay]] | Editor room boxes/labels, bridge bounds/centers, smoke | You work on room visualization |
 | [[35 - Editor Undo Redo]] | Single-edit undo/redo, history shape, smoke | You work on editor history |
+| [[36 - Editor Props]] | Bed/stove/toilet/desk placement, metadata, room effects | You work on props or room inference |

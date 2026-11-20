@@ -28,9 +28,10 @@ if [[ -z "$LINE" ]]; then
 	exit 1
 fi
 SOLID="$(sed -n 's/.*solid=\([0-9][0-9]*\).*/\1/p' <<<"$LINE")"
+PROPS="$(sed -n 's/.*props=\([0-9][0-9]*\).*/\1/p' <<<"$LINE")"
 HASH="$(sed -n 's/.*hash=\([^ ]*\).*/\1/p' <<<"$LINE")"
 STATUS="$(sed -n 's/.*status=\([a-z_]*\).*/\1/p' <<<"$LINE")"
-if [[ "$SOLID" != "257" || "$STATUS" != "ok" || "$HASH" != blake3:* ]]; then
+if [[ "$SOLID" != "257" || "$PROPS" != "1" || "$STATUS" != "ok" || "$HASH" != blake3:* ]]; then
 	echo "Blueprint smoke contract mismatch: $LINE" >&2
 	exit 1
 fi

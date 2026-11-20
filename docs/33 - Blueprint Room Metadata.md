@@ -36,7 +36,7 @@ The room pass runs on save only, not on every voxel edit.
 - `materials` keyed `material:{id}` for v0; a content registry will replace these keys with namespaced material ids.
 - `stats.resident_capacity`, `stats.job_slots`, `stats.class`.
 
-Props remain empty until the editor supports prop placement. Room types therefore default to `empty` unless the volume already contains prop data from a future editor pass.
+Props are written from the editor prop list; room types/capacity now reflect placed beds, stoves, toilets, and desks.
 
 ## 3. Bridge API
 

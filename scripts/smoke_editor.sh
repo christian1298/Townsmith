@@ -60,7 +60,9 @@ fi
 ROOMS="$(sed -n 's/.*rooms=\([0-9][0-9]*\).*/\1/p' <<<"$LINE")"
 NODES="$(sed -n 's/.*nodes=\([0-9][0-9]*\).*/\1/p' <<<"$LINE")"
 STATUS="$(sed -n 's/.*status=\([a-z_]*\).*/\1/p' <<<"$LINE")"
-if [[ "$ROOMS" != "1" || "$NODES" != "2" || "$STATUS" != "ok" ]]; then
+TYPE="$(sed -n 's/.*type=\([a-z_]*\).*/\1/p' <<<"$LINE")"
+CAPACITY="$(sed -n 's/.*capacity=\([0-9][0-9]*\).*/\1/p' <<<"$LINE")"
+if [[ "$ROOMS" != "1" || "$NODES" != "2" || "$TYPE" != "bedroom" || "$CAPACITY" != "1" || "$STATUS" != "ok" ]]; then
 	echo "Room overlay smoke contract mismatch: $LINE" >&2
 	exit 1
 fi

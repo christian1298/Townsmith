@@ -55,13 +55,13 @@ tags:
 `smoke_editor.sh` now runs three headless contracts:
 
 1. `EDITOR_SMOKE` — build/place/read/mesh/raycast.
-2. `ROOM_OVERLAY_SMOKE` — build a sealed room, detect it, toggle the overlay, assert one room and exactly two overlay nodes.
+2. `ROOM_OVERLAY_SMOKE` — build a sealed room with a bed, detect it, toggle the overlay, assert one bedroom, capacity 1, and exactly two overlay nodes.
 3. `UNDO_SMOKE` — set/remove, undo, redo.
 
 Current output:
 
 ```text
-ROOM_OVERLAY_SMOKE rooms=1 nodes=2 status=ok
+ROOM_OVERLAY_SMOKE rooms=1 nodes=2 type=bedroom capacity=1 status=ok
 ```
 
 Nodes = one translucent box + one label.
@@ -75,7 +75,7 @@ Detection is ~2 ms for the test house and runs only on toggle/rebuild. The overl
 - Room bounds are the floor-band interior rectangle, not the true room volume, and exclude walls.
 - Overlay boxes can clip walls/stairs; they are a diagnostic, not final art.
 - No room selection, hover, or per-room inspection yet.
-- No props, so most rooms show `empty`.
+- Props are now placeable; rooms show bedroom/kitchen/bathroom/office when relevant props exist.
 - English strings only until localization.
 - Room detection remains 2D per 3 m band; see [[31 - Room Detection]].
 
