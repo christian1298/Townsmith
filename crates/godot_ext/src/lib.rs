@@ -6,6 +6,7 @@
 //! resource creation stays on the main thread.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -19,6 +20,7 @@ use godot::classes::mesh::{ArrayType, PrimitiveType};
 use godot::classes::{ArrayMesh, SurfaceTool};
 use godot::prelude::*;
 
+use core_blueprint::{load_tsbp, save_tsbp_with_hash, Blueprint, BlueprintMetadata};
 use core_city::{CityLayout, CityTier};
 use core_voxel::coords::{MaterialId, CHUNK_SIZE, VOXEL_SIZE_M};
 use core_voxel::demo;
@@ -468,7 +470,7 @@ impl TownsmithCore {
             .unwrap_or_else(|error| error.into_inner());
         let Some(state) = guard.as_ref() else {
             result.set("created", false);
-            result.set("error", "no_editor_volume");
+            result.set("error", "no editor volume is open");
             return result;
         };
 
@@ -675,7 +677,7 @@ impl TownsmithCore {
             .unwrap_or_else(|error| error.into_inner());
         let Some(state) = guard.as_ref() else {
             result.set("created", false);
-            result.set("error", "no_editor_volume");
+            result.set("error", "no editor volume is open");
             return result;
         };
 
@@ -692,6 +694,155 @@ impl TownsmithCore {
         result.set("mesh_ms", state.mesh_ms);
         result
     }
+
+    /// Save the current editor volume as a `.tsbp` package.
+    ///
+    /// Returns `{ ok, path, hash, solid_voxels, bounds, rooms }` on success and
+    /// `{ ok: false, error }` on failure. The volume is cloned before the file
+    /// write so the editor lock is not held during I/O.
+    ///
+    /// **Main thread only.**
+    #[func]
+    fn editor_save_blueprint(&self, path: GString, id: GString, name: GString) -> VarDictionary {
+        let mut result = VarDictionary::new();
+        let path = match blueprint_path_from_arg(&path.to_string()) {
+            Ok(path) => path,
+            Err(error) => {
+                result.set("ok", false);
+                result.set("error", error);
+                return result;
+            }
+        };
+        let id = id.to_string();
+        let name = name.to_string();
+        if id.trim().is_empty() {
+            result.set("ok", false);
+            result.set("error", "blueprint id is empty");
+            return result;
+        }
+        if name.trim().is_empty() {
+            result.set("ok", false);
+            result.set("error", "blueprint name is empty");
+            return result;
+        }
+        if id.len() > 200 || name.len() > 200 {
+            result.set("ok", false);
+            result.set("error", "blueprint id and name must be at most 200 bytes");
+            return result;
+        }
+
+        let volume = {
+            let guard = self
+                .editor
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let Some(state) = guard.as_ref() else {
+                result.set("ok", false);
+                result.set("error", "no editor volume is open");
+                return result;
+            };
+            state.volume.clone()
+        };
+
+        let metadata = BlueprintMetadata::new(id, name);
+        let blueprint = Blueprint::new(metadata, volume);
+        let hash = match save_tsbp_with_hash(&path, &blueprint) {
+            Ok(hash) => hash,
+            Err(error) => {
+                result.set("ok", false);
+                result.set("error", error.to_string());
+                return result;
+            }
+        };
+
+        result.set("ok", true);
+        result.set("path", path.to_string_lossy().to_string());
+        result.set("hash", hash);
+        result.set("solid_voxels", blueprint.metadata.solid_voxels as i64);
+        result.set(
+            "bounds",
+            &PackedFloat32Array::from(blueprint.metadata.bounds_m.to_vec()).to_variant(),
+        );
+        result.set("rooms", blueprint.metadata.rooms.len() as i64);
+        result
+    }
+
+    /// Load a `.tsbp` package into the editor, replacing the current volume.
+    ///
+    /// Returns `{ ok, path, hash, solid_voxels, bounds, rooms, name, id }` on
+    /// success and `{ ok: false, error }` on failure.
+    ///
+    /// **Main thread only.**
+    #[func]
+    fn editor_load_blueprint(&self, path: GString) -> VarDictionary {
+        let mut result = VarDictionary::new();
+        let path = match blueprint_path_from_arg(&path.to_string()) {
+            Ok(path) => path,
+            Err(error) => {
+                result.set("ok", false);
+                result.set("error", error);
+                return result;
+            }
+        };
+
+        let blueprint = match load_tsbp(&path) {
+            Ok(blueprint) => blueprint,
+            Err(error) => {
+                result.set("ok", false);
+                result.set("error", error.to_string());
+                return result;
+            }
+        };
+
+        let hash = blueprint.metadata.content_hash.clone();
+        let solid_voxels = blueprint.metadata.solid_voxels;
+        let bounds = PackedFloat32Array::from(blueprint.metadata.bounds_m.to_vec());
+        let rooms = blueprint.metadata.rooms.len() as i64;
+        let name = blueprint.metadata.name.clone();
+        let id = blueprint.metadata.id.clone();
+
+        let mut guard = self
+            .editor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *guard = Some(EditorState::new(blueprint.volume));
+
+        result.set("ok", true);
+        result.set("path", path.to_string_lossy().to_string());
+        result.set("hash", hash);
+        result.set("solid_voxels", solid_voxels as i64);
+        result.set("bounds", &bounds.to_variant());
+        result.set("rooms", rooms);
+        result.set("name", name);
+        result.set("id", id);
+        result
+    }
+}
+
+/// Validate a GDScript blueprint path.
+fn blueprint_path_from_arg(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("blueprint path is empty".to_string());
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err("blueprint path must be absolute".to_string());
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("blueprint path must not contain '..'".to_string());
+    }
+    let extension_ok = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("tsbp"));
+    if !extension_ok {
+        return Err("blueprint path must end with .tsbp".to_string());
+    }
+    Ok(path)
 }
 
 /// Parse the GDScript chunk arguments, treating `0, 0, 0` as the default
@@ -1059,6 +1210,26 @@ mod tests {
         assert_eq!(volume_pos_from_args(0, 0, 0), Some(VolumePos::new(0, 0, 0)));
         assert_eq!(volume_pos_from_args(-1, 0, 0), None);
         assert_eq!(volume_pos_from_args(0, i64::MAX, 0), None);
+    }
+
+    #[test]
+    fn blueprint_path_requires_an_absolute_tsbp_path() {
+        let abs = std::env::temp_dir().join("house.tsbp");
+        let abs_upper = std::env::temp_dir().join("house.TSBP");
+        let traversal = std::env::temp_dir().join("..").join("house.tsbp");
+        assert!(blueprint_path_from_arg(&format!(" {} ", abs.display())).is_ok());
+        assert!(blueprint_path_from_arg(&abs_upper.to_string_lossy()).is_ok());
+        assert!(blueprint_path_from_arg("").is_err());
+        assert!(blueprint_path_from_arg("   ").is_err());
+        assert!(blueprint_path_from_arg("house.tsbp").is_err());
+        assert!(blueprint_path_from_arg(&traversal.to_string_lossy()).is_err());
+        assert!(
+            blueprint_path_from_arg(&std::env::temp_dir().join("house.zip").to_string_lossy())
+                .is_err()
+        );
+        assert!(
+            blueprint_path_from_arg(&std::env::temp_dir().join("house").to_string_lossy()).is_err()
+        );
     }
 
     #[test]

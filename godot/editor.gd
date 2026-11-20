@@ -4,14 +4,14 @@ extends Node3D
 ##
 ## This is the first playable editor: a default 5 x 3 x 5 chunk volume on a
 ## neutral pad, a fly camera, crosshair raycast edits, a five-material
-## palette, and a debounced whole-volume remesh. Edits live only in this
-## session; blueprint save/load is the next slice step.
+## palette, a debounced whole-volume remesh, and `.tsbp` save/load.
 ##
 ## Run it with:
 ##   godot --path godot res://editor.tscn
 ##
 ## Headless smoke:
 ##   godot --headless --path godot res://editor.tscn -- --editor-smoke
+##   godot --headless --path godot res://editor.tscn -- --blueprint-smoke
 ##
 ## See `docs/30 - Editor Shell.md` for the controls and rules.
 
@@ -48,6 +48,9 @@ const SMOKE_FLOOR_SOLID := 256
 const SMOKE_RAY_LOCAL := Vector3(0.83, 2.03, 0.83)
 const SMOKE_RAY_CELL := Vector3i(8, 0, 8)
 const SMOKE_RAY_PLACE := Vector3i(8, 1, 8)
+const DEFAULT_BLUEPRINT_NAME := "River House"
+const BLUEPRINT_DIR := "user://blueprints"
+const BLUEPRINT_EXT := "tsbp"
 
 var _core
 var _volume_origin := VOLUME_ORIGIN
@@ -62,6 +65,9 @@ var _status_label: Label
 var _active_material := 1
 var _remesh_pending := false
 var _remesh_due_msec := 0
+var _blueprint_name: LineEdit
+var _save_dialog: FileDialog
+var _load_dialog: FileDialog
 
 func _ready() -> void:
 	_core = TownsmithCore.new()
@@ -71,6 +77,9 @@ func _ready() -> void:
 		push_error("Editor: failed to create the default editor volume")
 		if _is_editor_smoke():
 			print("EDITOR_SMOKE solid=0 quads=0 surfaces=0 status=create_failed")
+			get_tree().quit(1)
+		elif _is_blueprint_smoke():
+			print("BLUEPRINT_SMOKE solid=0 hash= status=create_failed")
 			get_tree().quit(1)
 		return
 
@@ -90,6 +99,9 @@ func _ready() -> void:
 
 	if _is_editor_smoke():
 		_run_editor_smoke()
+		return
+	if _is_blueprint_smoke():
+		_run_blueprint_smoke()
 		return
 
 	_build_shell()
@@ -119,6 +131,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			if key == KEY_1 + index:
 				_select_material(int(MATERIALS[index]["id"]))
 				return
+		if key == KEY_F5:
+			_open_save_dialog()
+			return
+		if key == KEY_F9:
+			_open_load_dialog()
+			return
 
 	if event is InputEventMouseButton and event.pressed:
 		if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
@@ -335,8 +353,64 @@ func _build_ui() -> void:
 	help.text = "\n".join(PackedStringArray([
 		"WASD move   Space/Ctrl up/down   Shift boost   Esc release mouse",
 		"Left click remove   Right click place   Keys 1-5 select material",
-		"Mesh rebuilds 250 ms after the last edit",
+		"F5 save blueprint   F9 load blueprint   Mesh rebuilds 250 ms after edit",
 	]))
+
+	var blueprint_bar := HBoxContainer.new()
+	blueprint_bar.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
+	blueprint_bar.offset_left = -300.0
+	blueprint_bar.offset_right = 300.0
+	blueprint_bar.offset_top = 16.0
+	blueprint_bar.offset_bottom = 52.0
+	blueprint_bar.add_theme_constant_override("separation", 8)
+	ui.add_child(blueprint_bar)
+
+	_blueprint_name = LineEdit.new()
+	_blueprint_name.text = DEFAULT_BLUEPRINT_NAME
+	_blueprint_name.placeholder_text = "Blueprint name"
+	_blueprint_name.custom_minimum_size = Vector2(220.0, 0.0)
+	_blueprint_name.tooltip_text = "Name used for the saved .tsbp package"
+	blueprint_bar.add_child(_blueprint_name)
+
+	var save_button := Button.new()
+	save_button.text = "Save"
+	save_button.tooltip_text = "Save the current volume (F5)"
+	save_button.pressed.connect(_open_save_dialog)
+	blueprint_bar.add_child(save_button)
+
+	var load_button := Button.new()
+	load_button.text = "Load"
+	load_button.tooltip_text = "Load a .tsbp package (F9)"
+	load_button.pressed.connect(_open_load_dialog)
+	blueprint_bar.add_child(load_button)
+
+	var directory_error := DirAccess.make_dir_recursive_absolute(
+		ProjectSettings.globalize_path(BLUEPRINT_DIR))
+	if directory_error != OK:
+		push_warning("Could not create blueprint directory %s: %s" % [
+			BLUEPRINT_DIR, error_string(directory_error)])
+
+	_save_dialog = FileDialog.new()
+	_save_dialog.title = "Save Blueprint"
+	_save_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
+	_save_dialog.access = FileDialog.ACCESS_USERDATA
+	_save_dialog.filters = PackedStringArray(["*.%s ; Townsmith Blueprint" % BLUEPRINT_EXT])
+	_save_dialog.current_dir = BLUEPRINT_DIR
+	_save_dialog.use_native_dialog = false
+	_save_dialog.file_selected.connect(_on_save_file_selected)
+	_save_dialog.canceled.connect(_restore_mouse_after_dialog)
+	add_child(_save_dialog)
+
+	_load_dialog = FileDialog.new()
+	_load_dialog.title = "Load Blueprint"
+	_load_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	_load_dialog.access = FileDialog.ACCESS_USERDATA
+	_load_dialog.filters = PackedStringArray(["*.%s ; Townsmith Blueprint" % BLUEPRINT_EXT])
+	_load_dialog.current_dir = BLUEPRINT_DIR
+	_load_dialog.use_native_dialog = false
+	_load_dialog.file_selected.connect(_on_load_file_selected)
+	_load_dialog.canceled.connect(_restore_mouse_after_dialog)
+	add_child(_load_dialog)
 
 func _add_bar(parent: Control, position: Vector2, size: Vector2, color: Color) -> void:
 	var bar := ColorRect.new()
@@ -427,8 +501,176 @@ func _cell_in_bounds(cell: Vector3i) -> bool:
 func _event_key(event: InputEventKey) -> int:
 	return event.physical_keycode if event.physical_keycode != KEY_NONE else event.keycode
 
+func _open_save_dialog() -> void:
+	if _save_dialog == null:
+		return
+	if DisplayServer.get_name() != "headless":
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_save_dialog.current_file = "%s.%s" % [_slug(_blueprint_name.text), BLUEPRINT_EXT]
+	_save_dialog.popup_centered_ratio(0.6)
+
+func _open_load_dialog() -> void:
+	if _load_dialog == null:
+		return
+	if DisplayServer.get_name() != "headless":
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_load_dialog.popup_centered_ratio(0.6)
+
+func _on_save_file_selected(path: String) -> void:
+	_save_blueprint(path)
+	_restore_mouse_after_dialog()
+
+func _on_load_file_selected(path: String) -> void:
+	_load_blueprint(path)
+	_restore_mouse_after_dialog()
+
+func _restore_mouse_after_dialog() -> void:
+	if _blueprint_name != null:
+		_blueprint_name.release_focus()
+	if DisplayServer.get_name() != "headless":
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+func _save_blueprint(path: String) -> bool:
+	var name := _blueprint_name.text.strip_edges()
+	if name.is_empty():
+		_set_status("Blueprint name is empty")
+		return false
+	var id := "local:%s" % _slug(name)
+	var result: Dictionary = _core.editor_save_blueprint(
+		ProjectSettings.globalize_path(path), id, name)
+	if not bool(result.get("ok", false)):
+		_set_status("Save failed: %s" % str(result.get("error", "unknown error")))
+		push_error("Blueprint save failed: %s" % str(result.get("error", "unknown error")))
+		return false
+	_set_status("Saved %s  hash=%s" % [name, _short_hash(str(result.get("hash", "")))])
+	print("BLUEPRINT_SAVED path=%s hash=%s solid=%d" % [
+		str(result.get("path", path)),
+		str(result.get("hash", "")),
+		int(result.get("solid_voxels", 0)),
+	])
+	_refresh_stats_label()
+	return true
+
+func _load_blueprint(path: String) -> bool:
+	var result: Dictionary = _core.editor_load_blueprint(ProjectSettings.globalize_path(path))
+	if not bool(result.get("ok", false)):
+		_set_status("Load failed: %s" % str(result.get("error", "unknown error")))
+		push_error("Blueprint load failed: %s" % str(result.get("error", "unknown error")))
+		return false
+	var bounds: PackedFloat32Array = result.get("bounds", PackedFloat32Array())
+	if bounds.size() == 3:
+		_volume_bounds = Vector3(bounds[0], bounds[1], bounds[2])
+	var size: Dictionary = _core.editor_volume_size_voxels()
+	var voxels: PackedInt32Array = size.get("voxels", PackedInt32Array())
+	if voxels.size() == 3:
+		_volume_voxels = Vector3i(voxels[0], voxels[1], voxels[2])
+	_voxel_size_m = float(size.get("voxel_size_m", _voxel_size_m))
+	_blueprint_name.text = str(result.get("name", _blueprint_name.text))
+	_remesh_pending = false
+	_rebuild_volume_mesh()
+	_update_palette_label()
+	_set_status("Loaded %s  hash=%s" % [
+		str(result.get("name", "blueprint")), _short_hash(str(result.get("hash", "")))])
+	print("BLUEPRINT_LOADED path=%s hash=%s solid=%d rooms=%d" % [
+		str(result.get("path", path)),
+		str(result.get("hash", "")),
+		int(result.get("solid_voxels", 0)),
+		int(result.get("rooms", 0)),
+	])
+	return true
+
+func _short_hash(hash: String) -> String:
+	return hash.substr(0, 19) + "..." if hash.length() > 22 else hash
+
+func _slug(text: String) -> String:
+	var normalized := text.strip_edges().to_lower()
+	normalized = normalized.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
+	var cleaned := ""
+	for character in normalized:
+		if (character >= "a" and character <= "z") or (character >= "0" and character <= "9"):
+			cleaned += character
+		elif character == " " or character == "-" or character == "_":
+			cleaned += "_"
+	while cleaned.contains("__"):
+		cleaned = cleaned.replace("__", "_")
+	cleaned = cleaned.trim_prefix("_").trim_suffix("_")
+	return cleaned if not cleaned.is_empty() else "blueprint"
+
+## Headless blueprint save/load contract.
+##
+## Builds a small floor, saves a `.tsbp`, reloads it into a fresh editor
+## state, verifies the hash/solid count/bounds, and removes the temp package.
+func _run_blueprint_smoke() -> void:
+	var status := "ok"
+	var path := "user://blueprint_smoke.tsbp"
+	var global_path := ProjectSettings.globalize_path(path)
+	if FileAccess.file_exists(path):
+		DirAccess.remove_absolute(global_path)
+
+	if not _core.editor_fill_box(0, 0, 0, SMOKE_FLOOR_VOXELS, 1, SMOKE_FLOOR_VOXELS, 2):
+		status = "fill_failed"
+	elif not _core.editor_set_voxel(SMOKE_SET_CELL.x, SMOKE_SET_CELL.y, SMOKE_SET_CELL.z, 1):
+		status = "set_failed"
+
+	var saved: Dictionary = {}
+	var loaded: Dictionary = {}
+	if status == "ok":
+		saved = _core.editor_save_blueprint(global_path, "local:blueprint_smoke", "Blueprint Smoke")
+		if not bool(saved.get("ok", false)):
+			status = "save_failed"
+		elif int(saved.get("solid_voxels", -1)) != SMOKE_FLOOR_SOLID + 1:
+			status = "save_solid"
+		elif not str(saved.get("hash", "")).begins_with("blake3:"):
+			status = "save_hash"
+
+	if status == "ok":
+		if not _core.editor_clear():
+			status = "clear_failed"
+		elif int(_core.editor_volume_stats().get("solid_voxels", -1)) != 0:
+			status = "clear_not_empty"
+
+	if status == "ok":
+		loaded = _core.editor_load_blueprint(global_path)
+		if not bool(loaded.get("ok", false)):
+			status = "load_failed"
+		elif int(loaded.get("solid_voxels", -1)) != SMOKE_FLOOR_SOLID + 1:
+			status = "load_solid"
+		elif str(loaded.get("hash", "")) != str(saved.get("hash", "")):
+			status = "load_hash"
+		elif int(loaded.get("rooms", -1)) != 0:
+			status = "load_rooms"
+		var bounds: PackedFloat32Array = loaded.get("bounds", PackedFloat32Array())
+		if status == "ok" and bounds.size() != 3:
+			status = "load_bounds"
+		elif status == "ok":
+			for value in bounds:
+				if not is_finite(value):
+					status = "load_bounds_value"
+					break
+		if status == "ok" and not str(loaded.get("hash", "")).begins_with("blake3:"):
+			status = "load_hash_prefix"
+
+	if status == "ok":
+		var mesh: ArrayMesh = _core.build_editor_volume_mesh()
+		var stats: Dictionary = _core.editor_volume_stats()
+		if mesh.get_surface_count() != 1:
+			status = "load_surface"
+		elif int(stats.get("solid_voxels", -1)) != SMOKE_FLOOR_SOLID + 1:
+			status = "load_stats"
+
+	DirAccess.remove_absolute(global_path)
+	print("BLUEPRINT_SMOKE solid=%d hash=%s status=%s" % [
+		int(loaded.get("solid_voxels", 0)),
+		str(loaded.get("hash", "")),
+		status,
+	])
+	get_tree().quit(0 if status == "ok" else 1)
+
 func _is_editor_smoke() -> bool:
 	return OS.get_cmdline_user_args().has("--editor-smoke")
+
+func _is_blueprint_smoke() -> bool:
+	return OS.get_cmdline_user_args().has("--blueprint-smoke")
 
 ## Headless contract check for CI.
 ##

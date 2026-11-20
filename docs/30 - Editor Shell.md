@@ -13,7 +13,7 @@ tags:
 # 30 — Editor Shell
 
 > [!info] What this note is
-> The first playable first-person editor shell: `godot/editor.tscn` and its scripts. It uses the volume API from [[29 - Volume Editor Bridge]] to place and remove 10 cm voxels in the default volume. It is the camera, palette, raycast, and remesh half of [[26 - Vertical Slice Spec]] §3. Save/load, undo, and rooms are **not** in this slice step.
+> The first playable first-person editor shell: `godot/editor.tscn` and its scripts. It uses the volume API from [[29 - Volume Editor Bridge]] to place and remove 10 cm voxels in the default volume. It is the camera, palette, raycast, and remesh half of [[26 - Vertical Slice Spec]] §3. Blueprint save/load is in [[32 - Blueprint Save Load]]; undo and rooms are still open.
 
 ## 1. What runs
 
@@ -131,7 +131,8 @@ CI runs the script in the Godot headless smoke job after `smoke_volume.sh`.
 
 ## 8. Limitations
 
-- **No save/load.** Edits are in memory only; the blueprint package ([[28 - Blueprint Package]]) and the next slice step add round-tripping.
+- **No undo.** Edits are in memory until saved; save/load is in [[32 - Blueprint Save Load]].
+- **No room overlay or room-derived stats yet.** See [[31 - Room Detection]] for the core detector.
 - **No walk mode or collision.** The camera flies; there is no gravity, capsule, or ground contact.
 - **No undo/redo.** The bridge has no edit batches yet.
 - **No per-material rendering.** All voxels share one neutral material override.

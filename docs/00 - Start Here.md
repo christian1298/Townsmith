@@ -31,7 +31,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Item | State |
 |---|---|
 | Phase | **Phase 1 vertical slice** in progress |
-| Code | **Vertical slice in progress:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, chunked editable volume + cross-chunk meshing, 50 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, seam-aware terrain mesh + LOD + skirts, 58 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `core_city` (synthetic Early/Mid/Late layouts, 10 tests), `core_blueprint` (`.tsbp` v1 packages, 8 tests), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, a Godot 4.7 GDExtension bridge with terrain workers, city layout, and editable volume APIs (11 bridge tests), a MultiMesh city renderer, a 200-instance voxel-hut route, and a `VOLUME_SMOKE` editor path. Headless smoke passes. |
+| Code | **Vertical slice in progress:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, chunked editable volume + cross-chunk meshing, 50 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, seam-aware terrain mesh + LOD + skirts, 58 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `core_city` (synthetic Early/Mid/Late layouts, 10 tests), `core_blueprint` (`.tsbp` v1 packages, 8 tests), `core_rooms` (room detection + stats, 10 tests), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, a Godot 4.7 GDExtension bridge with terrain workers, city layout, editable volume, and blueprint save/load APIs (12 bridge tests), a MultiMesh city renderer, a 200-instance voxel-hut route, a first-person editor with `VOLUME_SMOKE`, `EDITOR_SMOKE`, and `BLUEPRINT_SMOKE` paths, and a room detector. Headless smoke passes. |
 | Engine | **Accepted:** Godot 4 shell + Rust core via GDExtension. The Phase 0 spike passed; the 3060-class 1M 30 FPS gate remains open for Phase 5. See [[04 - Engine and Stack]] and [[10 - Decisions]]. |
 | Team | **Accepted:** 2–3 full-time generalists; Rust/Godot experience or willingness to learn. |
 | Language | **Accepted:** Rust is the primary implementation language from Phase 0; GDScript is shell/UI only; C++ is the fallback. See D-011. |
@@ -47,7 +47,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with real 10 cm building detail is tractable. The box-city MultiMesh path is measured well above target on an RTX 4080; the target 3060-class run and voxel building LOD remain. See [[03 - Voxel and Scale]], [[23 - City Rendering Benchmark]], and [[09 - Open Questions]]. |
-| Next action | Start the vertical slice. Run `bench_phase0.sh` on a 3060-class machine before Phase 5 to close the 1M performance gate. See [[25 - Phase 0 Results]] and [[08 - Roadmap]]. |
+| Next action | Wire room metadata into the editor stats/overlay, add undo/redo, then run the 21-house slice benchmark. Keep the 3060-class 1M gate for Phase 5. See [[26 - Vertical Slice Spec]]. |
 
 > [!warning] This is a plan, not a commitment
 > Numbers in these docs are **planning targets**, not measured results. Anything marked *Assumption* or *Proposed* must be validated before it becomes an accepted decision.
@@ -153,8 +153,8 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 ## Next actions
 
-1. Implement room detection and stats on the `VoxelVolume` (rooms, props, material cost, capacity).
-2. Build the first-person editor shell: camera, raycast place/remove, room overlay, save/load UI.
+1. Write rooms/props/stats into `.tsbp` metadata and show the room overlay/stats panel.
+2. Add undo/redo and dirty-chunk remeshing.
 3. Add English/German editor UI tables and the language selector.
 4. Run the 21-house / 60 FPS slice benchmark.
 5. Keep the 3060-class 1M performance gate open for Phase 5; D-003 is accepted for the architecture.
@@ -195,3 +195,4 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 | [[29 - Volume Editor Bridge]] | GDExtension volume API, packed mesh upload, smoke | You wire the first-person editor |
 | [[30 - Editor Shell]] | First-person editor controls, raycast, palette, debounce, smoke | You work on the editor |
 | [[31 - Room Detection]] | Room flood fill, props, capacity, material stats | You work on rooms or stats |
+| [[32 - Blueprint Save Load]] | Editor `.tsbp` save/load bridge, UI, smoke, limits | You work on blueprint persistence |
