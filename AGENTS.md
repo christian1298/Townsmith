@@ -254,6 +254,8 @@ GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_strea
 # Synthetic city routes (200 / 10k / 100k buildings)
 CITY_TIER=late GODOT=/path/to/godot ./scripts/bench_godot.sh 1 5 benchmarks/routes/phase0_city_late.json
 GODOT=/path/to/godot ./scripts/smoke_city.sh
+GODOT=/path/to/godot ./scripts/smoke_volume.sh
+GODOT=/path/to/godot ./scripts/smoke_editor.sh
 
 # 200 real voxel-hut instances
 VOXEL_INSTANCES=200 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_voxel_instances.json
