@@ -63,7 +63,7 @@ The smoke covers setting from air, undoing to air, redoing the material, removin
 ## 5. Next
 
 1. Prop placement.
-2. Room selection and stats panel.
+2. Multi-voxel edit transactions and prop undo.
 3. EN/DE strings.
 4. Dirty-chunk remeshing.
 5. 21-house performance pass.

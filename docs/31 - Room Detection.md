@@ -60,7 +60,7 @@ Priority when multiple props are present:
 6. otherwise `empty`
 
 - `resident_capacity` = beds.
-- `job_slots` = desks.
+- `job_slots` = desks; each `RoomRecord` carries its own `desks` count.
 - Class heuristic: area + 2 × (doors + windows + residents + jobs); thresholds 60 / 20 → `upper` / `mid` / `lower_middle`. This is a readable placeholder, not a balanced economy rule.
 
 ## 4. Test house benchmark

@@ -60,8 +60,6 @@ const BLUEPRINT_EXT := "tsbp"
 const ROOM_OVERLAY_HEIGHT_M := 2.8
 const ROOM_SELECTED_COLOR := Color(1.0, 0.9, 0.35)
 const FLOOR_BAND_M := 3.0
-const PROP_KIND_BED := 0
-const PROP_KIND_DESK := 7
 const ROOM_PANEL_WIDTH := 500.0
 const MAX_HISTORY := 500
 
@@ -162,10 +160,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		if key == KEY_R:
 			_toggle_room_overlay()
 			return
-		if event.keycode == KEY_BRACKETLEFT:
+		if event.keycode == KEY_BRACKETLEFT and not event.ctrl_pressed and not event.alt_pressed:
 			_cycle_room(-1)
 			return
-		if event.keycode == KEY_BRACKETRIGHT:
+		if event.keycode == KEY_BRACKETRIGHT and not event.ctrl_pressed and not event.alt_pressed:
 			_cycle_room(1)
 			return
 		for index in PROPS.size():
@@ -578,7 +576,10 @@ func _build_room_panel(parent: Control) -> void:
 	_room_panel.offset_left = -ROOM_PANEL_WIDTH - 16.0
 	_room_panel.offset_right = -16.0
 	_room_panel.offset_top = 136.0
-	_room_panel.offset_bottom = 496.0
+	var viewport_size := get_viewport().get_visible_rect().size
+	_room_panel.offset_left = -minf(ROOM_PANEL_WIDTH + 16.0, viewport_size.x - 32.0)
+	_room_panel.offset_right = -16.0
+	_room_panel.offset_bottom = minf(496.0, viewport_size.y - 16.0)
 	_room_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_room_panel.visible = false
 
@@ -595,7 +596,7 @@ func _build_room_panel(parent: Control) -> void:
 	_room_panel_label.bbcode_enabled = false
 	_room_panel_label.fit_content = false
 	_room_panel_label.scroll_active = true
-	_room_panel_label.autowrap_mode = TextServer.AUTOWRAP_OFF
+	_room_panel_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_room_panel_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_room_panel_label.add_theme_font_size_override("normal_font_size", 13)
 	_room_panel.add_child(_room_panel_label)
@@ -618,6 +619,7 @@ func _refresh_room_panel(stats: Dictionary = {}) -> void:
 		_selected_room = -1
 		_room_stats_cache = {}
 		_set_room_panel_text("ROOM STATS\nstats unavailable: %s" % str(stats.get("error", "unknown")))
+		_set_room_panel_visible(false)
 		return
 	_room_stats_cache = stats
 	var rooms: Array = stats.get("rooms", [])
@@ -628,7 +630,6 @@ func _refresh_room_panel(stats: Dictionary = {}) -> void:
 	else:
 		_selected_room = clampi(_selected_room, 0, rooms.size() - 1)
 
-	var props: Array = _core.editor_props().get("props", [])
 	var materials: Dictionary = stats.get("materials", {})
 	var material_count := materials.size()
 	var lines := PackedStringArray([
@@ -651,7 +652,7 @@ func _refresh_room_panel(stats: Dictionary = {}) -> void:
 		for index in rooms.size():
 			lines.append(_format_room_line(rooms[index], index))
 		lines.append("")
-		lines.append(_format_room_detail(rooms[_selected_room], _selected_room, props))
+		lines.append(_format_room_detail(rooms[_selected_room], _selected_room))
 	_set_room_panel_text("\n".join(lines))
 
 func _set_room_panel_text(text: String) -> void:
@@ -661,24 +662,23 @@ func _set_room_panel_text(text: String) -> void:
 
 func _format_room_line(room: Dictionary, index: int) -> String:
 	var marker := ">" if index == _selected_room else " "
-	return "%s %s · %s · floor %d · %.1f m² · beds %d · doors %d · windows %d" % [
+	return "%s %s · %s · floor %d · %.1f m² · beds %d · desks %d · doors %d · windows %d" % [
 		marker,
 		str(room.get("id", "room_%d" % index)),
 		str(room.get("type", "room")),
 		int(room.get("floor", 0)),
 		float(room.get("area_m2", 0.0)),
 		int(room.get("beds", 0)),
+		int(room.get("desks", 0)),
 		int(room.get("doors", 0)),
 		int(room.get("windows", 0)),
 	]
 
 ## One selected-room detail block.
 ##
-## Capacity contribution is the room's beds. The bridge does not expose
-## per-room desk counts, so job contribution is counted from desk props whose
-## origin falls inside this room's X/Z bounds and 3 m floor band. That matches
-## the detector's prop-to-room assignment for normal layouts.
-func _format_room_detail(room: Dictionary, index: int, props: Array) -> String:
+## Capacity contribution is the room's beds; job contribution is the room's
+## desks, both supplied by the authoritative room detector.
+func _format_room_detail(room: Dictionary, index: int) -> String:
 	var floor_index := int(room.get("floor", 0))
 	var lines := PackedStringArray([
 		"selected %s · %s · floor %d" % [
@@ -690,7 +690,7 @@ func _format_room_detail(room: Dictionary, index: int, props: Array) -> String:
 			float(room.get("area_m2", 0.0)),
 			float(room.get("volume_m3", 0.0)),
 			int(room.get("beds", 0)),
-			_count_room_desks(room, props),
+			int(room.get("desks", 0)),
 		],
 	])
 	var bounds: PackedFloat32Array = room.get("bounds_m", PackedFloat32Array())
@@ -702,27 +702,6 @@ func _format_room_detail(room: Dictionary, index: int, props: Array) -> String:
 			(floor_index + 1) * FLOOR_BAND_M,
 		])
 	return "\n".join(lines)
-
-func _count_room_desks(room: Dictionary, props: Array) -> int:
-	var bounds: PackedFloat32Array = room.get("bounds_m", PackedFloat32Array())
-	if bounds.size() < 4:
-		return 0
-	var floor_index := int(room.get("floor", 0))
-	var y_min := floor_index * FLOOR_BAND_M
-	var y_max := y_min + FLOOR_BAND_M
-	var count := 0
-	for prop in props:
-		if int(prop.get("kind", -1)) != PROP_KIND_DESK:
-			continue
-		var x := (float(prop.get("x", 0)) + 0.5) * _voxel_size_m
-		var y := float(prop.get("y", 0)) * _voxel_size_m
-		var z := (float(prop.get("z", 0)) + 0.5) * _voxel_size_m
-		if x < bounds[0] or x >= bounds[2] or z < bounds[1] or z >= bounds[3]:
-			continue
-		if y < y_min or y >= y_max:
-			continue
-		count += 1
-	return count
 
 ## Cycle the selected room. `[` steps back, `]` steps forward.
 func _cycle_room(step: int) -> void:
@@ -739,6 +718,11 @@ func _cycle_room(step: int) -> void:
 		_selected_room = posmod(_selected_room + step, rooms.size())
 	_rebuild_room_overlay()
 	var refreshed_rooms: Array = _room_stats_cache.get("rooms", [])
+	if refreshed_rooms.is_empty():
+		_selected_room = -1
+		_set_status("No rooms to select")
+		return
+	_selected_room = clampi(_selected_room, 0, refreshed_rooms.size() - 1)
 	var selected: Dictionary = refreshed_rooms[_selected_room]
 	_set_status("Selected %s · %s  ([ ] cycle, R hide)" % [
 		str(selected.get("id", "room_%d" % _selected_room)),

@@ -102,7 +102,7 @@ The hash depends on the smoke volume, not the golden test-house hash.
 ## 6. Next
 
 1. Add room bounds/centers for the editor overlay.
-2. Room overlay and stats panel in the editor.
+2. Room stats panel (now in [[37 - Room Stats Panel]]); next is localization and the 21-house benchmark.
 3. Prop placement so room types/capacity are meaningful.
 4. Undo/redo before destructive load.
 5. Blueprint library / thumbnail.

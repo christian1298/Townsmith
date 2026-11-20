@@ -97,6 +97,6 @@ These are placeholders for real prop meshes and resource-pack models.
 1. Prop rotation and a small palette UI.
 2. Prop undo/redo.
 3. Real prop meshes/resource-pack models.
-4. Room selection and stats panel.
+4. Prop rotation and prop undo.
 5. EN/DE strings.
 6. 21-house performance pass.

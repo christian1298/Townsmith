@@ -205,6 +205,7 @@ fn room_stats_to_dictionary(stats: &RoomStats) -> VarDictionary {
         item.set("area_m2", room.area_m2);
         item.set("volume_m3", room.volume_m3);
         item.set("beds", room.beds as i64);
+        item.set("desks", room.desks as i64);
         item.set("doors", room.doors as i64);
         item.set("windows", room.windows as i64);
         let (bounds_m, center_m) = room_bounds_payload(bounds, room.floor);

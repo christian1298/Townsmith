@@ -41,7 +41,7 @@ ROOM STATS   [ ] select room   R hide
 rooms 1 · capacity 1 · jobs 0 · class lower_middle
 solid 34320 · material kinds 3
 
-> room_0 · bedroom · floor 0 · 14.4 m² · beds 1 · doors 4 · windows 8
+> room_0 · bedroom · floor 0 · 14.4 m² · beds 1 · desks 0 · doors 4 · windows 8
 
 selected room_0 · bedroom · floor 0
 area 14.4 m² · volume 43.3 m³ · cap +1 · jobs +0
@@ -74,7 +74,7 @@ All numbers come from one `TownsmithCore.editor_room_stats()` snapshot (the same
 ## 5. Derived values
 
 - `cap +N` is the room's `beds` field, which is exactly the detector's capacity contribution.
-- The bridge does not expose per-room desk counts. `jobs +N` is therefore counted in the UI from desk props (`kind 7`) whose origin falls inside the room's X/Z bounds and its 3 m floor band. This matches the detector's prop-to-room assignment for normal layouts, but it is an inference, not a second source of truth.
+- `jobs +N` is the room's authoritative `desks` field, returned by `core_rooms` in the same stats snapshot.
 - Bounds are the floor-band interior rectangle with exclusive max, converted from the payload's `bounds_m`. `y` is the full 3 m band, even for a partial top band.
 
 ## 6. Smoke
@@ -100,7 +100,6 @@ ROOM_PANEL_SMOKE rooms=1 selected=bedroom capacity=1 status=ok
 - Read-only: no click-to-select, scrolling to a room, or editing from the panel. Selection is keyboard-only.
 - One detection pass per room-view rebuild. Cycling with `[` / `]` rebuilds the whole overlay and re-runs detection (~2 ms for the test house); there is no dirty-room diff.
 - The panel refreshes on the 250 ms remesh cadence for voxel edits, not per click.
-- Fixed 500 × 360 px panel; on very narrow viewports it can overlap the bottom-left help text. Long room lists scroll inside the label.
-- Job contribution is inferred from desk props (Section 5), not returned per room.
+- Fixed 500 × 360 px panel; it is viewport-clamped at build time and can still overlap the bottom-left help text on very narrow screens. Long room lines wrap; the mouse-transparent panel does not accept wheel scrolling.
 - English strings and ASCII/UTF-8 separators are hard-coded until the localization pass ([[16 - Localization]]).
 - Room IDs renumber when rooms are added or removed, so a remembered selection follows the index, not the identity of the room.
