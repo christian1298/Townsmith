@@ -36,6 +36,8 @@ tags:
 
 Terrain-edit methods (`terrain_edit_height`, `terrain_delta_count`, `terrain_delta_checksum`, `terrain_clear_deltas`, and `reset_terrain_workers`) are documented in [[43 - Terrain Edits]]. `world_height_at` and placement validation use those deltas.
 
+Construction methods (`construction_tick`, `construction_sites`, `construction_summary`, `construction_set_crew`, `construction_add_materials`, `construction_checksum`, `construction_clear`) are documented in [[45 - Construction Sites]]. A successful placement creates a site in the same transaction.
+
 `x` and `z` are the **centre** of the rotated footprint in world metres. The blueprint mesh is volume-local with its minimum corner at `(0, 0, 0)`; a renderer offsets it by `-bounds_m / 2` on X/Z, then rotates around Y. `rotation` is normalized to 0/90/180/270.
 
 ## 2. Validation
@@ -45,7 +47,8 @@ Terrain-edit methods (`terrain_edit_height`, `terrain_delta_count`, `terrain_del
 - `blueprint_id`, `content_hash`, package path, name;
 - `bounds_m`;
 - material cost (stored when finite/positive, otherwise recomputed from the slice price table);
-- resident capacity and job slots.
+- resident capacity and job slots;
+- solid voxels, used as construction material litres.
 
 `core_city::placement` applies the terrain rules:
 
@@ -86,13 +89,14 @@ The sampler uses `WorldGenerator::height_at` on the 1 m grid, not the currently 
       "foundation_m": 1.0,
       "material_cost": 38028.8,
       "resident_capacity": 2,
-      "job_slots": 2
+      "job_slots": 2,
+      "solid_voxels": 64224
     }
   ]
 }
 ```
 
-2B adds an optional `terrain_deltas` (hex `TSDL`) + `terrain_checksum` pair when edits exist; see [[43 - Terrain Edits]].
+2B adds an optional `terrain_deltas` (hex `TSDL`) + `terrain_checksum` pair when edits exist; 2D adds a `construction` object when sites exist. See [[43 - Terrain Edits]] and [[45 - Construction Sites]].
 
 `world_load` rejects:
 
@@ -144,7 +148,7 @@ GODOT=/path/to/godot ./scripts/smoke_world_scene.sh
 `WORLD_SCENE` exercises the green/red ghost, water rejection, a 90° ghost rotation, a terrain edit and dirty chunk, placing at the fixture site, save/load of placements + deltas, rebuilding the placed node and foundation, and a failed load leaving the scene untouched. Terrain-edit details are in [[43 - Terrain Edits]]. Recorded marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok build=ok done=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 ## 5. Scene
@@ -155,7 +159,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok select=ok en
 - In Mayor Mode the target is the orbit point, snapped to the 1 m grid. The first-person view is read-only in this slice.
 - The ghost is a `Node3D` pivot with the blueprint mesh offset by `-bounds_m / 2` on X/Z. It is green when validation passes and red with the error code when it fails.
 - A transparent foundation box previews the unrotated blueprint footprint × `foundation_m`; the pivot carries the rotation.
-- `R` rotates 90°, `X` raises and `Z` lowers the target terrain by 1 m, left click places, right click selects, `Enter` enters the selected building, `Delete` clears, `F5` saves, and `F9` loads. See [[44 - Mayor Mode]] for the camera and selection rules.
+- `R` rotates 90°, `X` raises and `Z` lowers the target terrain by 1 m, left click creates a construction site, right click selects, `Enter` enters the selected building, `Delete` clears, `F5` saves, and `F9` loads. See [[44 - Mayor Mode]] for the camera and selection rules.
 - Placed buildings are rebuilt from the `.tsbp`; each has a mesh child, plus a foundation box when `foundation_m > 0`. The scene does not cache scenes.
 - Terrain edits remesh only the affected chunk; loading a world marks every loaded chunk dirty.
 - Validation runs when the 1 m target cell or rotation changes, not every frame. The ghost y comes from the validated centre; an invalid ghost sits on the sampled terrain.
@@ -166,7 +170,7 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 ## 6. Limits
 
 - The world save references **absolute package paths**. It is valid on the same machine but is not portable; a content-addressed local library is a follow-up.
-- Placement is instant. D-023's phased construction site is stage 2D.
+- Placement creates a phased construction site; the v0 state machine and visuals are in [[45 - Construction Sites]].
 - Terrain edits use the 2B delta fields in the same JSON; see [[43 - Terrain Edits]].
 - `world_load` re-verifies package hashes and metadata (id, name, bounds, capacity, jobs) but does not re-run slope/water sampling. Terrain edits can invalidate an old site; the gameplay layer will revalidate before construction.
 - No collision, road access, utility access, or lot ownership yet.
@@ -175,14 +179,14 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 
 ## 7. Tests
 
-- `core_city` placement validation and persistence: 13 tests.
+- `core_city` placement validation and persistence: 13 tests; construction state machine: 9 tests.
 - `godot_ext`: 22 tests total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta roundtrip/checksum rejection.
-- Workspace: **208 tests + 1 doctest**.
+- Workspace: **217 tests + 1 doctest**.
 - Godot headless: `WORLD_PLACEMENT ... status=ok` and `WORLD_SCENE ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 
 ## 8. Next
 
 1. Replace absolute package paths with a content-addressed library beside the save.
-2. Move placement into a construction site (2D).
-3. Add Mayor Mode camera/selection (2C; see [[44 - Mayor Mode]]).
+2. Add roads, lots, settlement boundaries, and zoning (2E).
+3. Replace global construction pools with settlement crews and delivery trips.

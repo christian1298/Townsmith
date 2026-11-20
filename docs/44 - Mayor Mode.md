@@ -117,7 +117,7 @@ Actual voxel editing remains in the workshop editor:
 Marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok build=ok done=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 The smoke runs without a display; camera projection uses the headless viewport.
@@ -138,4 +138,4 @@ The smoke runs without a display; camera projection uses the headless viewport.
 1. Hand the selected blueprint to `editor.tscn` and return to the world (D-026 workshop-first flow).
 2. Add entrance detection to blueprint metadata or room detection.
 3. Add hover, multi-select, and an inspection panel with room details.
-4. Move to 2D construction sites after the mode loop is stable.
+4. Move to 2E roads, lots, and zoning after construction v0 ([[45 - Construction Sites]]).
