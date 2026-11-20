@@ -27,8 +27,8 @@ use core_blueprint::{
     PropRecord, RoomRecord,
 };
 use core_city::{
-    normalize_rotation, CityLayout, CityTier, Placement, PlacementError, PlacementRequest,
-    PlacementStore, MAX_WORLD_COORD_M,
+    normalize_rotation, CityLayout, CityTier, ConstructionSite, ConstructionStore, Placement,
+    PlacementError, PlacementRequest, PlacementStore, MAX_WORLD_COORD_M,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -499,6 +499,7 @@ struct TownsmithCore {
     terrain: Mutex<Option<TerrainBridge>>,
     editor: Mutex<Option<EditorState>>,
     world: Mutex<Option<PlacementStore>>,
+    construction: Mutex<ConstructionStore>,
     terrain_deltas: Arc<RwLock<DeltaStore>>,
     terrain_seed: Mutex<Option<u64>>,
 }
@@ -509,6 +510,7 @@ impl Default for TownsmithCore {
             terrain: Mutex::new(None),
             editor: Mutex::new(None),
             world: Mutex::new(None),
+            construction: Mutex::new(ConstructionStore::default()),
             terrain_deltas: Arc::new(RwLock::new(DeltaStore::new())),
             terrain_seed: Mutex::new(None),
         }
@@ -943,15 +945,27 @@ impl TownsmithCore {
         }
         match placed {
             Ok(placement) => {
-                let store = guard.as_ref().expect("a successful place keeps a store");
+                let (count, checksum) = {
+                    let store = guard.as_ref().expect("a successful place keeps a store");
+                    (store.placements.len(), store.checksum())
+                };
+                let construction_result = self
+                    .construction
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .add_site(placement.id, request.solid_voxels)
+                    .map(|_| ());
+                if let Err(error) = construction_result {
+                    if let Some(store) = guard.as_mut() {
+                        store.remove(placement.id);
+                    }
+                    return placement_simple_error("construction_failed", error.to_string());
+                }
                 let mut result = VarDictionary::new();
                 result.set("ok", true);
                 result.set("seed", seed as i64);
-                result.set("count", store.placements.len() as i64);
-                result.set(
-                    "checksum",
-                    &GString::from(&format!("{:016x}", store.checksum())),
-                );
+                result.set("count", count as i64);
+                result.set("checksum", &GString::from(&format!("{checksum:016x}")));
                 result.set(
                     "placement",
                     &placement_to_dictionary(&placement).to_variant(),
@@ -1020,6 +1034,10 @@ impl TownsmithCore {
         if let Some(store) = guard.as_mut() {
             store.clear();
         }
+        self.construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
         true
     }
 
@@ -1030,7 +1048,153 @@ impl TownsmithCore {
             return false;
         };
         let mut guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
-        guard.as_mut().is_some_and(|store| store.remove(id))
+        let removed = guard.as_mut().is_some_and(|store| store.remove(id));
+        if removed {
+            self.construction
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove_site(id);
+        }
+        removed
+    }
+
+    /// Advance every construction site by `delta_seconds`.
+    ///
+    /// Returns `{ ok, completed[], phase_changed[], active, stalled,
+    /// checksum }`. The shell updates site visuals from
+    /// [`Self::construction_sites`].
+    #[func]
+    fn construction_tick(&self, delta_seconds: f64) -> VarDictionary {
+        if !delta_seconds.is_finite() {
+            return placement_simple_error("invalid_delta", "construction delta must be finite");
+        }
+        let mut store = self
+            .construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let report = store.tick(delta_seconds);
+        let mut completed: Array<i64> = Array::new();
+        for id in &report.completed {
+            completed.push(*id as i64);
+        }
+        let mut phase_changed: Array<i64> = Array::new();
+        for id in &report.phase_changed {
+            phase_changed.push(*id as i64);
+        }
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("completed", &completed.to_variant());
+        result.set("phase_changed", &phase_changed.to_variant());
+        result.set("active", report.active as i64);
+        result.set("stalled", report.stalled as i64);
+        result.set(
+            "checksum",
+            &GString::from(&format!("{:016x}", store.checksum())),
+        );
+        result
+    }
+
+    /// Current construction sites.
+    #[func]
+    fn construction_sites(&self) -> VarDictionary {
+        let store = self
+            .construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut sites: Array<VarDictionary> = Array::new();
+        for site in store.sites.values() {
+            sites.push(&construction_site_to_dictionary(site));
+        }
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("count", sites.len() as i64);
+        result.set("sites", &sites.to_variant());
+        result.set(
+            "checksum",
+            &GString::from(&format!("{:016x}", store.checksum())),
+        );
+        result
+    }
+
+    /// Construction counts and shared resources.
+    #[func]
+    fn construction_summary(&self) -> VarDictionary {
+        let store = self
+            .construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let active = store
+            .sites
+            .values()
+            .filter(|site| !site.is_complete())
+            .count();
+        let stalled = store
+            .sites
+            .values()
+            .filter(|site| !site.is_complete() && site.stall_reason.is_some())
+            .count();
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("sites", store.site_count() as i64);
+        result.set("active", active as i64);
+        result.set("stalled", stalled as i64);
+        result.set("complete", (store.site_count() - active) as i64);
+        result.set("crew_capacity", i64::from(store.crew_capacity));
+        result.set("materials_stock", store.materials_stock as i64);
+        result.set(
+            "checksum",
+            &GString::from(&format!("{:016x}", store.checksum())),
+        );
+        result
+    }
+
+    /// Set the shared crew pool. Values above 64 are rejected.
+    #[func]
+    fn construction_set_crew(&self, crew_capacity: i64) -> bool {
+        let Ok(crew_capacity) = u16::try_from(crew_capacity) else {
+            return false;
+        };
+        if crew_capacity > 64 {
+            return false;
+        }
+        self.construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .set_crew_capacity(crew_capacity);
+        true
+    }
+
+    /// Add material litres to the shared stockpile.
+    #[func]
+    fn construction_add_materials(&self, litres: i64) -> bool {
+        let Ok(litres) = u64::try_from(litres) else {
+            return false;
+        };
+        self.construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .deliver_materials(litres);
+        true
+    }
+
+    /// Stable construction checksum.
+    #[func]
+    fn construction_checksum(&self) -> GString {
+        let store = self
+            .construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        GString::from(&format!("{:016x}", store.checksum()))
+    }
+
+    /// Remove every construction site. Sites are also cleared with placements.
+    #[func]
+    fn construction_clear(&self) -> bool {
+        self.construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        true
     }
 
     /// Write the placement store as JSON.
@@ -1047,6 +1211,11 @@ impl TownsmithCore {
         let Some(store) = store else {
             return placement_simple_error("no_world", "no world placement store is open");
         };
+        let construction = self
+            .construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
         let json = match store.to_json_pretty() {
             Ok(json) => json,
             Err(error) => return placement_error_result(&error),
@@ -1078,6 +1247,14 @@ impl TownsmithCore {
         } else {
             json
         };
+        let json = if construction.site_count() > 0 {
+            match attach_construction(&json, &construction) {
+                Ok(json) => json,
+                Err(error) => return placement_simple_error("save_failed", error),
+            }
+        } else {
+            json
+        };
         if json.len() > MAX_WORLD_SAVE_BYTES as usize {
             return placement_simple_error(
                 "save_too_large",
@@ -1096,9 +1273,14 @@ impl TownsmithCore {
         result.set("seed", store.seed as i64);
         result.set("count", store.placements.len() as i64);
         result.set("terrain_edits", deltas_count as i64);
+        result.set("construction_sites", construction.site_count() as i64);
         result.set(
             "checksum",
             &GString::from(&format!("{:016x}", store.checksum())),
+        );
+        result.set(
+            "construction_checksum",
+            &GString::from(&format!("{:016x}", construction.checksum())),
         );
         result.set(
             "terrain_checksum",
@@ -1139,6 +1321,11 @@ impl TownsmithCore {
         };
         let deltas = match terrain_deltas_from_world_json(&json) {
             Ok(deltas) => deltas,
+            Err((code, error)) => return placement_simple_error(code, error),
+        };
+        let mut construction = match construction_from_world_json(&json) {
+            Ok(Some(store)) => store,
+            Ok(None) => ConstructionStore::default(),
             Err((code, error)) => return placement_simple_error(code, error),
         };
         let store = match PlacementStore::from_json(&json) {
@@ -1199,9 +1386,29 @@ impl TownsmithCore {
                 );
             }
         }
+        for placement in &store.placements {
+            if construction.site(placement.id).is_none() {
+                if let Err(error) = construction.add_site(placement.id, placement.solid_voxels) {
+                    return placement_simple_error("construction_failed", error.to_string());
+                }
+            }
+        }
+        for id in construction.sites.keys() {
+            if !store.placements.iter().any(|placement| placement.id == *id) {
+                return placement_simple_error(
+                    "construction_orphan",
+                    format!("construction site {id} has no placement"),
+                );
+            }
+        }
+        if let Err(error) = construction.validate() {
+            return placement_simple_error("invalid_construction", error.to_string());
+        }
         let seed = store.seed;
         let count = store.placements.len() as i64;
         let checksum = store.checksum();
+        let construction_count = construction.site_count();
+        let construction_checksum = construction.checksum();
         let deltas_count = deltas.edit_count();
         let deltas_checksum = deltas.checksum();
         let mut guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
@@ -1213,6 +1420,10 @@ impl TownsmithCore {
                 );
             }
         }
+        *self
+            .construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = construction;
         *guard = Some(store);
         *self
             .terrain_deltas
@@ -1229,10 +1440,15 @@ impl TownsmithCore {
         result.set("seed", seed as i64);
         result.set("count", count);
         result.set("terrain_edits", deltas_count as i64);
+        result.set("construction_sites", construction_count as i64);
         result.set("checksum", &GString::from(&format!("{checksum:016x}")));
         result.set(
             "terrain_checksum",
             &GString::from(&format!("{deltas_checksum:016x}")),
+        );
+        result.set(
+            "construction_checksum",
+            &GString::from(&format!("{construction_checksum:016x}")),
         );
         result
     }
@@ -2094,8 +2310,29 @@ fn placement_to_dictionary(placement: &Placement) -> VarDictionary {
     );
     result.set("foundation_m", f64::from(placement.foundation_m));
     result.set("material_cost", placement.material_cost);
+    result.set("solid_voxels", placement.solid_voxels as i64);
     result.set("resident_capacity", i64::from(placement.resident_capacity));
     result.set("job_slots", i64::from(placement.job_slots));
+    result
+}
+
+fn construction_site_to_dictionary(site: &ConstructionSite) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("id", site.placement_id as i64);
+    result.set("phase", &GString::from(site.phase.code()));
+    result.set("phase_label", &GString::from(site.phase.label()));
+    result.set("phase_progress", f64::from(site.phase_progress));
+    result.set("progress", f64::from(site.progress()));
+    result.set("elapsed_s", f64::from(site.elapsed_s));
+    result.set("total_s", f64::from(site.total_s));
+    result.set("materials_required", site.materials_required as i64);
+    result.set("materials_delivered", site.materials_delivered as i64);
+    result.set("crew_required", i64::from(site.crew_required));
+    result.set("crew_assigned", i64::from(site.crew_assigned));
+    result.set("complete", site.is_complete());
+    if let Some(reason) = &site.stall_reason {
+        result.set("stall_reason", &GString::from(reason.as_str()));
+    }
     result
 }
 
@@ -2150,6 +2387,29 @@ fn placement_request_from_blueprint(
         job_slots: blueprint.metadata.stats.job_slots,
         solid_voxels: blueprint.metadata.solid_voxels,
     }
+}
+
+fn attach_construction(json: &str, store: &ConstructionStore) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    value["construction"] = serde_json::to_value(store).map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+}
+
+fn construction_from_world_json(
+    json: &str,
+) -> Result<Option<ConstructionStore>, (&'static str, String)> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| ("invalid_json", error.to_string()))?;
+    let Some(raw) = value.get("construction") else {
+        return Ok(None);
+    };
+    let store: ConstructionStore = serde_json::from_value(raw.clone())
+        .map_err(|error| ("invalid_construction", error.to_string()))?;
+    store
+        .validate()
+        .map_err(|error| ("invalid_construction", error.to_string()))?;
+    Ok(Some(store))
 }
 
 fn attach_terrain_deltas(json: &str, bytes: &[u8], checksum: u64) -> Result<String, String> {
