@@ -41,6 +41,7 @@ Key methods:
 | `fill_box` | All-or-nothing box fill |
 | `solid_count` | Non-air voxels |
 | `chunks_allocated` | Lazily allocated chunk count |
+| `insert_chunk` | Restore a decoded chunk at a validated chunk coordinate (blueprint loading) |
 | `clear_chunk` / `clear` | Drop one chunk or the whole volume |
 | `mesh()` | One combined `MeshBuffers` in volume meters |
 
