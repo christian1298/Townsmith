@@ -2148,6 +2148,7 @@ fn placement_request_from_blueprint(
         material_cost,
         resident_capacity: blueprint.metadata.stats.resident_capacity,
         job_slots: blueprint.metadata.stats.job_slots,
+        solid_voxels: blueprint.metadata.solid_voxels,
     }
 }
 
