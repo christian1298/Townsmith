@@ -10,7 +10,7 @@ use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -39,8 +39,8 @@ use core_voxel::demo;
 use core_voxel::mesh::{greedy_mesh, MeshBuffers};
 use core_voxel::volume::{VolumeConfig, VolumePos, VoxelVolume, MAX_CHUNKS, MAX_CHUNKS_PER_AXIS};
 use core_world::{
-    terrain_mesh_lod_with_sampler_and_skirt, TerrainMesh, TerrainPos, WorldChunkCoord,
-    WorldGenerator, DEFAULT_SKIRT_DEPTH_M, WORLD_CHUNK_SIZE,
+    terrain_mesh_lod_with_sampler_and_skirt, DeltaStore, TerrainMesh, TerrainPos, WorldChunkCoord,
+    WorldGenerator, DEFAULT_SKIRT_DEPTH_M, MAX_HEIGHT_M, WORLD_CHUNK_SIZE,
 };
 
 const MAX_TERRAIN_WORKERS: usize = 4;
@@ -285,6 +285,7 @@ struct TerrainJob {
     chunk_x: i64,
     chunk_z: i64,
     step: usize,
+    deltas: Arc<RwLock<DeltaStore>>,
 }
 
 struct TerrainResult {
@@ -343,7 +344,14 @@ impl TerrainBridge {
         }
     }
 
-    fn request(&mut self, seed: u64, chunk_x: i64, chunk_z: i64, step: usize) -> i64 {
+    fn request(
+        &mut self,
+        seed: u64,
+        chunk_x: i64,
+        chunk_z: i64,
+        step: usize,
+        deltas: Arc<RwLock<DeltaStore>>,
+    ) -> i64 {
         let id = self.next_id;
         self.next_id = if id == i64::MAX { 1 } else { id + 1 };
 
@@ -353,6 +361,7 @@ impl TerrainBridge {
             chunk_x,
             chunk_z,
             step,
+            deltas,
         };
         let sent = self
             .jobs
@@ -395,15 +404,18 @@ fn worker_loop(jobs: Arc<Mutex<Receiver<TerrainJob>>>, results: Sender<TerrainRe
             break;
         };
 
-        let outcome = catch_unwind(AssertUnwindSafe(|| {
+        let deltas = Arc::clone(&job.deltas);
+        let outcome = catch_unwind(AssertUnwindSafe(move || {
             let generator = WorldGenerator::new(job.seed);
             generator
                 .generate(WorldChunkCoord::new(job.chunk_x, job.chunk_z))
-                .map(|chunk| {
+                .map(|mut chunk| {
+                    let deltas = deltas.read().unwrap_or_else(|error| error.into_inner());
+                    deltas.apply_to(&mut chunk);
                     terrain_mesh_lod_with_sampler_and_skirt(
                         &chunk,
                         job.step,
-                        |x, z| generator.height_at(TerrainPos::new(x, z)),
+                        |x, z| deltas.height_at(&generator, TerrainPos::new(x, z)),
                         DEFAULT_SKIRT_DEPTH_M,
                     )
                 })
@@ -487,6 +499,8 @@ struct TownsmithCore {
     terrain: Mutex<Option<TerrainBridge>>,
     editor: Mutex<Option<EditorState>>,
     world: Mutex<Option<PlacementStore>>,
+    terrain_deltas: Arc<RwLock<DeltaStore>>,
+    terrain_seed: Mutex<Option<u64>>,
 }
 
 impl Default for TownsmithCore {
@@ -495,6 +509,8 @@ impl Default for TownsmithCore {
             terrain: Mutex::new(None),
             editor: Mutex::new(None),
             world: Mutex::new(None),
+            terrain_deltas: Arc::new(RwLock::new(DeltaStore::new())),
+            terrain_seed: Mutex::new(None),
         }
     }
 }
@@ -629,6 +645,35 @@ impl TownsmithCore {
         result
     }
 
+    fn deltas_for_seed(&self, seed: u64) -> Arc<RwLock<DeltaStore>> {
+        let active = *self
+            .terrain_seed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if active.is_some_and(|active| active != seed) {
+            Arc::new(RwLock::new(DeltaStore::new()))
+        } else {
+            Arc::clone(&self.terrain_deltas)
+        }
+    }
+
+    fn terrain_height_for_seed(&self, seed: u64, pos: TerrainPos) -> u16 {
+        let active = *self
+            .terrain_seed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let generator = WorldGenerator::new(seed);
+        if active == Some(seed) {
+            let deltas = self
+                .terrain_deltas
+                .read()
+                .unwrap_or_else(|error| error.into_inner());
+            deltas.height_at(&generator, pos)
+        } else {
+            generator.height_at(pos)
+        }
+    }
+
     /// Generate one 256 m terrain chunk synchronously.
     ///
     /// Kept for tooling and tests. The streaming shell should use
@@ -651,14 +696,18 @@ impl TownsmithCore {
         step: i64,
     ) -> Gd<ArrayMesh> {
         let step = clamp_step(step);
-        let generator = WorldGenerator::new(seed as u64);
-        let Ok(chunk) = generator.generate(WorldChunkCoord::new(chunk_x, chunk_z)) else {
+        let seed = seed as u64;
+        let generator = WorldGenerator::new(seed);
+        let Ok(mut chunk) = generator.generate(WorldChunkCoord::new(chunk_x, chunk_z)) else {
             return ArrayMesh::new_gd();
         };
+        let deltas = self.deltas_for_seed(seed);
+        let deltas = deltas.read().unwrap_or_else(|error| error.into_inner());
+        deltas.apply_to(&mut chunk);
         let buffers = terrain_mesh_lod_with_sampler_and_skirt(
             &chunk,
             step,
-            |x, z| generator.height_at(TerrainPos::new(x, z)),
+            |x, z| deltas.height_at(&generator, TerrainPos::new(x, z)),
             DEFAULT_SKIRT_DEPTH_M,
         );
         terrain_mesh_to_godot(&buffers)
@@ -678,7 +727,22 @@ impl TownsmithCore {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let bridge = guard.get_or_insert_with(TerrainBridge::new);
-        bridge.request(seed as u64, chunk_x, chunk_z, step)
+        let seed = seed as u64;
+        bridge.request(seed, chunk_x, chunk_z, step, self.deltas_for_seed(seed))
+    }
+
+    /// Drop the terrain worker pool so the next request recreates it.
+    ///
+    /// Keeps terrain deltas and all other bridge state. Used after a worker
+    /// disconnect instead of constructing a new `TownsmithCore`.
+    #[func]
+    fn reset_terrain_workers(&self) -> bool {
+        let mut guard = self
+            .terrain
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        guard.take();
+        true
     }
 
     /// Poll one finished worker-thread terrain chunk.
@@ -745,8 +809,8 @@ impl TownsmithCore {
             Ok(value) => value,
             Err(error) => return error,
         };
-        let generator = WorldGenerator::new(seed);
-        let height_at = |cell_x, cell_z| generator.height_at(TerrainPos::new(cell_x, cell_z));
+        let height_at =
+            |cell_x, cell_z| self.terrain_height_for_seed(seed, TerrainPos::new(cell_x, cell_z));
         let guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(store) = guard.as_ref() {
             if store.seed != seed {
@@ -855,8 +919,8 @@ impl TownsmithCore {
             Ok(value) => value,
             Err(error) => return error,
         };
-        let generator = WorldGenerator::new(seed);
-        let height_at = |cell_x, cell_z| generator.height_at(TerrainPos::new(cell_x, cell_z));
+        let height_at =
+            |cell_x, cell_z| self.terrain_height_for_seed(seed, TerrainPos::new(cell_x, cell_z));
         let mut guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(store) = guard.as_ref() {
             if store.seed != seed {
@@ -987,6 +1051,42 @@ impl TownsmithCore {
             Ok(json) => json,
             Err(error) => return placement_error_result(&error),
         };
+        let (deltas_bytes, deltas_checksum, deltas_count) = {
+            let deltas = self
+                .terrain_deltas
+                .read()
+                .unwrap_or_else(|error| error.into_inner());
+            (deltas.encode(), deltas.checksum(), deltas.edit_count())
+        };
+        if deltas_count > 0 {
+            let deltas_seed = *self
+                .terrain_seed
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if deltas_seed != Some(store.seed) {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "terrain deltas belong to a different seed",
+                );
+            }
+        }
+        let json = if deltas_count > 0 {
+            match attach_terrain_deltas(&json, &deltas_bytes, deltas_checksum) {
+                Ok(json) => json,
+                Err(error) => return placement_simple_error("save_failed", error),
+            }
+        } else {
+            json
+        };
+        if json.len() > MAX_WORLD_SAVE_BYTES as usize {
+            return placement_simple_error(
+                "save_too_large",
+                format!(
+                    "world save is {} bytes; the limit is {MAX_WORLD_SAVE_BYTES}",
+                    json.len()
+                ),
+            );
+        }
         if let Err(error) = write_text_atomic(&path, &json) {
             return placement_simple_error("save_failed", error.to_string());
         }
@@ -995,9 +1095,14 @@ impl TownsmithCore {
         result.set("path", &GString::from(path.to_string_lossy().as_ref()));
         result.set("seed", store.seed as i64);
         result.set("count", store.placements.len() as i64);
+        result.set("terrain_edits", deltas_count as i64);
         result.set(
             "checksum",
             &GString::from(&format!("{:016x}", store.checksum())),
+        );
+        result.set(
+            "terrain_checksum",
+            &GString::from(&format!("{deltas_checksum:016x}")),
         );
         result
     }
@@ -1031,6 +1136,10 @@ impl TownsmithCore {
         let json = match std::fs::read_to_string(&path) {
             Ok(json) => json,
             Err(error) => return placement_simple_error("load_failed", error.to_string()),
+        };
+        let deltas = match terrain_deltas_from_world_json(&json) {
+            Ok(deltas) => deltas,
+            Err((code, error)) => return placement_simple_error(code, error),
         };
         let store = match PlacementStore::from_json(&json) {
             Ok(store) => store,
@@ -1093,6 +1202,8 @@ impl TownsmithCore {
         let seed = store.seed;
         let count = store.placements.len() as i64;
         let checksum = store.checksum();
+        let deltas_count = deltas.edit_count();
+        let deltas_checksum = deltas.checksum();
         let mut guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(current) = guard.as_ref() {
             if current.seed != seed {
@@ -1103,18 +1214,139 @@ impl TownsmithCore {
             }
         }
         *guard = Some(store);
+        *self
+            .terrain_deltas
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = deltas;
+        *self
+            .terrain_seed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            if deltas_count > 0 { Some(seed) } else { None };
         let mut result = VarDictionary::new();
         result.set("ok", true);
         result.set("path", &GString::from(path.to_string_lossy().as_ref()));
         result.set("seed", seed as i64);
         result.set("count", count);
+        result.set("terrain_edits", deltas_count as i64);
         result.set("checksum", &GString::from(&format!("{checksum:016x}")));
+        result.set(
+            "terrain_checksum",
+            &GString::from(&format!("{deltas_checksum:016x}")),
+        );
         result
+    }
+
+    /// Set one terrain cell to a new height and record the delta.
+    ///
+    /// Returns `{ ok, chunk_x, chunk_z, height, edits }`. The shell remeshes
+    /// the returned chunk. Heights must be 0..=255 m.
+    #[func]
+    fn terrain_edit_height(&self, seed: i64, x: i64, z: i64, height: i64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        if x.unsigned_abs() > 1_000_000 || z.unsigned_abs() > 1_000_000 {
+            return placement_simple_error(
+                "coordinate_out_of_range",
+                "terrain edit coordinates must be within ±1,000,000 m",
+            );
+        }
+        let Ok(height) = u16::try_from(height) else {
+            return placement_simple_error("invalid_height", "terrain height must be 0..=255 m");
+        };
+        if height > MAX_HEIGHT_M {
+            return placement_simple_error("invalid_height", "terrain height must be 0..=255 m");
+        }
+        let pos = TerrainPos::new(x, z);
+        let coord = WorldChunkCoord::from_terrain_pos(pos);
+        let Some((local_x, local_z)) = coord.local_from_world(pos) else {
+            return placement_simple_error(
+                "invalid_coordinate",
+                "terrain position is out of range",
+            );
+        };
+        let mut world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = world.as_ref() {
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the world belongs to a different seed",
+                );
+            }
+        }
+        let mut deltas = self
+            .terrain_deltas
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Err(error) = deltas.set_height(coord, local_x as u8, local_z as u8, height) {
+            return placement_simple_error("edit_failed", error.to_string());
+        }
+        if world.is_none() {
+            *world = Some(PlacementStore::new(seed));
+        }
+        *self
+            .terrain_seed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(seed);
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("chunk_x", coord.x);
+        result.set("chunk_z", coord.z);
+        result.set("local_x", local_x as i64);
+        result.set("local_z", local_z as i64);
+        result.set("height", i64::from(height));
+        result.set("edits", deltas.edit_count() as i64);
+        result
+    }
+
+    /// Number of terrain edits.
+    #[func]
+    fn terrain_delta_count(&self) -> i64 {
+        self.terrain_deltas
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .edit_count() as i64
+    }
+
+    /// Stable checksum of the encoded terrain deltas.
+    #[func]
+    fn terrain_delta_checksum(&self) -> GString {
+        let checksum = self
+            .terrain_deltas
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .checksum();
+        GString::from(&format!("{checksum:016x}"))
+    }
+
+    /// Seed that owns the terrain edits, or `-1` when there are none.
+    #[func]
+    fn terrain_deltas_seed(&self) -> i64 {
+        self.terrain_seed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .map_or(-1, |seed| seed as i64)
+    }
+
+    /// Remove every terrain edit.
+    #[func]
+    fn terrain_clear_deltas(&self) -> bool {
+        *self
+            .terrain_deltas
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = DeltaStore::new();
+        *self
+            .terrain_seed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        true
     }
 
     /// Sample one terrain height for the placement preview.
     ///
-    /// Returns `-1.0` for invalid coordinates.
+    /// Uses recorded edits when they belong to `seed`. Returns `-1.0` for
+    /// invalid coordinates.
     #[func]
     fn world_height_at(&self, seed: i64, x: f64, z: f64) -> f64 {
         let Ok(seed) = u64::try_from(seed) else {
@@ -1126,8 +1358,9 @@ impl TownsmithCore {
         if x.abs() > f64::from(MAX_WORLD_COORD_M) || z.abs() > f64::from(MAX_WORLD_COORD_M) {
             return -1.0;
         }
-        let generator = WorldGenerator::new(seed);
-        f64::from(generator.height_at(TerrainPos::new(x.floor() as i64, z.floor() as i64)))
+        f64::from(
+            self.terrain_height_for_seed(seed, TerrainPos::new(x.floor() as i64, z.floor() as i64)),
+        )
     }
 
     /// Create or replace the editor [`VoxelVolume`].
@@ -1918,6 +2151,89 @@ fn placement_request_from_blueprint(
     }
 }
 
+fn attach_terrain_deltas(json: &str, bytes: &[u8], checksum: u64) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    value["terrain_deltas"] = serde_json::Value::String(hex_encode(bytes));
+    value["terrain_checksum"] = serde_json::Value::String(format!("{checksum:016x}"));
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+}
+
+fn terrain_deltas_from_world_json(json: &str) -> Result<DeltaStore, (&'static str, String)> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| ("invalid_json", error.to_string()))?;
+    let Some(encoded) = value.get("terrain_deltas") else {
+        if value.get("terrain_checksum").is_some() {
+            return Err((
+                "invalid_terrain_checksum",
+                "terrain_checksum requires terrain_deltas".to_string(),
+            ));
+        }
+        return Ok(DeltaStore::new());
+    };
+    let Some(encoded) = encoded.as_str() else {
+        return Err((
+            "invalid_terrain_deltas",
+            "terrain_deltas must be a hex string".to_string(),
+        ));
+    };
+    let Some(checksum) = value
+        .get("terrain_checksum")
+        .and_then(|value| value.as_str())
+    else {
+        return Err((
+            "invalid_terrain_checksum",
+            "terrain_deltas requires terrain_checksum".to_string(),
+        ));
+    };
+    let checksum = u64::from_str_radix(checksum, 16).map_err(|error| {
+        (
+            "invalid_terrain_checksum",
+            format!("terrain checksum is not hexadecimal: {error}"),
+        )
+    })?;
+    let bytes = hex_decode(encoded).map_err(|error| ("invalid_terrain_deltas", error))?;
+    let actual = DeltaStore::checksum_bytes(&bytes);
+    if actual != checksum {
+        return Err((
+            "terrain_checksum_mismatch",
+            format!("expected {checksum:016x} but the deltas are {actual:016x}"),
+        ));
+    }
+    DeltaStore::decode(&bytes).map_err(|error| ("invalid_terrain_deltas", error.to_string()))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn hex_decode(encoded: &str) -> Result<Vec<u8>, String> {
+    let bytes = encoded.as_bytes();
+    if !bytes.len().is_multiple_of(2) || !encoded.is_ascii() {
+        return Err("terrain delta hex string has an invalid length or character".to_string());
+    }
+    let mut decoded = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.as_chunks::<2>().0 {
+        decoded.push((hex_value(pair[0])? << 4) | hex_value(pair[1])?);
+    }
+    Ok(decoded)
+}
+
+fn hex_value(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(format!("invalid hex character '{}'", char::from(byte))),
+    }
+}
+
 fn world_save_path_from_arg(raw: &str) -> Result<PathBuf, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -2248,7 +2564,7 @@ mod tests {
     #[test]
     fn request_round_trips_a_mesh() {
         let mut bridge = TerrainBridge::new();
-        let id = bridge.request(2026, 0, 0, 1);
+        let id = bridge.request(2026, 0, 0, 1, Arc::new(RwLock::new(DeltaStore::new())));
         assert!(id > 0);
 
         let result = wait_for_result(&bridge, id);
@@ -2264,7 +2580,9 @@ mod tests {
     fn concurrent_requests_each_return_once() {
         let mut bridge = TerrainBridge::new();
         let ids: Vec<i64> = (0..4)
-            .map(|index| bridge.request(2026, index, 0, 1))
+            .map(|index| {
+                bridge.request(2026, index, 0, 1, Arc::new(RwLock::new(DeltaStore::new())))
+            })
             .collect();
         assert!(ids.iter().all(|id| *id > 0));
 
@@ -2297,7 +2615,29 @@ mod tests {
         assert_eq!(expected.quad_count(), unskirted.quad_count() + 4 * 128);
 
         let mut bridge = TerrainBridge::new();
-        let id = bridge.request(2026, 0, 0, 2);
+        let id = bridge.request(2026, 0, 0, 2, Arc::new(RwLock::new(DeltaStore::new())));
+        let result = wait_for_result(&bridge, id);
+        assert!(result.error.is_none());
+        assert_eq!(result.mesh.expect("mesh"), expected);
+    }
+
+    #[test]
+    fn worker_applies_terrain_deltas() {
+        let generator = WorldGenerator::new(2026);
+        let coord = WorldChunkCoord::new(0, 0);
+        let mut deltas = DeltaStore::new();
+        deltas.set_height(coord, 10, 20, 200).expect("edit");
+        let mut edited = generator.generate(coord).expect("generated chunk");
+        deltas.apply_to(&mut edited);
+        let expected = terrain_mesh_lod_with_sampler_and_skirt(
+            &edited,
+            1,
+            |x, z| deltas.height_at(&generator, TerrainPos::new(x, z)),
+            DEFAULT_SKIRT_DEPTH_M,
+        );
+
+        let mut bridge = TerrainBridge::new();
+        let id = bridge.request(2026, 0, 0, 1, Arc::new(RwLock::new(deltas)));
         let result = wait_for_result(&bridge, id);
         assert!(result.error.is_none());
         assert_eq!(result.mesh.expect("mesh"), expected);
@@ -2398,6 +2738,62 @@ mod tests {
             world_save_path_from_arg(&std::env::temp_dir().join("world").to_string_lossy())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn terrain_delta_hex_round_trips() {
+        let bytes = [0, 1, 15, 16, 127, 128, 255];
+        let encoded = hex_encode(&bytes);
+        assert_eq!(encoded, "00010f107f80ff");
+        assert_eq!(hex_decode(&encoded).expect("decode"), bytes);
+        assert!(hex_decode("0").is_err());
+        assert!(hex_decode("zz").is_err());
+    }
+
+    #[test]
+    fn world_json_round_trips_terrain_deltas() {
+        let store = PlacementStore::new(2026);
+        let json = store.to_json_pretty().expect("placement json");
+        let mut deltas = DeltaStore::new();
+        deltas
+            .set_height(WorldChunkCoord::new(0, 0), 169, 125, 42)
+            .expect("edit");
+        let encoded = attach_terrain_deltas(&json, &deltas.encode(), deltas.checksum())
+            .expect("attach deltas");
+        let decoded = terrain_deltas_from_world_json(&encoded).expect("read deltas");
+        assert_eq!(decoded, deltas);
+    }
+
+    #[test]
+    fn world_json_rejects_bad_terrain_checksum() {
+        let store = PlacementStore::new(2026);
+        let json = store.to_json_pretty().expect("placement json");
+        let deltas = DeltaStore::new();
+        let encoded = attach_terrain_deltas(&json, &deltas.encode(), deltas.checksum())
+            .expect("attach deltas")
+            .replace(&format!("{:016x}", deltas.checksum()), "0000000000000000");
+        assert!(terrain_deltas_from_world_json(&encoded).is_err());
+
+        let mut missing: serde_json::Value = serde_json::from_str(
+            &attach_terrain_deltas(&json, &deltas.encode(), deltas.checksum())
+                .expect("attach deltas"),
+        )
+        .expect("json");
+        missing
+            .as_object_mut()
+            .expect("object")
+            .remove("terrain_checksum");
+        let missing = serde_json::to_string(&missing).expect("json");
+        assert!(terrain_deltas_from_world_json(&missing).is_err());
+    }
+
+    #[test]
+    fn old_world_json_has_empty_terrain_deltas() {
+        let json = PlacementStore::new(2026)
+            .to_json_pretty()
+            .expect("placement json");
+        let deltas = terrain_deltas_from_world_json(&json).expect("read deltas");
+        assert!(deltas.is_empty());
     }
 
     #[test]

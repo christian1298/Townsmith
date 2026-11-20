@@ -39,14 +39,14 @@ The slice follows accepted decisions:
 | **2A.2** | Placement store, JSON save format, checksum | **Done** — PR #45 |
 | **2A.3** | GDExtension placement/save/load API and headless smoke | **Done** — PR #46 |
 | **2A.4** | Streamed-world scene, preview, rotate/place/save/load controls | **This PR** — see [[42 - World Placement Bridge]] |
-| **2B** | Terrain edit deltas applied to streamed chunks, saved/reloaded | Planned |
+| **2B** | Terrain edit deltas applied to streamed chunks, saved/reloaded | **This PR** — see [[43 - Terrain Edits]] |
 | **2C** | Mayor camera, selection, mode switch at a door | Planned |
 | **2D** | Construction site v0: phased progress, materials, crews | Planned |
 | **2E** | Roads, lots, settlement boundaries, zoning | Planned |
 
 Each stage is a separate branch, worktree, and PR. Do not mix 2A with terrain editing or construction state. 2A is split so geometry, persistence, the bridge, and the shell each stay reviewable.
 
-## 3. Stage 2A scope
+## 3. Stage 2A/2B scope
 
 ### In
 
@@ -54,12 +54,12 @@ Each stage is a separate branch, worktree, and PR. Do not mix 2A with terrain ed
 - GDExtension APIs to place, validate, list, clear, save, and load placements.
 - A `world_placement` Godot scene with streamed terrain, a fly camera, and a green/red placement ghost.
 - A placement preview that samples terrain under a camera-forward target and shows valid/invalid, plus the first placed-node rebuild path.
-- Save/load of `seed + placements` as JSON; blueprint packages are referenced by path.
+- Save/load of `seed + placements + terrain deltas` as JSON; blueprint packages are referenced by path.
+- Height edits, dirty-chunk remeshing, and delta save/load (2B).
 - A headless smoke that places the acceptance house, verifies water, overlap, and rotation rejection, saves, clears, reloads, compares the placement checksum, and confirms a failed load leaves the store untouched. Slope rules stay covered by the core placement tests.
 
 ### Out
 
-- Terrain height edits and dirty-chunk remeshing (2B).
 - Roads, access checks, lots, zoning, settlements.
 - Construction phases, materials delivery, crews, budgets.
 - Blueprint library UI, thumbnails, content-addressed package storage.
@@ -162,7 +162,7 @@ World save v1:
 
 Sampling covers the rotated footprint on a 1 m grid, including the edges. A footprint that spans a chunk boundary is sampled from the world generator, not from currently loaded chunks, so placement does not depend on streaming state.
 
-The foundation is a visual box from `min_height` to `center.y` in 2A. Real terrain cut/fill and voxel foundations are 2B work.
+The foundation is a visual box from `min_height` to `center.y` in 2A. Manual height edits are 2B; automatic cut/fill and voxel foundations remain later work.
 
 ## 6. Bridge API
 
@@ -240,7 +240,7 @@ Add the world placement smoke to the Linux Godot job. Windows keeps the Rust gat
 | Risk | Mitigation |
 |---|---|
 | Absolute blueprint paths make saves non-portable | v0 limit; a follow-up adds a content-addressed local library beside the save |
-| Slope threshold rejects most terrain | Search + preview; v0 is deliberately strict; terraces come with 2B |
+| Slope threshold rejects most terrain | Preview plus manual height edits (2B); automatic terraces come later |
 | Foundation box looks crude | It is a placeholder for cut/fill and voxel foundations |
 | No road access check | 2E; the error model already has a place for it |
 | Instant placement contradicts D-023 | Temporary technical placeholder; construction sites are 2D |
@@ -253,9 +253,10 @@ Add the world placement smoke to the Linux Godot job. Windows keeps the Rust gat
 2. Add the placement store and JSON persistence in 2A.2.
 3. ~~Add the bridge and world save/load smoke in 2A.3; update CI.~~ Done.
 4. ~~Add the streamed-world scene and preview in 2A.4.~~ Done.
-5. Record the result in a new results note when 2A is merged.
-6. Start 2B: expose `StreamingWorld` deltas to the bridge and remesh dirty chunks.
-7. Revisit Q-011 once a real building sits on a slope; record the chosen foundation policy.
+5. ~~Record the result in a new results note when 2A is merged.~~ Done — [[42 - World Placement Bridge]] and [[43 - Terrain Edits]].
+6. ~~Start 2B: expose terrain deltas and remesh dirty chunks.~~ Done; see [[43 - Terrain Edits]].
+7. Start 2C: Mayor camera, selection, and mode switching at a door.
+8. Revisit Q-011 once a real building sits on a slope; record the chosen foundation policy.
 
 ## 12. Links
 

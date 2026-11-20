@@ -248,6 +248,7 @@ dependencies = [
  "core_voxel",
  "core_world",
  "godot",
+ "serde_json",
 ]
 
 [[package]]

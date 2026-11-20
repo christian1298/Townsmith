@@ -7,8 +7,9 @@
 use std::collections::BTreeMap;
 
 use crate::chunk::WorldChunk;
-use crate::coords::{WorldChunkCoord, MAX_HEIGHT_M};
+use crate::coords::{TerrainPos, WorldChunkCoord, MAX_HEIGHT_M};
 use crate::error::WorldError;
+use crate::generator::WorldGenerator;
 
 const DELTA_MAGIC: [u8; 4] = *b"TSDL";
 const DELTA_VERSION: u16 = 1;
@@ -65,6 +66,26 @@ impl DeltaStore {
         Ok(())
     }
 
+    /// Height at a world position, using an edit when one exists.
+    ///
+    /// This is the delta-aware sampler used by terrain meshing and placement
+    /// validation. It falls back to `generator.height_at` outside the edits.
+    #[must_use]
+    pub fn height_at(&self, generator: &WorldGenerator, pos: TerrainPos) -> u16 {
+        let coord = WorldChunkCoord::from_terrain_pos(pos);
+        if let Some((x, z)) = coord.local_from_world(pos) {
+            if let Some(edits) = self.chunks.get(&coord) {
+                if let Some(edit) = edits
+                    .iter()
+                    .find(|edit| usize::from(edit.x) == x && usize::from(edit.z) == z)
+                {
+                    return edit.height;
+                }
+            }
+        }
+        generator.height_at(pos)
+    }
+
     /// Apply the deltas for a chunk, if any.
     pub fn apply_to(&self, chunk: &mut WorldChunk) {
         if let Some(edits) = self.chunks.get(&chunk.coord()) {
@@ -99,6 +120,23 @@ impl DeltaStore {
         self.chunks.is_empty()
     }
 
+    /// Stable checksum of an encoded delta blob.
+    #[must_use]
+    pub fn checksum_bytes(bytes: &[u8]) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for &byte in bytes {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
+    }
+
+    /// Stable checksum of this store's encoded delta blob.
+    #[must_use]
+    pub fn checksum(&self) -> u64 {
+        Self::checksum_bytes(&self.encode())
+    }
+
     /// Encode to the phase 0 binary delta format.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
@@ -131,17 +169,29 @@ impl DeltaStore {
             return Err(WorldError::UnsupportedDeltaVersion { version });
         }
         let chunk_count = u32::from_le_bytes(cursor.take()?) as usize;
+        // Each chunk needs at least its 20-byte header. Bound the count before
+        // allocating or iterating so a tiny malformed file cannot request a
+        // huge allocation or a multi-billion-iteration loop.
+        if chunk_count > cursor.remaining() / 20 {
+            return Err(WorldError::TruncatedDelta);
+        }
         let mut chunks = BTreeMap::new();
 
         for _ in 0..chunk_count {
             let x = i64::from_le_bytes(cursor.take()?);
             let z = i64::from_le_bytes(cursor.take()?);
             let edit_count = u32::from_le_bytes(cursor.take()?) as usize;
+            if edit_count > cursor.remaining() / 4 {
+                return Err(WorldError::TruncatedDelta);
+            }
             let mut edits = Vec::with_capacity(edit_count);
             for _ in 0..edit_count {
                 let edit_x = cursor.take::<1>()?[0];
                 let edit_z = cursor.take::<1>()?[0];
                 let height = u16::from_le_bytes(cursor.take()?);
+                if height > MAX_HEIGHT_M {
+                    return Err(WorldError::InvalidHeight { height });
+                }
                 edits.push(TerrainEdit::new(edit_x, edit_z, height));
             }
             chunks.insert(WorldChunkCoord::new(x, z), edits);
@@ -227,6 +277,34 @@ mod tests {
     }
 
     #[test]
+    fn height_at_uses_edits_and_generated_fallback() {
+        let generator = WorldGenerator::new(42);
+        let coord = WorldChunkCoord::new(0, 0);
+        let pos = TerrainPos::new(10, 20);
+        let untouched = generator.height_at(pos);
+        let mut store = DeltaStore::new();
+        store.set_height(coord, 10, 20, 77).expect("edit");
+        assert_eq!(store.height_at(&generator, pos), 77);
+        assert_eq!(
+            store.height_at(&generator, TerrainPos::new(11, 20)),
+            generator.height_at(TerrainPos::new(11, 20))
+        );
+        assert_ne!(untouched, 77);
+    }
+
+    #[test]
+    fn checksum_changes_with_edits() {
+        let mut store = DeltaStore::new();
+        let empty = store.checksum();
+        store
+            .set_height(WorldChunkCoord::new(1, -1), 2, 3, 33)
+            .expect("edit");
+        assert_ne!(store.checksum(), empty);
+        let copy = DeltaStore::decode(&store.encode()).expect("decode");
+        assert_eq!(copy.checksum(), store.checksum());
+    }
+
+    #[test]
     fn rejects_heights_above_the_limit() {
         let mut store = DeltaStore::new();
         assert_eq!(
@@ -255,6 +333,32 @@ mod tests {
         let decoded = DeltaStore::decode(&store.encode()).expect("decode");
         assert_eq!(decoded, store);
         assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn decode_bounds_edit_count_before_allocating() {
+        let mut bytes = Vec::from(*b"TSDL");
+        bytes.extend_from_slice(&DELTA_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&0i64.to_le_bytes());
+        bytes.extend_from_slice(&0i64.to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(DeltaStore::decode(&bytes), Err(WorldError::TruncatedDelta));
+    }
+
+    #[test]
+    fn decode_rejects_out_of_range_heights() {
+        let mut store = DeltaStore::new();
+        store
+            .set_height(WorldChunkCoord::new(0, 0), 1, 2, 42)
+            .expect("edit");
+        let mut bytes = store.encode();
+        let len = bytes.len();
+        bytes[len - 2..].copy_from_slice(&256u16.to_le_bytes());
+        assert_eq!(
+            DeltaStore::decode(&bytes),
+            Err(WorldError::InvalidHeight { height: 256 })
+        );
     }
 
     #[test]
