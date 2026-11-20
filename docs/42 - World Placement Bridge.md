@@ -101,9 +101,10 @@ The sampler uses `WorldGenerator::height_at` on the 1 m grid, not the currently 
 - duplicate placement ids;
 - records whose footprint does not match bounds + rotation, or whose foundation, height, centre, or cost is inconsistent;
 - a missing package, an invalid/relative package path, a package whose content hash differs from the placement record, or a package whose id/name/bounds/capacity/jobs do not match the record;
-- a load whose seed differs from `expected_seed` (and from the active store).
+- a load whose seed differs from `expected_seed` (and from the active store);
+- a `terrain_deltas` blob with a missing, malformed, or mismatched `terrain_checksum`.
 
-The current store is only replaced after the whole file and every package have passed. A failed load leaves the current store untouched.
+The current placement store and deltas are only replaced after the whole file, the delta checksum, and every package have passed. A failed load leaves both untouched.
 
 ## 4. Smoke
 
