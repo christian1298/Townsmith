@@ -37,7 +37,7 @@ The full feature list is in [[08 - Roadmap]]. This plan cuts it into reviewable 
 | **3.3** | Jobs and wages: assign residents to job slots, commute distance, income | **Done** — PR #60, see [[51 - Jobs and Wages]] |
 | **3.4** | Primary industries: lumberjack, farmer, hunter with visible loops and storage | **Done** — PR #64, see [[54 - Primary Industries]] |
 | **3.5** | Utilities: water or power first, coverage, shortages, happiness/production effects | **Done** — PR #65, see [[55 - Utilities]] |
-| **3.6** | Economy: taxes, upkeep, construction draw-down, loans, bankruptcy | **This PR** — see [[53 - Treasury and Taxes]] |
+| **3.6** | Economy: taxes, upkeep, construction draw-down, loans, bankruptcy | **Done** — PR #67, see [[53 - Treasury and Taxes]] |
 | **3.7** | Traffic: road graph, flow fields, visual vehicles | Planned |
 | **3.8** | Dashboard and advisor: city metrics, district panel, notifications | Planned |
 | **3.9** | Headless 30-day runner and regression metrics | **Partial** — PR #61, city-loop runner; see [[52 - Headless City Loop]] |
