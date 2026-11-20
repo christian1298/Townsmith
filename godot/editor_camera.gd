@@ -31,13 +31,15 @@ func sync_look_from_rotation() -> void:
 	_pitch = clampf(rotation.x, -PITCH_LIMIT, PITCH_LIMIT)
 
 func _unhandled_input(event: InputEvent) -> void:
+	if not current:
+		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_yaw = wrapf(_yaw - event.relative.x * MOUSE_SENSITIVITY, -PI, PI)
 		_pitch = clampf(_pitch - event.relative.y * MOUSE_SENSITIVITY, -PITCH_LIMIT, PITCH_LIMIT)
 		rotation = Vector3(_pitch, _yaw, 0.0)
 
 func _process(delta: float) -> void:
-	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+	if not current or Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 		return
 
 	var forward := Vector3(-sin(_yaw), 0.0, -cos(_yaw))

@@ -151,11 +151,11 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok select=ok en
 
 `godot/world_placement.tscn` + `godot/world_placement.gd` is the first playable streamed-world placement shell.
 
-- Streams a 3 × 3 terrain ring around a fly camera (`editor_camera.gd`).
-- The target is 24 m ahead of the camera on the horizontal plane, snapped to the 1 m grid.
+- Streams a 3 × 3 terrain ring around the active camera. The default is the Mayor orbit camera (`mayor_camera.gd`); `Enter` switches to the first-person `editor_camera.gd` at the selected building's door, and `M`/`Esc` returns.
+- In Mayor Mode the target is the orbit point, snapped to the 1 m grid. The first-person view is read-only in this slice.
 - The ghost is a `Node3D` pivot with the blueprint mesh offset by `-bounds_m / 2` on X/Z. It is green when validation passes and red with the error code when it fails.
 - A transparent foundation box previews the unrotated blueprint footprint × `foundation_m`; the pivot carries the rotation.
-- `R` rotates 90°, `X` raises and `Z` lowers the target terrain by 1 m, left click places, `Delete` clears, `F5` saves, `F9` loads, `Esc` releases the mouse, and left click recaptures it.
+- `R` rotates 90°, `X` raises and `Z` lowers the target terrain by 1 m, left click places, right click selects, `Enter` enters the selected building, `Delete` clears, `F5` saves, and `F9` loads. See [[44 - Mayor Mode]] for the camera and selection rules.
 - Placed buildings are rebuilt from the `.tsbp`; each has a mesh child, plus a foundation box when `foundation_m > 0`. The scene does not cache scenes.
 - Terrain edits remesh only the affected chunk; loading a world marks every loaded chunk dirty.
 - Validation runs when the 1 m target cell or rotation changes, not every frame. The ghost y comes from the validated centre; an invalid ghost sits on the sampled terrain.
