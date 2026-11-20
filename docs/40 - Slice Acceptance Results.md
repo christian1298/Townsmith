@@ -59,7 +59,7 @@ BLUEPRINT_SMOKE solid=257 props=1 hash=blake3:... status=ok
 SLICE_HOUSE_SMOKE instances=21 quads=293 status=ok
 ```
 
-The workspace suite is **192 tests + 1 doctest**, all green. Linux and Windows run the Rust gates; the Linux Godot job runs the headless smokes (Windows does not run Godot yet).
+The workspace suite is **198 tests + 1 doctest**, all green. Linux and Windows run the Rust gates; the Linux Godot job runs the headless smokes (Windows does not run Godot yet).
 
 ## 4. Cost model
 

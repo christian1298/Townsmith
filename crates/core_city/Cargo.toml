@@ -9,3 +9,7 @@ description = "Deterministic city layouts and world-placement rules for Townsmit
 [lib]
 name = "core_city"
 path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

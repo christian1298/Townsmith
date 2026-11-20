@@ -80,7 +80,7 @@ These are warm-up + five-iteration medians; rendering performance is measured in
 
 ## 6. Tests
 
-`core_city` has 17 tests: 10 for the synthetic layouts and 7 for the world-placement validation module in [[41 - Phase 2 Slice Plan]].
+`core_city` has 23 tests: 10 for the synthetic layouts and 13 for the world-placement module in [[41 - Phase 2 Slice Plan]].
 
 Layout tests:
 
@@ -93,7 +93,7 @@ Layout tests:
 - sequential unique IDs;
 - whole-floor heights and valid colors.
 
-Placement tests cover flat placement, rotation, water, slope, overlap/gap, invalid requests, and rotation normalization.
+Placement tests cover flat placement, rotation, water, slope, overlap/gap, invalid requests, rotation normalization, store IDs, JSON roundtrip, checksum stability, bad versions/counters, duplicate IDs, and record consistency.
 
 ## 7. Limitations
 
