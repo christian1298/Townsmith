@@ -1,0 +1,15 @@
+[package]
+name = "core_rooms"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Engine-agnostic room detection v0 and gameplay stats for Townsmith"
+
+[lib]
+name = "core_rooms"
+path = "src/lib.rs"
+
+[dependencies]
+core_voxel.workspace = true
+serde.workspace = true

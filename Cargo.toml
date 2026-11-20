@@ -6,6 +6,7 @@ members = [
     "crates/core_sim",
     "crates/core_city",
     "crates/core_blueprint",
+    "crates/core_rooms",
     "crates/server",
     "crates/bench",
     "crates/godot_ext",
@@ -23,6 +24,7 @@ core_world = { path = "crates/core_world" }
 core_sim = { path = "crates/core_sim" }
 core_city = { path = "crates/core_city" }
 core_blueprint = { path = "crates/core_blueprint" }
+core_rooms = { path = "crates/core_rooms" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 blake3 = "1"
