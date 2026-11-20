@@ -33,6 +33,10 @@ pub struct CitySummary {
     pub water: f32,
     /// Resident-weighted rest satisfaction.
     pub rest: f32,
+    /// Resident-weighted average commute in metres.
+    pub average_commute_m: f32,
+    /// Gross wages paid per game day.
+    pub daily_wages: f64,
     /// Completed buildings represented in the ledger.
     pub completed_buildings: usize,
     /// Construction sites that are not complete.
@@ -77,6 +81,8 @@ pub fn summarize(
     let mut food = 0.0;
     let mut water = 0.0;
     let mut rest = 0.0;
+    let mut commune = 0.0;
+    let mut daily_wages = 0.0;
     let mut happiness = 0.0;
     for (&id, household) in &runtime.households {
         if !complete.contains(&id) {
@@ -92,6 +98,8 @@ pub fn summarize(
         food += household.food * weight;
         water += household.water * weight;
         rest += household.rest * weight;
+        commune += household.commute_m * weight;
+        daily_wages += household.income_per_day;
         happiness += household.happiness() * weight;
     }
     if population > 0 {
@@ -99,11 +107,14 @@ pub fn summarize(
         food *= scale;
         water *= scale;
         rest *= scale;
+        commune *= scale;
         happiness *= scale;
     } else {
         food = 0.0;
         water = 0.0;
         rest = 0.0;
+        commune = 0.0;
+        daily_wages = 0.0;
         happiness = 0.0;
     }
 
@@ -127,6 +138,8 @@ pub fn summarize(
         food,
         water,
         rest,
+        average_commute_m: commune,
+        daily_wages,
         completed_buildings,
         construction_sites,
         settlements,
@@ -205,6 +218,8 @@ mod tests {
         assert_eq!(summary.jobs, 2);
         assert_eq!(summary.employed, 2);
         assert_eq!(summary.unemployed, 0);
+        assert_eq!(summary.average_commute_m, 0.0);
+        assert!((summary.daily_wages - 40.0).abs() < 0.001);
         assert_eq!(summary.completed_buildings, 1);
         assert_eq!(summary.construction_sites, 0);
         assert_eq!(summary.settlements, 1);
