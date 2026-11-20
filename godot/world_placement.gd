@@ -360,12 +360,28 @@ func _edit_target(delta: int) -> bool:
 		_set_modal("Terrain edit failed: " + str(result.get("error_code", "unknown")), true)
 		_update_hud()
 		return false
-	streamer.invalidate_chunk(Vector2i(
+	var chunk := Vector2i(
 		int(result.get("chunk_x", 0)), int(result.get("chunk_z", 0))
-	))
+	)
+	var local_x := int(result.get("local_x", 0))
+	var local_z := int(result.get("local_z", 0))
+	for coord in _touched_chunks(chunk, local_x, local_z):
+		streamer.invalidate_chunk(coord)
 	_set_modal("Terrain %d m at (%d, %d)" % [height, int(target_x), int(target_z)], false)
 	_refresh_preview(true)
 	return true
+
+func _touched_chunks(chunk: Vector2i, local_x: int, local_z: int) -> Array[Vector2i]:
+	var touched: Array[Vector2i] = [chunk]
+	if local_x == 0:
+		touched.append(chunk + Vector2i(-1, 0))
+	elif local_x == 255:
+		touched.append(chunk + Vector2i(1, 0))
+	if local_z == 0:
+		touched.append(chunk + Vector2i(0, -1))
+	elif local_z == 255:
+		touched.append(chunk + Vector2i(0, 1))
+	return touched
 
 func _place_at_target() -> bool:
 	if not preview_valid or blueprint_mesh == null:
@@ -526,6 +542,13 @@ func _run_scene_smoke() -> void:
 		status = "rotation_failed:" + preview_error
 
 	edit_ok = _edit_target(1) and core.terrain_delta_count() == 1 and absf(core.world_height_at(SEED, FIXTURE_X, FIXTURE_Z) - 42.0) < 0.001 and streamer.dirty_count() > 0
+	var border_touched := _touched_chunks(Vector2i(0, 0), 0, 255)
+	edit_ok = edit_ok and border_touched.size() == 3 and border_touched.has(Vector2i(-1, 0)) and border_touched.has(Vector2i(0, 1))
+	# A chunk that is still on its first build must also be invalidated by load.
+	streamer.in_flight[9999] = {"coord": Vector2i(1, 1), "step": 1, "generation": 0}
+	streamer.invalidate_all()
+	edit_ok = edit_ok and streamer.dirty.has(Vector2i(1, 1))
+	streamer.in_flight.erase(9999)
 	if not edit_ok and status == "ok":
 		status = "edit_failed:" + preview_error
 
@@ -542,22 +565,31 @@ func _run_scene_smoke() -> void:
 			status = "save_failed"
 
 	if status == "ok":
+		var edit_checksum := str(core.terrain_delta_checksum())
 		_clear_placements()
 		clear_ok = core.world_placement_count() == 0 and placed_root.get_child_count() == 0
 		if not clear_ok:
 			status = "clear_failed"
 		else:
+			core.terrain_clear_deltas()
+			if core.terrain_delta_count() != 0:
+				status = "delta_clear_failed"
 			load_ok = _load_world() and core.world_placement_count() == 1 and placed_root.get_child_count() == 1
 			if load_ok:
 				var node := placed_root.get_child(0)
 				load_ok = absf(node.rotation_degrees.y - 90.0) < 0.001 and _foundation_matches_bounds(node)
-				load_ok = load_ok and core.terrain_delta_count() == 1 and absf(core.world_height_at(SEED, FIXTURE_X, FIXTURE_Z) - 42.0) < 0.001
+				load_ok = load_ok and core.terrain_delta_count() == 1
+				load_ok = load_ok and absf(core.world_height_at(SEED, FIXTURE_X, FIXTURE_Z) - 42.0) < 0.001
+				load_ok = load_ok and str(core.terrain_delta_checksum()) == edit_checksum
+				load_ok = load_ok and core.terrain_deltas_seed() == SEED
 			if not load_ok:
 				status = "load_failed"
 
 	if status == "ok":
-		# A failed load must leave the active store and placed nodes alone.
+		# A failed load must leave the active store, deltas, and nodes alone.
 		var before_failed_load := placed_root.get_child_count()
+		var before_failed_edits: int = core.terrain_delta_count()
+		var before_failed_checksum: String = str(core.terrain_delta_checksum())
 		var blueprint_backup := blueprint_path + ".bak"
 		if DirAccess.rename_absolute(blueprint_path, blueprint_backup) != OK:
 			status = "load_guard_backup_failed"
@@ -565,6 +597,8 @@ func _run_scene_smoke() -> void:
 			var failed_load := _load_world()
 			if failed_load or core.world_placement_count() != 1 or placed_root.get_child_count() != before_failed_load:
 				status = "load_failure_changed_scene"
+			elif core.terrain_delta_count() != before_failed_edits or str(core.terrain_delta_checksum()) != before_failed_checksum:
+				status = "load_failure_changed_deltas"
 			if DirAccess.rename_absolute(blueprint_backup, blueprint_path) != OK:
 				status = "load_guard_restore_failed"
 

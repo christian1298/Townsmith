@@ -39,7 +39,7 @@ All methods are main-thread only.
 
 | Method | Returns | Purpose |
 |---|---|---|
-| `terrain_edit_height(seed, x, z, height)` | `Dictionary` | Record one cell; `ok`, `chunk_x`, `chunk_z`, `height`, `edits` |
+| `terrain_edit_height(seed, x, z, height)` | `Dictionary` | Record one cell; `ok`, `chunk_x`, `chunk_z`, `local_x`, `local_z`, `height`, `edits` |
 | `terrain_delta_count()` | `int` | Number of edits |
 | `terrain_delta_checksum()` | `String` | Stable delta checksum, hex |
 | `terrain_deltas_seed()` | `int` | Owning seed, or `-1` when empty |
@@ -67,13 +67,13 @@ The first edit opens a `PlacementStore` for that seed if none exists, so `world_
 ```
 
 - `terrain_deltas` is the lowercase hex encoding of the `TSDL` v1 blob from `DeltaStore::encode`.
-- `terrain_checksum` is the FNV-1a checksum of the same blob.
+- `terrain_checksum` is the FNV-1a checksum of the same blob. It is required whenever `terrain_deltas` is present.
 - Both fields are omitted when there are no edits, so 2A saves keep working.
-- `world_load` decodes the blob, verifies the checksum, verifies the placement packages, and only then replaces both the placement store and the delta store.
+- `world_load` verifies the checksum over the raw bytes **before** decoding, bounds the decoder counts, validates every height, verifies the placement packages, and only then replaces both the placement store and the delta store.
 - Old saves without terrain fields load with empty deltas.
 - The 64 MiB save cap applies before reading; a malformed hex string or `TSDL` blob is rejected with `invalid_terrain_deltas`.
 
-The blob is roughly 19 bytes per edit before hex encoding. A 10,000-edit world is about 380 KiB of hex before JSON overhead.
+The binary blob is a 10-byte header, 20 bytes per edited chunk, and 4 bytes per edit. 10,000 edits in one chunk are about 40 KB binary and about 78 KiB of hex before JSON overhead.
 
 ## 4. Streaming and dirty chunks
 
@@ -84,8 +84,8 @@ streamer.core = core
 ```
 
 - `invalidate_chunk(coord)` increments a generation for that chunk and queues it.
-- `invalidate_all()` marks every loaded chunk after a world load.
-- A job captures its generation. When it finishes, the streamer drops the dirty flag only if no newer edit arrived; otherwise it queues one more remesh.
+- `invalidate_all()` marks every loaded chunk and every in-flight chunk after a world load, so a stale first-load result cannot survive.
+- A job captures its generation. When it finishes, the streamer drops the dirty flag only if no newer edit arrived; otherwise it queues one more remesh. A border edit invalidates the adjacent chunk as well, because the seam sampler reads the neighbor cell.
 - `_apply_chunk` replaces the old `MeshInstance3D` mesh, so there is no pop-out while the new mesh builds.
 - `reset_terrain_workers()` replaces only the worker pool on a disconnect; deltas and placements survive.
 
@@ -109,9 +109,11 @@ The preview revalidates at the new height, so a cut/fill that creates an illegal
 
 - a terrain edit at the fixture cell raises 41 m → 42 m;
 - the edit count is 1 and the streamer has a dirty chunk;
+- a border edit marks the adjacent chunk too, and a simulated in-flight first build is invalidated by load;
 - the placement foundation follows the edited height;
-- save/load restores the placement **and** the edit;
-- a failed load leaves the scene and deltas untouched.
+- the smoke clears in-memory deltas before load, so a passing load proves the edit came from the save;
+- save/load restores the placement, the edit, and the delta checksum;
+- a failed load leaves the scene, placements, and deltas untouched.
 
 Recorded marker:
 
@@ -126,16 +128,18 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok save=ok load
 - Height only; no biome, material, water, or resource edits.
 - One 1 m cell per edit; brushes and smoothing are later.
 - No undo/redo for terrain yet.
+- `terrain_clear_deltas()` is a store operation; the shell must call `invalidate_all()` afterward.
 - No delta compaction or spatial index; the blob is O(edits) and saved as hex.
 - Deltas are local to the client save; server-authoritative replication is a later phase.
 - Edits are not applied to already-loaded chunks on load until `invalidate_all()` runs; the scene does that.
+- Terrain workers hold the delta read lock while meshing a chunk; an edit can wait for up to the in-flight mesh time.
 - Old saves cannot represent terrain edits, so loading one clears the current delta store.
 
 ## 8. Tests
 
-- `core_world`: 60 tests, including delta-aware sampling, checksum stability, unload/reload persistence, and streaming roundtrip.
-- `godot_ext`: 19 tests, including worker meshing with deltas and hex roundtrip.
-- `cargo test --workspace`: **203 tests + 1 doctest**.
+- `core_world`: 62 tests, including delta-aware sampling, checksum stability, malformed-stream bounds, unload/reload persistence, and streaming roundtrip.
+- `godot_ext`: 22 tests, including worker meshing with deltas, hex roundtrip, and world-JSON delta roundtrip/checksum rejection.
+- `cargo test --workspace`: **208 tests + 1 doctest**.
 - `smoke_world_scene.sh`: `WORLD_SCENE ... edits=ok ... status=ok`.
 - `smoke_world_placement.sh` still passes on saves without terrain fields.
 

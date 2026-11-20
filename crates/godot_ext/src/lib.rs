@@ -1058,18 +1058,25 @@ impl TownsmithCore {
                 .unwrap_or_else(|error| error.into_inner());
             (deltas.encode(), deltas.checksum(), deltas.edit_count())
         };
-        let mut value: serde_json::Value = match serde_json::from_str(&json) {
-            Ok(value) => value,
-            Err(error) => return placement_simple_error("save_failed", error.to_string()),
-        };
         if deltas_count > 0 {
-            value["terrain_deltas"] = serde_json::Value::String(hex_encode(&deltas_bytes));
-            value["terrain_checksum"] =
-                serde_json::Value::String(format!("{deltas_checksum:016x}"));
+            let deltas_seed = *self
+                .terrain_seed
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if deltas_seed != Some(store.seed) {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "terrain deltas belong to a different seed",
+                );
+            }
         }
-        let json = match serde_json::to_string_pretty(&value) {
-            Ok(json) => json,
-            Err(error) => return placement_simple_error("save_failed", error.to_string()),
+        let json = if deltas_count > 0 {
+            match attach_terrain_deltas(&json, &deltas_bytes, deltas_checksum) {
+                Ok(json) => json,
+                Err(error) => return placement_simple_error("save_failed", error),
+            }
+        } else {
+            json
         };
         if json.len() > MAX_WORLD_SAVE_BYTES as usize {
             return placement_simple_error(
@@ -1130,43 +1137,10 @@ impl TownsmithCore {
             Ok(json) => json,
             Err(error) => return placement_simple_error("load_failed", error.to_string()),
         };
-        let value: serde_json::Value = match serde_json::from_str(&json) {
-            Ok(value) => value,
-            Err(error) => return placement_simple_error("invalid_json", error.to_string()),
+        let deltas = match terrain_deltas_from_world_json(&json) {
+            Ok(deltas) => deltas,
+            Err((code, error)) => return placement_simple_error(code, error),
         };
-        let deltas = match value.get("terrain_deltas") {
-            None | Some(serde_json::Value::Null) => DeltaStore::new(),
-            Some(serde_json::Value::String(encoded)) => {
-                let bytes = match hex_decode(encoded) {
-                    Ok(bytes) => bytes,
-                    Err(error) => return placement_simple_error("invalid_terrain_deltas", error),
-                };
-                match DeltaStore::decode(&bytes) {
-                    Ok(deltas) => deltas,
-                    Err(error) => {
-                        return placement_simple_error("invalid_terrain_deltas", error.to_string())
-                    }
-                }
-            }
-            Some(_) => {
-                return placement_simple_error(
-                    "invalid_terrain_deltas",
-                    "terrain_deltas must be a hex string",
-                )
-            }
-        };
-        if let Some(checksum) = value
-            .get("terrain_checksum")
-            .and_then(|value| value.as_str())
-        {
-            let actual = format!("{:016x}", deltas.checksum());
-            if checksum != actual {
-                return placement_simple_error(
-                    "terrain_checksum_mismatch",
-                    format!("expected {checksum} but the deltas are {actual}"),
-                );
-            }
-        }
         let store = match PlacementStore::from_json(&json) {
             Ok(store) => store,
             Err(error) => return placement_error_result(&error),
@@ -1319,6 +1293,8 @@ impl TownsmithCore {
         result.set("ok", true);
         result.set("chunk_x", coord.x);
         result.set("chunk_z", coord.z);
+        result.set("local_x", local_x as i64);
+        result.set("local_z", local_z as i64);
         result.set("height", i64::from(height));
         result.set("edits", deltas.edit_count() as i64);
         result
@@ -2175,6 +2151,58 @@ fn placement_request_from_blueprint(
     }
 }
 
+fn attach_terrain_deltas(json: &str, bytes: &[u8], checksum: u64) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    value["terrain_deltas"] = serde_json::Value::String(hex_encode(bytes));
+    value["terrain_checksum"] = serde_json::Value::String(format!("{checksum:016x}"));
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+}
+
+fn terrain_deltas_from_world_json(json: &str) -> Result<DeltaStore, (&'static str, String)> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| ("invalid_json", error.to_string()))?;
+    let Some(encoded) = value.get("terrain_deltas") else {
+        if value.get("terrain_checksum").is_some() {
+            return Err((
+                "invalid_terrain_checksum",
+                "terrain_checksum requires terrain_deltas".to_string(),
+            ));
+        }
+        return Ok(DeltaStore::new());
+    };
+    let Some(encoded) = encoded.as_str() else {
+        return Err((
+            "invalid_terrain_deltas",
+            "terrain_deltas must be a hex string".to_string(),
+        ));
+    };
+    let Some(checksum) = value
+        .get("terrain_checksum")
+        .and_then(|value| value.as_str())
+    else {
+        return Err((
+            "invalid_terrain_checksum",
+            "terrain_deltas requires terrain_checksum".to_string(),
+        ));
+    };
+    let checksum = u64::from_str_radix(checksum, 16).map_err(|error| {
+        (
+            "invalid_terrain_checksum",
+            format!("terrain checksum is not hexadecimal: {error}"),
+        )
+    })?;
+    let bytes = hex_decode(encoded).map_err(|error| ("invalid_terrain_deltas", error))?;
+    let actual = DeltaStore::checksum_bytes(&bytes);
+    if actual != checksum {
+        return Err((
+            "terrain_checksum_mismatch",
+            format!("expected {checksum:016x} but the deltas are {actual:016x}"),
+        ));
+    }
+    DeltaStore::decode(&bytes).map_err(|error| ("invalid_terrain_deltas", error.to_string()))
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(bytes.len() * 2);
@@ -2720,6 +2748,52 @@ mod tests {
         assert_eq!(hex_decode(&encoded).expect("decode"), bytes);
         assert!(hex_decode("0").is_err());
         assert!(hex_decode("zz").is_err());
+    }
+
+    #[test]
+    fn world_json_round_trips_terrain_deltas() {
+        let store = PlacementStore::new(2026);
+        let json = store.to_json_pretty().expect("placement json");
+        let mut deltas = DeltaStore::new();
+        deltas
+            .set_height(WorldChunkCoord::new(0, 0), 169, 125, 42)
+            .expect("edit");
+        let encoded = attach_terrain_deltas(&json, &deltas.encode(), deltas.checksum())
+            .expect("attach deltas");
+        let decoded = terrain_deltas_from_world_json(&encoded).expect("read deltas");
+        assert_eq!(decoded, deltas);
+    }
+
+    #[test]
+    fn world_json_rejects_bad_terrain_checksum() {
+        let store = PlacementStore::new(2026);
+        let json = store.to_json_pretty().expect("placement json");
+        let deltas = DeltaStore::new();
+        let encoded = attach_terrain_deltas(&json, &deltas.encode(), deltas.checksum())
+            .expect("attach deltas")
+            .replace(&format!("{:016x}", deltas.checksum()), "0000000000000000");
+        assert!(terrain_deltas_from_world_json(&encoded).is_err());
+
+        let mut missing: serde_json::Value = serde_json::from_str(
+            &attach_terrain_deltas(&json, &deltas.encode(), deltas.checksum())
+                .expect("attach deltas"),
+        )
+        .expect("json");
+        missing
+            .as_object_mut()
+            .expect("object")
+            .remove("terrain_checksum");
+        let missing = serde_json::to_string(&missing).expect("json");
+        assert!(terrain_deltas_from_world_json(&missing).is_err());
+    }
+
+    #[test]
+    fn old_world_json_has_empty_terrain_deltas() {
+        let json = PlacementStore::new(2026)
+            .to_json_pretty()
+            .expect("placement json");
+        let deltas = terrain_deltas_from_world_json(&json).expect("read deltas");
+        assert!(deltas.is_empty());
     }
 
     #[test]

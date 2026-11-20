@@ -120,15 +120,21 @@ impl DeltaStore {
         self.chunks.is_empty()
     }
 
-    /// Stable checksum of the encoded delta blob.
+    /// Stable checksum of an encoded delta blob.
     #[must_use]
-    pub fn checksum(&self) -> u64 {
+    pub fn checksum_bytes(bytes: &[u8]) -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
-        for byte in self.encode() {
+        for &byte in bytes {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
         hash
+    }
+
+    /// Stable checksum of this store's encoded delta blob.
+    #[must_use]
+    pub fn checksum(&self) -> u64 {
+        Self::checksum_bytes(&self.encode())
     }
 
     /// Encode to the phase 0 binary delta format.
@@ -163,17 +169,29 @@ impl DeltaStore {
             return Err(WorldError::UnsupportedDeltaVersion { version });
         }
         let chunk_count = u32::from_le_bytes(cursor.take()?) as usize;
+        // Each chunk needs at least its 20-byte header. Bound the count before
+        // allocating or iterating so a tiny malformed file cannot request a
+        // huge allocation or a multi-billion-iteration loop.
+        if chunk_count > cursor.remaining() / 20 {
+            return Err(WorldError::TruncatedDelta);
+        }
         let mut chunks = BTreeMap::new();
 
         for _ in 0..chunk_count {
             let x = i64::from_le_bytes(cursor.take()?);
             let z = i64::from_le_bytes(cursor.take()?);
             let edit_count = u32::from_le_bytes(cursor.take()?) as usize;
+            if edit_count > cursor.remaining() / 4 {
+                return Err(WorldError::TruncatedDelta);
+            }
             let mut edits = Vec::with_capacity(edit_count);
             for _ in 0..edit_count {
                 let edit_x = cursor.take::<1>()?[0];
                 let edit_z = cursor.take::<1>()?[0];
                 let height = u16::from_le_bytes(cursor.take()?);
+                if height > MAX_HEIGHT_M {
+                    return Err(WorldError::InvalidHeight { height });
+                }
                 edits.push(TerrainEdit::new(edit_x, edit_z, height));
             }
             chunks.insert(WorldChunkCoord::new(x, z), edits);
@@ -315,6 +333,32 @@ mod tests {
         let decoded = DeltaStore::decode(&store.encode()).expect("decode");
         assert_eq!(decoded, store);
         assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn decode_bounds_edit_count_before_allocating() {
+        let mut bytes = Vec::from(*b"TSDL");
+        bytes.extend_from_slice(&DELTA_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&0i64.to_le_bytes());
+        bytes.extend_from_slice(&0i64.to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(DeltaStore::decode(&bytes), Err(WorldError::TruncatedDelta));
+    }
+
+    #[test]
+    fn decode_rejects_out_of_range_heights() {
+        let mut store = DeltaStore::new();
+        store
+            .set_height(WorldChunkCoord::new(0, 0), 1, 2, 42)
+            .expect("edit");
+        let mut bytes = store.encode();
+        let len = bytes.len();
+        bytes[len - 2..].copy_from_slice(&256u16.to_le_bytes());
+        assert_eq!(
+            DeltaStore::decode(&bytes),
+            Err(WorldError::InvalidHeight { height: 256 })
+        );
     }
 
     #[test]

@@ -78,6 +78,8 @@ func invalidate_chunk(coord: Vector2i) -> void:
 func invalidate_all() -> void:
 	for key in chunks.keys():
 		invalidate_chunk(key)
+	for job in in_flight.values():
+		invalidate_chunk(job["coord"])
 
 func dirty_count() -> int:
 	return dirty.size()

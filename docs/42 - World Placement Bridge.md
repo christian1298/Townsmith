@@ -92,7 +92,7 @@ The sampler uses `WorldGenerator::height_at` on the 1 m grid, not the currently 
 }
 ```
 
-2B adds optional `terrain_deltas` (hex `TSDL`) and `terrain_checksum` fields when edits exist; see [[43 - Terrain Edits]].
+2B adds an optional `terrain_deltas` (hex `TSDL`) + `terrain_checksum` pair when edits exist; see [[43 - Terrain Edits]].
 
 `world_load` rejects:
 
@@ -175,8 +175,8 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 ## 7. Tests
 
 - `core_city` placement validation and persistence: 13 tests.
-- `godot_ext`: 19 tests total, including save-path validation, hex roundtrip, and delta-aware worker meshing.
-- Workspace: **203 tests + 1 doctest**.
+- `godot_ext`: 22 tests total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta roundtrip/checksum rejection.
+- Workspace: **208 tests + 1 doctest**.
 - Godot headless: `WORLD_PLACEMENT ... status=ok` and `WORLD_SCENE ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 
