@@ -1214,14 +1214,22 @@ mod tests {
 
     #[test]
     fn blueprint_path_requires_an_absolute_tsbp_path() {
-        assert!(blueprint_path_from_arg(" /tmp/house.tsbp ").is_ok());
-        assert!(blueprint_path_from_arg("/tmp/house.TSBP").is_ok());
+        let abs = std::env::temp_dir().join("house.tsbp");
+        let abs_upper = std::env::temp_dir().join("house.TSBP");
+        let traversal = std::env::temp_dir().join("..").join("house.tsbp");
+        assert!(blueprint_path_from_arg(&format!(" {} ", abs.display())).is_ok());
+        assert!(blueprint_path_from_arg(&abs_upper.to_string_lossy()).is_ok());
         assert!(blueprint_path_from_arg("").is_err());
         assert!(blueprint_path_from_arg("   ").is_err());
         assert!(blueprint_path_from_arg("house.tsbp").is_err());
-        assert!(blueprint_path_from_arg("/tmp/../house.tsbp").is_err());
-        assert!(blueprint_path_from_arg("/tmp/house.zip").is_err());
-        assert!(blueprint_path_from_arg("/tmp/house").is_err());
+        assert!(blueprint_path_from_arg(&traversal.to_string_lossy()).is_err());
+        assert!(
+            blueprint_path_from_arg(&std::env::temp_dir().join("house.zip").to_string_lossy())
+                .is_err()
+        );
+        assert!(
+            blueprint_path_from_arg(&std::env::temp_dir().join("house").to_string_lossy()).is_err()
+        );
     }
 
     #[test]
