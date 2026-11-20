@@ -36,9 +36,9 @@ The slice follows accepted decisions:
 | Stage | Deliverable | Status |
 |---|---|---|
 | **2A.1** | Placement records and terrain validation | **Done** — PR #44 |
-| **2A.2** | Placement store, JSON save format, checksum | **This PR** |
-| **2A.3** | GDExtension placement/save/load API and headless smoke | Planned |
-| **2A.4** | Streamed-world scene, preview, rotate/place/save/load controls | Planned |
+| **2A.2** | Placement store, JSON save format, checksum | **Done** — PR #45 |
+| **2A.3** | GDExtension placement/save/load API and headless smoke | **This PR** — see [[42 - World Placement Bridge]] |
+| **2A.4** | Streamed-world scene, preview, rotate/place/save/load controls | Next |
 | **2B** | Terrain edit deltas applied to streamed chunks, saved/reloaded | Planned |
 | **2C** | Mayor camera, selection, mode switch at a door | Planned |
 | **2D** | Construction site v0: phased progress, materials, crews | Planned |
@@ -55,7 +55,7 @@ Each stage is a separate branch, worktree, and PR. Do not mix 2A with terrain ed
 - A `world_placement` Godot scene with streamed terrain and a fly camera.
 - A placement preview that samples terrain under a camera-forward target and shows valid/invalid.
 - Save/load of `seed + placements` as JSON; blueprint packages are referenced by path.
-- A headless smoke that places the acceptance house, verifies overlap/slope/water rejection, saves, clears, reloads, and compares the placement checksum.
+- A headless smoke that places the acceptance house, verifies water, overlap, and rotation rejection, saves, clears, reloads, compares the placement checksum, and confirms a failed load leaves the store untouched. Slope rules stay covered by the core placement tests.
 
 ### Out
 
@@ -172,13 +172,13 @@ The foundation is a visual box from `min_height` to `center.y` in 2A. Real terra
 |---|---|---|
 | `world_validate_placement(seed, path, x, z, rotation)` | `Dictionary` | Load the package and validate without mutating; `ok` plus `error`, `center`, `foundation_m` |
 | `world_place_blueprint(seed, path, x, z, rotation)` | `Dictionary` | Validate and append; returns the placement record |
-| `world_placements()` | `Array[Dictionary]` | Current placement records |
+| `world_placements()` | `Dictionary` | `open`, `seed`, `next_id`, `count`, `checksum`, `placements[]` |
 | `world_placement_count()` | `int` | Count |
 | `world_placement_checksum()` | `String` | FNV-1a checksum for smoke output |
 | `world_clear_placements()` | `bool` | Remove all placements |
 | `world_remove_placement(id)` | `bool` | Remove one |
-| `world_save(path)` | `Dictionary` | Write JSON atomically; `ok`, `path`, `checksum`, `placements` |
-| `world_load(path)` | `Dictionary` | Read JSON, verify seed and packages, replace the store |
+| `world_save(path)` | `Dictionary` | Write JSON atomically; `ok`, `path`, `seed`, `count`, `checksum` |
+| `world_load(path)` | `Dictionary` | Read JSON, verify seed, packages, and metadata, replace the store; `ok`, `path`, `seed`, `count`, `checksum` |
 | `world_height_at(seed, x, z)` | `float` | One terrain sample for the preview/foundation |
 
 `world_load` fails with a readable error if the file is malformed, the format version is unknown, the active world seed is known and differs, or a referenced blueprint is missing or has a different hash. It never partially replaces the current store.
@@ -204,25 +204,25 @@ GODOT=/path/to/godot ./scripts/smoke_world_placement.sh
 The smoke:
 
 1. Builds the shared acceptance house and saves it to a temporary `.tsbp`.
-2. Searches a deterministic grid near the origin for a slope-valid site.
+2. Uses the deterministic fixture site: seed 2026, centre `(169, 125)`, 16 × 16 m, heights 40–41 m.
 3. Places the house; asserts rooms/capacity/cost/footprint/foundation and that a second overlapping placement is rejected.
-4. Verifies water, steep-slope, bad-rotation, and missing-package errors with readable codes.
-5. Saves the world JSON, clears the store, reloads, and compares the placement checksum.
-6. Builds the placement mesh and asserts the expected surface count and vertex count.
+4. Verifies water, overlap, and bad-rotation rejection; slope rejection is covered by the core placement tests.
+5. Saves the world JSON, clears the store, reloads, compares the placement checksum, then removes the package and confirms the failed load leaves the store unchanged.
+6. Builds the placement mesh and asserts one surface with vertices.
 7. Prints a stable marker.
 
 Expected marker shape:
 
 ```text
-WORLD_PLACEMENT rooms=4 capacity=2 cost=38028.80 placements=1 foundation=... checksum=... save=ok load=ok mesh=ok status=ok
+WORLD_PLACEMENT rooms=4 capacity=2 cost=38028.80 placements=1 foundation=1.0 checksum=... save=ok load=ok mesh=ok status=ok
 ```
 
 ## 9. Tests
 
 ### Rust
 
-- `core_city`: flat site, rotation swaps footprint, water rejection, steep-slope rejection, overlap rejection, gap, bad rotation, JSON roundtrip, atomic load failure, checksum stability, ID monotonicity.
-- `godot_ext`: path validation and package hash rejection use the existing `.tsbp` tests; the placement conversion is covered by the bridge smoke.
+- `core_city`: flat site, rotation swaps footprint, water rejection, steep-slope rejection, overlap rejection, gap, bad rotation, JSON roundtrip, checksum stability, ID monotonicity.
+- `godot_ext`: save-path validation test; package hash, metadata, and failed-load behavior are covered by the bridge smoke.
 
 ### Godot
 

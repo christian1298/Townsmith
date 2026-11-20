@@ -19,6 +19,10 @@ func _ready() -> void:
 		_run_volume_smoke(core)
 		return
 
+	if OS.get_cmdline_user_args().has("--world-placement-smoke"):
+		_run_world_placement_smoke(core)
+		return
+
 	streamer = TerrainStreamer.new()
 	streamer.seed = 2026
 	streamer.view_radius = 1
@@ -102,6 +106,151 @@ func _run_volume_smoke(core) -> void:
 		bounds[1] if bounds.size() > 1 else -1.0,
 		bounds[2] if bounds.size() > 2 else -1.0,
 		float(stats.get("mesh_ms", 0.0)),
+		status,
+	])
+	get_tree().quit(0 if status == "ok" else 1)
+
+func _run_world_placement_smoke(core) -> void:
+	var status := "ok"
+	var smoke_dir := OS.get_user_data_dir().path_join("world_placement_smoke")
+	DirAccess.make_dir_recursive_absolute(smoke_dir)
+	var blueprint_path := smoke_dir.path_join("acceptance_house.tsbp")
+	var save_path := smoke_dir.path_join("world.json")
+	for path in [blueprint_path, save_path]:
+		if FileAccess.file_exists(path):
+			DirAccess.remove_absolute(path)
+
+	if not core.create_editor_volume(0, 0, 0):
+		status = "volume_failed"
+	elif not core.editor_build_acceptance_house():
+		status = "build_failed"
+	var saved_blueprint: Dictionary = core.editor_save_blueprint(
+		blueprint_path,
+		"local:acceptance_house",
+		"Acceptance House"
+	)
+	if status == "ok" and not bool(saved_blueprint.get("ok", false)):
+		status = "blueprint_save_failed"
+
+	const SEED := 2026
+	const SITE_X := 169.0
+	const SITE_Z := 125.0
+	var height: float = core.world_height_at(SEED, SITE_X, SITE_Z)
+	if status == "ok" and absf(height - 41.0) > 0.001:
+		status = "height_mismatch"
+
+	var validation: Dictionary = core.world_validate_placement(
+		SEED, blueprint_path, SITE_X, SITE_Z, 0
+	)
+	var validation_error := str(validation.get("error_code", validation.get("error", "")))
+	if status == "ok" and not bool(validation.get("ok", false)):
+		status = "validate_failed:" + validation_error
+
+	# A rejected first placement must not leave an empty store behind.
+	var rejected_water: Dictionary = core.world_place_blueprint(
+		SEED, blueprint_path, 128.0, 128.0, 0
+	)
+	if status == "ok" and (bool(rejected_water.get("ok", true)) or str(rejected_water.get("error_code", "")) != "water"):
+		status = "water_not_rejected"
+	var rejected_state: Dictionary = core.world_placements()
+	if status == "ok" and bool(rejected_state.get("open", true)):
+		status = "rejected_created_store"
+
+	var placed: Dictionary = core.world_place_blueprint(
+		SEED, blueprint_path, SITE_X, SITE_Z, 0
+	)
+	var placement_error := str(placed.get("error_code", placed.get("error", "")))
+	if status == "ok" and not bool(placed.get("ok", false)):
+		status = "place_failed:" + placement_error
+
+	var count: int = core.world_placement_count()
+	var checksum := str(core.world_placement_checksum())
+	var placements: Dictionary = core.world_placements()
+	var items: Array = placements.get("placements", [])
+	var placement: Dictionary = items[0] if items.size() > 0 else {}
+	var foundation := float(placement.get("foundation_m", -1.0))
+	var cost := float(placement.get("material_cost", -1.0))
+	var capacity := int(placement.get("resident_capacity", -1))
+	var rooms := int(saved_blueprint.get("rooms", -1))
+	var center: PackedFloat32Array = placement.get("center", PackedFloat32Array())
+	var footprint: PackedFloat32Array = placement.get("footprint", PackedFloat32Array())
+	if status == "ok" and count != 1:
+		status = "count_mismatch"
+	elif status == "ok" and absf(foundation - 1.0) > 0.001:
+		status = "foundation_mismatch"
+	elif status == "ok" and absf(cost - 38028.8) > 0.01:
+		status = "cost_mismatch"
+	elif status == "ok" and (rooms != 4 or capacity != 2 or int(placement.get("job_slots", -1)) != 2):
+		status = "stats_mismatch"
+	elif status == "ok" and (center.size() != 3 or absf(center[0] - SITE_X) > 0.001 or absf(center[1] - 41.0) > 0.001 or absf(center[2] - SITE_Z) > 0.001):
+		status = "center_mismatch"
+	elif status == "ok" and (footprint.size() != 2 or absf(footprint[0] - 16.0) > 0.001 or absf(footprint[1] - 16.0) > 0.001):
+		status = "footprint_mismatch"
+	elif status == "ok" and str(placement.get("blueprint_hash", "")) != str(saved_blueprint.get("hash", "")):
+		status = "hash_mismatch"
+
+	var overlap: Dictionary = core.world_place_blueprint(
+		SEED, blueprint_path, SITE_X, SITE_Z, 0
+	)
+	if status == "ok" and (bool(overlap.get("ok", true)) or str(overlap.get("error_code", "")) != "overlap"):
+		status = "overlap_not_rejected"
+
+	var bad_rotation: Dictionary = core.world_validate_placement(
+		SEED, blueprint_path, SITE_X, SITE_Z, 45
+	)
+	if status == "ok" and (bool(bad_rotation.get("ok", true)) or str(bad_rotation.get("error_code", "")) != "invalid_rotation"):
+		status = "rotation_not_rejected"
+
+	var saved_world: Dictionary = core.world_save(save_path)
+	if status == "ok" and not bool(saved_world.get("ok", false)):
+		status = "world_save_failed:" + str(saved_world.get("error_code", ""))
+
+	core.world_clear_placements()
+	if status == "ok" and core.world_placement_count() != 0:
+		status = "clear_failed"
+
+	var loaded_world: Dictionary = core.world_load(save_path)
+	if status == "ok" and not bool(loaded_world.get("ok", false)):
+		status = "world_load_failed:" + str(loaded_world.get("error_code", ""))
+	var loaded_checksum := str(core.world_placement_checksum())
+	if status == "ok" and (core.world_placement_count() != 1 or loaded_checksum != checksum):
+		status = "load_mismatch"
+
+	# A failed load must not replace the active store.
+	if status == "ok":
+		var blueprint_backup := blueprint_path + ".bak"
+		if DirAccess.rename_absolute(blueprint_path, blueprint_backup) != OK:
+			status = "backup_failed"
+		else:
+			var failed_load: Dictionary = core.world_load(save_path)
+			if not bool(failed_load.get("ok", true)) and str(failed_load.get("error_code", "")) != "missing_blueprint":
+				status = "load_missing_not_rejected"
+			elif core.world_placement_count() != 1 or str(core.world_placement_checksum()) != checksum:
+				status = "load_failure_replaced"
+			if DirAccess.rename_absolute(blueprint_backup, blueprint_path) != OK:
+				status = "restore_failed"
+
+	var mesh: ArrayMesh = core.build_blueprint_mesh(blueprint_path)
+	var surfaces := mesh.get_surface_count()
+	var vertices := 0
+	if surfaces > 0:
+		var arrays: Array = mesh.surface_get_arrays(0)
+		var vertex_array: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		vertices = vertex_array.size()
+	if status == "ok" and (surfaces != 1 or vertices <= 0):
+		status = "mesh_mismatch"
+	var mesh_status := "ok" if surfaces == 1 and vertices > 0 else "failed"
+
+	print("WORLD_PLACEMENT rooms=%d capacity=%d cost=%.2f placements=%d foundation=%.1f checksum=%s save=%s load=%s mesh=%s status=%s" % [
+		rooms,
+		capacity,
+		cost,
+		core.world_placement_count(),
+		foundation,
+		loaded_checksum,
+		"ok" if bool(saved_world.get("ok", false)) else "failed",
+		"ok" if bool(loaded_world.get("ok", false)) else "failed",
+		mesh_status,
 		status,
 	])
 	get_tree().quit(0 if status == "ok" else 1)

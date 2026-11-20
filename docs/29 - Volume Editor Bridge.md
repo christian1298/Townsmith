@@ -102,3 +102,7 @@ VOLUME_SMOKE solid=25601 quads=14 vertices=56 surfaces=1 bounds=16.0,9.6,16.0 me
 ## 8. Shell integration
 
 `godot/editor.tscn` uses this API for the first-person editor. See [[30 - Editor Shell]].
+
+## 9. World placement
+
+`TownsmithCore` also owns the Phase 2 placement store. See [[42 - World Placement Bridge]] for `world_validate_placement`, `world_place_blueprint`, `world_save`, and `world_load`.

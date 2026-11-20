@@ -162,7 +162,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 | Terrain LOD 2, 256 m chunk | 65,536 cells | — | 25,327 quads | ~0.39 ms |
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **198 tests + 1 doctest**: 52 voxel, 58 world, 26 simulation, 23 city, 11 blueprint, 12 rooms, and 16 bridge tests.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **199 tests + 1 doctest**: 52 voxel, 58 world, 26 simulation, 23 city, 11 blueprint, 12 rooms, and 17 bridge tests.
 
 ### Vertical slice acceptance
 
@@ -213,6 +213,7 @@ GODOT=/path/to/godot ./scripts/smoke_blueprint.sh
 GODOT=/path/to/godot ./scripts/smoke_locale.sh
 GODOT=/path/to/godot ./scripts/smoke_layout.sh
 GODOT=/path/to/godot ./scripts/smoke_acceptance.sh
+GODOT=/path/to/godot ./scripts/smoke_world_placement.sh
 GODOT=/path/to/godot ./scripts/smoke_slice.sh
 cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
