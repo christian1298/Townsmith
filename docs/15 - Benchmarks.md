@@ -299,7 +299,7 @@ townsmith-bench --server \
 ### CI
 
 - Run the Phase 0 matrix through `.github/workflows/phase0-benchmark.yml` on the **self-hosted Linux runner first** (`self-hosted`, `Linux`, `X64`). It is the machine with the display/GPU used for real frame-time measurements. The workflow is manually dispatched, accepts runs/duration/headless inputs, and uploads the combined `phase0_target_*.json` plus route summaries as artifacts.
-- Runner prerequisites: Rust, Python 3, Godot via the `GODOT` repository variable (or on PATH), and a usable display via `PHASE0_DISPLAY` (defaults to `:0`). Use `allow_headless` only for structural checks.
+- Runner prerequisites: Rust, Python 3, Godot via the `GODOT` repository variable (or on PATH), and a usable display via `PHASE0_DISPLAY` (defaults to `:0`). Use `allow_headless` only for structural checks; it unsets `DISPLAY`/`WAYLAND_DISPLAY` so Godot uses its headless driver.
 - Keep GitHub-hosted runners for correctness CI; use the self-hosted runner for display-backed performance runs.
 - The workflow is `workflow_dispatch`-only so fork PRs cannot reach the host-level runner. Treat the runner as trusted infrastructure: dedicated low-privilege user, no repository write token, ephemeral runner preferred.
 - The results artifact is only complete when every route succeeds; a missing `phase0_target_*.json` fails the upload step. Report-only aggregation is intentionally not exposed in the workflow because checkout cleans the ignored results directory.

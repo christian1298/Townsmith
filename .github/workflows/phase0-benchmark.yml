@@ -34,8 +34,8 @@ jobs:
     env:
       # The runner service usually has no DISPLAY. Set the repository variable
       # PHASE0_DISPLAY (and/or PHASE0_WAYLAND_DISPLAY) if :0 is wrong.
-      DISPLAY: ${{ inputs.allow_headless && '' || vars.PHASE0_DISPLAY || ':0' }}
-      WAYLAND_DISPLAY: ${{ inputs.allow_headless && '' || vars.PHASE0_WAYLAND_DISPLAY }}
+      DISPLAY: ${{ vars.PHASE0_DISPLAY || ':0' }}
+      WAYLAND_DISPLAY: ${{ vars.PHASE0_WAYLAND_DISPLAY }}
       GODOT: ${{ vars.GODOT }}
     steps:
       - uses: actions/checkout@v4
@@ -62,12 +62,14 @@ jobs:
 
       - name: Verify tools
         shell: bash
+        env:
+          ALLOW_HEADLESS: ${{ inputs.allow_headless && '1' || '0' }}
         run: |
           set -euo pipefail
           cargo --version
           python3 --version
           "$GODOT" --version
-          if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+          if [[ "${ALLOW_HEADLESS:-0}" != "1" && -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
             echo "No display environment. Re-run with allow_headless for a structural check, or set PHASE0_DISPLAY." >&2
             exit 3
           fi
@@ -97,6 +99,10 @@ jobs:
           DURATION: ${{ inputs.duration }}
           ALLOW_HEADLESS: ${{ inputs.allow_headless && '1' || '0' }}
         run: |
+          if [[ "${ALLOW_HEADLESS:-0}" == "1" ]]; then
+            unset DISPLAY WAYLAND_DISPLAY
+            echo "Headless requested; unset display environment." >&2
+          fi
           bash ./scripts/bench_phase0.sh 2>&1 | tee "$RUNNER_TEMP/phase0-benchmark.log"
 
       - name: Upload benchmark log
