@@ -7,8 +7,9 @@
 use std::collections::BTreeMap;
 
 use crate::chunk::WorldChunk;
-use crate::coords::{WorldChunkCoord, MAX_HEIGHT_M};
+use crate::coords::{TerrainPos, WorldChunkCoord, MAX_HEIGHT_M};
 use crate::error::WorldError;
+use crate::generator::WorldGenerator;
 
 const DELTA_MAGIC: [u8; 4] = *b"TSDL";
 const DELTA_VERSION: u16 = 1;
@@ -65,6 +66,26 @@ impl DeltaStore {
         Ok(())
     }
 
+    /// Height at a world position, using an edit when one exists.
+    ///
+    /// This is the delta-aware sampler used by terrain meshing and placement
+    /// validation. It falls back to `generator.height_at` outside the edits.
+    #[must_use]
+    pub fn height_at(&self, generator: &WorldGenerator, pos: TerrainPos) -> u16 {
+        let coord = WorldChunkCoord::from_terrain_pos(pos);
+        if let Some((x, z)) = coord.local_from_world(pos) {
+            if let Some(edits) = self.chunks.get(&coord) {
+                if let Some(edit) = edits
+                    .iter()
+                    .find(|edit| usize::from(edit.x) == x && usize::from(edit.z) == z)
+                {
+                    return edit.height;
+                }
+            }
+        }
+        generator.height_at(pos)
+    }
+
     /// Apply the deltas for a chunk, if any.
     pub fn apply_to(&self, chunk: &mut WorldChunk) {
         if let Some(edits) = self.chunks.get(&chunk.coord()) {
@@ -97,6 +118,17 @@ impl DeltaStore {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.chunks.is_empty()
+    }
+
+    /// Stable checksum of the encoded delta blob.
+    #[must_use]
+    pub fn checksum(&self) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for byte in self.encode() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
     }
 
     /// Encode to the phase 0 binary delta format.
@@ -224,6 +256,34 @@ mod tests {
         store.set_height(coord, 7, 7, 50).expect("edit");
         assert_eq!(store.edit_count(), 1);
         assert_eq!(store.edits_for(coord), &[TerrainEdit::new(7, 7, 50)]);
+    }
+
+    #[test]
+    fn height_at_uses_edits_and_generated_fallback() {
+        let generator = WorldGenerator::new(42);
+        let coord = WorldChunkCoord::new(0, 0);
+        let pos = TerrainPos::new(10, 20);
+        let untouched = generator.height_at(pos);
+        let mut store = DeltaStore::new();
+        store.set_height(coord, 10, 20, 77).expect("edit");
+        assert_eq!(store.height_at(&generator, pos), 77);
+        assert_eq!(
+            store.height_at(&generator, TerrainPos::new(11, 20)),
+            generator.height_at(TerrainPos::new(11, 20))
+        );
+        assert_ne!(untouched, 77);
+    }
+
+    #[test]
+    fn checksum_changes_with_edits() {
+        let mut store = DeltaStore::new();
+        let empty = store.checksum();
+        store
+            .set_height(WorldChunkCoord::new(1, -1), 2, 3, 33)
+            .expect("edit");
+        assert_ne!(store.checksum(), empty);
+        let copy = DeltaStore::decode(&store.encode()).expect("decode");
+        assert_eq!(copy.checksum(), store.checksum());
     }
 
     #[test]

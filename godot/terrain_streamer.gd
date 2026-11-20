@@ -34,6 +34,7 @@ var water: WaterBody
 var last_center := Vector2i.ZERO
 var has_center := false
 var chunks_built := 0
+var dirty: Dictionary = {}
 var coord_attempts: Dictionary = {}
 var chunks_requested := 0
 var chunks_applied := 0
@@ -49,7 +50,8 @@ func _ready() -> void:
 	half_detail_radius = maxi(half_detail_radius, full_detail_radius)
 	far_detail_step = clampi(far_detail_step, 1, CHUNK_CELLS)
 
-	core = TownsmithCore.new()
+	if core == null:
+		core = TownsmithCore.new()
 	terrain_material = StandardMaterial3D.new()
 	terrain_material.vertex_color_use_as_albedo = true
 	terrain_material.roughness = 1.0
@@ -66,6 +68,19 @@ func bind_camera(camera_node: Camera3D) -> void:
 
 func chunk_count() -> int:
 	return chunks.size()
+
+## Mark a loaded or queued chunk for remeshing after a terrain edit.
+func invalidate_chunk(coord: Vector2i) -> void:
+	dirty[coord] = int(dirty.get(coord, 0)) + 1
+	_enqueue(coord)
+
+## Mark every loaded chunk for remeshing after loading a world save.
+func invalidate_all() -> void:
+	for key in chunks.keys():
+		invalidate_chunk(key)
+
+func dirty_count() -> int:
+	return dirty.size()
 
 func loaded_lods() -> Array[int]:
 	var lods: Array[int] = []
@@ -104,7 +119,7 @@ func _refill_queue(center: Vector2i) -> void:
 	for dz in range(-view_radius, view_radius + 1):
 		for dx in range(-view_radius, view_radius + 1):
 			var coord := center + Vector2i(dx, dz)
-			if not chunks.has(coord) or int(chunks_lod.get(coord, 0)) != _lod_step(coord, center):
+			if not chunks.has(coord) or int(chunks_lod.get(coord, 0)) != _lod_step(coord, center) or dirty.has(coord):
 				queue.append(coord)
 	queue.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
 		return _distance2(a, center) < _distance2(b, center)
@@ -166,25 +181,33 @@ func _poll_results(center: Vector2i) -> void:
 				_enqueue(coord)
 			continue
 
-		_apply_chunk(coord, step, mesh)
+		_apply_chunk(coord, step, mesh, int(job.get("generation", 0)))
 
 func _request_jobs(center: Vector2i) -> void:
+	var deferred: Array[Vector2i] = []
 	while in_flight.size() < max_in_flight and not queue.is_empty():
 		var coord: Vector2i = queue.pop_front()
 		if not _is_desired(coord, center):
 			continue
 		var step := _lod_step(coord, center)
-		if chunks.has(coord) and int(chunks_lod.get(coord, 0)) == step:
+		if chunks.has(coord) and int(chunks_lod.get(coord, 0)) == step and not dirty.has(coord):
 			continue
 		if _has_job(coord, step):
+			deferred.append(coord)
 			continue
 		var id := core.request_terrain_chunk(seed, coord.x, coord.y, step)
 		if id < 0:
 			push_error("Terrain request failed for %s; resetting workers" % coord)
 			_handle_disconnected()
 			return
-		in_flight[id] = {"coord": coord, "step": step}
+		in_flight[id] = {
+			"coord": coord,
+			"step": step,
+			"generation": int(dirty.get(coord, 0)),
+		}
 		chunks_requested += 1
+	for coord in deferred:
+		_enqueue(coord)
 
 func _enqueue(coord: Vector2i) -> void:
 	if not queue.has(coord):
@@ -206,7 +229,8 @@ func _handle_disconnected() -> void:
 		set_process(false)
 		return
 	push_error("Terrain worker pool disconnected; resetting")
-	core = TownsmithCore.new()
+	if core.has_method("reset_terrain_workers"):
+		core.reset_terrain_workers()
 	if has_center:
 		_refill_queue(last_center)
 
@@ -218,9 +242,10 @@ func stats() -> Dictionary:
 		"chunks_dropped": chunks_dropped,
 		"in_flight": in_flight.size(),
 		"queue": queue.size(),
+		"dirty": dirty.size(),
 	}
 
-func _apply_chunk(coord: Vector2i, step: int, mesh: ArrayMesh) -> void:
+func _apply_chunk(coord: Vector2i, step: int, mesh: ArrayMesh, generation: int) -> void:
 	var instance := MeshInstance3D.new()
 	instance.mesh = mesh
 	instance.position = Vector3(coord.x * CHUNK_METERS, 0.0, coord.y * CHUNK_METERS)
@@ -233,6 +258,10 @@ func _apply_chunk(coord: Vector2i, step: int, mesh: ArrayMesh) -> void:
 			previous.queue_free()
 	chunks[coord] = instance
 	chunks_lod[coord] = step
+	if int(dirty.get(coord, 0)) <= generation:
+		dirty.erase(coord)
+	else:
+		_enqueue(coord)
 	coord_attempts.erase(coord)
 	chunks_applied += 1
 	chunks_built += 1
@@ -250,4 +279,5 @@ func _unload_outside(center: Vector2i) -> void:
 				instance.queue_free()
 			chunks.erase(key)
 			chunks_lod.erase(key)
+			dirty.erase(key)
 			coord_attempts.erase(key)

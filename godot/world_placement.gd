@@ -89,6 +89,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_R:
 				rotation_deg = (rotation_deg + 90) % 360
 				_refresh_preview(true)
+			KEY_X:
+				_edit_target(1)
+			KEY_Z:
+				_edit_target(-1)
 			KEY_DELETE:
 				_clear_placements()
 			KEY_F5:
@@ -152,6 +156,7 @@ func _setup_world() -> void:
 	streamer.view_radius = 1
 	streamer.keep_radius = 2
 	streamer.builds_per_frame = 2
+	streamer.core = core
 	add_child(streamer)
 
 	camera = EditorCamera.new()
@@ -328,18 +333,39 @@ func _update_hud() -> void:
 	var name := str(blueprint_info.get("name", "none"))
 	var rooms := int(blueprint_info.get("rooms", 0))
 	var capacity := int(blueprint_info.get("resident_capacity", 0))
-	hud.text = "Townsmith — World Placement  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD fly · Shift boost · Space/Ctrl up/down · R rotate · LMB place · Del clear · F5 save · F9 load · Esc release mouse" % [
+	hud.text = "Townsmith — World Placement  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD fly · Shift boost · Space/Ctrl up/down · R rotate · X raise · Z lower · LMB place · Del clear · F5 save · F9 load · Esc release mouse" % [
 		SEED, name, rooms, capacity,
 	]
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
-	status_label.text = "Target (%d, %d)  rotation %d°  %s\nPlacements: %d   Save: %s" % [
+	status_label.text = "Target (%d, %d)  rotation %d°  %s\nPlacements: %d   Terrain edits: %d   Save: %s" % [
 		int(target_x),
 		int(target_z),
 		rotation_deg,
 		state,
 		core.world_placement_count(),
+		core.terrain_delta_count(),
 		save_path,
 	]
+
+func _edit_target(delta: int) -> bool:
+	var current: float = core.world_height_at(SEED, target_x, target_z)
+	if current < 0.0:
+		_set_modal("No terrain at the target", true)
+		return false
+	var height := clampi(roundi(current) + delta, 0, 255)
+	var result: Dictionary = core.terrain_edit_height(
+		SEED, int(target_x), int(target_z), height
+	)
+	if not bool(result.get("ok", false)):
+		_set_modal("Terrain edit failed: " + str(result.get("error_code", "unknown")), true)
+		_update_hud()
+		return false
+	streamer.invalidate_chunk(Vector2i(
+		int(result.get("chunk_x", 0)), int(result.get("chunk_z", 0))
+	))
+	_set_modal("Terrain %d m at (%d, %d)" % [height, int(target_x), int(target_z)], false)
+	_refresh_preview(true)
+	return true
 
 func _place_at_target() -> bool:
 	if not preview_valid or blueprint_mesh == null:
@@ -411,7 +437,9 @@ func _save_world() -> bool:
 	var result: Dictionary = core.world_save(save_path)
 	var ok := bool(result.get("ok", false))
 	if ok:
-		_set_modal("Saved %d placement(s) to %s" % [core.world_placement_count(), save_path], false)
+		_set_modal("Saved %d placement(s), %d terrain edit(s) to %s" % [
+			core.world_placement_count(), core.terrain_delta_count(), save_path
+		], false)
 	else:
 		_set_modal("Save failed: " + str(result.get("error_code", result.get("error", ""))), true)
 	_update_hud()
@@ -424,6 +452,7 @@ func _load_world() -> bool:
 		_update_hud()
 		return false
 	_clear_placed_nodes()
+	streamer.invalidate_all()
 	var state: Dictionary = core.world_placements()
 	for placement in state.get("placements", []):
 		_add_placement_node(placement)
@@ -466,6 +495,7 @@ func _run_scene_smoke() -> void:
 	var preview_ok := false
 	var water_ok := false
 	var rotation_ok := false
+	var edit_ok := false
 	var place_ok := false
 	var save_ok := false
 	var clear_ok := false
@@ -495,6 +525,10 @@ func _run_scene_smoke() -> void:
 	if not rotation_ok and status == "ok":
 		status = "rotation_failed:" + preview_error
 
+	edit_ok = _edit_target(1) and core.terrain_delta_count() == 1 and absf(core.world_height_at(SEED, FIXTURE_X, FIXTURE_Z) - 42.0) < 0.001 and streamer.dirty_count() > 0
+	if not edit_ok and status == "ok":
+		status = "edit_failed:" + preview_error
+
 	place_ok = _place_at_target() and core.world_placement_count() == 1 and placed_root.get_child_count() == 1
 	if place_ok:
 		var node := placed_root.get_child(0)
@@ -517,6 +551,7 @@ func _run_scene_smoke() -> void:
 			if load_ok:
 				var node := placed_root.get_child(0)
 				load_ok = absf(node.rotation_degrees.y - 90.0) < 0.001 and _foundation_matches_bounds(node)
+				load_ok = load_ok and core.terrain_delta_count() == 1 and absf(core.world_height_at(SEED, FIXTURE_X, FIXTURE_Z) - 42.0) < 0.001
 			if not load_ok:
 				status = "load_failed"
 
@@ -536,11 +571,12 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s place=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
 		"ok" if rotation_ok else "failed",
+		"ok" if edit_ok else "failed",
 		"ok" if place_ok else "failed",
 		"ok" if save_ok else "failed",
 		"ok" if load_ok else "failed",
