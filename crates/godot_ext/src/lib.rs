@@ -31,7 +31,8 @@ use core_city::{
     ConstructionSite, ConstructionStore, Economy, Home, IndustryKind, IndustryStore, Lot, LotError,
     LotRequest, LotStore, Placement, PlacementError, PlacementRequest, PlacementStore, RoadError,
     RoadRequest, RoadSegment, RoadStore, Settlement, SettlementError, SettlementRequest,
-    SettlementStore, Workplace, Zone, MAX_WORLD_COORD_M,
+    SettlementStore, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
+    MAX_WORLD_COORD_M,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -509,6 +510,7 @@ struct TownsmithCore {
     population: Mutex<Option<CityRuntime>>,
     economy: Mutex<Option<Economy>>,
     industry: Mutex<Option<IndustryStore>>,
+    utilities: Mutex<Option<UtilityStore>>,
     terrain_deltas: Arc<RwLock<DeltaStore>>,
     terrain_seed: Mutex<Option<u64>>,
 }
@@ -526,6 +528,7 @@ impl Default for TownsmithCore {
             population: Mutex::new(None),
             economy: Mutex::new(None),
             industry: Mutex::new(None),
+            utilities: Mutex::new(None),
             terrain_deltas: Arc::new(RwLock::new(DeltaStore::new())),
             terrain_seed: Mutex::new(None),
         }
@@ -1716,6 +1719,11 @@ impl TownsmithCore {
             .unwrap_or_else(|error| error.into_inner())
             .as_mut()
             .map(IndustryStore::clear);
+        self.utilities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_mut()
+            .map(UtilityStore::clear);
         true
     }
 
@@ -1747,6 +1755,14 @@ impl TownsmithCore {
                 .as_mut()
             {
                 industry.remove_site(id);
+            }
+            if let Some(utilities) = self
+                .utilities
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_mut()
+            {
+                utilities.remove_placement(id);
             }
         }
         removed
@@ -1944,15 +1960,39 @@ impl TownsmithCore {
             );
         }
         let runtime = population.get_or_insert_with(|| CityRuntime::new(seed));
-        let food_supply = self
-            .industry
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .as_ref()
-            .filter(|industry| industry.seed == seed)
-            .map_or(0.0, |industry| industry.food_supply);
-        let report =
-            runtime.tick_with_workplaces_and_supply(seconds, &homes, &workplaces, food_supply);
+        let (water_supply, power_supply) = {
+            let utilities = self
+                .utilities
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            utilities
+                .as_ref()
+                .filter(|utilities| utilities.seed == seed)
+                .map_or((0.0, 0.0), |utilities| {
+                    (
+                        f64::from(utilities.water_supply),
+                        f64::from(utilities.power_supply),
+                    )
+                })
+        };
+        let food_supply = {
+            let industry = self
+                .industry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            industry
+                .as_ref()
+                .filter(|industry| industry.seed == seed)
+                .map_or(0.0, |industry| industry.food_supply)
+        };
+        let report = runtime.tick_with_supplies(
+            seconds,
+            &homes,
+            &workplaces,
+            food_supply,
+            water_supply as f32,
+            power_supply as f32,
+        );
         let mut result = VarDictionary::new();
         result.set("ok", true);
         result.set("moved_in", i64::from(report.moved_in));
@@ -1962,6 +2002,8 @@ impl TownsmithCore {
         result.set("happiness", f64::from(runtime.happiness()));
         result.set("average_commute_m", f64::from(runtime.average_commute_m()));
         result.set("daily_wages", runtime.daily_wages());
+        result.set("water_supply", water_supply);
+        result.set("power_supply", power_supply);
         result.set(
             "checksum",
             &GString::from(&format!("{:016x}", runtime.checksum())),
@@ -2417,6 +2459,13 @@ impl TownsmithCore {
                 }
             }
         }
+        let power_supply = self
+            .utilities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .filter(|utilities| utilities.seed == seed)
+            .map_or(0.0, |utilities| utilities.power_supply);
         let (staffing, population) = {
             let runtime = self
                 .population
@@ -2443,6 +2492,7 @@ impl TownsmithCore {
             result.set("hides", 0.0);
             result.set("food_consumed", 0.0);
             result.set("food_supply", 0.0);
+            result.set("power_supply", 0.0);
             result.set("workers", 0);
             result.set("checksum", &GString::from("0000000000000000"));
             return result;
@@ -2453,7 +2503,7 @@ impl TownsmithCore {
                 "the industry store belongs to a different seed",
             );
         }
-        let tick = industry.tick(seconds, &staffing, population);
+        let tick = industry.tick_with_power(seconds, &staffing, population, power_supply);
         let mut result = VarDictionary::new();
         result.set("ok", true);
         result.set("open", true);
@@ -2462,6 +2512,7 @@ impl TownsmithCore {
         result.set("hides", tick.hides);
         result.set("food_consumed", tick.food_consumed);
         result.set("food_supply", f64::from(tick.food_supply));
+        result.set("power_supply", f64::from(tick.power_supply));
         result.set("workers", tick.workers as i64);
         result.set("stock_wood", tick.stockpile.wood);
         result.set("stock_food", tick.stockpile.food);
@@ -2492,6 +2543,209 @@ impl TownsmithCore {
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = None;
         true
+    }
+
+    /// Designate a placement as a water or power site.
+    #[func]
+    fn utility_add_site(&self, seed: i64, placement_id: i64, kind: GString) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        let Ok(placement_id) = u64::try_from(placement_id) else {
+            return placement_simple_error(
+                "invalid_placement",
+                "placement id must be non-negative",
+            );
+        };
+        let Some(kind) = UtilityKind::parse(&kind.to_string()) else {
+            return placement_simple_error(
+                "invalid_utility",
+                "utility kind must be water or power",
+            );
+        };
+        let center = {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(store) = world.as_ref() else {
+                return placement_simple_error("no_world", "no world placement store is open");
+            };
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the placement store belongs to a different seed",
+                );
+            }
+            let Some(placement) = store.placements.iter().find(|item| item.id == placement_id)
+            else {
+                return placement_simple_error("unknown_placement", "no placement has that id");
+            };
+            if placement.job_slots == 0 {
+                return placement_simple_error(
+                    "no_jobs",
+                    "a utility site needs at least one job slot",
+                );
+            }
+            let construction = self
+                .construction
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !construction
+                .site(placement_id)
+                .is_some_and(|site| site.is_complete())
+            {
+                return placement_simple_error(
+                    "not_complete",
+                    "a utility site needs a completed building",
+                );
+            }
+            placement.center
+        };
+        {
+            let mut guard = self
+                .utilities
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if guard
+                .as_ref()
+                .is_some_and(|utilities| utilities.seed != seed)
+            {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the utilities store belongs to a different seed",
+                );
+            }
+            let utilities = guard.get_or_insert_with(|| UtilityStore::new(seed));
+            if let Err(error) = utilities.add_site(placement_id, kind, center) {
+                return placement_simple_error("utility_failed", error.to_string());
+            }
+        }
+        let mut result = self.utilities_refresh(seed as i64);
+        result.set("placement_id", placement_id as i64);
+        result.set("kind", &GString::from(kind.as_str()));
+        result
+    }
+
+    /// Remove one water or power site and refresh service.
+    #[func]
+    fn utility_remove_site(&self, seed: i64, placement_id: i64, kind: GString) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        let Ok(placement_id) = u64::try_from(placement_id) else {
+            return placement_simple_error(
+                "invalid_placement",
+                "placement id must be non-negative",
+            );
+        };
+        let Some(kind) = UtilityKind::parse(&kind.to_string()) else {
+            return placement_simple_error(
+                "invalid_utility",
+                "utility kind must be water or power",
+            );
+        };
+        {
+            let mut guard = self
+                .utilities
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(utilities) = guard.as_mut() {
+                if utilities.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the utilities store belongs to a different seed",
+                    );
+                }
+                utilities.remove_site(placement_id, kind);
+            }
+        }
+        self.utilities_refresh(seed as i64)
+    }
+
+    /// Return utility sites, coverage, demand, and service shares.
+    #[func]
+    fn utilities_state(&self) -> VarDictionary {
+        let consumers = self.collect_utility_consumers();
+        let mut guard = self
+            .utilities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match guard.as_mut() {
+            Some(store) => {
+                let report = store.refresh(&consumers);
+                utility_payload(store, &report)
+            }
+            None => utility_closed_payload(consumers.len()),
+        }
+    }
+
+    /// Recompute utility service from completed buildings and households.
+    #[func]
+    fn utilities_refresh(&self, seed: i64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(store) = world.as_ref() {
+                if store.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the placement store belongs to a different seed",
+                    );
+                }
+            }
+        }
+        let consumers = self.collect_utility_consumers();
+        let mut guard = self
+            .utilities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match guard.as_mut() {
+            Some(store) => {
+                if store.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the utilities store belongs to a different seed",
+                    );
+                }
+                let report = store.refresh(&consumers);
+                utility_payload(store, &report)
+            }
+            None => utility_closed_payload(consumers.len()),
+        }
+    }
+
+    /// Stable utilities checksum.
+    #[func]
+    fn utilities_checksum(&self) -> GString {
+        let guard = self
+            .utilities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checksum = guard.as_ref().map_or(0, UtilityStore::checksum);
+        GString::from(&format!("{checksum:016x}"))
+    }
+
+    /// Close the utilities store.
+    #[func]
+    fn utilities_clear(&self) -> bool {
+        *self
+            .utilities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        true
+    }
+
+    fn collect_utility_consumers(&self) -> Vec<UtilityConsumer> {
+        let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        let construction = self
+            .construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let population = self
+            .population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        completed_utility_consumers(world.as_ref(), &construction, population.as_ref())
     }
 
     /// Set the shared crew pool. Values above 64 are rejected.
@@ -2550,7 +2804,17 @@ impl TownsmithCore {
             Ok(path) => path,
             Err(error) => return placement_simple_error("invalid_save_path", error),
         };
-        let (store, construction, roads, lots, settlements, mut population, economy, industry) = {
+        let (
+            store,
+            construction,
+            roads,
+            lots,
+            settlements,
+            mut population,
+            economy,
+            mut utilities,
+            industry,
+        ) = {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             let construction = self
                 .construction
@@ -2570,6 +2834,10 @@ impl TownsmithCore {
                 .economy
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
+            let utilities = self
+                .utilities
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let industry = self
                 .industry
                 .lock()
@@ -2582,6 +2850,7 @@ impl TownsmithCore {
                 settlements.as_ref().cloned(),
                 population.as_ref().cloned(),
                 economy.as_ref().cloned(),
+                utilities.as_ref().cloned(),
                 industry.as_ref().cloned(),
             )
         };
@@ -2593,6 +2862,38 @@ impl TownsmithCore {
             sanitize_staffing(runtime, &store, &construction);
             if let Err(error) = runtime.validate() {
                 return placement_simple_error("invalid_population", error.to_string());
+            }
+        }
+        if let Some(utilities) = utilities.as_mut() {
+            utilities.water_sites.retain(|id, site| {
+                let Some(placement) = store.placements.iter().find(|item| item.id == *id) else {
+                    return false;
+                };
+                placement.job_slots > 0
+                    && construction
+                        .site(*id)
+                        .is_some_and(|site| site.is_complete())
+                    && (site.center[0] - placement.center[0]).abs() <= 0.001
+                    && (site.center[1] - placement.center[1]).abs() <= 0.001
+                    && (site.center[2] - placement.center[2]).abs() <= 0.001
+            });
+            utilities.power_sites.retain(|id, site| {
+                let Some(placement) = store.placements.iter().find(|item| item.id == *id) else {
+                    return false;
+                };
+                placement.job_slots > 0
+                    && construction
+                        .site(*id)
+                        .is_some_and(|site| site.is_complete())
+                    && (site.center[0] - placement.center[0]).abs() <= 0.001
+                    && (site.center[1] - placement.center[1]).abs() <= 0.001
+                    && (site.center[2] - placement.center[2]).abs() <= 0.001
+            });
+            let consumers =
+                completed_utility_consumers(Some(&store), &construction, population.as_ref());
+            utilities.refresh(&consumers);
+            if let Err(error) = utilities.validate() {
+                return placement_simple_error("invalid_utilities", error.to_string());
             }
         }
         let json = match store.to_json_pretty() {
@@ -2705,6 +3006,21 @@ impl TownsmithCore {
             }
             None => json,
         };
+        let json = match utilities.as_ref() {
+            Some(utilities) => {
+                if utilities.seed != store.seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the utilities store belongs to a different seed",
+                    );
+                }
+                match attach_utilities(&json, utilities) {
+                    Ok(json) => json,
+                    Err(error) => return placement_simple_error("save_failed", error),
+                }
+            }
+            None => json,
+        };
         let json = match industry.as_ref() {
             Some(industry) => {
                 if industry.seed != store.seed {
@@ -2720,6 +3036,18 @@ impl TownsmithCore {
             }
             None => json,
         };
+        if let Some(utilities) = utilities.as_ref() {
+            let mut guard = self
+                .utilities
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if guard
+                .as_ref()
+                .is_some_and(|live| live.seed == utilities.seed)
+            {
+                *guard = Some(utilities.clone());
+            }
+        }
         if json.len() > MAX_WORLD_SAVE_BYTES as usize {
             return placement_simple_error(
                 "save_too_large",
@@ -2800,6 +3128,17 @@ impl TownsmithCore {
             &GString::from(&format!(
                 "{:016x}",
                 industry.as_ref().map_or(0, IndustryStore::checksum)
+            )),
+        );
+        result.set(
+            "utility_sites",
+            utilities.as_ref().map_or(0, UtilityStore::site_count) as i64,
+        );
+        result.set(
+            "utility_checksum",
+            &GString::from(&format!(
+                "{:016x}",
+                utilities.as_ref().map_or(0, UtilityStore::checksum)
             )),
         );
         result.set(
@@ -2940,6 +3279,21 @@ impl TownsmithCore {
                 );
             }
         }
+        let utilities = match utilities_from_world_json(&json) {
+            Ok(utilities) => utilities,
+            Err((code, error)) => return placement_simple_error(code, error),
+        };
+        if let Some(utilities) = utilities.as_ref() {
+            if utilities.seed != expected_seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    format!(
+                        "the utilities store uses seed {} but this world is {expected_seed}",
+                        utilities.seed
+                    ),
+                );
+            }
+        }
         let store = match PlacementStore::from_json(&json) {
             Ok(store) => store,
             Err(error) => return placement_error_result(&error),
@@ -3044,10 +3398,53 @@ impl TownsmithCore {
                 }
             }
         }
+        if let Some(utilities) = utilities.as_ref() {
+            for sites in [&utilities.water_sites, &utilities.power_sites] {
+                for &id in sites.keys() {
+                    let Some(placement) = store.placements.iter().find(|item| item.id == id) else {
+                        return placement_simple_error(
+                            "utility_orphan",
+                            format!("utility site {id} has no placement"),
+                        );
+                    };
+                    if placement.job_slots == 0 {
+                        return placement_simple_error(
+                            "utility_no_jobs",
+                            format!("utility site {id} has no job slots"),
+                        );
+                    }
+                    if !construction.site(id).is_some_and(|site| site.is_complete()) {
+                        return placement_simple_error(
+                            "utility_not_complete",
+                            format!("utility site {id} is not complete"),
+                        );
+                    }
+                    let site = sites.get(&id).expect("site");
+                    if (site.center[0] - placement.center[0]).abs() > 0.001
+                        || (site.center[1] - placement.center[1]).abs() > 0.001
+                        || (site.center[2] - placement.center[2]).abs() > 0.001
+                    {
+                        return placement_simple_error(
+                            "utility_center_mismatch",
+                            format!("utility site {id} does not match its placement centre"),
+                        );
+                    }
+                }
+            }
+        }
         population.sync(&completed_slots(&store, &construction));
         sanitize_staffing(&mut population, &store, &construction);
         if let Err(error) = population.validate() {
             return placement_simple_error("invalid_population", error.to_string());
+        }
+        let mut utilities = utilities;
+        if let Some(utilities) = utilities.as_mut() {
+            let consumers =
+                completed_utility_consumers(Some(&store), &construction, Some(&population));
+            utilities.refresh(&consumers);
+            if let Err(error) = utilities.validate() {
+                return placement_simple_error("invalid_utilities", error.to_string());
+            }
         }
         let population_count = population.population();
         let population_checksum = population.checksum();
@@ -3064,6 +3461,8 @@ impl TownsmithCore {
         let settlement_checksum = settlements.as_ref().map_or(0, SettlementStore::checksum);
         let industry_count = industry.as_ref().map_or(0, IndustryStore::site_count);
         let industry_checksum = industry.as_ref().map_or(0, IndustryStore::checksum);
+        let utility_count = utilities.as_ref().map_or(0, UtilityStore::site_count);
+        let utility_checksum = utilities.as_ref().map_or(0, UtilityStore::checksum);
         let deltas_count = deltas.edit_count();
         let deltas_checksum = deltas.checksum();
         let mut guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
@@ -3093,6 +3492,10 @@ impl TownsmithCore {
             .economy
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let mut utilities_guard = self
+            .utilities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut industry_guard = self
             .industry
             .lock()
@@ -3108,6 +3511,7 @@ impl TownsmithCore {
         *guard = Some(store);
         *population_guard = Some(population);
         *economy_guard = economy;
+        *utilities_guard = utilities;
         *industry_guard = industry;
         *deltas_guard = deltas;
         *self
@@ -3155,6 +3559,11 @@ impl TownsmithCore {
         result.set(
             "industry_checksum",
             &GString::from(&format!("{industry_checksum:016x}")),
+        );
+        result.set("utility_sites", utility_count as i64);
+        result.set(
+            "utility_checksum",
+            &GString::from(&format!("{utility_checksum:016x}")),
         );
         result
     }
@@ -4328,6 +4737,114 @@ fn completed_workplaces(
         .collect()
 }
 
+fn completed_utility_consumers(
+    placements: Option<&PlacementStore>,
+    construction: &ConstructionStore,
+    population: Option<&CityRuntime>,
+) -> Vec<UtilityConsumer> {
+    let Some(placements) = placements else {
+        return Vec::new();
+    };
+    placements
+        .placements
+        .iter()
+        .filter(|placement| {
+            construction
+                .site(placement.id)
+                .is_some_and(|site| site.is_complete())
+        })
+        .map(|placement| UtilityConsumer {
+            id: placement.id,
+            center: [placement.center[0], placement.center[2]],
+            residents: population
+                .and_then(|runtime| runtime.households.get(&placement.id))
+                .map_or(0, |household| household.residents),
+            workers: population
+                .and_then(|runtime| runtime.staffing.get(&placement.id))
+                .copied()
+                .unwrap_or(0),
+        })
+        .collect()
+}
+
+fn utility_closed_payload(consumers: usize) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set("open", false);
+    result.set("seed", 0);
+    result.set("site_count", 0);
+    result.set("water_sites", 0);
+    result.set("power_sites", 0);
+    result.set("water_supply", 0.0);
+    result.set("power_supply", 0.0);
+    result.set("water_demand", 0.0);
+    result.set("power_demand", 0.0);
+    result.set("water_served", 0.0);
+    result.set("power_served", 0.0);
+    result.set("water_capacity", 0.0);
+    result.set("power_capacity", 0.0);
+    result.set("water_coverage", 0.0);
+    result.set("power_coverage", 0.0);
+    result.set("water_covered_buildings", 0);
+    result.set("power_covered_buildings", 0);
+    result.set("consumers", consumers as i64);
+    result.set("sites", &Array::<VarDictionary>::new().to_variant());
+    result.set("checksum", &GString::from("0000000000000000"));
+    result
+}
+
+fn utility_payload(store: &UtilityStore, report: &UtilityReport) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set("open", true);
+    result.set("seed", store.seed as i64);
+    result.set("site_count", store.site_count() as i64);
+    result.set("water_sites", store.water_sites.len() as i64);
+    result.set("power_sites", store.power_sites.len() as i64);
+    result.set("water_supply", f64::from(report.water_supply));
+    result.set("power_supply", f64::from(report.power_supply));
+    result.set("water_demand", report.water_demand);
+    result.set("power_demand", report.power_demand);
+    result.set("water_served", report.water_served);
+    result.set("power_served", report.power_served);
+    result.set("water_capacity", report.water_capacity);
+    result.set("power_capacity", report.power_capacity);
+    result.set("water_coverage", f64::from(report.water_coverage));
+    result.set("power_coverage", f64::from(report.power_coverage));
+    result.set(
+        "water_covered_buildings",
+        report.water_covered_buildings as i64,
+    );
+    result.set(
+        "power_covered_buildings",
+        report.power_covered_buildings as i64,
+    );
+    result.set("consumers", report.consumers as i64);
+    let mut sites: Array<VarDictionary> = Array::new();
+    for (kind, sites_for_kind) in [
+        (UtilityKind::Water, &store.water_sites),
+        (UtilityKind::Power, &store.power_sites),
+    ] {
+        for (&id, site) in sites_for_kind {
+            let mut item = VarDictionary::new();
+            item.set("placement_id", id as i64);
+            item.set("kind", &GString::from(kind.as_str()));
+            item.set("radius_m", f64::from(site.radius_m));
+            item.set("capacity", site.capacity);
+            item.set("center_x", f64::from(site.center[0]));
+            item.set("center_y", f64::from(site.center[1]));
+            item.set("center_z", f64::from(site.center[2]));
+            sites.push(&item);
+        }
+    }
+    result.set("sites", &sites.to_variant());
+    result.set(
+        "checksum",
+        &GString::from(&format!("{:016x}", store.checksum())),
+    );
+    result
+}
+
 fn attach_construction(json: &str, store: &ConstructionStore) -> Result<String, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(json).map_err(|error| error.to_string())?;
@@ -4476,6 +4993,27 @@ fn industry_from_world_json(json: &str) -> Result<Option<IndustryStore>, (&'stat
     store
         .validate()
         .map_err(|error| ("invalid_industry", error.to_string()))?;
+    Ok(Some(store))
+}
+
+fn attach_utilities(json: &str, store: &UtilityStore) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    value["utilities"] = serde_json::to_value(store).map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+}
+
+fn utilities_from_world_json(json: &str) -> Result<Option<UtilityStore>, (&'static str, String)> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| ("invalid_json", error.to_string()))?;
+    let Some(raw) = value.get("utilities") else {
+        return Ok(None);
+    };
+    let store: UtilityStore = serde_json::from_value(raw.clone())
+        .map_err(|error| ("invalid_utilities", error.to_string()))?;
+    store
+        .validate()
+        .map_err(|error| ("invalid_utilities", error.to_string()))?;
     Ok(Some(store))
 }
 
@@ -5288,6 +5826,41 @@ mod tests {
             industry_from_world_json(&json).expect_err("reject").0,
             "invalid_industry"
         );
+    }
+
+    #[test]
+    fn utility_world_json_round_trips_and_old_saves_are_closed() {
+        let mut store = UtilityStore::new(2026);
+        store
+            .add_site(1, UtilityKind::Water, [10.0, 40.0, 20.0])
+            .expect("water");
+        store
+            .add_site(1, UtilityKind::Power, [10.0, 40.0, 20.0])
+            .expect("power");
+        store.refresh(&[UtilityConsumer {
+            id: 1,
+            center: [10.0, 20.0],
+            residents: 2,
+            workers: 2,
+        }]);
+        let json = attach_utilities("{}", &store).expect("attach");
+        let decoded = utilities_from_world_json(&json)
+            .expect("parse")
+            .expect("present");
+        assert_eq!(decoded, store);
+        assert!(utilities_from_world_json("{}").expect("old save").is_none());
+    }
+
+    #[test]
+    fn utility_world_json_rejects_invalid_sites() {
+        let mut store = UtilityStore::new(2026);
+        store
+            .add_site(1, UtilityKind::Water, [0.0, 0.0, 0.0])
+            .expect("water");
+        store.water_sites.get_mut(&1).expect("site").radius_m = -1.0;
+        let json = serde_json::to_string(&serde_json::json!({"utilities": store})).expect("json");
+        let error = utilities_from_world_json(&json).expect_err("reject");
+        assert_eq!(error.0, "invalid_utilities");
     }
 
     #[test]

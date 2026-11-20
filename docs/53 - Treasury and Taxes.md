@@ -112,9 +112,9 @@ The existing `occupancy=ok` marker covers these assertions; no new marker field.
 
 - `core_city::economy`: 6 tests — starting balance, income/expenses, clamped rates, bankruptcy flag, JSON/checksum, invalid balance.
 - `godot_ext`: 2 new tests — economy JSON roundtrip/old-save closed, invalid balance rejected.
-- `core_city` total **102**; bridge **38**; workspace **304 tests + 1 doctest**.
+- `core_city` total **117**; bridge **40**; workspace **321 tests + 1 doctest**.
 - `city_loop` bin test includes balance/economy checksum.
-- 30-day city-loop checksum: `fe84b6a6d06678ca` (with primary industries).
+- 30-day city-loop checksum: `e0d935b2a4421285` (with primary industries and utilities).
 
 ## 8. Limits
 
@@ -130,4 +130,4 @@ The existing `occupancy=ok` marker covers these assertions; no new marker field.
 1. Charge placement material cost at construction start and record it in `construction_spent`.
 2. Add loans and a simple bankruptcy consequence.
 3. Add service funding/upkeep per building type.
-4. Feed the 30-day runner with water/service supply (3.5) before tuning the final balance.
+4. Use the utility-backed 30-day runner ([[55 - Utilities]]) as the baseline before tuning the final balance.

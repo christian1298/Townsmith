@@ -1,12 +1,17 @@
+#![recursion_limit = "256"]
+
 //! Deterministic 30-day city-loop benchmark.
 //!
 //! Builds a fixed 50-house / 500-resident city from placement records, runs
 //! phased construction, move-in, job assignment, needs, and wages at a fixed
 //! step, then prints a stable JSON summary and checksum.
 
+use std::collections::BTreeSet;
+
 use core_city::{
     summarize, CityRuntime, ConstructionStore, Economy, Home, IndustryKind, IndustryStore,
-    Placement, PlacementPlan, PlacementRequest, PlacementStore, Workplace,
+    Placement, PlacementPlan, PlacementRequest, PlacementStore, UtilityConsumer, UtilityKind,
+    UtilityReport, UtilityStore, Workplace,
 };
 
 const DEFAULT_DAYS: u64 = 30;
@@ -85,12 +90,40 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
         industry.add_site(index + 1, kind).expect("industry site");
     }
 
+    let utility_span = houses.min(10);
+    let water_ids: BTreeSet<u64> = [1, utility_span].into_iter().collect();
+    let power_ids: BTreeSet<u64> = [1, 5.min(utility_span), utility_span].into_iter().collect();
+    let mut utilities = UtilityStore::new(seed);
+    let mut added_utilities: BTreeSet<(u64, UtilityKind)> = BTreeSet::new();
+    let mut utility_report = UtilityReport::default();
+
     let mut runtime = CityRuntime::new(seed);
     runtime.set_move_in_per_second(5.0);
     let mut economy = Economy::new(seed);
     let step_count = (days as f64 * 86_400.0 / step).ceil() as u64;
     for _ in 0..step_count {
         construction.tick(step);
+        for (&id, kind) in water_ids
+            .iter()
+            .map(|id| (id, UtilityKind::Water))
+            .chain(power_ids.iter().map(|id| (id, UtilityKind::Power)))
+        {
+            if added_utilities.contains(&(id, kind)) {
+                continue;
+            }
+            if !construction.site(id).is_some_and(|site| site.is_complete()) {
+                continue;
+            }
+            let placement = placements
+                .placements
+                .iter()
+                .find(|placement| placement.id == id)
+                .expect("utility placement");
+            utilities
+                .add_site(id, kind, placement.center)
+                .expect("utility site");
+            added_utilities.insert((id, kind));
+        }
         let homes = placements
             .placements
             .iter()
@@ -119,8 +152,39 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
                 center: [placement.center[0], placement.center[2]],
             })
             .collect::<Vec<_>>();
-        industry.tick(step, &runtime.staffing, runtime.population());
-        runtime.tick_with_workplaces_and_supply(step, &homes, &workplaces, industry.food_supply);
+        let consumers = placements
+            .placements
+            .iter()
+            .filter(|placement| {
+                construction
+                    .site(placement.id)
+                    .is_some_and(|site| site.is_complete())
+            })
+            .map(|placement| UtilityConsumer {
+                id: placement.id,
+                center: [placement.center[0], placement.center[2]],
+                residents: runtime
+                    .households
+                    .get(&placement.id)
+                    .map_or(0, |household| household.residents),
+                workers: runtime.staffing.get(&placement.id).copied().unwrap_or(0),
+            })
+            .collect::<Vec<_>>();
+        utility_report = utilities.refresh(&consumers);
+        industry.tick_with_power(
+            step,
+            &runtime.staffing,
+            runtime.population(),
+            utilities.power_supply,
+        );
+        runtime.tick_with_supplies(
+            step,
+            &homes,
+            &workplaces,
+            industry.food_supply,
+            utilities.water_supply,
+            utilities.power_supply,
+        );
         let completed = construction
             .sites
             .values()
@@ -171,6 +235,16 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
         "produced_hides": industry.produced_total.hides,
         "food_supply": industry.food_supply,
         "industry_checksum": format!("{:016x}", industry.checksum()),
+        "utility_sites": utilities.site_count(),
+        "water_sites": utilities.water_sites.len(),
+        "power_sites": utilities.power_sites.len(),
+        "water_supply": utilities.water_supply,
+        "power_supply": utilities.power_supply,
+        "water_demand": utility_report.water_demand,
+        "power_demand": utility_report.power_demand,
+        "water_capacity": utility_report.water_capacity,
+        "power_capacity": utility_report.power_capacity,
+        "utility_checksum": format!("{:016x}", utilities.checksum()),
         "balance": economy.balance,
         "daily_net": economy.daily_net(summary.population, summary.employed, summary.completed_buildings as u64),
         "bankrupt": economy.bankrupt,
@@ -220,6 +294,13 @@ mod tests {
         assert_eq!(result["bankrupt"], false);
         assert!(result["construction_checksum"].as_str().is_some());
         assert!(result["economy_checksum"].as_str().is_some());
+        assert!(result["utility_sites"].as_u64().expect("utilities") >= 2);
+        assert!(result["water_supply"].as_f64().expect("water supply") > 0.99);
+        assert!(result["power_supply"].as_f64().expect("power supply") > 0.99);
+        assert!(result["water"].as_f64().expect("water") > 0.9);
+        assert!(result["rest"].as_f64().expect("rest") > 0.9);
+        assert!(result["happiness"].as_f64().expect("happiness") > 0.9);
+        assert!(result["utility_checksum"].as_str().is_some());
         assert_eq!(result["industry_sites"], 5);
         assert!(result["stock_food"].as_f64().expect("stock") > 0.0);
         assert!(result["produced_wood"].as_f64().expect("wood") > 0.0);

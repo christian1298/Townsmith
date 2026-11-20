@@ -36,8 +36,8 @@ The full feature list is in [[08 - Roadmap]]. This plan cuts it into reviewable 
 | **3.2** | Households and move-in: vacant homes fill over time; simple needs and happiness | **Done** — PR #58, see [[50 - Households and Needs]] |
 | **3.3** | Jobs and wages: assign residents to job slots, commute distance, income | **Done** — PR #60, see [[51 - Jobs and Wages]] |
 | **3.4** | Primary industries: lumberjack, farmer, hunter with visible loops and storage | **Done** — PR #64, see [[54 - Primary Industries]] |
-| **3.5** | Utilities: water or power first, coverage, shortages, happiness/production effects | Next |
-| **3.6** | Economy: taxes, upkeep, construction draw-down, loans, bankruptcy | **Partial** — PR #62, treasury/taxes; see [[53 - Treasury and Taxes]] |
+| **3.5** | Utilities: water or power first, coverage, shortages, happiness/production effects | **This PR** — see [[55 - Utilities]] |
+| **3.6** | Economy: taxes, upkeep, construction draw-down, loans, bankruptcy | **Partial** — PR #62, treasury/taxes; draw-down and consequences are next |
 | **3.7** | Traffic: road graph, flow fields, visual vehicles | Planned |
 | **3.8** | Dashboard and advisor: city metrics, district panel, notifications | Planned |
 | **3.9** | Headless 30-day runner and regression metrics | **Partial** — PR #61, city-loop runner; see [[52 - Headless City Loop]] |
@@ -202,12 +202,45 @@ See [[54 - Primary Industries]] for rates, structs, tick order, persistence, HUD
 - `cargo test -p core_city` — industry, staffing, and food-replenishment tests.
 - `cargo test --workspace`.
 - `smoke_world_scene.sh` — industry site, production, supply, beacon, save/clear/load; marker `industry=ok` (checked by the script).
-- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `fe84b6a6d06678ca`.
+- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `e0d935b2a4421285`.
+- clippy and fmt.
+
+## 6e. Stage 3.5 scope
+
+### In
+
+- `core_city::utilities`: water and power sites, capacity, radius coverage, demand, served demand, and service shares.
+- Utility sites on completed job buildings; one building can host both kinds.
+- Water service replenishes water; power service replenishes rest and scales industry production.
+- Bridge APIs, save/load validation, and atomic replacement.
+- HUD line, selected-building utility label, `U` cycle, and visible beacons.
+- World-scene smoke and 30-day runner coverage.
+- A power outage test that stops production while residents still eat.
+
+### Out
+
+- Pipes, wires, flow, pressure, voltage, grid connectivity.
+- Sewage, garbage, heating, communications, or pollution.
+- Utility staffing, maintenance, failure, repair, or upgrades.
+- Utility-specific cost or upkeep.
+- Road-distance or network-based coverage.
+
+### Data
+
+See [[55 - Utilities]] for rates, formulas, tick order, persistence, HUD, tests, and limits.
+
+### Verification
+
+- `cargo test -p core_city` — utilities, population service, industry power tests.
+- `cargo test --workspace` — **321 tests + 1 doctest (322 passed)**.
+- `smoke_world_scene.sh` — water/power service, needs recovery, production, persistence, beacons; marker `utilities=ok` (checked by the script).
+- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `e0d935b2a4421285`.
 - clippy and fmt.
 
 ## 7. Next
 
-1. 3.5: water/power coverage and service replenishment for water/rest.
-2. 3.6: construction draw-down, loans, and bankruptcy consequences.
-3. Materialize a few named citizens for selection and stories.
-4. Keep the 500-citizen/50-building 60 FPS gate visible from the first slice.
+1. 3.6: construction draw-down, loans, and bankruptcy consequences.
+2. 3.7: road graph and traffic.
+3. 3.8: dashboard and advisor, including utility shortages.
+4. Materialize a few named citizens for selection and stories.
+5. Keep the 500-citizen/50-building 60 FPS gate visible from the first slice.

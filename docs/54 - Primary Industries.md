@@ -126,7 +126,7 @@ The one-step staffing lag is intentional and deterministic: staffing is produced
 food = clamp(food - 0.0004 × dt + 0.002 × food_supply × dt, 0, 1)
 ```
 
-At full supply, food recovers; at zero supply it decays as before. Water and rest still only decay until 3.5, so happiness improves but is not yet a healthy-city target.
+At full supply, food recovers; at zero supply it decays as before. Water and rest are supplied by [[55 - Utilities]]; power also scales industry production, so a power outage stops output while residents still eat.
 
 ## 4. Persistence
 
@@ -190,29 +190,31 @@ All fifty buildings have ten residents and ten job slots. Each household fills i
 | Hides production | 60 / day |
 | Stock after 30 days | wood ~7,199 · food ~4,799 · hides ~1,800 |
 | Food supply | 100% |
-| Food need | 100% |
-| Water / rest | 0% / 0% |
-| Happiness | 0.667 |
+| Food / water / rest | 100% / 100% / 100% |
+| Happiness | 1.000 |
+| Utility sites | 5 (2 water, 3 power) |
+| Water / power supply | 100% / 100% |
 | Treasury after 30 days | −27,500 |
 | Daily net | −4,250 |
 
 Checksums:
 
-- city loop: `fe84b6a6d06678ca`
-- population runtime: `91d57794af95ef8a`
+- city loop: `e0d935b2a4421285`
+- population runtime: `c0d28b58ce38145a`
 - construction: `aa3e36ad3cc1e717`
 - treasury: `1b6a7631bd9dd0ac`
 - industry: `1b536bce524f0c76`
+- utilities: `44e47a38faeb0edb`
 
-Food now reaches the city and stays at 100%. Water and rest still collapse; that is the 3.5 gap. The first industry step uses the previous staff assignment, so lifetime production is a fraction below the ideal 30-day rate.
+Food now reaches the city and stays at 100%; [[55 - Utilities]] keeps water and rest at 100% and full power keeps production at the full rate. The first industry step uses the previous staff assignment, so lifetime production is still a fraction below the ideal 30-day rate.
 
 ## 7. Tests
 
-- `core_city::industry`: 11 tests — empty store, per-kind output, time/worker scaling, consumption, full and partial supply, remove/clear, JSON/checksum, invalid stock, kind parsing.
+- `core_city::industry`: 13 tests — empty store, per-kind output, time/worker scaling, consumption, full and partial supply, power scaling/outage, remove/clear, JSON/checksum, invalid stock, kind parsing.
 - `core_city::population`: 3 new tests — per-workplace staffing, food replenishment, old saves without staffing.
 - `godot_ext`: 4 new tests — industry JSON roundtrip/old save, unknown kind/invalid stock, staffing roundtrip, stale-staffing sanitize.
 - `city_loop`: the five-house test asserts sites, food stock, wood production, full supply, and happiness > 0.6.
-- Workspace: **304 tests + 1 doctest** (52 voxel, 62 world, 26 simulation, 102 city, 11 blueprint, 12 rooms, 38 bridge, 1 city-loop).
+- Workspace: **321 tests + 1 doctest** (52 voxel, 62 world, 26 simulation, 117 city, 11 blueprint, 12 rooms, 40 bridge, 1 city-loop).
 
 ## 8. Limits
 
@@ -222,14 +224,14 @@ Food now reaches the city and stays at 100%. Water and rest still collapse; that
 - `staffing` can be momentarily stale after capacity or placement changes until the next population tick.
 - Wood and hides have no consumers yet.
 - Food supply is a single city-wide ratio; no district, market, or price effects.
-- Water, rest, power, and services are 3.5.
+- Water, power, and rest service are in [[55 - Utilities]]; sewage, garbage, heating, and communications are not modelled.
 - The beacon includes a small orbiting worker marker, but it is not a pathfinding citizen; production stays aggregate.
 - The site’s `produced` counter is the sum of wood, food, and hides, so it is informational rather than a per-resource total.
 - Rates are untuned and the assignment is O(households × workplaces).
 
 ## 9. Next
 
-1. 3.5: water coverage and service replenishment for water/rest.
+1. 3.6: construction draw-down, loans, and bankruptcy consequences.
 2. Replace the O(H × W) assignment with a spatial index before scaling.
 3. Add a wood consumer (construction draw-down) and a hide consumer (crafting/trade).
 4. Tune industry rates against the treasury and the headless runner.
