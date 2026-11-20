@@ -13,7 +13,7 @@ tags:
 # 30 — Editor Shell
 
 > [!info] What this note is
-> The first playable first-person editor shell: `godot/editor.tscn` and its scripts. It uses the volume API from [[29 - Volume Editor Bridge]] to place and remove 10 cm voxels in the default volume. It is the camera, palette, raycast, and remesh half of [[26 - Vertical Slice Spec]] §3. Blueprint save/load is in [[32 - Blueprint Save Load]]; the room overlay is in [[34 - Room Overlay]]; undo and prop placement are still open.
+> The first playable first-person editor shell: `godot/editor.tscn` and its scripts. It uses the volume API from [[29 - Volume Editor Bridge]] to place and remove 10 cm voxels in the default volume. It is the camera, palette, raycast, and remesh half of [[26 - Vertical Slice Spec]] §3. Blueprint save/load is in [[32 - Blueprint Save Load]]; the room overlay is in [[34 - Room Overlay]]; undo/redo is in [[35 - Editor Undo Redo]]; prop placement is still open.
 
 ## 1. What runs
 
@@ -108,11 +108,11 @@ This is a correctness-first loop. A **dense** 25,601-voxel debug floor took ~1.4
 GODOT=/path/to/godot ./scripts/smoke_editor.sh
 ```
 
-The script builds the debug GDExtension, retries the first headless import once (Godot 4.7 can abort the first import in a clean worktree), then runs two headless contracts:
+The script builds the debug GDExtension, retries the first headless import once (Godot 4.7 can abort the first import in a clean worktree), then runs three headless contracts:
 
 1. **Editor smoke** (`--editor-smoke`) — volume, edit, mesh, raycast.
 2. **Room overlay smoke** (`--room-overlay-smoke`) — sealed room, detection, overlay nodes.
-3. **Undo smoke** (`--undo-smoke`) — set, undo, redo.
+3. **Undo smoke** (`--undo-smoke`) — set/remove, undo, redo.
 
 The editor smoke path, inside `editor.gd`:
 
@@ -139,7 +139,7 @@ CI runs the script in the Godot headless smoke job after `smoke_volume.sh`.
 
 ## 8. Limitations
 
-- **No undo.** Edits are in memory until saved; save/load is in [[32 - Blueprint Save Load]].
+- **Single-edit undo only.** Place/remove are undoable; multi-voxel tools and blueprint loads are not. See [[35 - Editor Undo Redo]].
 - **No room overlay or room-derived stats yet.** See [[31 - Room Detection]] for the core detector.
 - **No walk mode or collision.** The camera flies; there is no gravity, capsule, or ground contact.
 - **Undo/redo is single-edit only.** Place/remove are undoable; paint, boxes, and load are not.

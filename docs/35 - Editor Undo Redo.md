@@ -22,7 +22,7 @@ tags:
 - Place and remove both record one change: cell, old material, new material.
 - The history is capped at 500 entries; the oldest is dropped.
 - A new edit clears the redo stack.
-- Loading a blueprint clears both stacks so undo cannot cross volume identities.
+- Loading a blueprint clears both stacks and cancels any pending remesh so undo cannot cross volume identities.
 - Undo/redo marks the volume dirty and uses the same 250 ms debounced remesh.
 - The room overlay, if visible, refreshes after the remesh.
 
@@ -50,7 +50,7 @@ Current undo output:
 UNDO_SMOKE undo=ok redo=ok status=ok
 ```
 
-The smoke sets a voxel, undoes it to air, and redoes it to the same material.
+The smoke covers setting from air, undoing to air, redoing the material, removing a voxel, undoing the removal, and redoing it. The undo/redo flags are independent.
 
 ## 4. Limitations
 

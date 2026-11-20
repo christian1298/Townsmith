@@ -52,6 +52,7 @@ const DEFAULT_BLUEPRINT_NAME := "River House"
 const BLUEPRINT_DIR := "user://blueprints"
 const BLUEPRINT_EXT := "tsbp"
 const ROOM_OVERLAY_HEIGHT_M := 2.8
+const MAX_HISTORY := 500
 
 var _core
 var _volume_origin := VOLUME_ORIGIN
@@ -71,9 +72,8 @@ var _save_dialog: FileDialog
 var _load_dialog: FileDialog
 var _room_overlay: Node3D
 var _room_overlay_on := false
-var _history: Array = []
-var _redo: Array = []
-const MAX_HISTORY := 500
+var _history: Array[Array] = []
+var _redo: Array[Array] = []
 
 func _ready() -> void:
 	_core = TownsmithCore.new()
@@ -142,10 +142,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		if key == KEY_R:
 			_toggle_room_overlay()
 			return
-		if event.ctrl_pressed and key == KEY_Z:
+		# Use keycode (layout-aware), not physical_keycode: on QWERTZ the
+		# labelled Z/Y keys sit at the opposite physical positions.
+		if event.ctrl_pressed and event.keycode == KEY_Z:
 			_undo_last()
 			return
-		if event.ctrl_pressed and key == KEY_Y:
+		if event.ctrl_pressed and event.keycode == KEY_Y:
 			_redo_last()
 			return
 		for index in MATERIALS.size():
@@ -263,6 +265,8 @@ func _place_under_crosshair() -> void:
 ## Apply one voxel edit and record it for undo/redo.
 func _set_voxel_with_history(cell: Vector3i, material: int) -> bool:
 	var old := int(_core.editor_get_voxel(cell.x, cell.y, cell.z))
+	if old < 0:
+		return false
 	if old == material:
 		return true
 	if not _core.editor_set_voxel(cell.x, cell.y, cell.z, material):
@@ -282,7 +286,10 @@ func _undo_last() -> void:
 		return
 	var batch: Array = _history.pop_back()
 	for change in batch:
-		_core.editor_set_voxel(change["x"], change["y"], change["z"], change["old"])
+		if not _core.editor_set_voxel(change["x"], change["y"], change["z"], change["old"]):
+			_history.append(batch)
+			_set_status("Undo failed at %s" % Vector3i(change["x"], change["y"], change["z"]))
+			return
 	_redo.append(batch)
 	_on_edit_applied("Undo")
 
@@ -292,8 +299,12 @@ func _redo_last() -> void:
 		return
 	var batch: Array = _redo.pop_back()
 	for change in batch:
-		_core.editor_set_voxel(change["x"], change["y"], change["z"], change["new"])
+		if not _core.editor_set_voxel(change["x"], change["y"], change["z"], change["new"]):
+			_redo.append(batch)
+			_set_status("Redo failed at %s" % Vector3i(change["x"], change["y"], change["z"]))
+			return
 	_history.append(batch)
+	# Undo/redo conserve the total history size, so the cap still holds.
 	_on_edit_applied("Redo")
 
 func _on_edit_applied(message: String) -> void:
@@ -829,6 +840,8 @@ func _is_blueprint_smoke() -> bool:
 ## Headless contract check for undo/redo.
 func _run_undo_smoke() -> void:
 	var cell := Vector3i(1, 1, 1)
+	var undo_status := "ok"
+	var redo_status := "ok"
 	var status := "ok"
 	if not _set_voxel_with_history(cell, 1):
 		status = "set_failed"
@@ -837,16 +850,30 @@ func _run_undo_smoke() -> void:
 	else:
 		_undo_last()
 		if int(_core.editor_get_voxel(cell.x, cell.y, cell.z)) != 0:
+			undo_status = "undo_failed"
 			status = "undo_failed"
 		else:
 			_redo_last()
 			if int(_core.editor_get_voxel(cell.x, cell.y, cell.z)) != 1:
+				redo_status = "redo_failed"
 				status = "redo_failed"
-	print("UNDO_SMOKE undo=%s redo=%s status=%s" % [
-		"ok" if status == "ok" else "fail",
-		"ok" if status == "ok" else "fail",
-		status,
-	])
+	if status == "ok":
+		var remove_cell := Vector3i(2, 1, 1)
+		if not _core.editor_set_voxel(remove_cell.x, remove_cell.y, remove_cell.z, 2):
+			status = "remove_setup"
+		elif not _set_voxel_with_history(remove_cell, 0):
+			status = "remove_failed"
+		else:
+			_undo_last()
+			if int(_core.editor_get_voxel(remove_cell.x, remove_cell.y, remove_cell.z)) != 2:
+				undo_status = "undo_remove_failed"
+				status = "undo_remove_failed"
+			else:
+				_redo_last()
+				if int(_core.editor_get_voxel(remove_cell.x, remove_cell.y, remove_cell.z)) != 0:
+					redo_status = "redo_remove_failed"
+					status = "redo_remove_failed"
+	print("UNDO_SMOKE undo=%s redo=%s status=%s" % [undo_status, redo_status, status])
 	get_tree().quit(0 if status == "ok" else 1)
 
 ## Headless contract check for the room overlay.
