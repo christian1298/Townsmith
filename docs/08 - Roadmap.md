@@ -112,6 +112,9 @@ tags:
 
 ### Phase 2 — Open world and Mayor Mode (8–10 weeks)
 
+> [!info] Slice plan
+> The first Phase 2 cut is staged in [[41 - Phase 2 Slice Plan]]: placement model and world save/load first, then terrain deltas, Mayor Mode, construction sites, and roads. Do not start with the full feature list below in one branch.
+
 **Goals**
 - An effectively infinite, procedurally generated world you can fly over, build anywhere in, and save.
 - Chunk streaming and edit persistence.
