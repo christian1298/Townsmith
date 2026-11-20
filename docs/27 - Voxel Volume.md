@@ -89,7 +89,7 @@ Current release numbers on this machine:
 | Vertices | 1,172 |
 | Median mesh | **~75.5–76.8 ms** |
 | Min / max | ~73.7 / ~79.6 ms |
-| Checksum | `29805bfe94ec4467` |
+| Checksum | `6fb7acce989419b7` |
 
 The whole-volume mesh is intentionally a correctness-first implementation. Empty volumes short-circuit immediately, but a **non-empty** volume still scans the full grid: the default house is ~75 ms, and a populated 16 × 16 × 16-chunk volume would be seconds. It is acceptable for load/save and room-detection refreshes, but **not** for remeshing after every voxel click.
 
