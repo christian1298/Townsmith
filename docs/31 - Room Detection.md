@@ -115,7 +115,7 @@ Well inside the 50 ms target.
 
 ## 7. Next
 
-1. Blueprint room metadata uses these records.
+1. Blueprint room metadata uses these records (landed in [[33 - Blueprint Room Metadata]]).
 2. Room overlay in the Godot editor.
 3. 3D enclosure/roof checks and unique opening detection.
 4. Structural validation and service gates from [[17 - Materials and Structure]].

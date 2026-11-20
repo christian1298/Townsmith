@@ -23,7 +23,7 @@ tags:
 | `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming, terrain mesh + LOD + seam skirts | Working, 58 tests |
 | `crates/core_sim` | 1M-scale cohort simulation plus deterministic 2,000 active agents | Working, 26 tests |
 | `crates/core_city` | Deterministic synthetic Early/Mid/Late city layouts for rendering benchmarks | Working, 10 tests |
-| `crates/core_blueprint` | `.tsbp` v1 package: zip, metadata, RLE voxel stream, BLAKE3 hash | Working, 8 tests |
+| `crates/core_blueprint` | `.tsbp` v1 package: zip, metadata, RLE voxel stream, BLAKE3 hash | Working, 9 tests |
 | `crates/server` | Headless cohort tick harness (no GPU, no socket yet) | Working |
 | `crates/bench` | Voxel, worldgen, terrain, cohort, active-agent, and city-layout microbenchmarks | Working |
 | `benchmarks/` | Route JSON, results, and benchmark notes | Harness v0 |
@@ -161,7 +161,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 | Terrain LOD 2, 256 m chunk | 65,536 cells | — | 25,327 quads | ~0.39 ms |
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **163 tests**: 50 voxel, 58 world, 26 simulation, 10 city, 8 blueprint, and 11 bridge tests.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **176 tests**: 50 voxel, 58 world, 26 simulation, 10 city, 9 blueprint, 10 rooms, and 13 bridge tests.
 
 ## 3. Known limitations
 
@@ -179,11 +179,12 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 
 ## 4. Next steps
 
-1. Implement room detection and stats on the `VoxelVolume` (rooms, props, material cost, capacity).
-2. Build the first-person editor shell: camera, raycast place/remove, room overlay, save/load UI.
-3. Add English/German editor UI tables and the language selector.
-4. Run the 21-house / 60 FPS slice benchmark.
-5. Keep the 3060-class 1M performance gate open for Phase 5.
+1. Add room bounds/centers and the editor overlay.
+2. Add prop placement so room types/capacity are meaningful.
+3. Add undo/redo and the blueprint library/thumbnail.
+4. Add English/German editor UI tables and the language selector.
+5. Run the 21-house / 60 FPS slice benchmark.
+6. Keep the 3060-class 1M performance gate open for Phase 5.
 
 ## 5. Commands
 
