@@ -29,6 +29,12 @@ var road_nodes: Dictionary = {}
 var road_material: StandardMaterial3D
 var road_mode := false
 var road_start := Vector2i(-999999, -999999)
+var lot_root: Node3D
+var lot_nodes: Dictionary = {}
+var lot_materials: Dictionary = {}
+var lot_mode := false
+var lot_start := Vector2i(-999999, -999999)
+var lot_zone := "residential"
 var selection_box: MeshInstance3D
 var selected_id := -1
 
@@ -71,6 +77,7 @@ func _ready() -> void:
 	_setup_ghost()
 	_setup_selection()
 	_setup_roads()
+	_setup_lots()
 	if _ensure_blueprint():
 		_refresh_preview(true)
 	else:
@@ -117,6 +124,14 @@ func _unhandled_input(event: InputEvent) -> void:
 		if event.physical_keycode == KEY_ESCAPE:
 			if mode == "architect":
 				_return_to_mayor()
+			elif lot_mode:
+				if lot_start.x != -999999:
+					lot_start = Vector2i(-999999, -999999)
+					_set_modal("Lot corner cleared", false)
+				else:
+					lot_mode = false
+					_set_modal("", false)
+				_update_hud()
 			elif road_mode:
 				road_mode = false
 				road_start = Vector2i(-999999, -999999)
@@ -145,9 +160,21 @@ func _unhandled_input(event: InputEvent) -> void:
 					_clear_placements()
 				KEY_G:
 					_toggle_road_mode()
+				KEY_H:
+					_toggle_lot_mode()
+				KEY_1:
+					_set_lot_zone("residential")
+				KEY_2:
+					_set_lot_zone("commercial")
+				KEY_3:
+					_set_lot_zone("industrial")
 				KEY_BACKSPACE:
-					core.road_clear()
-					_rebuild_roads()
+					if lot_mode:
+						core.lot_clear()
+						_rebuild_lots()
+					else:
+						core.road_clear()
+						_rebuild_roads()
 					_update_hud()
 				KEY_ENTER, KEY_KP_ENTER:
 					_enter_architect()
@@ -168,7 +195,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			if first_click_guard:
 				first_click_guard = false
 				return
-			if road_mode:
+			if lot_mode:
+				_lot_click(event.position)
+			elif road_mode:
 				_road_click(event.position)
 			else:
 				_place_at_target()
@@ -344,6 +373,120 @@ func _setup_roads() -> void:
 	road_material.albedo_color = Color(0.22, 0.23, 0.24)
 	road_material.roughness = 1.0
 	road_material.metallic = 0.0
+
+func _setup_lots() -> void:
+	lot_root = Node3D.new()
+	lot_root.name = "Lots"
+	add_child(lot_root)
+	var colors := {
+		"residential": Color(0.25, 0.75, 0.35, 0.3),
+		"commercial": Color(0.25, 0.5, 0.95, 0.3),
+		"industrial": Color(0.95, 0.55, 0.2, 0.3),
+	}
+	for zone in colors:
+		var material := StandardMaterial3D.new()
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		material.cull_mode = BaseMaterial3D.CULL_DISABLED
+		material.albedo_color = colors[zone]
+		lot_materials[zone] = material
+
+func _toggle_lot_mode() -> void:
+	lot_mode = not lot_mode
+	lot_start = Vector2i(-999999, -999999)
+	if lot_mode:
+		road_mode = false
+		road_start = Vector2i(-999999, -999999)
+		_set_modal("Lot mode: click two corners · 1/2/3 zone · Esc cancels", false)
+	else:
+		_set_modal("", false)
+	_update_hud()
+
+func _set_lot_zone(zone: String) -> void:
+	if not lot_materials.has(zone):
+		return
+	lot_zone = zone
+	_set_modal("Lot zone: " + zone, false)
+	_update_hud()
+
+func _lot_click(screen: Vector2) -> bool:
+	var point := _road_ground_point(screen)
+	var cell := Vector2i(roundi(point.x / 4.0) * 4, roundi(point.y / 4.0) * 4)
+	if lot_start.x == -999999:
+		lot_start = cell
+		_set_modal("Lot corner (%d, %d) · click the opposite corner" % [cell.x, cell.y], false)
+		return true
+	var min_x := mini(lot_start.x, cell.x)
+	var min_z := mini(lot_start.y, cell.y)
+	var max_x := maxi(lot_start.x, cell.x)
+	var max_z := maxi(lot_start.y, cell.y)
+	if max_x - min_x < 4 or max_z - min_z < 4:
+		_set_modal("Lot needs at least 4 × 4 m", true)
+		return false
+	var ok := _add_lot(min_x, min_z, max_x, max_z, lot_zone)
+	if ok:
+		lot_start = Vector2i(-999999, -999999)
+	return ok
+
+func _add_lot(min_x: int, min_z: int, max_x: int, max_z: int, zone: String) -> bool:
+	var result: Dictionary = core.lot_add(
+		SEED, min_x, min_z, max_x, max_z, zone
+	)
+	if not bool(result.get("ok", false)):
+		_set_modal("Lot rejected: " + str(result.get("error_code", "unknown")), true)
+		return false
+	_rebuild_lots()
+	_update_hud()
+	return true
+
+func _rebuild_lots() -> void:
+	_clear_lot_nodes()
+	var state: Dictionary = core.lots()
+	for lot in state.get("lots", []):
+		_add_lot_node(lot)
+
+func _clear_lot_nodes() -> void:
+	for node in lot_nodes.values():
+		if is_instance_valid(node):
+			node.free()
+	lot_nodes.clear()
+
+func _add_lot_node(lot: Dictionary) -> void:
+	var id := int(lot.get("id", -1))
+	if id < 0 or lot_nodes.has(id):
+		return
+	var bounds: PackedInt32Array = lot.get("bounds", PackedInt32Array())
+	var center: PackedFloat32Array = lot.get("center", PackedFloat32Array())
+	if bounds.size() != 4 or center.size() != 2:
+		return
+	var ground: float = core.world_height_at(SEED, center[0], center[1])
+	if ground < 0.0:
+		return
+	var box := BoxMesh.new()
+	box.size = Vector3(
+		float(bounds[2] - bounds[0]), 0.1, float(bounds[3] - bounds[1])
+	)
+	var node := MeshInstance3D.new()
+	node.mesh = box
+	node.material_override = lot_materials.get(str(lot.get("zone", "residential")))
+	node.position = Vector3(center[0], ground + 0.06, center[1])
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	lot_root.add_child(node)
+	lot_nodes[id] = node
+
+func _lot_node_matches(lot: Dictionary) -> bool:
+	var id := int(lot.get("id", -1))
+	var node: MeshInstance3D = lot_nodes.get(id)
+	if not is_instance_valid(node) or not (node.mesh is BoxMesh):
+		return false
+	var box := node.mesh as BoxMesh
+	var bounds: PackedInt32Array = lot.get("bounds", PackedInt32Array())
+	if bounds.size() != 4:
+		return false
+	return (
+		absf(box.size.x - float(bounds[2] - bounds[0])) < 0.001
+		and absf(box.size.z - float(bounds[3] - bounds[1])) < 0.001
+	)
 
 func _ensure_blueprint() -> bool:
 	if not FileAccess.file_exists(blueprint_path):
@@ -685,6 +828,8 @@ func _toggle_road_mode() -> void:
 	road_mode = not road_mode
 	road_start = Vector2i(-999999, -999999)
 	if road_mode:
+		lot_mode = false
+		lot_start = Vector2i(-999999, -999999)
 		_set_modal("Road mode: click start, then end · 8 m wide · Esc cancels", false)
 	else:
 		_set_modal("", false)
@@ -976,6 +1121,7 @@ func _load_world() -> bool:
 	_clear_selection()
 	_clear_placed_nodes()
 	_rebuild_roads()
+	_rebuild_lots()
 	streamer.invalidate_all()
 	var state: Dictionary = core.world_placements()
 	var construction_index := _construction_index()
@@ -1025,6 +1171,7 @@ func _run_scene_smoke() -> void:
 	var edit_ok := false
 	var place_ok := false
 	var road_ok := false
+	var lot_ok := false
 	var select_ok := false
 	var enter_ok := false
 	var return_ok := false
@@ -1072,6 +1219,16 @@ func _run_scene_smoke() -> void:
 		road_ok = road_ok and core.world_placement_count() == 0
 		if not road_ok:
 			status = "road_failed:" + str(bad_road.get("error_code", ""))
+
+		var bad_lot: Dictionary = core.lot_add(SEED, 120, 128, 136, 140, "residential")
+		var lot_added := _add_lot(184, 128, 198, 140, "residential")
+		var lots_state: Dictionary = core.lots()
+		var lot_list: Array = lots_state.get("lots", [])
+		lot_ok = not bool(bad_lot.get("ok", true)) and str(bad_lot.get("error_code", "")) == "no_road_frontage"
+		lot_ok = lot_ok and lot_added and core.lot_count() == 1 and lot_nodes.size() == 1
+		lot_ok = lot_ok and lot_list.size() == 1 and _lot_node_matches(lot_list[0])
+		if not lot_ok:
+			status = "lot_failed:" + str(bad_lot.get("error_code", ""))
 
 	edit_ok = _edit_target(1) and core.terrain_delta_count() == 1 and absf(core.world_height_at(SEED, FIXTURE_X, FIXTURE_Z) - 42.0) < 0.001 and streamer.dirty_count() > 0
 	var border_touched := _touched_chunks(Vector2i(0, 0), 0, 255)
@@ -1146,9 +1303,11 @@ func _run_scene_smoke() -> void:
 			status = "save_failed"
 
 	var road_checksum := ""
+	var lot_checksum := ""
 	if status == "ok":
 		var edit_checksum := str(core.terrain_delta_checksum())
 		road_checksum = str(core.road_checksum())
+		lot_checksum = str(core.lot_checksum())
 		_clear_placements()
 		clear_ok = core.world_placement_count() == 0 and placed_root.get_child_count() == 0
 		clear_ok = clear_ok and core.construction_summary().sites == 0
@@ -1158,8 +1317,12 @@ func _run_scene_smoke() -> void:
 			core.terrain_clear_deltas()
 			core.road_clear()
 			_rebuild_roads()
+			core.lot_clear()
+			_rebuild_lots()
 			if core.terrain_delta_count() != 0 or core.road_count() != 0 or road_nodes.size() != 0:
 				status = "delta_clear_failed"
+			if core.lot_count() != 0 or lot_nodes.size() != 0:
+				status = "lot_clear_failed"
 			load_ok = _load_world() and core.world_placement_count() == 1 and placed_root.get_child_count() == 1
 			if load_ok:
 				var node := placed_root.get_child(0)
@@ -1171,10 +1334,17 @@ func _run_scene_smoke() -> void:
 				load_ok = load_ok and core.road_count() == 1
 				load_ok = load_ok and str(core.road_checksum()) == road_checksum
 				load_ok = load_ok and road_nodes.size() == 1
+				load_ok = load_ok and core.lot_count() == 1
+				load_ok = load_ok and str(core.lot_checksum()) == lot_checksum
+				load_ok = load_ok and lot_nodes.size() == 1
 				if core.road_count() == 1:
 					var roads_state: Dictionary = core.roads()
 					var road_list: Array = roads_state.get("roads", [])
 					load_ok = load_ok and road_list.size() == 1 and _road_node_matches(road_list[0])
+				if core.lot_count() == 1:
+					var lots_state: Dictionary = core.lots()
+					var lot_list: Array = lots_state.get("lots", [])
+					load_ok = load_ok and lot_list.size() == 1 and _lot_node_matches(lot_list[0])
 				load_ok = load_ok and construction_nodes.has(1) and not placed_nodes.is_empty()
 				var loaded_site := _construction_site_for(1)
 				load_ok = load_ok and absf(float(loaded_site.get("progress", -1.0)) - saved_site_progress) < 0.001
@@ -1203,6 +1373,8 @@ func _run_scene_smoke() -> void:
 		var before_failed_load := placed_root.get_child_count()
 		var before_failed_edits: int = core.terrain_delta_count()
 		var before_failed_checksum: String = str(core.terrain_delta_checksum())
+		var before_failed_lots: int = core.lot_count()
+		var before_failed_lot_checksum: String = str(core.lot_checksum())
 		var blueprint_backup := blueprint_path + ".bak"
 		if DirAccess.rename_absolute(blueprint_path, blueprint_backup) != OK:
 			status = "load_guard_backup_failed"
@@ -1212,13 +1384,15 @@ func _run_scene_smoke() -> void:
 				status = "load_failure_changed_scene"
 			elif core.terrain_delta_count() != before_failed_edits or str(core.terrain_delta_checksum()) != before_failed_checksum:
 				status = "load_failure_changed_deltas"
+			elif core.lot_count() != before_failed_lots or str(core.lot_checksum()) != before_failed_lot_checksum:
+				status = "load_failure_changed_lots"
 			if DirAccess.rename_absolute(blueprint_backup, blueprint_path) != OK:
 				status = "load_guard_restore_failed"
 
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s build=%s done=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s build=%s done=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -1226,6 +1400,7 @@ func _run_scene_smoke() -> void:
 		"ok" if edit_ok else "failed",
 		"ok" if place_ok else "failed",
 		"ok" if road_ok else "failed",
+		"ok" if lot_ok else "failed",
 		"ok" if build_ok else "failed",
 		"ok" if build_done_ok else "failed",
 		"ok" if select_ok else "failed",

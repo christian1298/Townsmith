@@ -30,8 +30,8 @@ tags:
 | `world_placement_checksum()` | `String` | Stable 64-bit checksum, hex |
 | `world_clear_placements()` | `bool` | Clear placements; keep the seed |
 | `world_remove_placement(id)` | `bool` | Remove one placement |
-| `world_save(path)` | `Dictionary` | Write world JSON atomically; returns placement/construction/road/delta counts and checksums |
-| `world_load(path, expected_seed)` | `Dictionary` | Read JSON for one seed, verify structure, packages, construction, roads, and deltas, replace the stores |
+| `world_save(path)` | `Dictionary` | Write world JSON atomically; returns placement/construction/road/lot/delta counts and checksums |
+| `world_load(path, expected_seed)` | `Dictionary` | Read JSON for one seed, verify structure, packages, construction, roads, lots, and deltas, replace the stores |
 | `world_height_at(seed, x, z)` | `float` | One terrain sample for the preview; `-1.0` on invalid input |
 
 Terrain-edit methods (`terrain_edit_height`, `terrain_delta_count`, `terrain_delta_checksum`, `terrain_clear_deltas`, and `reset_terrain_workers`) are documented in [[43 - Terrain Edits]]. `world_height_at` and placement validation use those deltas.
@@ -39,6 +39,8 @@ Terrain-edit methods (`terrain_edit_height`, `terrain_delta_count`, `terrain_del
 Construction methods (`construction_tick`, `construction_sites`, `construction_summary`, `construction_set_crew`, `construction_add_materials`, `construction_checksum`, `construction_clear`) are documented in [[45 - Construction Sites]]. A successful placement creates a site in the same transaction.
 
 Road methods (`road_validate`, `road_add`, `roads`, `road_count`, `road_checksum`, `road_clear`, `road_remove`) are documented in [[46 - Road Network]]. The world save carries an optional `roads` object; old saves load with the road store closed.
+
+Lot methods (`lot_validate`, `lot_add`, `lots`, `lot_count`, `lot_checksum`, `lot_clear`, `lot_remove`) are documented in [[47 - Lots and Zoning]]. The world save carries an optional `lots` object; old saves load with the lot store closed.
 
 `x` and `z` are the **centre** of the rotated footprint in world metres. The blueprint mesh is volume-local with its minimum corner at `(0, 0, 0)`; a renderer offsets it by `-bounds_m / 2` on X/Z, then rotates around Y. `rotation` is normalized to 0/90/180/270.
 
@@ -98,7 +100,7 @@ The sampler uses `WorldGenerator::height_at` on the 1 m grid, not the currently 
 }
 ```
 
-2B adds an optional `terrain_deltas` (hex `TSDL`) + `terrain_checksum` pair when edits exist; 2D adds a `construction` object when sites exist. See [[43 - Terrain Edits]] and [[45 - Construction Sites]].
+2B adds an optional `terrain_deltas` (hex `TSDL`) + `terrain_checksum` pair when edits exist; 2D adds a `construction` object when sites exist; 2E adds optional `roads` and `lots` objects. See [[43 - Terrain Edits]], [[45 - Construction Sites]], [[46 - Road Network]], and [[47 - Lots and Zoning]].
 
 `world_load` rejects:
 
@@ -150,7 +152,7 @@ GODOT=/path/to/godot ./scripts/smoke_world_scene.sh
 `WORLD_SCENE` exercises the green/red ghost, water rejection, a 90° ghost rotation, a terrain edit and dirty chunk, placing at the fixture site, save/load of placements + deltas, rebuilding the placed node and foundation, and a failed load leaving the scene untouched. Terrain-edit details are in [[43 - Terrain Edits]]. Recorded marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok build=ok done=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok build=ok done=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 ## 5. Scene
@@ -181,14 +183,14 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 
 ## 7. Tests
 
-- `core_city` placement validation and persistence: 13 tests; construction state machine: 11 tests.
-- `godot_ext`: 22 tests total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta roundtrip/checksum rejection.
-- Workspace: **221 tests + 1 doctest**.
+- `core_city`: placement persistence, construction, roads, and lots; **50 tests**.
+- `godot_ext`: **28 tests** total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
+- Workspace: **241 tests + 1 doctest**.
 - Godot headless: `WORLD_PLACEMENT ... status=ok` and `WORLD_SCENE ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 
 ## 8. Next
 
 1. Replace absolute package paths with a content-addressed library beside the save.
-2. Add roads, lots, settlement boundaries, and zoning (2E).
+2. Add settlement boundaries and ownership (2E.4).
 3. Replace global construction pools with settlement crews and delivery trips.

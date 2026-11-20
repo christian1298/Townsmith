@@ -147,14 +147,14 @@ The existing streamed-world smoke adds, before any placement:
 Marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok build=ok done=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok build=ok done=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 ## 8. Tests
 
 - `core_city::road`: 8 tests — geometry, width-edge water/rise rejection, extreme-coordinate overflow, JSON/checksum, duplicate/next-id rejection, remove/clear.
 - `core_city`: 42 tests.
-- Workspace: **231 tests + 1 doctest**.
+- Workspace: **241 tests + 1 doctest**.
 - Godot: `WORLD_SCENE ... roads=ok ... status=ok`.
 
 ## 9. Limits

@@ -281,6 +281,32 @@ impl RoadStore {
         self.next_id = 1;
     }
 
+    /// Whether an axis-aligned lot rectangle is within `gap` metres of a road
+    /// corridor.
+    ///
+    /// `bounds` is `[min_x, min_z, max_x, max_z]`. The test expands each
+    /// segment by half its width and then by the gap; it is a conservative
+    /// frontage check, not a driveway simulation.
+    #[must_use]
+    pub fn has_frontage(&self, bounds: [i32; 4], gap: i32) -> bool {
+        let [min_x, min_z, max_x, max_z] = bounds;
+        for road in &self.roads {
+            let half = i32::from(road.width_m) / 2;
+            let road_min_x = road.start[0].min(road.end[0]) - half - gap;
+            let road_max_x = road.start[0].max(road.end[0]) + half + gap;
+            let road_min_z = road.start[1].min(road.end[1]) - half - gap;
+            let road_max_z = road.start[1].max(road.end[1]) + half + gap;
+            if road_min_x <= max_x
+                && road_max_x >= min_x
+                && road_min_z <= max_z
+                && road_max_z >= min_z
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Serialize the network as pretty JSON.
     pub fn to_json_pretty(&self) -> Result<String, RoadError> {
         serde_json::to_string_pretty(self)
@@ -608,5 +634,23 @@ mod tests {
         store.clear();
         assert!(store.roads.is_empty());
         assert_eq!(store.next_id, 1);
+    }
+    #[test]
+    fn frontage_expands_the_road_corridor_and_gap() {
+        let mut store = RoadStore::new(1);
+        store
+            .add(
+                &RoadRequest {
+                    start: [0, 0],
+                    end: [20, 0],
+                    width_m: 8,
+                },
+                |_, _| 40,
+            )
+            .expect("road");
+        assert!(store.has_frontage([26, -2, 36, 2], 2));
+        assert!(!store.has_frontage([27, -2, 36, 2], 2));
+        assert!(store.has_frontage([10, 6, 20, 16], 2));
+        assert!(!store.has_frontage([10, 7, 20, 16], 2));
     }
 }
