@@ -44,8 +44,8 @@ The slice follows accepted decisions:
 | **2D** | Construction site v0: phased progress, materials, crews | **Done** — PR #51, see [[45 - Construction Sites]] |
 | **2E.1** | Road network core, terrain validation, world save/load | **Done** — PR #52, see [[46 - Road Network]] |
 | **2E.2** | Road drawing/rendering | **Done** — PR #53, see [[46 - Road Network]] |
-| **2E.3** | Lots and zoning | **This PR** — see [[47 - Lots and Zoning]] |
-| **2E.4** | Settlement boundaries and ownership | Next |
+| **2E.3** | Lots and zoning | **Done** — PR #54, see [[47 - Lots and Zoning]] |
+| **2E.4** | Settlement boundaries and ownership | **This PR** — see [[48 - Settlement Boundaries]] |
 
 Each stage is a separate branch, worktree, and PR. Do not mix placement, terrain edits, Mayor Mode, and construction state in one change. Each slice keeps geometry, persistence, the bridge, and the shell reviewable.
 
@@ -57,9 +57,10 @@ Each stage is a separate branch, worktree, and PR. Do not mix placement, terrain
 - GDExtension APIs to place, validate, list, clear, save, and load placements.
 - A `world_placement` Godot scene with streamed terrain, a Mayor orbit camera, and a green/red placement ghost.
 - A placement preview that samples terrain under the Mayor target and shows valid/invalid, plus the placed-node rebuild path.
-- Save/load of `seed + placements + terrain deltas + construction + roads` as JSON; blueprint packages are referenced by path.
+- Save/load of `seed + placements + terrain deltas + construction + roads + lots + settlements` as JSON; blueprint packages are referenced by path.
 - Height edits, dirty-chunk remeshing, and delta save/load (2B).
 - A Mayor camera, right-click building selection with an inspection highlight, and a first-person door transition back to Mayor (2C).
+- Soft settlement boundaries, owner lookup, and a terrain-following ring (2E.4).
 - A construction site per placement with phased progress, shared crew/material pools, save/load, and a visible partial building (2D).
 - A straight, axis-aligned road network with terrain validation and world save/load (2E.1), plus a two-click draw tool and flat road meshes (2E.2).
 - Zoned rectangular lots with terrain, overlap, and road-frontage validation, world save/load, and a coloured parcel overlay (2E.3).
@@ -67,13 +68,13 @@ Each stage is a separate branch, worktree, and PR. Do not mix placement, terrain
 
 ### Out
 
-- Access checks, lots, zoning, settlement boundaries, traffic, utilities.
+- Access checks, traffic, utilities.
 - Construction workers, vehicles, deliveries, budgets, and inspections.
 - Blueprint library UI, thumbnails, content-addressed package storage.
 - Multiplayer authority and command validation.
 - Collision, pathfinding, citizens, or simulation.
 - Voxel editing inside a placed building; the workshop editor handoff and blueprint versioning are a later slice.
-- Road width selection, intersections, settlement boundaries, ownership, automatic growth, and traffic; 2E.4.
+- Road width selection, intersections, automatic growth, and traffic; later Phase 2 work.
 - Individual construction workers, vehicles, trade skills, delivery trips, budgets, inspections, and demolition; 2D is a global-pool state machine.
 
 ## 4. Data model
@@ -266,7 +267,7 @@ Add the world placement smoke to the Linux Godot job. Windows keeps the Rust gat
 5. ~~Record the result in a new results note when 2A is merged.~~ Done — [[42 - World Placement Bridge]] and [[43 - Terrain Edits]].
 6. ~~Start 2B: expose terrain deltas and remesh dirty chunks.~~ Done; see [[43 - Terrain Edits]].
 7. 2C: Mayor camera, selection, and mode switching at a door ([[44 - Mayor Mode]]).
-8. 2E.4: settlement boundaries and ownership after the lot/zone overlay ([[47 - Lots and Zoning]]).
+8. 2E.4: settlement boundaries and ownership ([[48 - Settlement Boundaries]]).
 8. Revisit Q-011 once a real building sits on a slope; record the chosen foundation policy.
 
 ## 12. Links

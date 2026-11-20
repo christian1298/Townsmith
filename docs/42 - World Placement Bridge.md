@@ -31,7 +31,7 @@ tags:
 | `world_clear_placements()` | `bool` | Clear placements; keep the seed |
 | `world_remove_placement(id)` | `bool` | Remove one placement |
 | `world_save(path)` | `Dictionary` | Write world JSON atomically; returns placement/construction/road/lot/delta counts and checksums |
-| `world_load(path, expected_seed)` | `Dictionary` | Read JSON for one seed, verify structure, packages, construction, roads, lots, and deltas, replace the stores |
+| `world_load(path, expected_seed)` | `Dictionary` | Read JSON for one seed, verify structure, packages, construction, roads, lots, settlements, and deltas, replace the stores |
 | `world_height_at(seed, x, z)` | `float` | One terrain sample for the preview; `-1.0` on invalid input |
 
 Terrain-edit methods (`terrain_edit_height`, `terrain_delta_count`, `terrain_delta_checksum`, `terrain_clear_deltas`, and `reset_terrain_workers`) are documented in [[43 - Terrain Edits]]. `world_height_at` and placement validation use those deltas.
@@ -100,7 +100,7 @@ The sampler uses `WorldGenerator::height_at` on the 1 m grid, not the currently 
 }
 ```
 
-2B adds an optional `terrain_deltas` (hex `TSDL`) + `terrain_checksum` pair when edits exist; 2D adds a `construction` object when sites exist; 2E adds optional `roads` and `lots` objects. See [[43 - Terrain Edits]], [[45 - Construction Sites]], [[46 - Road Network]], and [[47 - Lots and Zoning]].
+2B adds an optional `terrain_deltas` (hex `TSDL`) + `terrain_checksum` pair when edits exist; 2D adds a `construction` object when sites exist; 2E adds optional `roads`, `lots`, and `settlements` objects. See [[43 - Terrain Edits]], [[45 - Construction Sites]], [[46 - Road Network]], and [[47 - Lots and Zoning]].
 
 `world_load` rejects:
 
@@ -183,7 +183,7 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 
 ## 7. Tests
 
-- `core_city`: placement persistence, construction, roads, and lots; **50 tests**.
+- `core_city`: placement persistence, construction, roads, lots, and settlements; **57 tests**.
 - `godot_ext`: **28 tests** total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
 - Workspace: **241 tests + 1 doctest**.
 - Godot headless: `WORLD_PLACEMENT ... status=ok` and `WORLD_SCENE ... status=ok`.

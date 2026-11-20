@@ -147,7 +147,7 @@ The existing streamed-world smoke adds, before any placement:
 Marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok build=ok done=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 ## 8. Tests
@@ -171,6 +171,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 ## 10. Next
 
 1. Generate lots along frontage and add zoning (2E.3).
+2. Settlement boundaries and ownership (2E.4, [[48 - Settlement Boundaries]]).
 2. Add settlement boundaries and ownership (2E.4).
 3. Add road width selection, intersections, and terrain-conforming strips.
 4. Replace the fixed rise limit with a grade/curve model.

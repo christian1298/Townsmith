@@ -118,7 +118,7 @@ The streamed placement shell adds a lot layer under the buildings:
 Marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok build=ok done=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 ## 7. Tests
@@ -141,5 +141,6 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 
 1. 2E.4: settlement boundaries, ownership, and a first zoned-growth rule.
 2. Link placements to lots and reject building/lot mismatches.
+3. Settlement boundaries and ownership (2E.4, [[48 - Settlement Boundaries]]).
 3. Revalidate parcels after road or terrain edits.
 4. Add lot hover/selection and a zone overlay legend.
