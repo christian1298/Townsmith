@@ -27,9 +27,9 @@ use core_blueprint::{
     PropRecord, RoomRecord,
 };
 use core_city::{
-    normalize_rotation, CityLayout, CityTier, ConstructionSite, ConstructionStore, Placement,
-    PlacementError, PlacementRequest, PlacementStore, RoadError, RoadRequest, RoadSegment,
-    RoadStore, MAX_WORLD_COORD_M,
+    normalize_rotation, CityLayout, CityTier, ConstructionSite, ConstructionStore, Lot, LotError,
+    LotRequest, LotStore, Placement, PlacementError, PlacementRequest, PlacementStore, RoadError,
+    RoadRequest, RoadSegment, RoadStore, Zone, MAX_WORLD_COORD_M,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -502,6 +502,7 @@ struct TownsmithCore {
     world: Mutex<Option<PlacementStore>>,
     construction: Mutex<ConstructionStore>,
     roads: Mutex<Option<RoadStore>>,
+    lots: Mutex<Option<LotStore>>,
     terrain_deltas: Arc<RwLock<DeltaStore>>,
     terrain_seed: Mutex<Option<u64>>,
 }
@@ -514,6 +515,7 @@ impl Default for TownsmithCore {
             world: Mutex::new(None),
             construction: Mutex::new(ConstructionStore::default()),
             roads: Mutex::new(None),
+            lots: Mutex::new(None),
             terrain_deltas: Arc::new(RwLock::new(DeltaStore::new())),
             terrain_seed: Mutex::new(None),
         }
@@ -1240,6 +1242,215 @@ impl TownsmithCore {
             .is_some_and(|store| store.remove(id))
     }
 
+    /// Validate a zoned lot without mutating the store.
+    #[func]
+    fn lot_validate(
+        &self,
+        seed: i64,
+        min_x: i64,
+        min_z: i64,
+        max_x: i64,
+        max_z: i64,
+        zone: GString,
+    ) -> VarDictionary {
+        let (seed, request) = match lot_request_from_args(seed, min_x, min_z, max_x, max_z, &zone) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = world.as_ref() {
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the world belongs to a different seed",
+                );
+            }
+        }
+        let roads = self.roads.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = roads.as_ref() {
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the road store belongs to a different seed",
+                );
+            }
+        }
+        let empty_roads = RoadStore::new(seed);
+        let road_store = roads.as_ref().unwrap_or(&empty_roads);
+        let lots = self.lots.lock().unwrap_or_else(|error| error.into_inner());
+        let lot_store = lots
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| LotStore::new(seed));
+        match lot_store.validate(
+            &request,
+            |x, z| self.terrain_height_for_seed(seed, TerrainPos::new(x, z)),
+            road_store,
+        ) {
+            Ok(()) => lot_validation_result(&request),
+            Err(error) => lot_error_result(&error),
+        }
+    }
+
+    /// Add a zoned lot after validation. A first successful lot opens the
+    /// world store for the seed.
+    #[func]
+    fn lot_add(
+        &self,
+        seed: i64,
+        min_x: i64,
+        min_z: i64,
+        max_x: i64,
+        max_z: i64,
+        zone: GString,
+    ) -> VarDictionary {
+        let (seed, request) = match lot_request_from_args(seed, min_x, min_z, max_x, max_z, &zone) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let mut world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = world.as_ref() {
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the world belongs to a different seed",
+                );
+            }
+        }
+        let roads = self.roads.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = roads.as_ref() {
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the road store belongs to a different seed",
+                );
+            }
+        }
+        let empty_roads = RoadStore::new(seed);
+        let road_store = roads.as_ref().unwrap_or(&empty_roads);
+        let created_world = world.is_none();
+        let mut lots = self.lots.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = lots.as_ref() {
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the lot store belongs to a different seed",
+                );
+            }
+        }
+        let created_lots = lots.is_none();
+        let result = {
+            let lot_store = lots.get_or_insert_with(|| LotStore::new(seed));
+            lot_store.add(
+                &request,
+                |x, z| self.terrain_height_for_seed(seed, TerrainPos::new(x, z)),
+                road_store,
+            )
+        };
+        match result {
+            Ok(lot) => {
+                if created_world {
+                    *world = Some(PlacementStore::new(seed));
+                }
+                let lot_store = lots.as_ref().expect("a successful lot keeps a store");
+                let mut result = VarDictionary::new();
+                result.set("ok", true);
+                result.set("seed", seed as i64);
+                result.set("count", lot_store.lots.len() as i64);
+                result.set(
+                    "checksum",
+                    &GString::from(&format!("{:016x}", lot_store.checksum())),
+                );
+                result.set("lot", &lot_to_dictionary(&lot).to_variant());
+                result
+            }
+            Err(error) => {
+                if created_lots {
+                    *lots = None;
+                }
+                if created_world {
+                    *world = None;
+                }
+                lot_error_result(&error)
+            }
+        }
+    }
+
+    /// Return the active lot store.
+    #[func]
+    fn lots(&self) -> VarDictionary {
+        let store = self.lots.lock().unwrap_or_else(|error| error.into_inner());
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        match store.as_ref() {
+            Some(store) => {
+                let mut lots: Array<VarDictionary> = Array::new();
+                for lot in &store.lots {
+                    lots.push(&lot_to_dictionary(lot));
+                }
+                result.set("open", true);
+                result.set("seed", store.seed as i64);
+                result.set("next_id", store.next_id as i64);
+                result.set("count", store.lots.len() as i64);
+                result.set(
+                    "checksum",
+                    &GString::from(&format!("{:016x}", store.checksum())),
+                );
+                result.set("lots", &lots.to_variant());
+            }
+            None => {
+                result.set("open", false);
+                result.set("seed", 0);
+                result.set("next_id", 1);
+                result.set("count", 0);
+                result.set("checksum", &GString::from("0000000000000000"));
+                result.set("lots", &Array::<VarDictionary>::new().to_variant());
+            }
+        }
+        result
+    }
+
+    /// Number of zoned lots.
+    #[func]
+    fn lot_count(&self) -> i64 {
+        self.lots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map_or(0, |store| store.lots.len() as i64)
+    }
+
+    /// Stable checksum of the active lot store.
+    #[func]
+    fn lot_checksum(&self) -> GString {
+        let store = self.lots.lock().unwrap_or_else(|error| error.into_inner());
+        let checksum = store.as_ref().map_or(0, LotStore::checksum);
+        GString::from(&format!("{checksum:016x}"))
+    }
+
+    /// Remove every lot.
+    #[func]
+    fn lot_clear(&self) -> bool {
+        let mut store = self.lots.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = store.as_mut() {
+            store.clear();
+        }
+        true
+    }
+
+    /// Remove one lot by id.
+    #[func]
+    fn lot_remove(&self, id: i64) -> bool {
+        let Ok(id) = u64::try_from(id) else {
+            return false;
+        };
+        self.lots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_mut()
+            .is_some_and(|store| store.remove(id))
+    }
+
     /// Remove every placement. The seed and an empty store stay open.
     #[func]
     fn world_clear_placements(&self) -> bool {
@@ -1417,17 +1628,19 @@ impl TownsmithCore {
             Ok(path) => path,
             Err(error) => return placement_simple_error("invalid_save_path", error),
         };
-        let (store, construction, roads) = {
+        let (store, construction, roads, lots) = {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             let construction = self
                 .construction
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             let roads = self.roads.lock().unwrap_or_else(|error| error.into_inner());
+            let lots = self.lots.lock().unwrap_or_else(|error| error.into_inner());
             (
                 world.as_ref().cloned(),
                 construction.clone(),
                 roads.as_ref().cloned(),
+                lots.as_ref().cloned(),
             )
         };
         let Some(store) = store else {
@@ -1483,6 +1696,21 @@ impl TownsmithCore {
             }
             None => json,
         };
+        let json = match lots.as_ref() {
+            Some(lots) => {
+                if lots.seed != store.seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "lots belong to a different seed",
+                    );
+                }
+                match attach_lots(&json, lots) {
+                    Ok(json) => json,
+                    Err(error) => return placement_simple_error("save_failed", error),
+                }
+            }
+            None => json,
+        };
         if json.len() > MAX_WORLD_SAVE_BYTES as usize {
             return placement_simple_error(
                 "save_too_large",
@@ -1507,6 +1735,10 @@ impl TownsmithCore {
             roads.as_ref().map_or(0, |roads| roads.roads.len()) as i64,
         );
         result.set(
+            "lots",
+            lots.as_ref().map_or(0, |lots| lots.lots.len()) as i64,
+        );
+        result.set(
             "checksum",
             &GString::from(&format!("{:016x}", store.checksum())),
         );
@@ -1519,6 +1751,13 @@ impl TownsmithCore {
             &GString::from(&format!(
                 "{:016x}",
                 roads.as_ref().map_or(0, RoadStore::checksum)
+            )),
+        );
+        result.set(
+            "lot_checksum",
+            &GString::from(&format!(
+                "{:016x}",
+                lots.as_ref().map_or(0, LotStore::checksum)
             )),
         );
         result.set(
@@ -1579,6 +1818,22 @@ impl TownsmithCore {
                     format!(
                         "roads use seed {} but this world is {expected_seed}",
                         roads.seed
+                    ),
+                );
+            }
+        }
+        let lots = match lots_from_world_json(&json) {
+            Ok(Some(store)) => Some(store),
+            Ok(None) => None,
+            Err((code, error)) => return placement_simple_error(code, error),
+        };
+        if let Some(lots) = lots.as_ref() {
+            if lots.seed != expected_seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    format!(
+                        "lots use seed {} but this world is {expected_seed}",
+                        lots.seed
                     ),
                 );
             }
@@ -1678,6 +1933,8 @@ impl TownsmithCore {
         let construction_checksum = construction.checksum();
         let road_count = roads.as_ref().map_or(0, |roads| roads.roads.len());
         let road_checksum = roads.as_ref().map_or(0, RoadStore::checksum);
+        let lot_count = lots.as_ref().map_or(0, |lots| lots.lots.len());
+        let lot_checksum = lots.as_ref().map_or(0, LotStore::checksum);
         let deltas_count = deltas.edit_count();
         let deltas_checksum = deltas.checksum();
         let mut guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
@@ -1694,12 +1951,14 @@ impl TownsmithCore {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let mut roads_guard = self.roads.lock().unwrap_or_else(|error| error.into_inner());
+        let mut lots_guard = self.lots.lock().unwrap_or_else(|error| error.into_inner());
         let mut deltas_guard = self
             .terrain_deltas
             .write()
             .unwrap_or_else(|error| error.into_inner());
         *construction_guard = construction;
         *roads_guard = roads;
+        *lots_guard = lots;
         *guard = Some(store);
         *deltas_guard = deltas;
         *self
@@ -1715,6 +1974,7 @@ impl TownsmithCore {
         result.set("terrain_edits", deltas_count as i64);
         result.set("construction_sites", construction_count as i64);
         result.set("roads", road_count as i64);
+        result.set("lots", lot_count as i64);
         result.set("checksum", &GString::from(&format!("{checksum:016x}")));
         result.set(
             "terrain_checksum",
@@ -1727,6 +1987,10 @@ impl TownsmithCore {
         result.set(
             "road_checksum",
             &GString::from(&format!("{road_checksum:016x}")),
+        );
+        result.set(
+            "lot_checksum",
+            &GString::from(&format!("{lot_checksum:016x}")),
         );
         result
     }
@@ -2531,6 +2795,69 @@ impl TownsmithCore {
     }
 }
 
+fn lot_request_from_args(
+    seed: i64,
+    min_x: i64,
+    min_z: i64,
+    max_x: i64,
+    max_z: i64,
+    zone: &GString,
+) -> Result<(u64, LotRequest), VarDictionary> {
+    let seed = u64::try_from(seed)
+        .map_err(|_| placement_simple_error("invalid_seed", "lot seed must be non-negative"))?;
+    let mut bounds = [0i32; 4];
+    for (target, value) in bounds.iter_mut().zip([min_x, min_z, max_x, max_z]) {
+        *target = i32::try_from(value).map_err(|_| {
+            placement_simple_error("coordinate_out_of_range", "lot coordinate is outside i32")
+        })?;
+    }
+    let zone = Zone::parse(&zone.to_string()).ok_or_else(|| {
+        placement_simple_error(
+            "invalid_zone",
+            "zone must be residential, commercial, or industrial",
+        )
+    })?;
+    Ok((seed, LotRequest { bounds, zone }))
+}
+
+fn lot_validation_result(request: &LotRequest) -> VarDictionary {
+    let width = request.bounds[2] - request.bounds[0];
+    let depth = request.bounds[3] - request.bounds[1];
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set(
+        "bounds",
+        &PackedInt32Array::from(request.bounds.to_vec()).to_variant(),
+    );
+    result.set("zone", &GString::from(request.zone.as_str()));
+    result.set("width_m", i64::from(width));
+    result.set("depth_m", i64::from(depth));
+    result.set("area_m2", i64::from(width * depth));
+    result
+}
+
+fn lot_error_result(error: &LotError) -> VarDictionary {
+    placement_simple_error(error.code(), error.to_string())
+}
+
+fn lot_to_dictionary(lot: &Lot) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("id", lot.id as i64);
+    result.set(
+        "bounds",
+        &PackedInt32Array::from(lot.bounds.to_vec()).to_variant(),
+    );
+    result.set("zone", &GString::from(lot.zone.as_str()));
+    result.set("width_m", i64::from(lot.width_m()));
+    result.set("depth_m", i64::from(lot.depth_m()));
+    result.set("area_m2", i64::from(lot.area_m2()));
+    result.set(
+        "center",
+        &PackedFloat32Array::from(lot.center().to_vec()).to_variant(),
+    );
+    result
+}
+
 fn road_request_from_args(
     x1: i64,
     z1: i64,
@@ -2782,6 +3109,27 @@ fn roads_from_world_json(json: &str) -> Result<Option<RoadStore>, (&'static str,
     store
         .validate_loaded()
         .map_err(|error| ("invalid_roads", error.to_string()))?;
+    Ok(Some(store))
+}
+
+fn attach_lots(json: &str, store: &LotStore) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    value["lots"] = serde_json::to_value(store).map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+}
+
+fn lots_from_world_json(json: &str) -> Result<Option<LotStore>, (&'static str, String)> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| ("invalid_json", error.to_string()))?;
+    let Some(raw) = value.get("lots") else {
+        return Ok(None);
+    };
+    let store: LotStore =
+        serde_json::from_value(raw.clone()).map_err(|error| ("invalid_lots", error.to_string()))?;
+    store
+        .validate_loaded()
+        .map_err(|error| ("invalid_lots", error.to_string()))?;
     Ok(Some(store))
 }
 
@@ -3475,6 +3823,46 @@ mod tests {
         store.format_version = 99;
         let json = attach_roads("{}", &store).expect("attach");
         assert!(roads_from_world_json(&json).is_err());
+    }
+
+    #[test]
+    fn lot_json_round_trips_through_world_save() {
+        let mut roads = RoadStore::new(2026);
+        roads
+            .add(
+                &RoadRequest {
+                    start: [180, 125],
+                    end: [200, 125],
+                    width_m: 8,
+                },
+                |_, _| 40,
+            )
+            .expect("road");
+        let mut store = LotStore::new(2026);
+        store
+            .add(
+                &LotRequest {
+                    bounds: [182, 128, 198, 144],
+                    zone: Zone::Residential,
+                },
+                |_, _| 40,
+                &roads,
+            )
+            .expect("lot");
+        let json = attach_lots("{}", &store).expect("attach");
+        let decoded = lots_from_world_json(&json)
+            .expect("parse")
+            .expect("lots field");
+        assert_eq!(decoded, store);
+        assert_eq!(decoded.checksum(), store.checksum());
+    }
+
+    #[test]
+    fn lot_json_rejects_unknown_version() {
+        let mut store = LotStore::new(2026);
+        store.format_version = 99;
+        let json = attach_lots("{}", &store).expect("attach");
+        assert!(lots_from_world_json(&json).is_err());
     }
 
     #[test]

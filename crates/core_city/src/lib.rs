@@ -32,6 +32,7 @@
 #![forbid(unsafe_code)]
 
 pub mod construction;
+pub mod lot;
 pub mod placement;
 pub mod road;
 
@@ -42,6 +43,10 @@ pub use construction::{
     total_seconds_for, ConstructionError, ConstructionPhase, ConstructionSite, ConstructionStore,
     ConstructionTick, CONSTRUCTION_FORMAT_VERSION, MAX_SITES as MAX_CONSTRUCTION_SITES,
     MAX_TICK_SECONDS,
+};
+pub use lot::{
+    Lot, LotError, LotRequest, LotStore, Zone, LOT_FORMAT_VERSION, LOT_ROAD_GAP_M, MAX_LOTS,
+    MAX_LOT_AREA_M2, MAX_LOT_SIDE_M, MAX_LOT_SLOPE_M, MIN_LOT_AREA_M2, MIN_LOT_SIDE_M,
 };
 pub use placement::{
     footprint_for, normalize_rotation, validate_placement, Placement, PlacementError,

@@ -162,7 +162,7 @@ A site advances only when both conditions are met. Phase progress is clamped and
 Marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok build=ok done=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok build=ok done=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 ## 8. Limits
@@ -180,8 +180,8 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok bui
 ## 9. Tests
 
 - `core_city::construction`: 11 tests covering phase start, completion, crew stall, material stall, no material drain while crew-stalled, large-step crew enforcement, shared crew, monotonic progress, duplicate ids, JSON/checksum, and malformed state.
-- `core_city`: 34 tests.
-- Workspace: **221 tests + 1 doctest**.
+- `core_city`: **50 tests**.
+- Workspace: **241 tests + 1 doctest**.
 - Godot headless: `WORLD_SCENE ... build=ok done=ok ... status=ok`.
 
 ## 10. Next
