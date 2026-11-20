@@ -44,6 +44,7 @@ Outputs:
 - `materials: BTreeMap<String, u64>` keyed `material:{id}`.
 - `resident_capacity`, `job_slots`, `class`.
 - `solid_voxels`.
+- `room_bounds` (serde-skipped): floor-band rectangles for overlays, same order as `rooms`.
 
 Room IDs are stable (`room_0`, `room_1`, …) in floor/Z/X scan order.
 

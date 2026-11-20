@@ -119,6 +119,17 @@ fn enclosed_room_is_detected() {
     assert!((room.area_m2 - expected_cells * VOXEL_AREA_M2).abs() < 1e-3);
     assert!((room.volume_m3 - room.area_m2 * 3.0).abs() < 1e-3);
     assert_eq!(stats.solid_voxels, u64::from(volume.solid_count()));
+    let bounds = stats.room_bounds[0];
+    assert_eq!(
+        (
+            bounds.min_x,
+            bounds.max_x,
+            bounds.min_z,
+            bounds.max_z,
+            bounds.floor
+        ),
+        (42, 77, 42, 77, 0)
+    );
 }
 
 #[test]
@@ -154,6 +165,11 @@ fn two_floors_yield_two_rooms_with_correct_floor_indices() {
     assert_eq!(stats.rooms[1].floor, 1);
     assert!((stats.rooms[0].area_m2 - stats.rooms[1].area_m2).abs() < 1e-4);
     assert!((stats.rooms[0].area_m2 - 12.96).abs() < 1e-3);
+    assert_eq!(stats.room_bounds.len(), 2);
+    assert_eq!(stats.room_bounds[0].floor, 0);
+    assert_eq!(stats.room_bounds[1].floor, 1);
+    assert_eq!(stats.room_bounds[0].min_x, 42);
+    assert_eq!(stats.room_bounds[1].max_x, 77);
 }
 
 #[test]

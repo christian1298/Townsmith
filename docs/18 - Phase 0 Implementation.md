@@ -24,13 +24,14 @@ tags:
 | `crates/core_sim` | 1M-scale cohort simulation plus deterministic 2,000 active agents | Working, 26 tests |
 | `crates/core_city` | Deterministic synthetic Early/Mid/Late city layouts for rendering benchmarks | Working, 10 tests |
 | `crates/core_blueprint` | `.tsbp` v1 package: zip, metadata, RLE voxel stream, BLAKE3 hash | Working, 9 tests |
+| `crates/core_rooms` | Room detection, props, capacity/jobs, material stats, room bounds | Working, 10 tests |
 | `crates/server` | Headless cohort tick harness (no GPU, no socket yet) | Working |
-| `crates/bench` | Voxel, worldgen, terrain, cohort, active-agent, and city-layout microbenchmarks | Working |
+| `crates/bench` | Voxel, volume, worldgen, terrain, cohort, active-agent, city-layout, and rooms microbenchmarks | Working |
 | `benchmarks/` | Route JSON, results, and benchmark notes | Harness v0 |
 | `scripts/bench_core.sh` | 3-run core benchmark aggregation | Working |
 | `scripts/bench_godot.sh` | 3-run Godot flyover aggregation | Working; headless frame times are not representative |
-| `crates/godot_ext` | Godot 4.7 GDExtension bridge with a Rust terrain worker pool, city layout bridge, and editable volume API | Working, 11 tests + headless smoke |
-| `godot/` | Preview project; streams terrain, renders synthetic city MultiMeshes, and smokes the editable volume | Working |
+| `crates/godot_ext` | Godot 4.7 GDExtension bridge with terrain workers, city layout, editable volume, blueprint, and room APIs | Working, 14 tests + headless smoke |
+| `godot/` | Terrain/city previews plus the first-person editor, blueprint save/load, and room overlay | Working |
 | `scripts/` | Build, check, run, and smoke commands | Working |
 
 The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`, and `server` have no Godot dependency.
@@ -161,7 +162,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 | Terrain LOD 2, 256 m chunk | 65,536 cells | — | 25,327 quads | ~0.39 ms |
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **176 tests**: 50 voxel, 58 world, 26 simulation, 10 city, 9 blueprint, 10 rooms, and 13 bridge tests.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **177 tests**: 50 voxel, 58 world, 26 simulation, 10 city, 9 blueprint, 10 rooms, and 14 bridge tests.
 
 ## 3. Known limitations
 

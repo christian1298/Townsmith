@@ -51,6 +51,7 @@ const SMOKE_RAY_PLACE := Vector3i(8, 1, 8)
 const DEFAULT_BLUEPRINT_NAME := "River House"
 const BLUEPRINT_DIR := "user://blueprints"
 const BLUEPRINT_EXT := "tsbp"
+const ROOM_OVERLAY_HEIGHT_M := 2.8
 
 var _core
 var _volume_origin := VOLUME_ORIGIN
@@ -68,6 +69,8 @@ var _remesh_due_msec := 0
 var _blueprint_name: LineEdit
 var _save_dialog: FileDialog
 var _load_dialog: FileDialog
+var _room_overlay: Node3D
+var _room_overlay_on := false
 
 func _ready() -> void:
 	_core = TownsmithCore.new()
@@ -97,6 +100,9 @@ func _ready() -> void:
 	if voxel_size > 0.0:
 		_voxel_size_m = voxel_size
 
+	if _is_room_overlay_smoke():
+		_run_room_overlay_smoke()
+		return
 	if _is_editor_smoke():
 		_run_editor_smoke()
 		return
@@ -126,6 +132,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 				_set_status("Click to capture the mouse")
+			return
+		if key == KEY_R:
+			_toggle_room_overlay()
 			return
 		for index in MATERIALS.size():
 			if key == KEY_1 + index:
@@ -254,6 +263,95 @@ func _rebuild_volume_mesh() -> void:
 	_volume_mesh.mesh = mesh
 	var wall_ms := float(Time.get_ticks_usec() - started_usec) / 1000.0
 	_refresh_stats_label(wall_ms)
+	if _room_overlay_on:
+		_rebuild_room_overlay()
+
+## Toggle the translucent room boxes/labels. Detection runs on demand.
+func _toggle_room_overlay() -> void:
+	if _room_overlay != null:
+		remove_child(_room_overlay)
+		_room_overlay.queue_free()
+		_room_overlay = null
+		_room_overlay_on = false
+		_set_status("Room overlay off")
+		return
+	_room_overlay_on = true
+	_rebuild_room_overlay()
+
+func _rebuild_room_overlay() -> void:
+	if _room_overlay != null:
+		remove_child(_room_overlay)
+		_room_overlay.queue_free()
+	_room_overlay = Node3D.new()
+	_room_overlay.name = "RoomOverlay"
+	add_child(_room_overlay)
+
+	var stats: Dictionary = _core.editor_room_stats()
+	if not bool(stats.get("ok", false)):
+		remove_child(_room_overlay)
+		_room_overlay.queue_free()
+		_room_overlay = null
+		_room_overlay_on = false
+		_set_status("Room overlay failed: %s" % str(stats.get("error", "unknown error")))
+		return
+	var rooms: Array = stats.get("rooms", [])
+	for room in rooms:
+		var bounds: PackedFloat32Array = room.get("bounds_m", PackedFloat32Array())
+		var center: PackedFloat32Array = room.get("center_m", PackedFloat32Array())
+		if bounds.size() < 4 or center.size() < 3:
+			continue
+		var kind := str(room.get("type", "room"))
+		var color := _room_color(kind)
+		var width := bounds[2] - bounds[0]
+		var depth := bounds[3] - bounds[1]
+		var box := BoxMesh.new()
+		box.size = Vector3(width, ROOM_OVERLAY_HEIGHT_M, depth)
+		var instance := MeshInstance3D.new()
+		instance.mesh = box
+		instance.material_override = _room_material(color)
+		instance.position = _volume_origin + Vector3(center[0], center[1], center[2])
+		instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_room_overlay.add_child(instance)
+
+		var label := Label3D.new()
+		label.text = "%s\n%.1f m²" % [kind, float(room.get("area_m2", 0.0))]
+		label.position = instance.position + Vector3(0.0, ROOM_OVERLAY_HEIGHT_M * 0.5 + 0.4, 0.0)
+		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		label.no_depth_test = false
+		label.font_size = 48
+		label.pixel_size = 0.005
+		label.outline_size = 8
+		label.modulate = color
+		_room_overlay.add_child(label)
+
+	_set_status("Room overlay: %d room(s), capacity %d, jobs %d" % [
+		rooms.size(),
+		int(stats.get("resident_capacity", 0)),
+		int(stats.get("job_slots", 0)),
+	])
+
+func _room_material(color: Color) -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color(color.r, color.g, color.b, 0.22)
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return material
+
+func _room_color(kind: String) -> Color:
+	match kind:
+		"bedroom":
+			return Color(0.35, 0.65, 1.0)
+		"kitchen":
+			return Color(1.0, 0.72, 0.25)
+		"bathroom":
+			return Color(0.25, 0.9, 0.9)
+		"office":
+			return Color(0.75, 0.55, 1.0)
+		"living_dining":
+			return Color(0.45, 0.9, 0.45)
+		_:
+			return Color(0.8, 0.8, 0.8)
 
 func _build_shell() -> void:
 	var world_environment := WorldEnvironment.new()
@@ -353,7 +451,7 @@ func _build_ui() -> void:
 	help.text = "\n".join(PackedStringArray([
 		"WASD move   Space/Ctrl up/down   Shift boost   Esc release mouse",
 		"Left click remove   Right click place   Keys 1-5 select material",
-		"F5 save blueprint   F9 load blueprint   Mesh rebuilds 250 ms after edit",
+		"R room overlay   F5 save blueprint   F9 load blueprint   Mesh rebuilds 250 ms after edit",
 	]))
 
 	var blueprint_bar := HBoxContainer.new()
@@ -669,8 +767,52 @@ func _run_blueprint_smoke() -> void:
 func _is_editor_smoke() -> bool:
 	return OS.get_cmdline_user_args().has("--editor-smoke")
 
+func _is_room_overlay_smoke() -> bool:
+	return OS.get_cmdline_user_args().has("--room-overlay-smoke")
+
 func _is_blueprint_smoke() -> bool:
 	return OS.get_cmdline_user_args().has("--blueprint-smoke")
+
+## Headless contract check for the room overlay.
+##
+## Builds a sealed room, toggles the overlay, and asserts the detector and
+## overlay node tree. Uses the same volume created in `_ready`.
+func _run_room_overlay_smoke() -> void:
+	var status := "ok"
+	if not _core.editor_fill_box(0, 0, 0, 40, 1, 40, 2):
+		status = "floor_failed"
+	elif not _core.editor_fill_box(0, 30, 0, 40, 31, 40, 3):
+		status = "ceiling_failed"
+	elif not _core.editor_fill_box(0, 1, 0, 1, 30, 40, 1):
+		status = "west_failed"
+	elif not _core.editor_fill_box(39, 1, 0, 40, 30, 40, 1):
+		status = "east_failed"
+	elif not _core.editor_fill_box(1, 1, 0, 39, 30, 1, 1):
+		status = "north_failed"
+	elif not _core.editor_fill_box(1, 1, 39, 39, 30, 40, 1):
+		status = "south_failed"
+	elif not _core.editor_set_voxel(0, 15, 20, 5):
+		status = "door_failed"
+	elif not _core.editor_set_voxel(0, 15, 10, 4):
+		status = "window_failed"
+	else:
+		_toggle_room_overlay()
+		var stats: Dictionary = _core.editor_room_stats()
+		var rooms: Array = stats.get("rooms", [])
+		if not bool(stats.get("ok", false)):
+			status = "stats_failed"
+		elif rooms.size() != 1:
+			status = "room_count"
+		elif _room_overlay == null or _room_overlay.get_child_count() < 1:
+			status = "overlay_nodes"
+		else:
+			print("ROOM_OVERLAY_SMOKE rooms=%d nodes=%d status=ok" % [
+				rooms.size(), _room_overlay.get_child_count()])
+	if status != "ok":
+		print("ROOM_OVERLAY_SMOKE rooms=0 nodes=0 status=%s" % status)
+		get_tree().quit(1)
+		return
+	get_tree().quit(0)
 
 ## Headless contract check for CI.
 ##

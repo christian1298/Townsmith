@@ -81,7 +81,7 @@ It is main-thread only and does not mutate the volume.
 
 ## 7. Next
 
-1. Add room bounds/centers to the bridge, then draw the overlay using `editor_room_stats`.
+1. Room overlay using the new `bounds_m`/`center_m` fields (landed in [[34 - Room Overlay]]).
 2. Prop placement so room types/capacity become meaningful.
 3. Content registry material keys.
 4. Thumbnail and library index.

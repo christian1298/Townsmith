@@ -164,6 +164,23 @@ pub struct RoomRecord {
     pub windows: u32,
 }
 
+/// Bounding rectangle of one room on its floor band, in voxel cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomBounds {
+    /// Left-most cell, inclusive.
+    pub min_x: u32,
+    /// Right-most cell, inclusive.
+    pub max_x: u32,
+    /// Top-most cell, inclusive.
+    pub min_z: u32,
+    /// Bottom-most cell, inclusive.
+    pub max_z: u32,
+    /// Floor band index.
+    pub floor: u32,
+    /// Height of this band in 10 cm voxels (the top band can be partial).
+    pub band_height_voxels: u32,
+}
+
 /// Aggregate room and material stats for one volume.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoomStats {
@@ -179,6 +196,12 @@ pub struct RoomStats {
     pub class: String,
     /// Total non-air voxels.
     pub solid_voxels: u64,
+    /// Per-room bounding rectangles, in the same order as `rooms`.
+    ///
+    /// Skipped by serde so the benchmark checksum remains focused on gameplay
+    /// stats; shells use it for overlays.
+    #[serde(default, skip_serializing)]
+    pub room_bounds: Vec<RoomBounds>,
 }
 
 impl Default for RoomStats {
@@ -190,6 +213,7 @@ impl Default for RoomStats {
             job_slots: 0,
             class: "lower_middle".to_string(),
             solid_voxels: 0,
+            room_bounds: Vec::new(),
         }
     }
 }
@@ -229,6 +253,16 @@ pub fn detect_rooms(
             for &(x, z) in &component.cells {
                 layout.component[z * width + x] = room_index;
             }
+            let mut min_x = u32::MAX;
+            let mut max_x = 0;
+            let mut min_z = u32::MAX;
+            let mut max_z = 0;
+            for &(x, z) in &component.cells {
+                min_x = min_x.min(x as u32);
+                max_x = max_x.max(x as u32);
+                min_z = min_z.min(z as u32);
+                max_z = max_z.max(z as u32);
+            }
             pending.push(PendingRoom {
                 floor: floor as u32,
                 cells: component.cells.len() as u32,
@@ -241,6 +275,11 @@ pub fn detect_rooms(
                 showers: 0,
                 sofas: 0,
                 tables: 0,
+                min_x,
+                max_x,
+                min_z,
+                max_z,
+                band_height_voxels: (band_end - band_start) as u32,
             });
         }
 
@@ -282,6 +321,7 @@ pub fn detect_rooms(
     }
 
     let mut rooms = Vec::with_capacity(pending.len());
+    let mut room_bounds = Vec::with_capacity(pending.len());
     let mut resident_capacity = 0;
     let mut job_slots = 0;
     for (index, room) in pending.into_iter().enumerate() {
@@ -298,6 +338,14 @@ pub fn detect_rooms(
             doors: room.doors,
             windows: room.windows,
         });
+        room_bounds.push(RoomBounds {
+            min_x: room.min_x,
+            max_x: room.max_x,
+            min_z: room.min_z,
+            max_z: room.max_z,
+            floor: room.floor,
+            band_height_voxels: room.band_height_voxels,
+        });
     }
 
     let class = building_class(&rooms, resident_capacity, job_slots).to_string();
@@ -309,6 +357,7 @@ pub fn detect_rooms(
         job_slots,
         class,
         solid_voxels,
+        room_bounds,
     }
 }
 
@@ -326,6 +375,11 @@ struct PendingRoom {
     showers: u32,
     sofas: u32,
     tables: u32,
+    min_x: u32,
+    max_x: u32,
+    min_z: u32,
+    max_z: u32,
+    band_height_voxels: u32,
 }
 
 impl PendingRoom {

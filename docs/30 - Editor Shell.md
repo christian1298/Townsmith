@@ -13,7 +13,7 @@ tags:
 # 30 — Editor Shell
 
 > [!info] What this note is
-> The first playable first-person editor shell: `godot/editor.tscn` and its scripts. It uses the volume API from [[29 - Volume Editor Bridge]] to place and remove 10 cm voxels in the default volume. It is the camera, palette, raycast, and remesh half of [[26 - Vertical Slice Spec]] §3. Blueprint save/load is in [[32 - Blueprint Save Load]]; undo and rooms are still open.
+> The first playable first-person editor shell: `godot/editor.tscn` and its scripts. It uses the volume API from [[29 - Volume Editor Bridge]] to place and remove 10 cm voxels in the default volume. It is the camera, palette, raycast, and remesh half of [[26 - Vertical Slice Spec]] §3. Blueprint save/load is in [[32 - Blueprint Save Load]]; the room overlay is in [[34 - Room Overlay]]; undo and prop placement are still open.
 
 ## 1. What runs
 
@@ -50,6 +50,7 @@ GODOT=/path/to/godot ./scripts/run_godot.sh   # defaults to main.tscn
 | Left click | Remove the first solid voxel under the crosshair |
 | Right click | Place the active material in the empty cell before the hit |
 | `1` … `5` | Select timber, stone, roof, glass, door |
+| `R` | Toggle the room overlay |
 | Mouse wheel | Unbound in v0 |
 
 Movement is free flight: no gravity, collision, crouch, or fall damage yet. Horizontal flight uses the yaw-only basis, so looking down does not slow forward movement. Mouse look is pitch-clamped to ±89°.
@@ -106,9 +107,12 @@ This is a correctness-first loop. A **dense** 25,601-voxel debug floor took ~1.4
 GODOT=/path/to/godot ./scripts/smoke_editor.sh
 ```
 
-The script builds the debug GDExtension, retries the first headless import once (Godot 4.7 can abort the first import in a clean worktree), runs the editor scene with `--editor-smoke`, and asserts the marker.
+The script builds the debug GDExtension, retries the first headless import once (Godot 4.7 can abort the first import in a clean worktree), then runs two headless contracts:
 
-The smoke path, inside `editor.gd`:
+1. **Editor smoke** (`--editor-smoke`) — volume, edit, mesh, raycast.
+2. **Room overlay smoke** (`--room-overlay-smoke`) — sealed room, detection, overlay nodes.
+
+The editor smoke path, inside `editor.gd`:
 
 1. Creates the default volume via `_ready`.
 2. Fills a **16 × 1 × 16** stone floor at the volume corner (256 voxels).
@@ -123,9 +127,10 @@ Current output:
 
 ```text
 EDITOR_SMOKE solid=257 quads=14 surfaces=1 status=ok
+ROOM_OVERLAY_SMOKE rooms=1 nodes=2 status=ok
 ```
 
-The quads count is intentionally not pinned: greedy meshing changes it when the mesher changes. The contract is solid voxels, one surface, positive quads, quad/vertex agreement, and `status=ok`.
+The quads count is intentionally not pinned: greedy meshing changes it when the mesher changes. The contract is solid voxels, one surface, positive quads, quad/vertex agreement, and `status=ok`. The overlay contract is exactly one room and two nodes (box + label).
 
 CI runs the script in the Godot headless smoke job after `smoke_volume.sh`.
 
@@ -138,7 +143,7 @@ CI runs the script in the Godot headless smoke job after `smoke_volume.sh`.
 - **No per-material rendering.** All voxels share one neutral material override.
 - **One-voxel brush.** There is no 2×2×2/3×3×3 brush, paint, pick, box, copy/paste, rotate, or mirror.
 - **Whole-volume remesh.** Every rebuild remeshes the entire 16 × 9.6 × 16 m volume on the main thread; no dirty-chunk path or worker yet.
-- **Room, structural, and cost overlays are absent.** Room detection runs on blueprint save and is exposed by `editor_room_stats`, but the shell does not draw an overlay or stats panel yet.
+- **Room overlay is diagnostic.** Press R for room boxes/labels; there is no room selection, structural overlay, or cost panel yet.
 - **Localization is not wired.** The overlay strings are literal English; key-based strings arrive with [[16 - Localization]].
 - **Mouse capture is not focus-aware.** Losing window focus while captured is not handled beyond `Esc`.
 - **Single scene, no menus.** Launching the scene drops straight into the camera; there is no start screen, settings, or rebind UI.
