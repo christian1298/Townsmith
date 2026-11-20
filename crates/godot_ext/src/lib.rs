@@ -788,6 +788,56 @@ impl TownsmithCore {
         }
     }
 
+    /// Return metadata for a saved blueprint without touching the world.
+    ///
+    /// The scene uses this to size the placement ghost and show the blueprint
+    /// name, cost, and room count before the first placement.
+    #[func]
+    fn world_blueprint_info(&self, path: GString) -> VarDictionary {
+        let path = match blueprint_path_from_arg(&path.to_string()) {
+            Ok(path) => path,
+            Err(error) => return placement_simple_error("invalid_blueprint_path", error),
+        };
+        let blueprint = match load_tsbp(&path) {
+            Ok(blueprint) => blueprint,
+            Err(error) => {
+                return placement_simple_error(
+                    blueprint_error_code(&error),
+                    format!("{}: {error}", path.display()),
+                )
+            }
+        };
+        let (materials, _) = count_materials(&blueprint.volume);
+        let computed_cost = slice_material_cost(&materials);
+        let stored_cost = blueprint.metadata.stats.material_cost;
+        let material_cost = if stored_cost.is_finite() && stored_cost > 0.0 {
+            stored_cost
+        } else {
+            computed_cost
+        };
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("id", &GString::from(blueprint.metadata.id.as_str()));
+        result.set("name", &GString::from(blueprint.metadata.name.as_str()));
+        result.set(
+            "hash",
+            &GString::from(blueprint.metadata.content_hash.as_str()),
+        );
+        result.set(
+            "bounds",
+            &PackedFloat32Array::from(blueprint.metadata.bounds_m.to_vec()).to_variant(),
+        );
+        result.set("solid_voxels", blueprint.metadata.solid_voxels as i64);
+        result.set("rooms", blueprint.metadata.rooms.len() as i64);
+        result.set(
+            "resident_capacity",
+            i64::from(blueprint.metadata.stats.resident_capacity),
+        );
+        result.set("job_slots", i64::from(blueprint.metadata.stats.job_slots));
+        result.set("material_cost", material_cost);
+        result
+    }
+
     /// Place a `.tsbp` blueprint in the world after validation.
     ///
     /// Returns `{ ok, seed, count, checksum, placement }` on success.

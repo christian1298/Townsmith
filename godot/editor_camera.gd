@@ -11,7 +11,7 @@ extends Camera3D
 ## Pitch is clamped just short of vertical to avoid a degenerate look basis.
 ## Movement is free flight: there is no gravity or collision yet.
 
-const MOVE_SPEED_MPS := 6.0
+@export var move_speed_mps := 6.0
 const BOOST_MULTIPLIER := 3.0
 const MOUSE_SENSITIVITY := 0.0022
 const PITCH_LIMIT := 1.5533  # 89 degrees
@@ -58,7 +58,7 @@ func _process(delta: float) -> void:
 
 	if direction == Vector3.ZERO:
 		return
-	var speed := MOVE_SPEED_MPS
+	var speed := move_speed_mps
 	if Input.is_physical_key_pressed(KEY_SHIFT):
 		speed *= BOOST_MULTIPLIER
 	# A synchronous remesh can stall one frame; clamp the step so the camera

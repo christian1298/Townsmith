@@ -140,6 +140,11 @@ jobs:
         run: |
           set -o pipefail
           bash ./scripts/smoke_world_placement.sh 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
+      - name: Run world placement scene smoke
+        shell: bash
+        run: |
+          set -o pipefail
+          bash ./scripts/smoke_world_scene.sh 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
       - name: Run EN/DE layout smoke
         shell: bash
         run: |
