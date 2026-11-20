@@ -30,8 +30,8 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 
 | Item | State |
 |---|---|
-| Phase | Phase 0 spike in progress |
-| Code | **Phase 0 in progress:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, chunked editable volume + cross-chunk meshing, 49 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, seam-aware terrain mesh + LOD + skirts, 58 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `core_city` (synthetic Early/Mid/Late layouts, 10 tests), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, a Godot 4.7 GDExtension bridge that streams terrain chunks on Rust worker threads with distance LOD (11 bridge tests), a MultiMesh city renderer with Early/Mid/Late routes, a 200-instance voxel-hut route, and an editable multi-chunk volume bridge. Headless smoke passes. |
+| Phase | **Phase 1 vertical slice** in progress |
+| Code | **Vertical slice in progress:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, chunked editable volume + cross-chunk meshing, 50 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, seam-aware terrain mesh + LOD + skirts, 58 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `core_city` (synthetic Early/Mid/Late layouts, 10 tests), `core_blueprint` (`.tsbp` v1 packages, 8 tests), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, a Godot 4.7 GDExtension bridge with terrain workers, city layout, and editable volume APIs (11 bridge tests), a MultiMesh city renderer, a 200-instance voxel-hut route, and a `VOLUME_SMOKE` editor path. Headless smoke passes. |
 | Engine | **Accepted:** Godot 4 shell + Rust core via GDExtension. The Phase 0 spike passed; the 3060-class 1M 30 FPS gate remains open for Phase 5. See [[04 - Engine and Stack]] and [[10 - Decisions]]. |
 | Team | **Accepted:** 2–3 full-time generalists; Rust/Godot experience or willingness to learn. |
 | Language | **Accepted:** Rust is the primary implementation language from Phase 0; GDScript is shell/UI only; C++ is the fallback. See D-011. |
@@ -153,12 +153,12 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 ## Next actions
 
-1. Run the Early/Mid/Late city routes on an 8-core/16-thread + RTX 3060-class machine with a display.
-2. Record FPS, 1% lows, hitches, and build times in [[15 - Benchmarks]].
-3. Measure the 30 FPS 1M-population (100k-building) target.
-4. Keep the 3060-class 1M performance gate open for Phase 5; D-003 is accepted for the architecture.
-5. Lock the vertical-slice scope in [[08 - Roadmap]].
-6. Write the first content schemas (blocks, materials, blueprints) from [[06 - Modding and Resource Packs]].
+1. Implement room detection and stats on the `VoxelVolume` (rooms, props, material cost, capacity).
+2. Build the first-person editor shell: camera, raycast place/remove, room overlay, save/load UI.
+3. Add English/German editor UI tables and the language selector.
+4. Run the 21-house / 60 FPS slice benchmark.
+5. Keep the 3060-class 1M performance gate open for Phase 5; D-003 is accepted for the architecture.
+6. Write the first content schemas (materials, rooms, props) from [[06 - Modding and Resource Packs]].
 
 ## Document map
 
@@ -191,4 +191,5 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 | [[25 - Phase 0 Results]] | Measured Phase 0 results and D-003 recommendation | You close Phase 0 or plan the vertical slice |
 | [[26 - Vertical Slice Spec]] | First playable editor/house/blueprint scope and acceptance tests | You start Phase 1 |
 | [[27 - Voxel Volume]] | Chunked editable volume, cross-chunk meshing, limits, benchmark | You edit or mesh buildings |
+| [[28 - Blueprint Package]] | `.tsbp` v1 zip, voxel stream, BLAKE3 hash, save/load security | You save, load, or share a building |
 | [[29 - Volume Editor Bridge]] | GDExtension volume API, packed mesh upload, smoke | You wire the first-person editor |

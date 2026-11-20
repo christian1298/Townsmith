@@ -77,6 +77,9 @@ tags:
 
 ### Phase 1 — Architect Mode core (6–8 weeks)
 
+> [!success] Vertical slice progress — 2026-11-20
+> The multi-chunk `VoxelVolume`, the GDExtension editor bridge, and `.tsbp` v1 save/load are merged. Remaining slice work: room detection/stats, the first-person editor shell, English/German editor UI, and the 21-house performance pass. See [[26 - Vertical Slice Spec]], [[27 - Voxel Volume]], [[28 - Blueprint Package]], and [[29 - Volume Editor Bridge]].
+
 **Goals**
 - A first-person voxel editor that is pleasant to use.
 - Blueprint save/load with metadata, thumbnail, and cost.
