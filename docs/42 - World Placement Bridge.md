@@ -33,8 +33,9 @@ tags:
 | `world_save(path)` | `Dictionary` | Write world JSON atomically; returns placement/construction/road/lot/delta counts and checksums |
 | `world_load(path, expected_seed)` | `Dictionary` | Read JSON for one seed, verify structure, packages, construction, roads, lots, settlements, and deltas, replace the stores |
 | `world_height_at(seed, x, z)` | `float` | One terrain sample for the preview; `-1.0` on invalid input |
+| `city_summary()` | `Dictionary` | Derived population, housing, jobs, employment, happiness; see [[49 - Phase 3 Slice Plan]] |
 
-Terrain-edit methods (`terrain_edit_height`, `terrain_delta_count`, `terrain_delta_checksum`, `terrain_clear_deltas`, and `reset_terrain_workers`) are documented in [[43 - Terrain Edits]]. `world_height_at` and placement validation use those deltas.
+Terrain-edit methods (`terrain_edit_height`, `terrain_delta_count`, `terrain_delta_checksum`, `terrain_clear_deltas`, and `reset_terrain_workers`) are documented in [[43 - Terrain Edits]]. `world_height_at` and placement validation use those deltas. `city_summary` is derived from completed placements and is not a separate save field; see [[49 - Phase 3 Slice Plan]].
 
 Construction methods (`construction_tick`, `construction_sites`, `construction_summary`, `construction_set_crew`, `construction_add_materials`, `construction_checksum`, `construction_clear`) are documented in [[45 - Construction Sites]]. A successful placement creates a site in the same transaction.
 
@@ -185,7 +186,7 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 
 - `core_city`: placement persistence, construction, roads, lots, and settlements; **57 tests**.
 - `godot_ext`: **28 tests** total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
-- Workspace: **253 tests + 1 doctest**.
+- Workspace: **257 tests + 1 doctest**.
 - Godot headless: `WORLD_PLACEMENT ... status=ok` and `WORLD_SCENE ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 

@@ -45,7 +45,7 @@ The slice follows accepted decisions:
 | **2E.1** | Road network core, terrain validation, world save/load | **Done** — PR #52, see [[46 - Road Network]] |
 | **2E.2** | Road drawing/rendering | **Done** — PR #53, see [[46 - Road Network]] |
 | **2E.3** | Lots and zoning | **Done** — PR #54, see [[47 - Lots and Zoning]] |
-| **2E.4** | Settlement boundaries and ownership | **This PR** — see [[48 - Settlement Boundaries]] |
+| **2E.4** | Settlement boundaries and ownership | **Done** — PR #55, see [[48 - Settlement Boundaries]] |
 
 Each stage is a separate branch, worktree, and PR. Do not mix placement, terrain edits, Mayor Mode, and construction state in one change. Each slice keeps geometry, persistence, the bridge, and the shell reviewable.
 
