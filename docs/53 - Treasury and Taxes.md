@@ -112,7 +112,7 @@ The existing `occupancy=ok` marker covers these assertions; no new marker field.
 
 - `core_city::economy`: 6 tests — starting balance, income/expenses, clamped rates, bankruptcy flag, JSON/checksum, invalid balance.
 - `godot_ext`: 2 new tests — economy JSON roundtrip/old-save closed, invalid balance rejected.
-- `core_city` total **102**; bridge **37**; workspace **303 tests + 1 doctest**.
+- `core_city` total **102**; bridge **38**; workspace **304 tests + 1 doctest**.
 - `city_loop` bin test includes balance/economy checksum.
 - 30-day city-loop checksum: `fe84b6a6d06678ca` (with primary industries).
 

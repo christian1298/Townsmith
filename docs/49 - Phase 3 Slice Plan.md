@@ -201,7 +201,7 @@ See [[54 - Primary Industries]] for rates, structs, tick order, persistence, HUD
 
 - `cargo test -p core_city` — industry, staffing, and food-replenishment tests.
 - `cargo test --workspace`.
-- `smoke_world_scene.sh` — industry site, production, supply, beacon, save/clear/load; marker `industry=ok`.
+- `smoke_world_scene.sh` — industry site, production, supply, beacon, save/clear/load; marker `industry=ok` (checked by the script).
 - `cargo run --release -p townsmith-bench --bin city_loop` — checksum `fe84b6a6d06678ca`.
 - clippy and fmt.
 

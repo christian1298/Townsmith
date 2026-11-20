@@ -112,7 +112,8 @@ pub struct Stockpile {
 pub struct IndustrySite {
     /// Industry kind.
     pub kind: IndustryKind,
-    /// Lifetime output from this site, in resource units.
+    /// Lifetime combined output from this site in mixed resource units
+    /// (wood + food + hides). Informational only.
     #[serde(default)]
     pub produced: f64,
 }

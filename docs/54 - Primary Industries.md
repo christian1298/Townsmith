@@ -14,14 +14,14 @@ tags:
 # 54 — Primary Industries
 
 > [!info] What this note is
-> Phase 3.4 turns completed workplaces into primary producers. A designated building becomes a lumberjack camp, farm, or hunting lodge; staffed sites fill a city stockpile, and residents eat from the food stock. It closes the food half of the needs loop that 3.2 left open.
+> Phase 3.4 turns job buildings into primary producers. A designated building becomes a lumberjack camp, farm, or hunting lodge; staffed sites fill a city stockpile, and residents eat from the food stock. It closes the food half of the needs loop that 3.2 left open.
 
 ## 1. Scope
 
 In:
 
 - `IndustryKind`: lumberjack, farm, hunt.
-- One industry site per designated placement, with a kind and lifetime output.
+- One industry site per designated placement, with a kind and a mixed lifetime output counter.
 - Wood, food, and hides in a city stockpile.
 - Staffing taken from the household runtime’s per-workplace assignment.
 - Food consumption by residents and a food-supply ratio.
@@ -78,7 +78,7 @@ pub struct IndustryStore {
 }
 ```
 
-`add_site(placement_id, kind)` accepts a placement with at least one job slot; the bridge enforces that. Replacing the kind keeps the city stock and resets the site’s lifetime counter.
+`add_site(placement_id, kind)` accepts a placement with at least one job slot; the bridge enforces that. A site may be designated while the building is still under construction: the beacon appears immediately, but production starts only after the building completes and the household runtime staffs it. Replacing the kind keeps the city stock and resets the site’s lifetime counter.
 
 ### Staffing
 
@@ -104,7 +104,7 @@ stockpile += production
 demand = population × 1 × days
 consumed = min(stockpile.food, demand)
 stockpile.food -= consumed
-food_supply = demand > 0 ? consumed / demand : 1
+food_supply = demand > 0 ? consumed / demand : (stock_food > 0 ? 1 : 0)
 ```
 
 Production happens before residents eat, so a harvest in the same step can feed the city.
@@ -210,9 +210,9 @@ Food now reaches the city and stays at 100%. Water and rest still collapse; that
 
 - `core_city::industry`: 11 tests — empty store, per-kind output, time/worker scaling, consumption, full and partial supply, remove/clear, JSON/checksum, invalid stock, kind parsing.
 - `core_city::population`: 3 new tests — per-workplace staffing, food replenishment, old saves without staffing.
-- `godot_ext`: 3 new tests — industry JSON roundtrip/old save, unknown kind/invalid stock, staffing roundtrip.
+- `godot_ext`: 4 new tests — industry JSON roundtrip/old save, unknown kind/invalid stock, staffing roundtrip, stale-staffing sanitize.
 - `city_loop`: the five-house test asserts sites, food stock, wood production, full supply, and happiness > 0.6.
-- Workspace: **303 tests + 1 doctest** (52 voxel, 62 world, 26 simulation, 102 city, 11 blueprint, 12 rooms, 37 bridge, 1 city-loop).
+- Workspace: **304 tests + 1 doctest** (52 voxel, 62 world, 26 simulation, 102 city, 11 blueprint, 12 rooms, 38 bridge, 1 city-loop).
 
 ## 8. Limits
 
@@ -224,6 +224,7 @@ Food now reaches the city and stays at 100%. Water and rest still collapse; that
 - Food supply is a single city-wide ratio; no district, market, or price effects.
 - Water, rest, power, and services are 3.5.
 - The beacon includes a small orbiting worker marker, but it is not a pathfinding citizen; production stays aggregate.
+- The site’s `produced` counter is the sum of wood, food, and hides, so it is informational rather than a per-resource total.
 - Rates are untuned and the assignment is O(households × workplaces).
 
 ## 9. Next

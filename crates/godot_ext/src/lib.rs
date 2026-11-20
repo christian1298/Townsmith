@@ -2301,14 +2301,20 @@ impl TownsmithCore {
     /// Return industry sites, staffing, stockpile, and production.
     #[func]
     fn industry_state(&self) -> VarDictionary {
-        let site_ids: BTreeSet<u64> = {
+        let (industry_seed, site_ids): (Option<u64>, BTreeSet<u64>) = {
             let industry = self
                 .industry
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            industry.as_ref().map_or_else(BTreeSet::new, |industry| {
-                industry.sites.keys().copied().collect()
-            })
+            industry.as_ref().map_or_else(
+                || (None, BTreeSet::new()),
+                |industry| {
+                    (
+                        Some(industry.seed),
+                        industry.sites.keys().copied().collect(),
+                    )
+                },
+            )
         };
         let centers: BTreeMap<u64, [f32; 3]> = {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
@@ -2328,6 +2334,7 @@ impl TownsmithCore {
                 .unwrap_or_else(|error| error.into_inner());
             population
                 .as_ref()
+                .filter(|runtime| Some(runtime.seed) == industry_seed)
                 .map_or_else(BTreeMap::new, |runtime| runtime.staffing.clone())
         };
         let guard = self
@@ -2394,9 +2401,10 @@ impl TownsmithCore {
         let Ok(seed) = u64::try_from(seed) else {
             return placement_simple_error("invalid_seed", "world seed must be non-negative");
         };
-        if !seconds.is_finite() || !(0.0..=core_city::MAX_INDUSTRY_TICK_SECONDS).contains(&seconds)
+        if !seconds.is_finite()
+            || !(0.0..=core_city::MAX_POPULATION_TICK_SECONDS).contains(&seconds)
         {
-            return placement_simple_error("invalid_delta", "industry delta is outside 0..=86400");
+            return placement_simple_error("invalid_delta", "industry delta is outside 0..=3600");
         }
         {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
@@ -2414,10 +2422,13 @@ impl TownsmithCore {
                 .population
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            runtime.as_ref().map_or_else(
-                || (BTreeMap::new(), 0),
-                |runtime| (runtime.staffing.clone(), runtime.population()),
-            )
+            runtime
+                .as_ref()
+                .filter(|runtime| runtime.seed == seed)
+                .map_or_else(
+                    || (BTreeMap::new(), 0),
+                    |runtime| (runtime.staffing.clone(), runtime.population()),
+                )
         };
         let mut guard = self
             .industry
@@ -2579,6 +2590,7 @@ impl TownsmithCore {
         };
         if let Some(runtime) = population.as_mut() {
             runtime.sync(&completed_slots(&store, &construction));
+            sanitize_staffing(runtime, &store, &construction);
             if let Err(error) = runtime.validate() {
                 return placement_simple_error("invalid_population", error.to_string());
             }
@@ -3033,6 +3045,7 @@ impl TownsmithCore {
             }
         }
         population.sync(&completed_slots(&store, &construction));
+        sanitize_staffing(&mut population, &store, &construction);
         if let Err(error) = population.validate() {
             return placement_simple_error("invalid_population", error.to_string());
         }
@@ -4236,6 +4249,29 @@ fn placement_request_from_blueprint(
     }
 }
 
+/// Drop staffing entries that no longer point at a completed workplace and
+/// cap each remaining entry by its job slots and the household worker total.
+fn sanitize_staffing(
+    runtime: &mut CityRuntime,
+    placements: &PlacementStore,
+    construction: &ConstructionStore,
+) {
+    let slots: BTreeMap<u64, u32> = completed_workplaces(placements, construction)
+        .into_iter()
+        .map(|workplace| (workplace.id, workplace.slots))
+        .collect();
+    let mut remaining = runtime.workers();
+    runtime.staffing.retain(|id, staffed| {
+        let capacity = slots.get(id).copied().unwrap_or(0);
+        let keep = (*staffed)
+            .min(capacity)
+            .min(u32::try_from(remaining).unwrap_or(u32::MAX));
+        *staffed = keep;
+        remaining = remaining.saturating_sub(u64::from(keep));
+        keep > 0
+    });
+}
+
 fn completed_slots(
     placements: &PlacementStore,
     construction: &ConstructionStore,
@@ -5264,6 +5300,18 @@ mod tests {
             .expect("parse")
             .expect("present");
         assert_eq!(decoded.staffing, runtime.staffing);
+    }
+
+    #[test]
+    fn sanitize_staffing_drops_unknown_workplaces() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.staffing.insert(99, 5);
+        sanitize_staffing(
+            &mut runtime,
+            &PlacementStore::new(2026),
+            &ConstructionStore::new(4, 1_000_000),
+        );
+        assert!(runtime.staffing.is_empty());
     }
 
     #[test]

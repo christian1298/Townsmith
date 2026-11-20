@@ -1773,6 +1773,16 @@ func _run_scene_smoke() -> void:
 					_refresh_industry_visuals()
 					industry_ok = industry_ok and industry_nodes.size() == 1
 					industry_ok = industry_ok and str(industry_kinds.get(1, "")) == kind
+					var kind_tick: Dictionary = core.industry_tick(SEED, 300.0)
+					industry_ok = industry_ok and int(kind_tick.get("workers", 0)) == 2
+					match kind:
+						"lumberjack":
+							industry_ok = industry_ok and float(kind_tick.get("stock_wood", 0.0)) > 0.0
+						"farm":
+							industry_ok = industry_ok and float(kind_tick.get("stock_food", 0.0)) > 0.0
+						"hunt":
+							industry_ok = industry_ok and float(kind_tick.get("stock_food", 0.0)) > 0.0
+							industry_ok = industry_ok and float(kind_tick.get("stock_hides", 0.0)) > 0.0
 				var industry_added: Dictionary = core.industry_add_site(SEED, 1, "farm")
 				industry_ok = industry_ok and bool(industry_added.get("ok", false))
 				_refresh_industry_visuals()

@@ -103,7 +103,7 @@ The runner should not be used to claim “30 stable days” until 3.5 adds water
 ## 6. Tests
 
 - `city_loop` bin test: five houses complete, fill 50 residents, staff their sites, and produce food/wood in one simulated day.
-- Workspace: **303 tests + 1 doctest**.
+- Workspace: **304 tests + 1 doctest**.
 
 ## 7. Next
 
