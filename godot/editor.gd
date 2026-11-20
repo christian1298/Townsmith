@@ -1018,6 +1018,8 @@ func _num(value: float) -> String:
 	return text.replace(".", ",") if _i18n.locale() == "de" else text
 
 func _apply_locale(update_status: bool = true) -> void:
+	if get_window() != null:
+		get_window().title = _i18n.t("base.editor.window.title")
 	if _language_label != null:
 		_language_label.text = _i18n.t("base.editor.hud.language", [_i18n.locale_name()])
 	if _help_label != null:
@@ -1045,7 +1047,9 @@ func _apply_locale(update_status: bool = true) -> void:
 			_i18n.t("base.editor.blueprint.filter", [BLUEPRINT_EXT])])
 	_update_palette_label()
 	_refresh_stats_label()
-	if _room_panel != null and _room_panel.visible:
+	if _room_overlay_on:
+		_rebuild_room_overlay()
+	elif _room_panel != null and _room_panel.visible:
 		_refresh_room_panel()
 	if update_status:
 		_status("base.editor.status.language", [_i18n.locale_name()])
