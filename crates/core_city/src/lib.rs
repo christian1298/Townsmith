@@ -31,11 +31,17 @@
 
 #![forbid(unsafe_code)]
 
+pub mod construction;
 pub mod placement;
 
 use std::error::Error;
 use std::fmt;
 
+pub use construction::{
+    total_seconds_for, ConstructionError, ConstructionPhase, ConstructionSite, ConstructionStore,
+    ConstructionTick, CONSTRUCTION_FORMAT_VERSION, MAX_SITES as MAX_CONSTRUCTION_SITES,
+    MAX_TICK_SECONDS,
+};
 pub use placement::{
     footprint_for, normalize_rotation, validate_placement, Placement, PlacementError,
     PlacementPlan, PlacementRequest, PlacementStore, MAX_BUILDING_HEIGHT_M, MAX_FOOTPRINT_M,

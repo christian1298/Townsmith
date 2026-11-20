@@ -56,6 +56,8 @@ pub struct PlacementRequest {
     pub resident_capacity: u32,
     /// Blueprint job slots, copied for the placement readout.
     pub job_slots: u32,
+    /// Blueprint solid voxels, used as material litres by construction.
+    pub solid_voxels: u64,
 }
 
 /// A placed building after validation.
@@ -87,6 +89,9 @@ pub struct Placement {
     pub resident_capacity: u32,
     /// Blueprint job slots.
     pub job_slots: u32,
+    /// Blueprint solid voxels, used as material litres by construction.
+    #[serde(default)]
+    pub solid_voxels: u64,
 }
 
 impl Placement {
@@ -107,6 +112,7 @@ impl Placement {
             material_cost: request.material_cost,
             resident_capacity: request.resident_capacity,
             job_slots: request.job_slots,
+            solid_voxels: request.solid_voxels,
         }
     }
 }
@@ -742,6 +748,7 @@ mod tests {
             material_cost: 100.0,
             resident_capacity: 2,
             job_slots: 0,
+            solid_voxels: 100,
         }
     }
 
