@@ -47,7 +47,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with real 10 cm building detail is tractable. The box-city MultiMesh path is measured well above target on an RTX 4080; the target 3060-class run and voxel building LOD remain. See [[03 - Voxel and Scale]], [[23 - City Rendering Benchmark]], and [[09 - Open Questions]]. |
-| Next action | Add EN/DE editor strings, then run the 21-house slice benchmark. Keep the 3060-class 1M gate for Phase 5. See [[26 - Vertical Slice Spec]]. |
+| Next action | Run the 21-house slice benchmark; EN/DE editor strings are implemented. Keep the 3060-class 1M gate for Phase 5. See [[26 - Vertical Slice Spec]]. |
 
 > [!warning] This is a plan, not a commitment
 > Numbers in these docs are **planning targets**, not measured results. Anything marked *Assumption* or *Proposed* must be validated before it becomes an accepted decision.
@@ -153,9 +153,9 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 ## Next actions
 
-1. Add EN/DE editor strings; rooms/stats metadata, overlay, panel, undo/redo, and prop placement are done.
+1. Run the 21-house slice benchmark; rooms/stats metadata, overlay, panel, undo/redo, props, and EN/DE editor strings are done.
 2. Add dirty-chunk remeshing and prop rotation/undo.
-3. Add English/German editor UI tables and the language selector.
+3. Run the 21-house performance pass.
 4. Run the 21-house / 60 FPS slice benchmark.
 5. Keep the 3060-class 1M performance gate open for Phase 5; D-003 is accepted for the architecture.
 6. Write the first content schemas (materials, rooms, props) from [[06 - Modding and Resource Packs]].

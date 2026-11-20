@@ -12,10 +12,13 @@ extends Node3D
 ## Headless smoke:
 ##   godot --headless --path godot res://editor.tscn -- --editor-smoke
 ##   godot --headless --path godot res://editor.tscn -- --blueprint-smoke
+##   godot --headless --path godot res://editor.tscn -- --locale-smoke
 ##
-## See `docs/30 - Editor Shell.md` for the controls and rules.
+## See `docs/30 - Editor Shell.md` for the controls and rules, and
+## `docs/38 - Editor Localization.md` for the EN/DE strings and the L toggle.
 
 const EditorCamera = preload("res://editor_camera.gd")
+const EditorI18n = preload("res://editor_i18n.gd")
 
 const VOXEL_SIZE_M := 0.1
 const VOLUME_CHUNKS := Vector3i(5, 3, 5)
@@ -64,6 +67,7 @@ const ROOM_PANEL_WIDTH := 500.0
 const MAX_HISTORY := 500
 
 var _core
+var _i18n
 var _volume_origin := VOLUME_ORIGIN
 var _volume_voxels := VOLUME_VOXELS
 var _volume_bounds := VOLUME_BOUNDS_M
@@ -73,6 +77,10 @@ var _camera
 var _palette_label: Label
 var _stats_label: Label
 var _status_label: Label
+var _language_label: Label
+var _help_label: Label
+var _save_button: Button
+var _load_button: Button
 var _active_material := 1
 var _remesh_pending := false
 var _remesh_due_msec := 0
@@ -93,6 +101,11 @@ var _history: Array[Array] = []
 var _redo: Array[Array] = []
 
 func _ready() -> void:
+	_i18n = EditorI18n.new()
+	if _is_locale_smoke():
+		_run_locale_smoke()
+		return
+
 	_core = TownsmithCore.new()
 	print("Townsmith core version: ", _core.version())
 
@@ -136,11 +149,10 @@ func _ready() -> void:
 	_build_shell()
 	_build_ui()
 	_refresh_prop_nodes()
-	_update_palette_label()
-	_refresh_stats_label()
+	_apply_locale(false)
 	if DisplayServer.get_name() != "headless":
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-		_set_status("Esc releases the mouse")
+		_status("base.editor.status.capture_mouse")
 
 func _process(_delta: float) -> void:
 	if not _remesh_pending:
@@ -155,7 +167,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		if key == KEY_ESCAPE:
 			if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-				_set_status("Click to capture the mouse")
+				_status("base.editor.status.click_to_capture")
+			return
+		if key == KEY_L and not event.ctrl_pressed and not event.alt_pressed:
+			_toggle_locale()
 			return
 		if key == KEY_R:
 			_toggle_room_overlay()
@@ -193,7 +208,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 			if event.button_index == MOUSE_BUTTON_LEFT:
 				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-				_set_status("Esc releases the mouse")
+				_status("base.editor.status.capture_mouse")
 			return
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if _active_prop >= 0:
@@ -259,61 +274,63 @@ func _remove_under_crosshair() -> void:
 		return
 	var hit := _raycast(_camera.global_position, -_camera.global_transform.basis.z)
 	if not bool(hit.get("hit", false)):
-		_set_status("No voxel in reach")
+		_status("base.editor.status.no_voxel_in_reach")
 		return
 	if bool(hit.get("pad", false)):
-		_set_status("The pad is not editable; place a voxel first")
+		_status("base.editor.status.pad_not_editable")
 		return
 	var cell: Vector3i = hit["cell"]
 	if not _set_voxel_with_history(cell, 0):
-		_set_status("Remove rejected at %s" % cell)
+		_status("base.editor.status.remove_rejected", [cell])
 		return
-	_on_edit_applied("Removed %s at %s" % [_material_name(int(hit.get("material", 0))), cell])
+	_on_edit_applied(_i18n.t("base.editor.status.removed", [
+		_material_name(int(hit.get("material", 0))), cell]))
 
 func _place_under_crosshair() -> void:
 	if _camera == null:
 		return
 	var hit := _raycast(_camera.global_position, -_camera.global_transform.basis.z)
 	if not bool(hit.get("hit", false)):
-		_set_status("No surface in reach")
+		_status("base.editor.status.no_surface_in_reach")
 		return
 	if not bool(hit.get("has_place", false)):
-		_set_status("No empty cell against the hit face")
+		_status("base.editor.status.no_empty_cell")
 		return
 	var cell: Vector3i = hit["place"]
 	if not _cell_in_bounds(cell):
-		_set_status("Placement outside the volume")
+		_status("base.editor.status.outside_volume")
 		return
 	if int(_core.editor_get_voxel(cell.x, cell.y, cell.z)) != 0:
-		_set_status("Placement cell is occupied")
+		_status("base.editor.status.cell_occupied")
 		return
 	if not _set_voxel_with_history(cell, _active_material):
-		_set_status("Place rejected at %s" % cell)
+		_status("base.editor.status.place_rejected", [cell])
 		return
-	_on_edit_applied("Placed %s at %s" % [_material_name(_active_material), cell])
+	_on_edit_applied(_i18n.t("base.editor.status.placed", [
+		_material_name(_active_material), cell]))
 
 func _place_prop_under_crosshair() -> void:
 	var hit := _raycast(_camera.global_position, -_camera.global_transform.basis.z)
 	if not bool(hit.get("hit", false)) or not bool(hit.get("has_place", false)):
-		_set_status("No empty cell for a prop")
+		_status("base.editor.status.no_prop_cell")
 		return
 	var cell: Vector3i = hit["place"]
 	if not _core.editor_place_prop(_active_prop, cell.x, cell.y, cell.z, 0.0):
-		_set_status("Prop placement rejected at %s" % cell)
+		_status("base.editor.status.prop_place_rejected", [cell])
 		return
 	_add_prop_node(_active_prop, cell)
 	if _room_overlay_on:
 		_rebuild_room_overlay()
-	_set_status("Placed %s at %s" % [_prop_name(_active_prop), cell])
+	_status("base.editor.status.prop_placed", [_prop_name(_active_prop), cell])
 
 func _remove_prop_under_crosshair() -> void:
 	var hit := _raycast(_camera.global_position, -_camera.global_transform.basis.z)
 	if not bool(hit.get("hit", false)) or not bool(hit.get("has_place", false)):
-		_set_status("No prop cell in reach")
+		_status("base.editor.status.no_prop_cell_in_reach")
 		return
 	var cell: Vector3i = hit["place"]
 	if not _core.editor_remove_prop_at(cell.x, cell.y, cell.z):
-		_set_status("No prop at %s" % cell)
+		_status("base.editor.status.no_prop_at", [cell])
 		return
 	var key := _prop_key(cell)
 	var node: Node = _prop_nodes.get(key)
@@ -322,7 +339,7 @@ func _remove_prop_under_crosshair() -> void:
 		_prop_nodes.erase(key)
 	if _room_overlay_on:
 		_rebuild_room_overlay()
-	_set_status("Removed prop at %s" % cell)
+	_status("base.editor.status.prop_removed", [cell])
 
 func _refresh_prop_nodes() -> void:
 	if _prop_root == null:
@@ -413,30 +430,32 @@ func _push_history(change: Dictionary) -> void:
 
 func _undo_last() -> void:
 	if _history.is_empty():
-		_set_status("Nothing to undo")
+		_status("base.editor.status.nothing_to_undo")
 		return
 	var batch: Array = _history.pop_back()
 	for change in batch:
 		if not _core.editor_set_voxel(change["x"], change["y"], change["z"], change["old"]):
 			_history.append(batch)
-			_set_status("Undo failed at %s" % Vector3i(change["x"], change["y"], change["z"]))
+			_status("base.editor.status.undo_failed", [
+				Vector3i(change["x"], change["y"], change["z"])])
 			return
 	_redo.append(batch)
-	_on_edit_applied("Undo")
+	_on_edit_applied(_i18n.t("base.editor.status.undo"))
 
 func _redo_last() -> void:
 	if _redo.is_empty():
-		_set_status("Nothing to redo")
+		_status("base.editor.status.nothing_to_redo")
 		return
 	var batch: Array = _redo.pop_back()
 	for change in batch:
 		if not _core.editor_set_voxel(change["x"], change["y"], change["z"], change["new"]):
 			_redo.append(batch)
-			_set_status("Redo failed at %s" % Vector3i(change["x"], change["y"], change["z"]))
+			_status("base.editor.status.redo_failed", [
+				Vector3i(change["x"], change["y"], change["z"])])
 			return
 	_history.append(batch)
 	# Undo/redo conserve the total history size, so the cap still holds.
-	_on_edit_applied("Redo")
+	_on_edit_applied(_i18n.t("base.editor.status.redo"))
 
 func _on_edit_applied(message: String) -> void:
 	_remesh_pending = true
@@ -465,7 +484,7 @@ func _toggle_room_overlay() -> void:
 		_room_overlay = null
 		_room_overlay_on = false
 		_set_room_panel_visible(false)
-		_set_status("Room view off")
+		_status("base.editor.status.room_view_off")
 		return
 	_room_overlay_on = true
 	_rebuild_room_overlay()
@@ -485,7 +504,8 @@ func _rebuild_room_overlay() -> void:
 		_room_overlay = null
 		_room_overlay_on = false
 		_set_room_panel_visible(false)
-		_set_status("Room overlay failed: %s" % str(stats.get("error", "unknown error")))
+		_status("base.editor.status.room_overlay_failed", [
+			str(stats.get("error", _i18n.t("base.editor.generic.unknown_error")))])
 		return
 	_room_stats_cache = stats
 	var rooms: Array = stats.get("rooms", [])
@@ -518,12 +538,8 @@ func _rebuild_room_overlay() -> void:
 		_room_overlay.add_child(instance)
 
 		var label := Label3D.new()
-		label.text = "%s%s\n%s\n%.1f m²" % [
-			"> " if selected else "",
-			kind,
-			str(room.get("id", "room_%d" % index)),
-			float(room.get("area_m2", 0.0)),
-		]
+		label.text = _room_label_text(kind, str(room.get("id", "room_%d" % index)),
+			float(room.get("area_m2", 0.0)), selected)
 		label.position = instance.position + Vector3(0.0, ROOM_OVERLAY_HEIGHT_M * 0.5 + 0.4, 0.0)
 		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		label.no_depth_test = false
@@ -535,7 +551,7 @@ func _rebuild_room_overlay() -> void:
 
 	_set_room_panel_visible(true)
 	_refresh_room_panel(stats)
-	_set_status("Room view: %d room(s), capacity %d, jobs %d  ([ ] select, R hide)" % [
+	_status("base.editor.status.room_view_summary", [
 		rooms.size(),
 		int(stats.get("resident_capacity", 0)),
 		int(stats.get("job_slots", 0)),
@@ -563,6 +579,26 @@ func _room_color(kind: String) -> Color:
 			return Color(0.45, 0.9, 0.45)
 		_:
 			return Color(0.8, 0.8, 0.8)
+
+## Localized display name for a room type. Unknown types fall back to the raw
+## internal type so a future detector addition still renders something useful.
+func _room_type_label(kind: String) -> String:
+	var key := "base.editor.room_type.%s" % kind
+	return _i18n.t(key) if _i18n.has_key(key) else kind
+
+## Localized display name for a building class. The core uses data ids such as
+## `lower_middle`; unknown classes are shown raw.
+func _room_class_label(value: String) -> String:
+	var key := "base.editor.room_class.%s" % value
+	return _i18n.t(key) if _i18n.has_key(key) else value
+
+func _room_label_text(kind: String, room_id: String, area_m2: float, selected: bool) -> String:
+	return _i18n.t("base.editor.rooms.label", [
+		"> " if selected else "",
+		_room_type_label(kind),
+		room_id,
+		_num(area_m2),
+	])
 
 ## Build the read-only room/stats panel on the right side of the editor UI.
 ##
@@ -618,7 +654,11 @@ func _refresh_room_panel(stats: Dictionary = {}) -> void:
 	if not bool(stats.get("ok", false)):
 		_selected_room = -1
 		_room_stats_cache = {}
-		_set_room_panel_text("ROOM STATS\nstats unavailable: %s" % str(stats.get("error", "unknown")))
+		var error := str(stats.get("error", _i18n.t("base.editor.generic.unknown")))
+		_set_room_panel_text("%s\n%s" % [
+			_i18n.t("base.editor.rooms.header"),
+			_i18n.t("base.editor.rooms.unavailable", [error]),
+		])
 		_set_room_panel_visible(false)
 		return
 	_room_stats_cache = stats
@@ -632,22 +672,23 @@ func _refresh_room_panel(stats: Dictionary = {}) -> void:
 
 	var materials: Dictionary = stats.get("materials", {})
 	var material_count := materials.size()
+	var class_value := str(stats.get("class", _i18n.t("base.editor.generic.unknown")))
 	var lines := PackedStringArray([
-		"ROOM STATS   [ ] select room   R hide",
-		"rooms %d · capacity %d · jobs %d · class %s" % [
+		_i18n.t("base.editor.rooms.header"),
+		_i18n.t("base.editor.rooms.summary", [
 			rooms.size(),
 			int(stats.get("resident_capacity", 0)),
 			int(stats.get("job_slots", 0)),
-			str(stats.get("class", "unknown")),
-		],
-		"solid %d · material kinds %d" % [
+			_room_class_label(class_value),
+		]),
+		_i18n.t("base.editor.rooms.solid", [
 			int(stats.get("solid_voxels", 0)),
 			material_count,
-		],
+		]),
 		"",
 	])
 	if rooms.is_empty():
-		lines.append("no enclosed rooms")
+		lines.append(_i18n.t("base.editor.rooms.none"))
 	else:
 		for index in rooms.size():
 			lines.append(_format_room_line(rooms[index], index))
@@ -662,17 +703,17 @@ func _set_room_panel_text(text: String) -> void:
 
 func _format_room_line(room: Dictionary, index: int) -> String:
 	var marker := ">" if index == _selected_room else " "
-	return "%s %s · %s · floor %d · %.1f m² · beds %d · desks %d · doors %d · windows %d" % [
+	return _i18n.t("base.editor.rooms.line", [
 		marker,
 		str(room.get("id", "room_%d" % index)),
-		str(room.get("type", "room")),
+		_room_type_label(str(room.get("type", _i18n.t("base.editor.generic.room")))),
 		int(room.get("floor", 0)),
-		float(room.get("area_m2", 0.0)),
+		_num(float(room.get("area_m2", 0.0))),
 		int(room.get("beds", 0)),
 		int(room.get("desks", 0)),
 		int(room.get("doors", 0)),
 		int(room.get("windows", 0)),
-	]
+	])
 
 ## One selected-room detail block.
 ##
@@ -681,36 +722,36 @@ func _format_room_line(room: Dictionary, index: int) -> String:
 func _format_room_detail(room: Dictionary, index: int) -> String:
 	var floor_index := int(room.get("floor", 0))
 	var lines := PackedStringArray([
-		"selected %s · %s · floor %d" % [
+		_i18n.t("base.editor.rooms.detail_selected", [
 			str(room.get("id", "room_%d" % index)),
-			str(room.get("type", "room")),
+			_room_type_label(str(room.get("type", "room"))),
 			floor_index,
-		],
-		"area %.1f m² · volume %.1f m³ · cap +%d · jobs +%d" % [
-			float(room.get("area_m2", 0.0)),
-			float(room.get("volume_m3", 0.0)),
+		]),
+		_i18n.t("base.editor.rooms.detail_metrics", [
+			_num(float(room.get("area_m2", 0.0))),
+			_num(float(room.get("volume_m3", 0.0))),
 			int(room.get("beds", 0)),
 			int(room.get("desks", 0)),
-		],
+		]),
 	])
 	var bounds: PackedFloat32Array = room.get("bounds_m", PackedFloat32Array())
 	if bounds.size() >= 4:
-		lines.append("bounds x %.1f-%.1f m · z %.1f-%.1f m · y %.1f-%.1f m" % [
-			bounds[0], bounds[2],
-			bounds[1], bounds[3],
-			floor_index * FLOOR_BAND_M,
-			(floor_index + 1) * FLOOR_BAND_M,
-		])
+		lines.append(_i18n.t("base.editor.rooms.detail_bounds", [
+			_num(bounds[0]), _num(bounds[2]),
+			_num(bounds[1]), _num(bounds[3]),
+			_num(floor_index * FLOOR_BAND_M),
+			_num((floor_index + 1) * FLOOR_BAND_M),
+		]))
 	return "\n".join(lines)
 
 ## Cycle the selected room. `[` steps back, `]` steps forward.
 func _cycle_room(step: int) -> void:
 	if not _room_overlay_on:
-		_set_status("Room view is off (R)")
+		_status("base.editor.status.room_view_off_hint")
 		return
 	var rooms: Array = _room_stats_cache.get("rooms", [])
 	if rooms.is_empty():
-		_set_status("No rooms to select")
+		_status("base.editor.status.no_rooms")
 		return
 	if _selected_room < 0:
 		_selected_room = 0
@@ -720,13 +761,13 @@ func _cycle_room(step: int) -> void:
 	var refreshed_rooms: Array = _room_stats_cache.get("rooms", [])
 	if refreshed_rooms.is_empty():
 		_selected_room = -1
-		_set_status("No rooms to select")
+		_status("base.editor.status.no_rooms")
 		return
 	_selected_room = clampi(_selected_room, 0, refreshed_rooms.size() - 1)
 	var selected: Dictionary = refreshed_rooms[_selected_room]
-	_set_status("Selected %s · %s  ([ ] cycle, R hide)" % [
+	_status("base.editor.status.room_selected", [
 		str(selected.get("id", "room_%d" % _selected_room)),
-		str(selected.get("type", "room")),
+		_room_type_label(str(selected.get("type", "room"))),
 	])
 
 func _build_shell() -> void:
@@ -823,16 +864,19 @@ func _build_ui() -> void:
 	_status_label.offset_bottom = -16.0
 	_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 
-	var help := _add_label(ui, Control.PRESET_BOTTOM_LEFT)
-	help.offset_left = 16.0
-	help.offset_right = 620.0
-	help.offset_top = -96.0
-	help.offset_bottom = -16.0
-	help.text = "\n".join(PackedStringArray([
-		"WASD move   Space/Ctrl up/down   Shift boost   Esc release mouse",
-		"Left click remove   Right click place   Keys 1-5 select material",
-		"R room view   [ ] select room   Ctrl+Z undo   Ctrl+Y redo   F5 save   F9 load",
-	]))
+	_language_label = _add_label(ui, Control.PRESET_TOP_LEFT)
+	_language_label.offset_left = 16.0
+	_language_label.offset_right = 420.0
+	_language_label.offset_top = 168.0
+	_language_label.offset_bottom = 196.0
+	_language_label.add_theme_font_size_override("font_size", 14)
+
+	_help_label = _add_label(ui, Control.PRESET_BOTTOM_LEFT)
+	_help_label.offset_left = 16.0
+	_help_label.offset_right = 720.0
+	_help_label.offset_top = -96.0
+	_help_label.offset_bottom = -16.0
+	_help_label.add_theme_font_size_override("font_size", 14)
 
 	_build_room_panel(ui)
 
@@ -847,22 +891,16 @@ func _build_ui() -> void:
 
 	_blueprint_name = LineEdit.new()
 	_blueprint_name.text = DEFAULT_BLUEPRINT_NAME
-	_blueprint_name.placeholder_text = "Blueprint name"
 	_blueprint_name.custom_minimum_size = Vector2(220.0, 0.0)
-	_blueprint_name.tooltip_text = "Name used for the saved .tsbp package"
 	blueprint_bar.add_child(_blueprint_name)
 
-	var save_button := Button.new()
-	save_button.text = "Save"
-	save_button.tooltip_text = "Save the current volume (F5)"
-	save_button.pressed.connect(_open_save_dialog)
-	blueprint_bar.add_child(save_button)
+	_save_button = Button.new()
+	_save_button.pressed.connect(_open_save_dialog)
+	blueprint_bar.add_child(_save_button)
 
-	var load_button := Button.new()
-	load_button.text = "Load"
-	load_button.tooltip_text = "Load a .tsbp package (F9)"
-	load_button.pressed.connect(_open_load_dialog)
-	blueprint_bar.add_child(load_button)
+	_load_button = Button.new()
+	_load_button.pressed.connect(_open_load_dialog)
+	blueprint_bar.add_child(_load_button)
 
 	var directory_error := DirAccess.make_dir_recursive_absolute(
 		ProjectSettings.globalize_path(BLUEPRINT_DIR))
@@ -871,10 +909,8 @@ func _build_ui() -> void:
 			BLUEPRINT_DIR, error_string(directory_error)])
 
 	_save_dialog = FileDialog.new()
-	_save_dialog.title = "Save Blueprint"
 	_save_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
 	_save_dialog.access = FileDialog.ACCESS_USERDATA
-	_save_dialog.filters = PackedStringArray(["*.%s ; Townsmith Blueprint" % BLUEPRINT_EXT])
 	_save_dialog.current_dir = BLUEPRINT_DIR
 	_save_dialog.use_native_dialog = false
 	_save_dialog.file_selected.connect(_on_save_file_selected)
@@ -882,10 +918,8 @@ func _build_ui() -> void:
 	add_child(_save_dialog)
 
 	_load_dialog = FileDialog.new()
-	_load_dialog.title = "Load Blueprint"
 	_load_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
 	_load_dialog.access = FileDialog.ACCESS_USERDATA
-	_load_dialog.filters = PackedStringArray(["*.%s ; Townsmith Blueprint" % BLUEPRINT_EXT])
 	_load_dialog.current_dir = BLUEPRINT_DIR
 	_load_dialog.use_native_dialog = false
 	_load_dialog.file_selected.connect(_on_load_file_selected)
@@ -925,29 +959,29 @@ func _select_material(id: int) -> void:
 	_update_palette_label()
 	var material_name := _material_name(id)
 	print("Editor material: %d %s" % [id, material_name])
-	_set_status("Material %d: %s" % [id, material_name])
+	_status("base.editor.status.material_selected", [id, material_name])
 
 func _select_prop(kind: int) -> void:
 	_active_prop = kind
 	_update_palette_label()
 	var name := _prop_name(kind)
 	print("Editor prop: %d %s" % [kind, name])
-	_set_status("Prop: %s  (right click place, left click remove)" % name)
+	_status("base.editor.status.prop_selected", [name])
 
 func _update_palette_label() -> void:
 	if _palette_label == null:
 		return
-	var lines := PackedStringArray(["Materials  (keys 1-5)"])
+	var lines := PackedStringArray([_i18n.t("base.editor.palette.materials")])
 	for entry in MATERIALS:
 		var id := int(entry["id"])
 		var marker := ">" if id == _active_material and _active_prop < 0 else " "
-		lines.append("%s %d  %s" % [marker, id, str(entry["name"])])
-	lines.append("Props  (keys 6-9)")
+		lines.append("%s %d  %s" % [marker, id, _material_name(id)])
+	lines.append(_i18n.t("base.editor.palette.props"))
 	for index in PROPS.size():
 		var entry: Dictionary = PROPS[index]
 		var kind := int(entry["kind"])
 		var marker := ">" if kind == _active_prop else " "
-		lines.append("%s %d  %s" % [marker, 6 + index, str(entry["name"])])
+		lines.append("%s %d  %s" % [marker, 6 + index, _prop_name(kind)])
 	_palette_label.text = "\n".join(lines)
 
 func _refresh_stats_label(build_ms: float = -1.0) -> void:
@@ -956,37 +990,87 @@ func _refresh_stats_label(build_ms: float = -1.0) -> void:
 	var stats: Dictionary = _core.editor_volume_stats()
 	var text := _format_stats(stats)
 	if build_ms >= 0.0:
-		text += "\nbuild=%.1f ms  builds=%d" % [build_ms, int(stats.get("mesh_builds", 0))]
+		text += "\n" + _i18n.t("base.editor.stats.build", [
+			_num(build_ms), int(stats.get("mesh_builds", 0))])
 	elif _remesh_pending:
-		text += "\nremesh pending..."
+		text += "\n" + _i18n.t("base.editor.stats.remesh_pending")
 	_stats_label.text = text
 
 func _format_stats(stats: Dictionary) -> String:
-	return "solid=%d  quads=%d  mesh=%.1f ms\nchunks=%d  volume=%.1f x %.1f x %.1f m" % [
+	return _i18n.t("base.editor.stats.solid_quads", [
 		int(stats.get("solid_voxels", 0)),
 		int(stats.get("last_mesh_quads", 0)),
-		float(stats.get("mesh_ms", 0.0)),
+		_num(float(stats.get("mesh_ms", 0.0))),
+	]) + "\n" + _i18n.t("base.editor.stats.chunks_volume", [
 		int(stats.get("allocated_chunks", 0)),
-		_volume_bounds.x,
-		_volume_bounds.y,
-		_volume_bounds.z,
-	]
+		_num(_volume_bounds.x), _num(_volume_bounds.y), _num(_volume_bounds.z),
+	])
 
 func _set_status(text: String) -> void:
 	if _status_label != null:
 		_status_label.text = text
 
+func _status(key: String, params = []) -> void:
+	_set_status(_i18n.t(key, params))
+
+func _num(value: float) -> String:
+	var text := "%.1f" % value
+	return text.replace(".", ",") if _i18n.locale() == "de" else text
+
+func _apply_locale(update_status: bool = true) -> void:
+	if get_window() != null:
+		get_window().title = _i18n.t("base.editor.window.title")
+	if _language_label != null:
+		_language_label.text = _i18n.t("base.editor.hud.language", [_i18n.locale_name()])
+	if _help_label != null:
+		_help_label.text = "\n".join(PackedStringArray([
+			_i18n.t("base.editor.help.move"),
+			_i18n.t("base.editor.help.edit"),
+			_i18n.t("base.editor.help.tools"),
+		]))
+	if _blueprint_name != null:
+		_blueprint_name.placeholder_text = _i18n.t("base.editor.blueprint.name_placeholder")
+		_blueprint_name.tooltip_text = _i18n.t("base.editor.blueprint.name_tooltip")
+	if _save_button != null:
+		_save_button.text = _i18n.t("base.editor.blueprint.save")
+		_save_button.tooltip_text = _i18n.t("base.editor.blueprint.save_tooltip")
+	if _load_button != null:
+		_load_button.text = _i18n.t("base.editor.blueprint.load")
+		_load_button.tooltip_text = _i18n.t("base.editor.blueprint.load_tooltip")
+	if _save_dialog != null:
+		_save_dialog.title = _i18n.t("base.editor.blueprint.save_title")
+		_save_dialog.filters = PackedStringArray([
+			_i18n.t("base.editor.blueprint.filter", [BLUEPRINT_EXT])])
+	if _load_dialog != null:
+		_load_dialog.title = _i18n.t("base.editor.blueprint.load_title")
+		_load_dialog.filters = PackedStringArray([
+			_i18n.t("base.editor.blueprint.filter", [BLUEPRINT_EXT])])
+	_update_palette_label()
+	_refresh_stats_label()
+	if _room_overlay_on:
+		_rebuild_room_overlay()
+	elif _room_panel != null and _room_panel.visible:
+		_refresh_room_panel()
+	if update_status:
+		_status("base.editor.status.language", [_i18n.locale_name()])
+
+func _toggle_locale() -> void:
+	_i18n.toggle()
+	_apply_locale()
+
 func _material_name(id: int) -> String:
 	for entry in MATERIALS:
 		if int(entry["id"]) == id:
-			return str(entry["name"])
-	return "unknown"
+			var key := "base.editor.material.%s" % str(entry["name"])
+			return _i18n.t(key) if _i18n.has_key(key) else str(entry["name"])
+	return _i18n.t("base.editor.generic.unknown")
 
 func _prop_name(kind: int) -> String:
 	for entry in PROPS:
 		if int(entry["kind"]) == kind:
-			return str(entry["name"])
-	return "prop"
+			var key := "base.editor.prop.%s" % str(entry["name"])
+			return _i18n.t(key) if _i18n.has_key(key) else str(entry["name"])
+	return _i18n.t("base.editor.generic.prop")
 
 func _world_to_cell(world: Vector3) -> Vector3i:
 	var local := (world - _volume_origin) / _voxel_size_m
@@ -1033,16 +1117,17 @@ func _restore_mouse_after_dialog() -> void:
 func _save_blueprint(path: String) -> bool:
 	var name := _blueprint_name.text.strip_edges()
 	if name.is_empty():
-		_set_status("Blueprint name is empty")
+		_status("base.editor.status.blueprint_name_empty")
 		return false
 	var id := "local:%s" % _slug(name)
 	var result: Dictionary = _core.editor_save_blueprint(
 		ProjectSettings.globalize_path(path), id, name)
 	if not bool(result.get("ok", false)):
-		_set_status("Save failed: %s" % str(result.get("error", "unknown error")))
-		push_error("Blueprint save failed: %s" % str(result.get("error", "unknown error")))
+		var error := str(result.get("error", _i18n.t("base.editor.generic.unknown_error")))
+		_status("base.editor.status.save_failed", [error])
+		push_error("Blueprint save failed: %s" % error)
 		return false
-	_set_status("Saved %s  hash=%s" % [name, _short_hash(str(result.get("hash", "")))])
+	_status("base.editor.status.saved", [name, _short_hash(str(result.get("hash", "")))])
 	print("BLUEPRINT_SAVED path=%s hash=%s solid=%d" % [
 		str(result.get("path", path)),
 		str(result.get("hash", "")),
@@ -1054,8 +1139,9 @@ func _save_blueprint(path: String) -> bool:
 func _load_blueprint(path: String) -> bool:
 	var result: Dictionary = _core.editor_load_blueprint(ProjectSettings.globalize_path(path))
 	if not bool(result.get("ok", false)):
-		_set_status("Load failed: %s" % str(result.get("error", "unknown error")))
-		push_error("Blueprint load failed: %s" % str(result.get("error", "unknown error")))
+		var error := str(result.get("error", _i18n.t("base.editor.generic.unknown_error")))
+		_status("base.editor.status.load_failed", [error])
+		push_error("Blueprint load failed: %s" % error)
 		return false
 	var bounds: PackedFloat32Array = result.get("bounds", PackedFloat32Array())
 	if bounds.size() == 3:
@@ -1074,8 +1160,9 @@ func _load_blueprint(path: String) -> bool:
 	_rebuild_volume_mesh()
 	_refresh_prop_nodes()
 	_update_palette_label()
-	_set_status("Loaded %s  hash=%s" % [
-		str(result.get("name", "blueprint")), _short_hash(str(result.get("hash", "")))])
+	_status("base.editor.status.loaded", [
+		str(result.get("name", _i18n.t("base.editor.generic.blueprint"))),
+		_short_hash(str(result.get("hash", "")))])
 	print("BLUEPRINT_LOADED path=%s hash=%s solid=%d rooms=%d" % [
 		str(result.get("path", path)),
 		str(result.get("hash", "")),
@@ -1100,6 +1187,85 @@ func _slug(text: String) -> String:
 		cleaned = cleaned.replace("__", "_")
 	cleaned = cleaned.trim_prefix("_").trim_suffix("_")
 	return cleaned if not cleaned.is_empty() else "blueprint"
+
+## Headless localization contract.
+##
+## Checks EN/DE key parity, placeholder parity, required content/room keys,
+## toggle behavior, and representative rendered strings. Runs before the core
+## is created so it can test the string table alone.
+func _run_locale_smoke() -> void:
+	var status := "ok"
+	var en := EditorI18n.new("en")
+	var de := EditorI18n.new("de")
+	var en_keys := en.keys("en")
+	var de_keys := de.keys("de")
+	if en_keys.size() != de_keys.size():
+		status = "key_count"
+	elif not en.missing_keys("en", "de").is_empty():
+		status = "missing_de"
+	elif not de.missing_keys("de", "en").is_empty():
+		status = "missing_en"
+
+	var required := [
+		"base.editor.status.saved",
+		"base.editor.status.loaded",
+		"base.editor.rooms.line",
+		"base.editor.rooms.detail_bounds",
+		"base.editor.material.timber",
+		"base.editor.prop.bed",
+		"base.editor.room_type.bedroom",
+		"base.editor.room_type.kitchen",
+		"base.editor.room_type.bathroom",
+		"base.editor.room_type.office",
+		"base.editor.room_type.living_dining",
+		"base.editor.room_type.empty",
+	]
+	for key in required:
+		if status == "ok" and not en.has_key(key, "en"):
+			status = "en:" + key
+		elif status == "ok" and not de.has_key(key, "de"):
+			status = "de:" + key
+
+	if status == "ok":
+		for key in en_keys:
+			if EditorI18n.placeholders(en.raw(key, "en")) != EditorI18n.placeholders(de.raw(key, "de")):
+				status = "placeholders:" + key
+				break
+
+	if status == "ok" and en.t("base.editor.missing") != "!base.editor.missing!":
+		status = "missing_marker"
+	if status == "ok" and de.t("base.editor.room_type.bedroom") != "Schlafzimmer":
+		status = "german_room"
+
+	var toggle := EditorI18n.new("en")
+	toggle.toggle()
+	if status == "ok" and toggle.locale() != "de":
+		status = "toggle_de"
+	toggle.toggle()
+	if status == "ok" and toggle.locale() != "en":
+		status = "toggle_en"
+
+	if status == "ok":
+		var samples := PackedStringArray([
+			en.t("base.editor.status.removed", ["timber", "(1, 2, 3)"]),
+			en.t("base.editor.status.saved", ["River House", "blake3:abc"]),
+			en.t("base.editor.rooms.line", ["", "room_0", "bedroom", 0, "20.2", 1, 0, 4, 8]),
+			en.t("base.editor.rooms.detail_bounds", ["0.1", "3.9", "0.1", "3.9", "0.0", "3.0"]),
+			de.t("base.editor.status.removed", ["Holz", "(1, 2, 3)"]),
+			de.t("base.editor.status.saved", ["Haus", "blake3:abc"]),
+			de.t("base.editor.rooms.line", ["", "room_0", "Schlafzimmer", 0, "20,2", 1, 0, 4, 8]),
+			de.t("base.editor.rooms.detail_bounds", ["0,1", "3,9", "0,1", "3,9", "0,0", "3,0"]),
+		])
+		for sample in samples:
+			if sample.contains("!") or sample.contains("{"):
+				status = "render"
+				break
+
+	if status == "ok":
+		print("LOCALE_SMOKE en=ok de=ok keys=%d status=ok" % en_keys.size())
+	else:
+		print("LOCALE_SMOKE en=fail de=fail keys=0 status=%s" % status)
+	get_tree().quit(0 if status == "ok" else 1)
 
 ## Headless blueprint save/load contract.
 ##
@@ -1179,6 +1345,9 @@ func _run_blueprint_smoke() -> void:
 		status,
 	])
 	get_tree().quit(0 if status == "ok" else 1)
+
+func _is_locale_smoke() -> bool:
+	return OS.get_cmdline_user_args().has("--locale-smoke")
 
 func _is_editor_smoke() -> bool:
 	return OS.get_cmdline_user_args().has("--editor-smoke")
