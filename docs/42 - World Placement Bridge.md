@@ -31,7 +31,7 @@ tags:
 | `world_clear_placements()` | `bool` | Clear placements; keep the seed |
 | `world_remove_placement(id)` | `bool` | Remove one placement |
 | `world_save(path)` | `Dictionary` | Write world JSON atomically |
-| `world_load(path)` | `Dictionary` | Read JSON, verify structure and every blueprint package |
+| `world_load(path, expected_seed)` | `Dictionary` | Read JSON for one seed, verify structure and every package, replace the store |
 | `world_height_at(seed, x, z)` | `float` | One terrain sample for the preview; `-1.0` on invalid input |
 
 `x` and `z` are the **centre** of the rotated footprint in world metres. The blueprint mesh is volume-local with its minimum corner at `(0, 0, 0)`; a renderer offsets it by `-bounds_m / 2` on X/Z, then rotates around Y. `rotation` is normalized to 0/90/180/270.
@@ -97,7 +97,7 @@ The sampler uses `WorldGenerator::height_at` on the 1 m grid, not the currently 
 - duplicate placement ids;
 - records whose footprint does not match bounds + rotation, or whose foundation, height, centre, or cost is inconsistent;
 - a missing package, an invalid/relative package path, a package whose content hash differs from the placement record, or a package whose id/name/bounds/capacity/jobs do not match the record;
-- a load with a different seed than the active store.
+- a load whose seed differs from `expected_seed` (and from the active store).
 
 The current store is only replaced after the whole file and every package have passed. A failed load leaves the current store untouched.
 
@@ -136,10 +136,10 @@ The scene has its own smoke:
 GODOT=/path/to/godot ./scripts/smoke_world_scene.sh
 ```
 
-`WORLD_SCENE` exercises the green/red ghost, water rejection, placing at the fixture site, save/load, and rebuilding the placed node. Recorded marker:
+`WORLD_SCENE` exercises the green/red ghost, water rejection, a 90° ghost rotation, placing at the fixture site, save/load, rebuilding the placed node and foundation, and a failed load leaving the scene untouched. Recorded marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok place=ok save=ok load=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok place=ok save=ok load=ok guard=ok status=ok
 ```
 
 ## 5. Scene
@@ -149,9 +149,9 @@ WORLD_SCENE rooms=4 preview=ok water=ok place=ok save=ok load=ok status=ok
 - Streams a 3 × 3 terrain ring around a fly camera (`editor_camera.gd`).
 - The target is 24 m ahead of the camera on the horizontal plane, snapped to the 1 m grid.
 - The ghost is a `Node3D` pivot with the blueprint mesh offset by `-bounds_m / 2` on X/Z. It is green when validation passes and red with the error code when it fails.
-- A transparent foundation box previews `footprint_m × foundation_m`.
+- A transparent foundation box previews the unrotated blueprint footprint × `foundation_m`; the pivot carries the rotation.
 - `R` rotates 90°, left click places, `Delete` clears, `F5` saves, `F9` loads, `Esc` releases the mouse, and left click recaptures it.
-- Placed buildings are rebuilt from the `.tsbp`; each has a mesh child and a foundation box. The scene does not cache scenes.
+- Placed buildings are rebuilt from the `.tsbp`; each has a mesh child, plus a foundation box when `foundation_m > 0`. The scene does not cache scenes.
 - Validation runs when the 1 m target cell or rotation changes, not every frame. The ghost y comes from the validated centre; an invalid ghost sits on the sampled terrain.
 - The default blueprint is generated once from the shared acceptance house at `user://world_placement/acceptance_house.tsbp`; `--blueprint <absolute.tsbp>` overrides it. The default save is `user://world_placement/world.json`; `--world-save <absolute.json>` overrides it.
 

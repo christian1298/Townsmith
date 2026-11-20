@@ -178,7 +178,7 @@ The foundation is a visual box from `min_height` to `center.y` in 2A. Real terra
 | `world_clear_placements()` | `bool` | Remove all placements |
 | `world_remove_placement(id)` | `bool` | Remove one |
 | `world_save(path)` | `Dictionary` | Write JSON atomically; `ok`, `path`, `seed`, `count`, `checksum` |
-| `world_load(path)` | `Dictionary` | Read JSON, verify seed, packages, and metadata, replace the store; `ok`, `path`, `seed`, `count`, `checksum` |
+| `world_load(path, expected_seed)` | `Dictionary` | Read JSON for one seed, verify packages and metadata, replace the store; `ok`, `path`, `seed`, `count`, `checksum` |
 | `world_height_at(seed, x, z)` | `float` | One terrain sample for the preview/foundation |
 
 `world_load` fails with a readable error if the file is malformed, the format version is unknown, the active world seed is known and differs, or a referenced blueprint is missing or has a different hash. It never partially replaces the current store.
@@ -227,7 +227,7 @@ WORLD_PLACEMENT rooms=4 capacity=2 cost=38028.80 placements=1 foundation=1.0 che
 ### Godot
 
 - `smoke_world_placement.sh` as above.
-- `smoke_world_scene.sh` verifies the scene ghost, water rejection, placement, save/load, and node rebuild.
+- `smoke_world_scene.sh` verifies the scene ghost, water rejection, 90° rotation, placement, save/load, and node/foundation rebuild.
 - `smoke_godot.sh` remains the streaming regression.
 - `smoke_acceptance.sh` remains the editor/blueprint regression.
 

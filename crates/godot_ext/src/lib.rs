@@ -1002,9 +1002,15 @@ impl TownsmithCore {
         result
     }
 
-    /// Read a world placement save and verify its blueprint packages.
+    /// Read a world placement save for `expected_seed` and verify its packages.
     #[func]
-    fn world_load(&self, path: GString) -> VarDictionary {
+    fn world_load(&self, path: GString, expected_seed: i64) -> VarDictionary {
+        let expected_seed = match u64::try_from(expected_seed) {
+            Ok(seed) => seed,
+            Err(_) => {
+                return placement_simple_error("invalid_seed", "world seed must be non-negative")
+            }
+        };
         let path = match world_save_path_from_arg(&path.to_string()) {
             Ok(path) => path,
             Err(error) => return placement_simple_error("invalid_save_path", error),
@@ -1030,6 +1036,15 @@ impl TownsmithCore {
             Ok(store) => store,
             Err(error) => return placement_error_result(&error),
         };
+        if store.seed != expected_seed {
+            return placement_simple_error(
+                "seed_mismatch",
+                format!(
+                    "save uses seed {} but this world is {expected_seed}",
+                    store.seed
+                ),
+            );
+        }
         for placement in &store.placements {
             let package_path = match blueprint_path_from_arg(&placement.blueprint_path) {
                 Ok(path) => path,

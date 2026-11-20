@@ -122,6 +122,9 @@ func _resolve_paths() -> void:
 		save_path = user_dir.path_join(DEFAULT_SAVE)
 	else:
 		save_path = _absolute_arg(save_path)
+	var save_dir := save_path.get_base_dir()
+	if save_dir != "":
+		DirAccess.make_dir_recursive_absolute(save_dir)
 	blueprint_path = _arg_value("--blueprint")
 	if blueprint_path == "":
 		blueprint_path = user_dir.path_join(DEFAULT_BLUEPRINT)
@@ -290,14 +293,16 @@ func _refresh_preview(force: bool) -> void:
 	var y := ground
 	var foundation := 0.0
 	var footprint := Vector2(1.0, 1.0)
+	var local_bounds: PackedFloat32Array = blueprint_info.get("bounds", PackedFloat32Array())
+	if local_bounds.size() == 3:
+		# The ghost pivot is rotated, so the foundation box must use the
+		# unrotated blueprint footprint; `footprint_m` is already world-axis.
+		footprint = Vector2(local_bounds[0], local_bounds[2])
 	if preview_valid:
 		var center: PackedFloat32Array = preview_validation.get("center", PackedFloat32Array())
 		if center.size() == 3:
 			y = center[1]
 		foundation = float(preview_validation.get("foundation_m", 0.0))
-		var fp: PackedFloat32Array = preview_validation.get("footprint", PackedFloat32Array())
-		if fp.size() == 2:
-			footprint = Vector2(fp[0], fp[1])
 
 	ghost.position = Vector3(target_x, y, target_z)
 	ghost.rotation_degrees = Vector3(0.0, float(rotation_deg), 0.0)
@@ -380,7 +385,7 @@ func _add_placement_node(placement: Dictionary) -> void:
 	var foundation := float(placement.get("foundation_m", 0.0))
 	if foundation > 0.001:
 		var box := BoxMesh.new()
-		box.size = Vector3(footprint[0], foundation, footprint[1])
+		box.size = Vector3(bounds[0], foundation, bounds[2])
 		var foundation_node := MeshInstance3D.new()
 		foundation_node.mesh = box
 		foundation_node.position = Vector3(0.0, -foundation * 0.5, 0.0)
@@ -399,28 +404,41 @@ func _clear_placements() -> void:
 	_clear_placed_nodes()
 	core.world_clear_placements()
 	_set_modal("", false)
+	_refresh_preview(true)
 	_update_hud()
 
-func _save_world() -> void:
+func _save_world() -> bool:
 	var result: Dictionary = core.world_save(save_path)
-	if bool(result.get("ok", false)):
+	var ok := bool(result.get("ok", false))
+	if ok:
 		_set_modal("Saved %d placement(s) to %s" % [core.world_placement_count(), save_path], false)
 	else:
 		_set_modal("Save failed: " + str(result.get("error_code", result.get("error", ""))), true)
 	_update_hud()
+	return ok
 
-func _load_world() -> void:
-	var result: Dictionary = core.world_load(save_path)
+func _load_world() -> bool:
+	var result: Dictionary = core.world_load(save_path, SEED)
 	if not bool(result.get("ok", false)):
 		_set_modal("Load failed: " + str(result.get("error_code", result.get("error", ""))), true)
 		_update_hud()
-		return
+		return false
 	_clear_placed_nodes()
 	var state: Dictionary = core.world_placements()
 	for placement in state.get("placements", []):
 		_add_placement_node(placement)
+	if placed_nodes.size() != int(state.get("count", -1)):
+		_set_modal(
+			"Loaded %d placement(s) but rebuilt %d" % [
+				core.world_placement_count(), placed_nodes.size()
+			],
+			true
+		)
+		_update_hud()
+		return false
 	_set_modal("Loaded %d placement(s) from %s" % [core.world_placement_count(), save_path], false)
 	_refresh_preview(true)
+	return true
 
 func _set_modal(message: String, is_error: bool) -> void:
 	if modal_label == null:
@@ -431,12 +449,26 @@ func _set_modal(message: String, is_error: bool) -> void:
 		"font_color", Color(1.0, 0.55, 0.35) if is_error else Color(0.75, 1.0, 0.75)
 	)
 
+func _foundation_matches_bounds(node: Node) -> bool:
+	if node.get_child_count() < 2:
+		return false
+	var foundation_node := node.get_child(1) as MeshInstance3D
+	if foundation_node == null or not (foundation_node.mesh is BoxMesh):
+		return false
+	var box := foundation_node.mesh as BoxMesh
+	var bounds: PackedFloat32Array = blueprint_info.get("bounds", PackedFloat32Array())
+	if bounds.size() != 3:
+		return false
+	return absf(box.size.x - bounds[0]) < 0.001 and absf(box.size.z - bounds[2]) < 0.001
+
 func _run_scene_smoke() -> void:
 	var status := "ok"
 	var preview_ok := false
 	var water_ok := false
+	var rotation_ok := false
 	var place_ok := false
 	var save_ok := false
+	var clear_ok := false
 	var load_ok := false
 	var rooms := int(blueprint_info.get("rooms", -1))
 
@@ -455,40 +487,64 @@ func _run_scene_smoke() -> void:
 	if not water_ok and status == "ok":
 		status = "water_failed:" + preview_error
 
+	rotation_deg = 90
 	target_x = FIXTURE_X
 	target_z = FIXTURE_Z
 	_refresh_preview(true)
-	place_ok = _place_at_target() and core.world_placement_count() == 1 and placed_root.get_child_count() == 1 and placed_root.get_child(0).get_child_count() == 2
+	rotation_ok = preview_valid and absf(ghost.rotation_degrees.y - 90.0) < 0.001
+	if not rotation_ok and status == "ok":
+		status = "rotation_failed:" + preview_error
+
+	place_ok = _place_at_target() and core.world_placement_count() == 1 and placed_root.get_child_count() == 1
+	if place_ok:
+		var node := placed_root.get_child(0)
+		place_ok = absf(node.rotation_degrees.y - 90.0) < 0.001 and _foundation_matches_bounds(node)
 	if not place_ok and status == "ok":
 		status = "place_failed:" + preview_error
 
 	if status == "ok":
-		_save_world()
-		save_ok = FileAccess.file_exists(save_path)
+		save_ok = _save_world()
 		if not save_ok:
 			status = "save_failed"
 
 	if status == "ok":
 		_clear_placements()
-		load_ok = core.world_placement_count() == 0 and placed_root.get_child_count() == 0
-		if not load_ok:
+		clear_ok = core.world_placement_count() == 0 and placed_root.get_child_count() == 0
+		if not clear_ok:
 			status = "clear_failed"
 		else:
-			_load_world()
-			load_ok = core.world_placement_count() == 1 and placed_root.get_child_count() == 1 and placed_root.get_child(0).get_child_count() == 2
+			load_ok = _load_world() and core.world_placement_count() == 1 and placed_root.get_child_count() == 1
+			if load_ok:
+				var node := placed_root.get_child(0)
+				load_ok = absf(node.rotation_degrees.y - 90.0) < 0.001 and _foundation_matches_bounds(node)
 			if not load_ok:
 				status = "load_failed"
+
+	if status == "ok":
+		# A failed load must leave the active store and placed nodes alone.
+		var before_failed_load := placed_root.get_child_count()
+		var blueprint_backup := blueprint_path + ".bak"
+		if DirAccess.rename_absolute(blueprint_path, blueprint_backup) != OK:
+			status = "load_guard_backup_failed"
+		else:
+			var failed_load := _load_world()
+			if failed_load or core.world_placement_count() != 1 or placed_root.get_child_count() != before_failed_load:
+				status = "load_failure_changed_scene"
+			if DirAccess.rename_absolute(blueprint_backup, blueprint_path) != OK:
+				status = "load_guard_restore_failed"
 
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s place=%s save=%s load=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s place=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
+		"ok" if rotation_ok else "failed",
 		"ok" if place_ok else "failed",
 		"ok" if save_ok else "failed",
 		"ok" if load_ok else "failed",
+		"ok" if status == "ok" else "failed",
 		status,
 	])
 	get_tree().quit(0 if status == "ok" else 1)
