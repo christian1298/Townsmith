@@ -30,7 +30,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 
 | Item | State |
 |---|---|
-| Phase | **Phase 1 vertical slice** — technical acceptance passed; 30-minute playtest open (Q-101) |
+| Phase | **Phase 1** technical acceptance passed (30-minute playtest open, Q-101); **Phase 2** first slice planned in [[41 - Phase 2 Slice Plan]] |
 | Code | **Vertical slice:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, chunked editable volume + cross-chunk meshing, 52 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, seam-aware terrain mesh + LOD + skirts, 58 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `core_city` (synthetic Early/Mid/Late layouts, 10 tests), `core_blueprint` (`.tsbp` v1 packages + material cost, 11 tests), `core_rooms` (room detection + shared acceptance house, 12 tests + 1 doctest), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, a Godot 4.7 GDExtension bridge with terrain workers, city layout, editable volume, blueprint, copy-mesh, and acceptance APIs (16 bridge tests), a MultiMesh city renderer, a 200-instance voxel-hut route, a first-person editor with `VOLUME_SMOKE`, `EDITOR_SMOKE`, `ROOM_OVERLAY_SMOKE`, `UNDO_SMOKE`, `BLUEPRINT_SMOKE`, `LOCALE_SMOKE`, `LAYOUT_SMOKE`, and `SLICE_ACCEPTANCE` paths. Headless smoke passes. |
 | Engine | **Accepted:** Godot 4 shell + Rust core via GDExtension. The Phase 0 spike passed; the 3060-class 1M 30 FPS gate remains open for Phase 5. See [[04 - Engine and Stack]] and [[10 - Decisions]]. |
 | Team | **Accepted:** 2–3 full-time generalists; Rust/Godot experience or willingness to learn. |
@@ -47,7 +47,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with real 10 cm building detail is tractable. The box-city MultiMesh path is measured well above target on an RTX 4080; the target 3060-class run and voxel building LOD remain. See [[03 - Voxel and Scale]], [[23 - City Rendering Benchmark]], and [[09 - Open Questions]]. |
-| Next action | Record the 30-minute slice playtest (Q-101), then start Phase 2 planning. Technical acceptance and the 21-house result are in [[40 - Slice Acceptance Results]]. Keep the 3060-class 1M gate for Phase 5. |
+| Next action | Record the 30-minute slice playtest (Q-101). Phase 2 planning has started with [[41 - Phase 2 Slice Plan]]: placement validation and world save/load first, then terrain deltas and Mayor Mode. Technical acceptance and the 21-house result are in [[40 - Slice Acceptance Results]]. Keep the 3060-class 1M gate for Phase 5. |
 
 > [!warning] This is a plan, not a commitment
 > Numbers in these docs are **planning targets**, not measured results. Anything marked *Assumption* or *Proposed* must be validated before it becomes an accepted decision.
@@ -58,7 +58,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 |---|---|
 | Understand the game | [[01 - Vision]], [[02 - Game Design]] |
 | Work on voxel tech | [[03 - Voxel and Scale]], [[12 - Technical Architecture]] |
-| Work on worldgen or open-world streaming | [[03 - Voxel and Scale]], [[12 - Technical Architecture]], [[07 - Simulation and AI]] |
+| Work on worldgen or open-world streaming | [[03 - Voxel and Scale]], [[12 - Technical Architecture]], [[07 - Simulation and AI]], [[41 - Phase 2 Slice Plan]] |
 | Work on primary industries or wildlife | [[07 - Simulation and AI]], [[02 - Game Design]] |
 | Validate or change the engine | [[04 - Engine and Stack]], [[10 - Decisions]] |
 | Work on simulation or AI | [[07 - Simulation and AI]], [[02 - Game Design]] |
@@ -154,7 +154,7 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 ## Next actions
 
 1. Run and record the 30-minute slice playtest (Q-101); technical acceptance is complete.
-2. Start Phase 2 planning: open world, build-anywhere placement, Mayor Mode.
+2. Implement the first Phase 2 slice from [[41 - Phase 2 Slice Plan]]: placement validation, world save/load, then terrain deltas and Mayor Mode.
 3. Finish deferred editor work: paint/pick, brushes, selection/copy/rotate/mirror, structural v0, thumbnails, AO/texture arrays.
 4. Keep the 3060-class 1M performance gate open for Phase 5; D-003 is accepted for the architecture.
 5. Write the first content schemas (materials, rooms, props) from [[06 - Modding and Resource Packs]].
