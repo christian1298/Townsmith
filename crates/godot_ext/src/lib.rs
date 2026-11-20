@@ -28,10 +28,10 @@ use core_blueprint::{
 };
 use core_city::{
     normalize_rotation, summarize, CityLayout, CityRuntime, CitySummary, CityTier,
-    ConstructionSite, ConstructionStore, Economy, Home, Lot, LotError, LotRequest, LotStore,
-    Placement, PlacementError, PlacementRequest, PlacementStore, RoadError, RoadRequest,
-    RoadSegment, RoadStore, Settlement, SettlementError, SettlementRequest, SettlementStore,
-    Workplace, Zone, MAX_WORLD_COORD_M,
+    ConstructionSite, ConstructionStore, Economy, Home, IndustryKind, IndustryStore, Lot, LotError,
+    LotRequest, LotStore, Placement, PlacementError, PlacementRequest, PlacementStore, RoadError,
+    RoadRequest, RoadSegment, RoadStore, Settlement, SettlementError, SettlementRequest,
+    SettlementStore, Workplace, Zone, MAX_WORLD_COORD_M,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -508,6 +508,7 @@ struct TownsmithCore {
     settlements: Mutex<Option<SettlementStore>>,
     population: Mutex<Option<CityRuntime>>,
     economy: Mutex<Option<Economy>>,
+    industry: Mutex<Option<IndustryStore>>,
     terrain_deltas: Arc<RwLock<DeltaStore>>,
     terrain_seed: Mutex<Option<u64>>,
 }
@@ -524,6 +525,7 @@ impl Default for TownsmithCore {
             settlements: Mutex::new(None),
             population: Mutex::new(None),
             economy: Mutex::new(None),
+            industry: Mutex::new(None),
             terrain_deltas: Arc::new(RwLock::new(DeltaStore::new())),
             terrain_seed: Mutex::new(None),
         }
@@ -1709,6 +1711,11 @@ impl TownsmithCore {
             .unwrap_or_else(|error| error.into_inner())
             .as_mut()
             .map(CityRuntime::clear);
+        self.industry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_mut()
+            .map(IndustryStore::clear);
         true
     }
 
@@ -1732,6 +1739,14 @@ impl TownsmithCore {
                 .as_mut()
             {
                 runtime.remove(id);
+            }
+            if let Some(industry) = self
+                .industry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_mut()
+            {
+                industry.remove_site(id);
             }
         }
         removed
@@ -1929,7 +1944,15 @@ impl TownsmithCore {
             );
         }
         let runtime = population.get_or_insert_with(|| CityRuntime::new(seed));
-        let report = runtime.tick_with_workplaces(seconds, &homes, &workplaces);
+        let food_supply = self
+            .industry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .filter(|industry| industry.seed == seed)
+            .map_or(0.0, |industry| industry.food_supply);
+        let report =
+            runtime.tick_with_workplaces_and_supply(seconds, &homes, &workplaces, food_supply);
         let mut result = VarDictionary::new();
         result.set("ok", true);
         result.set("moved_in", i64::from(report.moved_in));
@@ -2198,6 +2221,268 @@ impl TownsmithCore {
         true
     }
 
+    /// Designate a placement as an industry site.
+    ///
+    /// Returns `{ ok, placement_id, kind }`; the placement must exist and have
+    /// at least one job slot.
+    #[func]
+    fn industry_add_site(&self, seed: i64, placement_id: i64, kind: GString) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        let Ok(placement_id) = u64::try_from(placement_id) else {
+            return placement_simple_error(
+                "invalid_placement",
+                "placement id must be non-negative",
+            );
+        };
+        let Some(kind) = IndustryKind::parse(&kind.to_string()) else {
+            return placement_simple_error(
+                "invalid_industry",
+                "industry kind must be lumberjack, farm, or hunt",
+            );
+        };
+        {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(store) = world.as_ref() else {
+                return placement_simple_error("no_world", "no world placement store is open");
+            };
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the placement store belongs to a different seed",
+                );
+            }
+            let Some(placement) = store.placements.iter().find(|item| item.id == placement_id)
+            else {
+                return placement_simple_error("unknown_placement", "no placement has that id");
+            };
+            if placement.job_slots == 0 {
+                return placement_simple_error(
+                    "no_jobs",
+                    "an industry site needs at least one job slot",
+                );
+            }
+        }
+        let mut guard = self
+            .industry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if guard.as_ref().is_some_and(|industry| industry.seed != seed) {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the industry store belongs to a different seed",
+            );
+        }
+        let industry = guard.get_or_insert_with(|| IndustryStore::new(seed));
+        if let Err(error) = industry.add_site(placement_id, kind) {
+            return placement_simple_error("industry_failed", error.to_string());
+        }
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("placement_id", placement_id as i64);
+        result.set("kind", &GString::from(kind.as_str()));
+        result
+    }
+
+    /// Remove one industry site.
+    #[func]
+    fn industry_remove_site(&self, placement_id: i64) -> bool {
+        let Ok(placement_id) = u64::try_from(placement_id) else {
+            return false;
+        };
+        self.industry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_mut()
+            .is_some_and(|industry| industry.remove_site(placement_id))
+    }
+
+    /// Return industry sites, staffing, stockpile, and production.
+    #[func]
+    fn industry_state(&self) -> VarDictionary {
+        let site_ids: BTreeSet<u64> = {
+            let industry = self
+                .industry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            industry.as_ref().map_or_else(BTreeSet::new, |industry| {
+                industry.sites.keys().copied().collect()
+            })
+        };
+        let centers: BTreeMap<u64, [f32; 3]> = {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            world.as_ref().map_or_else(BTreeMap::new, |store| {
+                store
+                    .placements
+                    .iter()
+                    .filter(|placement| site_ids.contains(&placement.id))
+                    .map(|placement| (placement.id, placement.center))
+                    .collect()
+            })
+        };
+        let staffing: BTreeMap<u64, u32> = {
+            let population = self
+                .population
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            population
+                .as_ref()
+                .map_or_else(BTreeMap::new, |runtime| runtime.staffing.clone())
+        };
+        let guard = self
+            .industry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        match guard.as_ref() {
+            Some(industry) => {
+                result.set("open", true);
+                result.set("seed", industry.seed as i64);
+                result.set("site_count", industry.site_count() as i64);
+                result.set("wood", industry.stockpile.wood);
+                result.set("food", industry.stockpile.food);
+                result.set("hides", industry.stockpile.hides);
+                result.set("produced_wood", industry.produced_total.wood);
+                result.set("produced_food", industry.produced_total.food);
+                result.set("produced_hides", industry.produced_total.hides);
+                result.set("food_supply", f64::from(industry.food_supply));
+                let mut sites: Array<VarDictionary> = Array::new();
+                for (&id, site) in &industry.sites {
+                    let mut item = VarDictionary::new();
+                    item.set("placement_id", id as i64);
+                    item.set("kind", &GString::from(site.kind.as_str()));
+                    item.set("produced", site.produced);
+                    item.set(
+                        "workers",
+                        i64::from(staffing.get(&id).copied().unwrap_or(0)),
+                    );
+                    let center = centers.get(&id).copied().unwrap_or([0.0, 40.0, 0.0]);
+                    item.set("center_x", f64::from(center[0]));
+                    item.set("center_y", f64::from(center[1]));
+                    item.set("center_z", f64::from(center[2]));
+                    sites.push(&item);
+                }
+                result.set("sites", &sites.to_variant());
+                result.set(
+                    "checksum",
+                    &GString::from(&format!("{:016x}", industry.checksum())),
+                );
+            }
+            None => {
+                result.set("open", false);
+                result.set("seed", 0);
+                result.set("site_count", 0);
+                result.set("wood", 0.0);
+                result.set("food", 0.0);
+                result.set("hides", 0.0);
+                result.set("produced_wood", 0.0);
+                result.set("produced_food", 0.0);
+                result.set("produced_hides", 0.0);
+                result.set("food_supply", 0.0);
+                result.set("sites", &Array::<VarDictionary>::new().to_variant());
+                result.set("checksum", &GString::from("0000000000000000"));
+            }
+        }
+        result
+    }
+
+    /// Advance industry production and food consumption by `seconds`.
+    #[func]
+    fn industry_tick(&self, seed: i64, seconds: f64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        if !seconds.is_finite() || !(0.0..=core_city::MAX_INDUSTRY_TICK_SECONDS).contains(&seconds)
+        {
+            return placement_simple_error("invalid_delta", "industry delta is outside 0..=86400");
+        }
+        {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(store) = world.as_ref() {
+                if store.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the placement store belongs to a different seed",
+                    );
+                }
+            }
+        }
+        let (staffing, population) = {
+            let runtime = self
+                .population
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            runtime.as_ref().map_or_else(
+                || (BTreeMap::new(), 0),
+                |runtime| (runtime.staffing.clone(), runtime.population()),
+            )
+        };
+        let mut guard = self
+            .industry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(industry) = guard.as_mut() else {
+            let mut result = VarDictionary::new();
+            result.set("ok", true);
+            result.set("open", false);
+            result.set("wood", 0.0);
+            result.set("food", 0.0);
+            result.set("hides", 0.0);
+            result.set("food_consumed", 0.0);
+            result.set("food_supply", 0.0);
+            result.set("workers", 0);
+            result.set("checksum", &GString::from("0000000000000000"));
+            return result;
+        };
+        if industry.seed != seed {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the industry store belongs to a different seed",
+            );
+        }
+        let tick = industry.tick(seconds, &staffing, population);
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("open", true);
+        result.set("wood", tick.wood);
+        result.set("food", tick.food);
+        result.set("hides", tick.hides);
+        result.set("food_consumed", tick.food_consumed);
+        result.set("food_supply", f64::from(tick.food_supply));
+        result.set("workers", tick.workers as i64);
+        result.set("stock_wood", tick.stockpile.wood);
+        result.set("stock_food", tick.stockpile.food);
+        result.set("stock_hides", tick.stockpile.hides);
+        result.set(
+            "checksum",
+            &GString::from(&format!("{:016x}", industry.checksum())),
+        );
+        result
+    }
+
+    /// Stable industry checksum.
+    #[func]
+    fn industry_checksum(&self) -> GString {
+        let guard = self
+            .industry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checksum = guard.as_ref().map_or(0, IndustryStore::checksum);
+        GString::from(&format!("{checksum:016x}"))
+    }
+
+    /// Close the industry store.
+    #[func]
+    fn industry_clear(&self) -> bool {
+        *self
+            .industry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        true
+    }
+
     /// Set the shared crew pool. Values above 64 are rejected.
     #[func]
     fn construction_set_crew(&self, crew_capacity: i64) -> bool {
@@ -2254,7 +2539,7 @@ impl TownsmithCore {
             Ok(path) => path,
             Err(error) => return placement_simple_error("invalid_save_path", error),
         };
-        let (store, construction, roads, lots, settlements, mut population, economy) = {
+        let (store, construction, roads, lots, settlements, mut population, economy, industry) = {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             let construction = self
                 .construction
@@ -2274,6 +2559,10 @@ impl TownsmithCore {
                 .economy
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
+            let industry = self
+                .industry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             (
                 world.as_ref().cloned(),
                 construction.clone(),
@@ -2282,6 +2571,7 @@ impl TownsmithCore {
                 settlements.as_ref().cloned(),
                 population.as_ref().cloned(),
                 economy.as_ref().cloned(),
+                industry.as_ref().cloned(),
             )
         };
         let Some(store) = store else {
@@ -2403,6 +2693,21 @@ impl TownsmithCore {
             }
             None => json,
         };
+        let json = match industry.as_ref() {
+            Some(industry) => {
+                if industry.seed != store.seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the industry store belongs to a different seed",
+                    );
+                }
+                match attach_industry(&json, industry) {
+                    Ok(json) => json,
+                    Err(error) => return placement_simple_error("save_failed", error),
+                }
+            }
+            None => json,
+        };
         if json.len() > MAX_WORLD_SAVE_BYTES as usize {
             return placement_simple_error(
                 "save_too_large",
@@ -2472,6 +2777,17 @@ impl TownsmithCore {
             &GString::from(&format!(
                 "{:016x}",
                 settlements.as_ref().map_or(0, SettlementStore::checksum)
+            )),
+        );
+        result.set(
+            "industry_sites",
+            industry.as_ref().map_or(0, IndustryStore::site_count) as i64,
+        );
+        result.set(
+            "industry_checksum",
+            &GString::from(&format!(
+                "{:016x}",
+                industry.as_ref().map_or(0, IndustryStore::checksum)
             )),
         );
         result.set(
@@ -2597,6 +2913,21 @@ impl TownsmithCore {
                 );
             }
         }
+        let industry = match industry_from_world_json(&json) {
+            Ok(industry) => industry,
+            Err((code, error)) => return placement_simple_error(code, error),
+        };
+        if let Some(industry) = industry.as_ref() {
+            if industry.seed != expected_seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    format!(
+                        "the industry store uses seed {} but this world is {expected_seed}",
+                        industry.seed
+                    ),
+                );
+            }
+        }
         let store = match PlacementStore::from_json(&json) {
             Ok(store) => store,
             Err(error) => return placement_error_result(&error),
@@ -2685,6 +3016,22 @@ impl TownsmithCore {
         if let Err(error) = construction.validate() {
             return placement_simple_error("invalid_construction", error.to_string());
         }
+        if let Some(industry) = industry.as_ref() {
+            for &id in industry.sites.keys() {
+                let Some(placement) = store.placements.iter().find(|item| item.id == id) else {
+                    return placement_simple_error(
+                        "industry_orphan",
+                        format!("industry site {id} has no placement"),
+                    );
+                };
+                if placement.job_slots == 0 {
+                    return placement_simple_error(
+                        "industry_no_jobs",
+                        format!("industry site {id} has no job slots"),
+                    );
+                }
+            }
+        }
         population.sync(&completed_slots(&store, &construction));
         if let Err(error) = population.validate() {
             return placement_simple_error("invalid_population", error.to_string());
@@ -2702,6 +3049,8 @@ impl TownsmithCore {
         let lot_checksum = lots.as_ref().map_or(0, LotStore::checksum);
         let settlement_count = settlements.as_ref().map_or(0, |store| store.count());
         let settlement_checksum = settlements.as_ref().map_or(0, SettlementStore::checksum);
+        let industry_count = industry.as_ref().map_or(0, IndustryStore::site_count);
+        let industry_checksum = industry.as_ref().map_or(0, IndustryStore::checksum);
         let deltas_count = deltas.edit_count();
         let deltas_checksum = deltas.checksum();
         let mut guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
@@ -2731,6 +3080,10 @@ impl TownsmithCore {
             .economy
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let mut industry_guard = self
+            .industry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut deltas_guard = self
             .terrain_deltas
             .write()
@@ -2742,6 +3095,7 @@ impl TownsmithCore {
         *guard = Some(store);
         *population_guard = Some(population);
         *economy_guard = economy;
+        *industry_guard = industry;
         *deltas_guard = deltas;
         *self
             .terrain_seed
@@ -2783,6 +3137,11 @@ impl TownsmithCore {
         result.set(
             "settlement_checksum",
             &GString::from(&format!("{settlement_checksum:016x}")),
+        );
+        result.set("industry_sites", industry_count as i64);
+        result.set(
+            "industry_checksum",
+            &GString::from(&format!("{industry_checksum:016x}")),
         );
         result
     }
@@ -4063,6 +4422,27 @@ fn economy_from_world_json(json: &str) -> Result<Option<Economy>, (&'static str,
     Ok(Some(economy))
 }
 
+fn attach_industry(json: &str, store: &IndustryStore) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    value["industry"] = serde_json::to_value(store).map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+}
+
+fn industry_from_world_json(json: &str) -> Result<Option<IndustryStore>, (&'static str, String)> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| ("invalid_json", error.to_string()))?;
+    let Some(raw) = value.get("industry") else {
+        return Ok(None);
+    };
+    let store: IndustryStore = serde_json::from_value(raw.clone())
+        .map_err(|error| ("invalid_industry", error.to_string()))?;
+    store
+        .validate()
+        .map_err(|error| ("invalid_industry", error.to_string()))?;
+    Ok(Some(store))
+}
+
 fn attach_terrain_deltas(json: &str, bytes: &[u8], checksum: u64) -> Result<String, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(json).map_err(|error| error.to_string())?;
@@ -4835,6 +5215,55 @@ mod tests {
         let json = serde_json::to_string(&serde_json::json!({"economy": economy})).expect("json");
         let error = economy_from_world_json(&json).expect_err("reject");
         assert_eq!(error.0, "invalid_economy");
+    }
+
+    #[test]
+    fn industry_world_json_round_trips_and_old_saves_are_closed() {
+        let mut store = IndustryStore::new(2026);
+        store.add_site(1, IndustryKind::Farm).expect("site");
+        store.add_site(2, IndustryKind::Hunt).expect("site");
+        store.tick(core_city::DAY_SECONDS, &[(1, 10)].into_iter().collect(), 20);
+        let json = attach_industry("{}", &store).expect("attach");
+        let decoded = industry_from_world_json(&json)
+            .expect("parse")
+            .expect("present");
+        assert_eq!(decoded, store);
+        assert!(industry_from_world_json("{}").expect("old save").is_none());
+    }
+
+    #[test]
+    fn industry_world_json_rejects_unknown_kind_and_invalid_stock() {
+        let mut store = IndustryStore::new(2026);
+        store.add_site(1, IndustryKind::Farm).expect("site");
+        let json = attach_industry("{}", &store).expect("attach");
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("value");
+        value["industry"]["sites"]["1"]["kind"] = serde_json::json!("mine");
+        let json = serde_json::to_string(&value).expect("json");
+        assert_eq!(
+            industry_from_world_json(&json).expect_err("reject").0,
+            "invalid_industry"
+        );
+
+        let mut store = IndustryStore::new(2026);
+        store.add_site(1, IndustryKind::Farm).expect("site");
+        store.stockpile.food = -1.0;
+        let json = serde_json::to_string(&serde_json::json!({"industry": store})).expect("json");
+        assert_eq!(
+            industry_from_world_json(&json).expect_err("reject").0,
+            "invalid_industry"
+        );
+    }
+
+    #[test]
+    fn population_staffing_round_trips_in_world_json() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.set_move_in_per_second(2.0);
+        runtime.tick(1.0, 1, &[(1, 1)]);
+        let json = attach_population("{}", &runtime).expect("attach");
+        let decoded = population_from_world_json(&json)
+            .expect("parse")
+            .expect("present");
+        assert_eq!(decoded.staffing, runtime.staffing);
     }
 
     #[test]

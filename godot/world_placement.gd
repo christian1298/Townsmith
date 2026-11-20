@@ -37,6 +37,10 @@ var lot_start := Vector2i(-999999, -999999)
 var settlement_root: Node3D
 var settlement_nodes: Dictionary = {}
 var settlement_material: StandardMaterial3D
+var industry_root: Node3D
+var industry_nodes: Dictionary = {}
+var industry_kinds: Dictionary = {}
+var industry_time := 0.0
 var lot_zone := "residential"
 var selection_box: MeshInstance3D
 var selected_id := -1
@@ -82,6 +86,7 @@ func _ready() -> void:
 	_setup_roads()
 	_setup_lots()
 	_setup_settlements()
+	_setup_industry()
 	if _ensure_blueprint():
 		_refresh_preview(true)
 	else:
@@ -104,6 +109,17 @@ func _process(delta: float) -> void:
 		steps += 1
 	if construction_tick_accum >= 1.0:
 		construction_tick_accum = fmod(construction_tick_accum, 0.25)
+	industry_time += delta
+	for node in industry_nodes.values():
+		if is_instance_valid(node):
+			var base_y := float(node.get_meta("base_y", 0.0))
+			node.position.y = base_y + sin(industry_time * 2.0) * 0.15
+			var spinner = node.get_meta("spinner", null)
+			if spinner != null and is_instance_valid(spinner):
+				spinner.rotation.y += delta * 2.4
+				var worker = spinner.get_child(0) if spinner.get_child_count() > 0 else null
+				if worker != null and is_instance_valid(worker):
+					worker.position.y = 0.8 + absf(sin(industry_time * 3.0)) * 0.35
 	if mode == "mayor" and mayor_camera != null:
 		var ground: float = core.world_height_at(
 			SEED, mayor_camera.target.x, mayor_camera.target.z
@@ -161,6 +177,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					_edit_target(-1)
 				KEY_C:
 					_toggle_crew()
+				KEY_I:
+					_cycle_industry()
 				KEY_V:
 					core.construction_add_materials(10000)
 					_update_hud()
@@ -518,6 +536,114 @@ func _setup_settlements() -> void:
 	settlement_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	settlement_material.albedo_color = Color(0.95, 0.78, 0.2, 0.95)
 
+func _setup_industry() -> void:
+	industry_root = Node3D.new()
+	industry_root.name = "Industry"
+	add_child(industry_root)
+
+func _industry_color(kind: String) -> Color:
+	match kind:
+		"farm":
+			return Color(0.85, 0.75, 0.2)
+		"hunt":
+			return Color(0.7, 0.35, 0.2)
+		_:
+			return Color(0.45, 0.3, 0.15)
+
+func _refresh_industry_visuals() -> void:
+	if industry_root == null:
+		return
+	for node in industry_nodes.values():
+		if is_instance_valid(node):
+			node.free()
+	industry_nodes.clear()
+	industry_kinds.clear()
+	if core == null:
+		return
+	var state: Dictionary = core.industry_state()
+	for site in state.get("sites", []):
+		var id := int(site.get("placement_id", -1))
+		if id < 0:
+			continue
+		var kind := str(site.get("kind", ""))
+		industry_kinds[id] = kind
+		var pivot := Node3D.new()
+		pivot.name = "Industry%d" % id
+		var base_y := float(site.get("center_y", 40.0))
+		pivot.position = Vector3(
+			float(site.get("center_x", 0.0)),
+			base_y,
+			float(site.get("center_z", 0.0))
+		)
+		pivot.set_meta("base_y", base_y)
+		var mesh_instance := MeshInstance3D.new()
+		var box := BoxMesh.new()
+		box.size = Vector3(0.8, 3.0, 0.8)
+		mesh_instance.mesh = box
+		mesh_instance.position.y = 1.7
+		var material := StandardMaterial3D.new()
+		material.albedo_color = _industry_color(kind)
+		material.emission_enabled = true
+		material.emission = _industry_color(kind) * 0.35
+		mesh_instance.material_override = material
+		pivot.add_child(mesh_instance)
+		var spinner := Node3D.new()
+		spinner.name = "WorkerLoop"
+		var worker := MeshInstance3D.new()
+		var worker_box := BoxMesh.new()
+		worker_box.size = Vector3(0.45, 0.9, 0.45)
+		worker.mesh = worker_box
+		worker.position = Vector3(2.0, 0.8, 0.0)
+		var worker_material := StandardMaterial3D.new()
+		worker_material.albedo_color = Color(0.9, 0.9, 0.85)
+		worker.material_override = worker_material
+		spinner.add_child(worker)
+		pivot.add_child(spinner)
+		pivot.set_meta("spinner", spinner)
+		var label := Label3D.new()
+		label.text = kind.capitalize()
+		label.font_size = 40
+		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		label.position.y = 3.9
+		label.modulate = _industry_color(kind)
+		pivot.add_child(label)
+		industry_root.add_child(pivot)
+		industry_nodes[id] = pivot
+
+func _cycle_industry() -> void:
+	if selected_id < 0:
+		_set_modal("Select a building first (RMB)", true)
+		return
+	var selected := _selected_placement()
+	if int(selected.get("job_slots", 0)) <= 0:
+		_set_modal("This building has no job slots", true)
+		return
+	var current := str(industry_kinds.get(selected_id, ""))
+	var next := ""
+	match current:
+		"":
+			next = "lumberjack"
+		"lumberjack":
+			next = "farm"
+		"farm":
+			next = "hunt"
+		"hunt":
+			next = ""
+	if next == "":
+		core.industry_remove_site(selected_id)
+		_set_modal("Industry removed", false)
+	else:
+		var result: Dictionary = core.industry_add_site(SEED, selected_id, next)
+		if not bool(result.get("ok", false)):
+			_set_modal(
+				"Industry failed: " + str(result.get("error_code", result.get("error", ""))),
+				true
+			)
+			return
+		_set_modal("Industry: " + next, false)
+	_refresh_industry_visuals()
+	_update_hud()
+
 func _found_settlement() -> bool:
 	var state: Dictionary = core.settlements()
 	var used: Dictionary = {}
@@ -757,12 +883,15 @@ func _update_hud() -> void:
 				var settlement: Dictionary = owner_info.get("settlement", {})
 				owner_name = str(settlement.get("name", owner_name))
 			selected_line += "  ·  owner " + owner_name
+		var industry_kind := str(industry_kinds.get(selected_id, ""))
+		if industry_kind != "":
+			selected_line += "  ·  industry " + industry_kind
 	if mode == "architect":
 		hud.text = "Townsmith — Architect View (read-only)  (seed %d)\nBlueprint: %s\nFirst-person view at the selected door · M / Esc returns to Mayor" % [
 			SEED, blueprint_name,
 		]
 	else:
-		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew on/off · V +10k materials · F5 save · F9 load" % [
+		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew on/off · I industry · V +10k materials · F5 save · F9 load" % [
 			SEED, blueprint_name, rooms, capacity,
 		]
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
@@ -779,6 +908,15 @@ func _update_hud() -> void:
 			float(economy.get("tax_per_resident_per_day", 0.0)),
 			float(economy.get("business_tax_per_job_per_day", 0.0)),
 		]
+	var industry: Dictionary = core.industry_state()
+	var industry_text := "—"
+	if bool(industry.get("open", false)):
+		industry_text = "wood %.0f · food %.0f · hides %.0f · supply %.0f%%" % [
+			float(industry.get("wood", 0.0)),
+			float(industry.get("food", 0.0)),
+			float(industry.get("hides", 0.0)),
+			float(industry.get("food_supply", 0.0)) * 100.0,
+		]
 	var happiness_text := "—"
 	var needs_text := "—"
 	if int(city.get("population", 0)) > 0:
@@ -788,7 +926,7 @@ func _update_hud() -> void:
 			float(city.get("water", 0.0)) * 100.0,
 			float(city.get("rest", 0.0)) * 100.0,
 		]
-	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
+	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nIndustry: %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
 		selected_line,
 		int(target_x),
 		int(target_z),
@@ -809,6 +947,7 @@ func _update_hud() -> void:
 		float(city.get("daily_wages", 0.0)),
 		needs_text,
 		treasury_text,
+		industry_text,
 		int(construction.get("active", 0)),
 		int(construction.get("stalled", 0)),
 		int(construction.get("crew_capacity", 0)),
@@ -1269,6 +1408,7 @@ func _advance_construction(seconds: float) -> Dictionary:
 	if seconds <= 0.0:
 		return {}
 	var report: Dictionary = core.construction_tick(seconds)
+	core.industry_tick(SEED, seconds)
 	core.population_tick(SEED, seconds)
 	core.economy_tick(SEED, seconds)
 	_refresh_construction_visuals()
@@ -1294,6 +1434,7 @@ func _clear_placements() -> void:
 	_clear_selection()
 	_clear_placed_nodes()
 	core.world_clear_placements()
+	_refresh_industry_visuals()
 	_set_modal("", false)
 	_refresh_preview(true)
 	_update_hud()
@@ -1323,6 +1464,7 @@ func _load_world() -> bool:
 	_rebuild_roads()
 	_rebuild_lots()
 	_rebuild_settlements()
+	_refresh_industry_visuals()
 	streamer.invalidate_all()
 	var state: Dictionary = core.world_placements()
 	var construction_index := _construction_index()
@@ -1381,6 +1523,7 @@ func _run_scene_smoke() -> void:
 	var build_done_ok := false
 	var occupancy_before_ok := false
 	var occupancy_after_ok := false
+	var industry_ok := false
 	var save_ok := false
 	var clear_ok := false
 	var load_ok := false
@@ -1623,6 +1766,31 @@ func _run_scene_smoke() -> void:
 				occupancy_after_ok = occupancy_after_ok and float(city_after.get("food", 0.0)) > 0.0
 				occupancy_after_ok = occupancy_after_ok and float(city_after.get("water", 0.0)) > 0.0
 				occupancy_after_ok = occupancy_after_ok and float(city_after.get("rest", 0.0)) > 0.0
+				industry_ok = true
+				for kind in ["lumberjack", "farm", "hunt"]:
+					var added: Dictionary = core.industry_add_site(SEED, 1, kind)
+					industry_ok = industry_ok and bool(added.get("ok", false))
+					_refresh_industry_visuals()
+					industry_ok = industry_ok and industry_nodes.size() == 1
+					industry_ok = industry_ok and str(industry_kinds.get(1, "")) == kind
+				var industry_added: Dictionary = core.industry_add_site(SEED, 1, "farm")
+				industry_ok = industry_ok and bool(industry_added.get("ok", false))
+				_refresh_industry_visuals()
+				var beacon = industry_nodes.get(1, null)
+				industry_ok = industry_ok and beacon != null
+				industry_ok = industry_ok and beacon.has_meta("spinner")
+				var industry_tick: Dictionary = core.industry_tick(SEED, 300.0)
+				industry_ok = industry_ok and bool(industry_tick.get("open", false))
+				industry_ok = industry_ok and int(industry_tick.get("workers", 0)) == 2
+				industry_ok = industry_ok and float(industry_tick.get("food", 0.0)) > 0.0
+				industry_ok = industry_ok and float(industry_tick.get("stock_food", 0.0)) > 0.0
+				industry_ok = industry_ok and float(industry_tick.get("food_supply", 0.0)) > 0.99
+				core.population_tick(SEED, 300.0)
+				industry_ok = industry_ok and float(core.city_summary().get("food", 0.0)) > 0.9
+				var industry_after: Dictionary = core.industry_state()
+				industry_ok = industry_ok and int(industry_after.get("site_count", 0)) == 1
+				industry_ok = industry_ok and float(industry_after.get("food", 0.0)) > 0.0
+				occupancy_after_ok = occupancy_after_ok and industry_ok
 				var economy_after: Dictionary = core.economy_state()
 				occupancy_after_ok = occupancy_after_ok and bool(economy_after.get("open", false))
 				occupancy_after_ok = occupancy_after_ok and float(economy_after.get("balance", 100000.0)) < 100000.0
@@ -1633,9 +1801,12 @@ func _run_scene_smoke() -> void:
 				if occupancy_after_ok:
 					var population_checksum: String = str(core.population_checksum())
 					var economy_checksum: String = str(core.economy_checksum())
+					var industry_checksum: String = str(core.industry_checksum())
+					var industry_stock := float(core.industry_state().get("food", 0.0))
 					var populated := _save_world()
 					core.population_clear()
 					core.economy_clear()
+					core.industry_clear()
 					var reloaded := _load_world()
 					var city_persisted: Dictionary = core.city_summary()
 					var households: Dictionary = core.population_state()
@@ -1657,10 +1828,18 @@ func _run_scene_smoke() -> void:
 					occupancy_after_ok = occupancy_after_ok and absf(float(economy_persisted.get("balance", 0.0)) - economy_balance) < 0.01
 					occupancy_after_ok = occupancy_after_ok and absf(float(economy_persisted.get("daily_net", 0.0)) - economy_net) < 0.01
 					occupancy_after_ok = occupancy_after_ok and not bool(economy_persisted.get("bankrupt", true))
+					var industry_persisted: Dictionary = core.industry_state()
+					occupancy_after_ok = occupancy_after_ok and bool(industry_persisted.get("open", false))
+					occupancy_after_ok = occupancy_after_ok and int(industry_persisted.get("site_count", -1)) == 1
+					occupancy_after_ok = occupancy_after_ok and absf(float(industry_persisted.get("food", 0.0)) - industry_stock) < 0.01
+					occupancy_after_ok = occupancy_after_ok and str(core.industry_checksum()) == industry_checksum
+					occupancy_after_ok = occupancy_after_ok and industry_nodes.size() == 1
 				if not build_done_ok:
 					status = "construction_complete_failed"
 				elif not (occupancy_before_ok and occupancy_after_ok):
 					status = "occupancy_failed"
+				elif not industry_ok:
+					status = "industry_failed"
 			if not load_ok:
 				status = "load_failed"
 
@@ -1674,6 +1853,7 @@ func _run_scene_smoke() -> void:
 		var before_failed_settlements: int = core.settlement_count()
 		var before_failed_settlement_checksum: String = str(core.settlement_checksum())
 		var before_failed_economy: String = str(core.economy_checksum())
+		var before_failed_industry: String = str(core.industry_checksum())
 		var blueprint_backup := blueprint_path + ".bak"
 		if DirAccess.rename_absolute(blueprint_path, blueprint_backup) != OK:
 			status = "load_guard_backup_failed"
@@ -1685,6 +1865,8 @@ func _run_scene_smoke() -> void:
 				status = "load_failure_changed_deltas"
 			elif str(core.economy_checksum()) != before_failed_economy:
 				status = "load_failure_changed_economy"
+			elif str(core.industry_checksum()) != before_failed_industry:
+				status = "load_failure_changed_industry"
 			elif core.lot_count() != before_failed_lots or str(core.lot_checksum()) != before_failed_lot_checksum:
 				status = "load_failure_changed_lots"
 			elif core.settlement_count() != before_failed_settlements or str(core.settlement_checksum()) != before_failed_settlement_checksum:
@@ -1695,7 +1877,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s occupancy=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s occupancy=%s industry=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -1708,6 +1890,7 @@ func _run_scene_smoke() -> void:
 		"ok" if build_ok else "failed",
 		"ok" if build_done_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
+		"ok" if industry_ok else "failed",
 		"ok" if select_ok else "failed",
 		"ok" if enter_ok else "failed",
 		"ok" if return_ok else "failed",

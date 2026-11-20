@@ -5,8 +5,8 @@
 //! step, then prints a stable JSON summary and checksum.
 
 use core_city::{
-    summarize, CityRuntime, ConstructionStore, Economy, Home, Placement, PlacementPlan,
-    PlacementRequest, PlacementStore, Workplace,
+    summarize, CityRuntime, ConstructionStore, Economy, Home, IndustryKind, IndustryStore,
+    Placement, PlacementPlan, PlacementRequest, PlacementStore, Workplace,
 };
 
 const DEFAULT_DAYS: u64 = 30;
@@ -75,6 +75,16 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
     }
     placements.next_id = houses + 1;
 
+    let mut industry = IndustryStore::new(seed);
+    for index in 0..houses.min(10) {
+        let kind = match index {
+            0..=3 => IndustryKind::Farm,
+            4..=6 => IndustryKind::Lumberjack,
+            _ => IndustryKind::Hunt,
+        };
+        industry.add_site(index + 1, kind).expect("industry site");
+    }
+
     let mut runtime = CityRuntime::new(seed);
     runtime.set_move_in_per_second(5.0);
     let mut economy = Economy::new(seed);
@@ -109,13 +119,23 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
                 center: [placement.center[0], placement.center[2]],
             })
             .collect::<Vec<_>>();
-        runtime.tick_with_workplaces(step, &homes, &workplaces);
+        industry.tick(step, &runtime.staffing, runtime.population());
+        runtime.tick_with_workplaces_and_supply(step, &homes, &workplaces, industry.food_supply);
         let completed = construction
             .sites
             .values()
             .filter(|site| site.is_complete())
             .count() as u64;
-        economy.tick(step, runtime.population(), runtime.workers(), completed);
+        let jobs = workplaces
+            .iter()
+            .map(|work| u64::from(work.slots))
+            .sum::<u64>();
+        economy.tick(
+            step,
+            runtime.population(),
+            runtime.workers().min(jobs),
+            completed,
+        );
     }
 
     let summary = summarize(&placements, &construction, &runtime, 0);
@@ -142,6 +162,15 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
         "construction_sites": summary.construction_sites,
         "population_checksum": format!("{:016x}", runtime.checksum()),
         "construction_checksum": format!("{:016x}", construction.checksum()),
+        "industry_sites": industry.site_count(),
+        "stock_wood": industry.stockpile.wood,
+        "stock_food": industry.stockpile.food,
+        "stock_hides": industry.stockpile.hides,
+        "produced_wood": industry.produced_total.wood,
+        "produced_food": industry.produced_total.food,
+        "produced_hides": industry.produced_total.hides,
+        "food_supply": industry.food_supply,
+        "industry_checksum": format!("{:016x}", industry.checksum()),
         "balance": economy.balance,
         "daily_net": economy.daily_net(summary.population, summary.employed, summary.completed_buildings as u64),
         "bankrupt": economy.bankrupt,
@@ -191,6 +220,11 @@ mod tests {
         assert_eq!(result["bankrupt"], false);
         assert!(result["construction_checksum"].as_str().is_some());
         assert!(result["economy_checksum"].as_str().is_some());
+        assert_eq!(result["industry_sites"], 5);
+        assert!(result["stock_food"].as_f64().expect("stock") > 0.0);
+        assert!(result["produced_wood"].as_f64().expect("wood") > 0.0);
+        assert!(result["food_supply"].as_f64().expect("supply") > 0.99);
+        assert!(result["happiness"].as_f64().expect("happiness") > 0.6);
         assert_eq!(result["checksum"], simulate(1, 5, 60.0)["checksum"]);
     }
 }

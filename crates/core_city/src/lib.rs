@@ -33,6 +33,7 @@
 
 pub mod construction;
 pub mod economy;
+pub mod industry;
 pub mod lot;
 pub mod metrics;
 pub mod placement;
@@ -54,6 +55,12 @@ pub use economy::{
     DEFAULT_UPKEEP_PER_BUILDING_PER_DAY, ECONOMY_FORMAT_VERSION, MAX_ECONOMY_TICK_SECONDS,
     STARTING_BALANCE,
 };
+pub use industry::{
+    IndustryError, IndustryKind, IndustrySite, IndustryStore, IndustryTick, Stockpile,
+    FOOD_PER_FARM_WORKER_PER_DAY, FOOD_PER_HUNTER_WORKER_PER_DAY, FOOD_PER_RESIDENT_PER_DAY,
+    HIDES_PER_HUNTER_WORKER_PER_DAY, INDUSTRY_FORMAT_VERSION, MAX_INDUSTRY_SITES,
+    MAX_INDUSTRY_TICK_SECONDS, MAX_STOCK, WOOD_PER_LUMBERJACK_WORKER_PER_DAY,
+};
 pub use lot::{
     Lot, LotError, LotRequest, LotStore, Zone, LOT_FORMAT_VERSION, LOT_ROAD_GAP_M, MAX_LOTS,
     MAX_LOT_AREA_M2, MAX_LOT_SIDE_M, MAX_LOT_SLOPE_M, MIN_LOT_AREA_M2, MIN_LOT_SIDE_M,
@@ -65,9 +72,10 @@ pub use placement::{
     MAX_SLOPE_M, MAX_WORLD_COORD_M, PLACEMENT_GAP_M, WATER_LEVEL_M, WORLD_SAVE_FORMAT_VERSION,
 };
 pub use population::{
-    CityRuntime, Home, Household, PopulationError, PopulationReport, Workplace, MAX_COMMUTE_M,
-    MAX_HOUSEHOLDS, MAX_MOVE_IN_PER_SECOND, MAX_TICK_SECONDS as MAX_POPULATION_TICK_SECONDS,
-    POPULATION_FORMAT_VERSION, WAGE_PER_WORKER_PER_DAY,
+    CityRuntime, Home, Household, PopulationError, PopulationReport, Workplace,
+    FOOD_REPLENISH_PER_S, MAX_COMMUTE_M, MAX_HOUSEHOLDS, MAX_MOVE_IN_PER_SECOND,
+    MAX_TICK_SECONDS as MAX_POPULATION_TICK_SECONDS, POPULATION_FORMAT_VERSION,
+    WAGE_PER_WORKER_PER_DAY,
 };
 pub use road::{
     RoadError, RoadRequest, RoadSegment, RoadStore, MAX_ROADS, MAX_ROAD_LENGTH_M, MAX_ROAD_SLOPE_M,
