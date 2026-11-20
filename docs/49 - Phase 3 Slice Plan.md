@@ -33,8 +33,8 @@ The full feature list is in [[08 - Roadmap]]. This plan cuts it into reviewable 
 | Stage | Deliverable | Status |
 |---|---|---|
 | **3.1** | City ledger: completed buildings → population, housing, jobs, employment, happiness | **Done** — PR #56 |
-| **3.2** | Households and move-in: vacant homes fill over time; simple needs and happiness | Next |
-| **3.3** | Jobs and wages: assign residents to job slots, commute distance, income | Planned |
+| **3.2** | Households and move-in: vacant homes fill over time; simple needs and happiness | **This PR** — see [[50 - Households and Needs]] |
+| **3.3** | Jobs and wages: assign residents to job slots, commute distance, income | Next |
 | **3.4** | Primary industries: lumberjack, farmer, hunter with visible loops and storage | Planned |
 | **3.5** | Utilities: water or power first, coverage, shortages, happiness/production effects | Planned |
 | **3.6** | Economy: taxes, upkeep, construction draw-down, loans, bankruptcy | Planned |
@@ -123,9 +123,38 @@ pub fn summarize(
 - The bridge clones placements/construction for each HUD refresh. Fine for the slice; the 100k-building dashboard needs a cached/incremental summary.
 - English-only developer HUD.
 
+## 6b. Stage 3.2 scope
+
+### In
+
+- `core_city::population`: `CityRuntime` with one aggregate household per completed residential building.
+- Move-in over time (default 1 resident/s), vacancies, job assignment capped by residents, food/water/rest decay, happiness.
+- Persist the runtime in the world JSON; old saves start empty and sync against completed buildings.
+- `TownsmithCore.population_tick`, `population_state`, `population_set_rate`, `population_clear`, `population_checksum`.
+- HUD population/vacancies/jobs/happiness/needs.
+- Smoke: complete a house, move residents in, save/clear/load, verify the runtime checksum.
+
+### Out
+
+- Named citizens, households with names, births/deaths, migration pressure.
+- Food/water/power supply and service coverage.
+- Wages, taxes, commute, education, health, or a full economy.
+- Individual agents and materialization.
+
+### Data
+
+See [[50 - Households and Needs]] for the structs, rates, persistence, HUD, and limits.
+
+### Verification
+
+- `cargo test -p core_city` — population + ledger tests.
+- `cargo test --workspace`.
+- `smoke_world_scene.sh` — occupancy before/after, needs, persistence; marker `occupancy=ok`.
+- clippy and fmt.
+
 ## 7. Next
 
-1. 3.2: household records, vacancy, move-in, food/water needs, a real happiness update.
+1. 3.3: wages, job assignment by household/building, commute distance, income.
 2. Materialize a few named citizens for selection and stories.
 3. Add a headless runner before the first industry loop so balance changes are measurable.
 4. Keep the 500-citizen/50-building 60 FPS gate visible from the first slice.

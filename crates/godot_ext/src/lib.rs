@@ -27,10 +27,11 @@ use core_blueprint::{
     PropRecord, RoomRecord,
 };
 use core_city::{
-    normalize_rotation, summarize, CityLayout, CitySummary, CityTier, ConstructionSite,
-    ConstructionStore, Lot, LotError, LotRequest, LotStore, Placement, PlacementError,
-    PlacementRequest, PlacementStore, RoadError, RoadRequest, RoadSegment, RoadStore, Settlement,
-    SettlementError, SettlementRequest, SettlementStore, Zone, MAX_WORLD_COORD_M,
+    normalize_rotation, summarize, CityLayout, CityRuntime, CitySummary, CityTier,
+    ConstructionSite, ConstructionStore, Lot, LotError, LotRequest, LotStore, Placement,
+    PlacementError, PlacementRequest, PlacementStore, RoadError, RoadRequest, RoadSegment,
+    RoadStore, Settlement, SettlementError, SettlementRequest, SettlementStore, Zone,
+    MAX_WORLD_COORD_M,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -505,6 +506,7 @@ struct TownsmithCore {
     roads: Mutex<Option<RoadStore>>,
     lots: Mutex<Option<LotStore>>,
     settlements: Mutex<Option<SettlementStore>>,
+    population: Mutex<Option<CityRuntime>>,
     terrain_deltas: Arc<RwLock<DeltaStore>>,
     terrain_seed: Mutex<Option<u64>>,
 }
@@ -519,6 +521,7 @@ impl Default for TownsmithCore {
             roads: Mutex::new(None),
             lots: Mutex::new(None),
             settlements: Mutex::new(None),
+            population: Mutex::new(None),
             terrain_deltas: Arc::new(RwLock::new(DeltaStore::new())),
             terrain_seed: Mutex::new(None),
         }
@@ -1699,6 +1702,11 @@ impl TownsmithCore {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
+        self.population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_mut()
+            .map(CityRuntime::clear);
         true
     }
 
@@ -1715,6 +1723,14 @@ impl TownsmithCore {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .remove_site(id);
+            if let Some(runtime) = self
+                .population
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_mut()
+            {
+                runtime.remove(id);
+            }
         }
         removed
     }
@@ -1828,23 +1844,195 @@ impl TownsmithCore {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let settlement_count = settlements.as_ref().map_or(0, SettlementStore::count);
-        let summary = placements
-            .as_ref()
-            .map_or_else(CitySummary::default, |placements| {
-                summarize(placements, &construction, settlement_count)
-            });
+        let population = self
+            .population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let summary = match placements.as_ref() {
+            Some(placements) => {
+                let empty_runtime = CityRuntime::new(placements.seed);
+                let runtime = population
+                    .as_ref()
+                    .filter(|runtime| runtime.seed == placements.seed)
+                    .unwrap_or(&empty_runtime);
+                summarize(placements, &construction, runtime, settlement_count)
+            }
+            None => CitySummary {
+                settlements: settlement_count,
+                ..CitySummary::default()
+            },
+        };
         let mut result = VarDictionary::new();
         result.set("ok", true);
         result.set("population", summary.population as i64);
         result.set("housing_capacity", summary.housing_capacity as i64);
+        result.set("vacancies", summary.vacancies as i64);
         result.set("jobs", summary.jobs as i64);
         result.set("employed", summary.employed as i64);
         result.set("unemployed", summary.unemployed as i64);
         result.set("happiness", f64::from(summary.happiness));
+        result.set("food", f64::from(summary.food));
+        result.set("water", f64::from(summary.water));
+        result.set("rest", f64::from(summary.rest));
         result.set("completed_buildings", summary.completed_buildings as i64);
         result.set("construction_sites", summary.construction_sites as i64);
         result.set("settlements", summary.settlements as i64);
         result
+    }
+
+    /// Advance households by `seconds`: move-in, jobs, and needs.
+    #[func]
+    fn population_tick(&self, seed: i64, seconds: f64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        if !seconds.is_finite()
+            || !(0.0..=core_city::MAX_POPULATION_TICK_SECONDS).contains(&seconds)
+        {
+            return placement_simple_error("invalid_delta", "population delta is outside 0..=3600");
+        }
+        let placements = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(placements) = placements.as_ref() {
+            if placements.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the placement store belongs to a different seed",
+                );
+            }
+        }
+        let construction = self
+            .construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (slots, jobs) = match placements.as_ref() {
+            Some(placements) => (
+                completed_slots(placements, &construction),
+                completed_jobs(placements, &construction),
+            ),
+            None => (Vec::new(), 0),
+        };
+        let mut population = self
+            .population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if population
+            .as_ref()
+            .is_some_and(|runtime| runtime.seed != seed)
+        {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the household runtime belongs to a different seed",
+            );
+        }
+        let runtime = population.get_or_insert_with(|| CityRuntime::new(seed));
+        let report = runtime.tick(seconds, jobs, &slots);
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("moved_in", i64::from(report.moved_in));
+        result.set("population", report.population as i64);
+        result.set("vacancies", report.vacancies as i64);
+        result.set("workers", report.workers as i64);
+        result.set("happiness", f64::from(runtime.happiness()));
+        result.set(
+            "checksum",
+            &GString::from(&format!("{:016x}", runtime.checksum())),
+        );
+        result
+    }
+
+    /// Return household records and the move-in policy.
+    #[func]
+    fn population_state(&self) -> VarDictionary {
+        let guard = self
+            .population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        match guard.as_ref() {
+            Some(runtime) => {
+                result.set("open", true);
+                result.set("seed", runtime.seed as i64);
+                result.set("move_in_per_second", f64::from(runtime.move_in_per_second));
+                result.set("population", runtime.population() as i64);
+                result.set("housing_capacity", runtime.housing_capacity() as i64);
+                result.set("vacancies", runtime.vacancies() as i64);
+                result.set("workers", runtime.workers() as i64);
+                result.set("happiness", f64::from(runtime.happiness()));
+                let mut households: Array<VarDictionary> = Array::new();
+                for (&id, household) in &runtime.households {
+                    let mut item = VarDictionary::new();
+                    item.set("placement_id", id as i64);
+                    item.set("capacity", i64::from(household.capacity));
+                    item.set("residents", i64::from(household.residents));
+                    item.set("workers", i64::from(household.workers));
+                    item.set("food", f64::from(household.food));
+                    item.set("water", f64::from(household.water));
+                    item.set("rest", f64::from(household.rest));
+                    item.set("happiness", f64::from(household.happiness()));
+                    households.push(&item);
+                }
+                result.set("households", &households.to_variant());
+                result.set(
+                    "checksum",
+                    &GString::from(&format!("{:016x}", runtime.checksum())),
+                );
+            }
+            None => {
+                result.set("open", false);
+                result.set("seed", 0);
+                result.set("move_in_per_second", 0.0);
+                result.set("population", 0);
+                result.set("housing_capacity", 0);
+                result.set("vacancies", 0);
+                result.set("workers", 0);
+                result.set("happiness", 0.0);
+                result.set("households", &Array::<VarDictionary>::new().to_variant());
+                result.set("checksum", &GString::from("0000000000000000"));
+            }
+        }
+        result
+    }
+
+    /// Set the move-in rate in residents per simulated second.
+    #[func]
+    fn population_set_rate(&self, rate: f64) -> bool {
+        if !rate.is_finite() {
+            return false;
+        }
+        let mut guard = self
+            .population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(runtime) = guard.as_mut() else {
+            return false;
+        };
+        runtime.set_move_in_per_second(rate as f32);
+        true
+    }
+
+    /// Remove every household.
+    #[func]
+    fn population_clear(&self) -> bool {
+        let mut guard = self
+            .population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(runtime) = guard.as_mut() {
+            runtime.clear();
+        }
+        true
+    }
+
+    /// Household runtime checksum.
+    #[func]
+    fn population_checksum(&self) -> GString {
+        let guard = self
+            .population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checksum = guard.as_ref().map_or(0, CityRuntime::checksum);
+        GString::from(&format!("{checksum:016x}"))
     }
 
     /// Set the shared crew pool. Values above 64 are rejected.
@@ -1903,7 +2091,7 @@ impl TownsmithCore {
             Ok(path) => path,
             Err(error) => return placement_simple_error("invalid_save_path", error),
         };
-        let (store, construction, roads, lots, settlements) = {
+        let (store, construction, roads, lots, settlements, mut population) = {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             let construction = self
                 .construction
@@ -1915,17 +2103,28 @@ impl TownsmithCore {
                 .settlements
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
+            let population = self
+                .population
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             (
                 world.as_ref().cloned(),
                 construction.clone(),
                 roads.as_ref().cloned(),
                 lots.as_ref().cloned(),
                 settlements.as_ref().cloned(),
+                population.as_ref().cloned(),
             )
         };
         let Some(store) = store else {
             return placement_simple_error("no_world", "no world placement store is open");
         };
+        if let Some(runtime) = population.as_mut() {
+            runtime.sync(&completed_slots(&store, &construction));
+            if let Err(error) = runtime.validate() {
+                return placement_simple_error("invalid_population", error.to_string());
+            }
+        }
         let json = match store.to_json_pretty() {
             Ok(json) => json,
             Err(error) => return placement_error_result(&error),
@@ -1960,6 +2159,21 @@ impl TownsmithCore {
         let json = match attach_construction(&json, &construction) {
             Ok(json) => json,
             Err(error) => return placement_simple_error("save_failed", error),
+        };
+        let json = match population.as_ref() {
+            Some(population) => {
+                if population.seed != store.seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "households belong to a different seed",
+                    );
+                }
+                match attach_population(&json, population) {
+                    Ok(json) => json,
+                    Err(error) => return placement_simple_error("save_failed", error),
+                }
+            }
+            None => json,
         };
         let json = match roads.as_ref() {
             Some(roads) => {
@@ -2046,6 +2260,17 @@ impl TownsmithCore {
             &GString::from(&format!("{:016x}", construction.checksum())),
         );
         result.set(
+            "population",
+            population.as_ref().map_or(0, CityRuntime::population) as i64,
+        );
+        result.set(
+            "population_checksum",
+            &GString::from(&format!(
+                "{:016x}",
+                population.as_ref().map_or(0, CityRuntime::checksum)
+            )),
+        );
+        result.set(
             "road_checksum",
             &GString::from(&format!(
                 "{:016x}",
@@ -2112,6 +2337,20 @@ impl TownsmithCore {
             Ok(None) => ConstructionStore::default(),
             Err((code, error)) => return placement_simple_error(code, error),
         };
+        let mut population = match population_from_world_json(&json) {
+            Ok(Some(runtime)) => runtime,
+            Ok(None) => CityRuntime::new(expected_seed),
+            Err((code, error)) => return placement_simple_error(code, error),
+        };
+        if population.seed != expected_seed {
+            return placement_simple_error(
+                "seed_mismatch",
+                format!(
+                    "households use seed {} but this world is {expected_seed}",
+                    population.seed
+                ),
+            );
+        }
         let roads = match roads_from_world_json(&json) {
             Ok(Some(store)) => Some(store),
             Ok(None) => None,
@@ -2248,6 +2487,12 @@ impl TownsmithCore {
         if let Err(error) = construction.validate() {
             return placement_simple_error("invalid_construction", error.to_string());
         }
+        population.sync(&completed_slots(&store, &construction));
+        if let Err(error) = population.validate() {
+            return placement_simple_error("invalid_population", error.to_string());
+        }
+        let population_count = population.population();
+        let population_checksum = population.checksum();
         let seed = store.seed;
         let count = store.placements.len() as i64;
         let checksum = store.checksum();
@@ -2280,6 +2525,10 @@ impl TownsmithCore {
             .settlements
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let mut population_guard = self
+            .population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut deltas_guard = self
             .terrain_deltas
             .write()
@@ -2289,6 +2538,7 @@ impl TownsmithCore {
         *lots_guard = lots;
         *settlements_guard = settlements;
         *guard = Some(store);
+        *population_guard = Some(population);
         *deltas_guard = deltas;
         *self
             .terrain_seed
@@ -2313,6 +2563,11 @@ impl TownsmithCore {
         result.set(
             "construction_checksum",
             &GString::from(&format!("{construction_checksum:016x}")),
+        );
+        result.set("population", population_count as i64);
+        result.set(
+            "population_checksum",
+            &GString::from(&format!("{population_checksum:016x}")),
         );
         result.set(
             "road_checksum",
@@ -3419,6 +3674,36 @@ fn placement_request_from_blueprint(
     }
 }
 
+fn completed_slots(
+    placements: &PlacementStore,
+    construction: &ConstructionStore,
+) -> Vec<(u64, u32)> {
+    placements
+        .placements
+        .iter()
+        .filter(|placement| {
+            placement.resident_capacity > 0
+                && construction
+                    .site(placement.id)
+                    .is_some_and(|site| site.is_complete())
+        })
+        .map(|placement| (placement.id, placement.resident_capacity))
+        .collect()
+}
+
+fn completed_jobs(placements: &PlacementStore, construction: &ConstructionStore) -> u64 {
+    placements
+        .placements
+        .iter()
+        .filter(|placement| {
+            construction
+                .site(placement.id)
+                .is_some_and(|site| site.is_complete())
+        })
+        .map(|placement| u64::from(placement.job_slots))
+        .sum()
+}
+
 fn attach_construction(json: &str, store: &ConstructionStore) -> Result<String, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(json).map_err(|error| error.to_string())?;
@@ -3440,6 +3725,27 @@ fn construction_from_world_json(
         .validate()
         .map_err(|error| ("invalid_construction", error.to_string()))?;
     Ok(Some(store))
+}
+
+fn attach_population(json: &str, runtime: &CityRuntime) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    value["population"] = serde_json::to_value(runtime).map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+}
+
+fn population_from_world_json(json: &str) -> Result<Option<CityRuntime>, (&'static str, String)> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| ("invalid_json", error.to_string()))?;
+    let Some(raw) = value.get("population") else {
+        return Ok(None);
+    };
+    let runtime: CityRuntime = serde_json::from_value(raw.clone())
+        .map_err(|error| ("invalid_population", error.to_string()))?;
+    runtime
+        .validate()
+        .map_err(|error| ("invalid_population", error.to_string()))?;
+    Ok(Some(runtime))
 }
 
 fn attach_roads(json: &str, store: &RoadStore) -> Result<String, String> {
@@ -4429,6 +4735,28 @@ mod tests {
         };
         let (_, partial_center) = room_bounds_payload(&partial, 3);
         assert_eq!(partial_center[1], 9.3);
+    }
+
+    #[test]
+    fn population_round_trips_in_world_json() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.tick(2.0, 2, &[(1, 2)]);
+        let json = attach_population("{}", &runtime).expect("attach");
+        let parsed = population_from_world_json(&json)
+            .expect("parse")
+            .expect("present");
+        assert_eq!(parsed, runtime);
+        assert!(population_from_world_json("{}")
+            .expect("old save")
+            .is_none());
+    }
+
+    #[test]
+    fn population_rejects_an_unsupported_version() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.format_version = 99;
+        let json = attach_population("{}", &runtime).expect("attach");
+        assert!(population_from_world_json(&json).is_err());
     }
 
     #[test]

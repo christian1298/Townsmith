@@ -97,8 +97,12 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	construction_tick_accum += delta
-	if construction_tick_accum >= 0.25:
-		_advance_construction(construction_tick_accum)
+	var steps := 0
+	while construction_tick_accum >= 0.25 and steps < 8:
+		_advance_construction(0.25)
+		construction_tick_accum -= 0.25
+		steps += 1
+	if construction_tick_accum >= 1.0:
 		construction_tick_accum = fmod(construction_tick_accum, 0.25)
 	if mode == "mayor" and mayor_camera != null:
 		var ground: float = core.world_height_at(
@@ -765,9 +769,15 @@ func _update_hud() -> void:
 	var construction: Dictionary = core.construction_summary()
 	var city: Dictionary = core.city_summary()
 	var happiness_text := "—"
+	var needs_text := "—"
 	if int(city.get("population", 0)) > 0:
 		happiness_text = "%.0f%%" % (float(city.get("happiness", 0.0)) * 100.0)
-	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d · jobs %d (%d employed) · happiness %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
+		needs_text = "food %.0f%% · water %.0f%% · rest %.0f%%" % [
+			float(city.get("food", 0.0)) * 100.0,
+			float(city.get("water", 0.0)) * 100.0,
+			float(city.get("rest", 0.0)) * 100.0,
+		]
+	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nNeeds: %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
 		selected_line,
 		int(target_x),
 		int(target_z),
@@ -780,9 +790,11 @@ func _update_hud() -> void:
 		core.terrain_delta_count(),
 		int(city.get("population", 0)),
 		int(city.get("housing_capacity", 0)),
+		int(city.get("vacancies", 0)),
 		int(city.get("jobs", 0)),
 		int(city.get("employed", 0)),
 		happiness_text,
+		needs_text,
 		int(construction.get("active", 0)),
 		int(construction.get("stalled", 0)),
 		int(construction.get("crew_capacity", 0)),
@@ -1243,6 +1255,7 @@ func _advance_construction(seconds: float) -> Dictionary:
 	if seconds <= 0.0:
 		return {}
 	var report: Dictionary = core.construction_tick(seconds)
+	core.population_tick(SEED, seconds)
 	_refresh_construction_visuals()
 	_update_hud()
 	return report
@@ -1574,14 +1587,37 @@ func _run_scene_smoke() -> void:
 				var finished_mesh := placed_root.get_child(0).get_child(0) as MeshInstance3D
 				build_done_ok = build_done_ok and finished_mesh != null and finished_mesh.material_override == placed_material
 				build_done_ok = build_done_ok and absf(finished_mesh.scale.y - 1.0) < 0.001
+				var pacing_ok: bool = core.population_set_rate(1.0)
+				core.population_clear()
+				_advance_construction(0.25)
+				pacing_ok = pacing_ok and int(core.city_summary().get("population", -1)) == 0
+				_advance_construction(2.0)
+				pacing_ok = pacing_ok and int(core.city_summary().get("population", -1)) == 2
 				var city_after: Dictionary = core.city_summary()
+				occupancy_after_ok = occupancy_after_ok and pacing_ok
 				occupancy_after_ok = int(city_after.get("population", -1)) == 2
 				occupancy_after_ok = occupancy_after_ok and int(city_after.get("housing_capacity", -1)) == 2
 				occupancy_after_ok = occupancy_after_ok and int(city_after.get("jobs", -1)) == 2
 				occupancy_after_ok = occupancy_after_ok and int(city_after.get("employed", -1)) == 2
 				occupancy_after_ok = occupancy_after_ok and int(city_after.get("completed_buildings", -1)) == 1
 				occupancy_after_ok = occupancy_after_ok and int(city_after.get("construction_sites", -1)) == 0
-				occupancy_after_ok = occupancy_after_ok and float(city_after.get("happiness", 0.0)) > 0.99
+				occupancy_after_ok = occupancy_after_ok and int(city_after.get("vacancies", -1)) == 0
+				occupancy_after_ok = occupancy_after_ok and float(city_after.get("happiness", 0.0)) > 0.5
+				occupancy_after_ok = occupancy_after_ok and float(city_after.get("food", 0.0)) > 0.0
+				occupancy_after_ok = occupancy_after_ok and float(city_after.get("water", 0.0)) > 0.0
+				occupancy_after_ok = occupancy_after_ok and float(city_after.get("rest", 0.0)) > 0.0
+				if occupancy_after_ok:
+					var population_checksum: String = str(core.population_checksum())
+					var populated := _save_world()
+					core.population_clear()
+					var reloaded := _load_world()
+					var city_persisted: Dictionary = core.city_summary()
+					var households: Dictionary = core.population_state()
+					occupancy_after_ok = populated and reloaded
+					occupancy_after_ok = occupancy_after_ok and int(city_persisted.get("population", -1)) == 2
+					occupancy_after_ok = occupancy_after_ok and int(city_persisted.get("vacancies", -1)) == 0
+					occupancy_after_ok = occupancy_after_ok and int(households.get("households", []).size()) == 1
+					occupancy_after_ok = occupancy_after_ok and str(core.population_checksum()) == population_checksum
 				if not build_done_ok:
 					status = "construction_complete_failed"
 				elif not (occupancy_before_ok and occupancy_after_ok):

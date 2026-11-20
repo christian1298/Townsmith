@@ -1,30 +1,38 @@
-//! Derived city-wide metrics from completed buildings.
+//! Derived city-wide metrics from completed buildings and household runtime.
 //!
-//! Phase 3 starts with a ledger, not a full household simulation: completed
-//! construction sites contribute their blueprint capacity and job slots, and
-//! the ledger exposes occupancy, employment, and a first happiness signal.
-//! This is deliberately derived state; it is not persisted separately.
+//! The ledger only counts placements whose construction site is complete.
+//! Households provide the independent population, vacancy, need, and happiness
+//! values; job slots still come from the completed blueprint metadata.
 
 use std::collections::BTreeSet;
 
 use crate::construction::ConstructionStore;
 use crate::placement::PlacementStore;
+use crate::population::CityRuntime;
 
-/// City-wide metrics derived from placements and construction.
+/// City-wide metrics derived from placements, construction, and households.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct CitySummary {
-    /// Residents in completed housing.
+    /// Residents currently living in completed housing.
     pub population: u64,
     /// Housing capacity in completed buildings.
     pub housing_capacity: u64,
+    /// Vacant housing slots.
+    pub vacancies: u64,
     /// Job slots in completed buildings.
     pub jobs: u64,
-    /// Employed residents, `min(population, jobs)`.
+    /// Employed residents.
     pub employed: u64,
     /// Residents without a job.
     pub unemployed: u64,
-    /// First happiness signal, 0..=1. Zero when there are no residents.
+    /// Resident-weighted happiness, 0..=1. Zero when there are no residents.
     pub happiness: f32,
+    /// Resident-weighted food satisfaction.
+    pub food: f32,
+    /// Resident-weighted water satisfaction.
+    pub water: f32,
+    /// Resident-weighted rest satisfaction.
+    pub rest: f32,
     /// Completed buildings represented in the ledger.
     pub completed_buildings: usize,
     /// Construction sites that are not complete.
@@ -33,15 +41,16 @@ pub struct CitySummary {
     pub settlements: usize,
 }
 
-/// Summarize a world from completed construction sites.
+/// Summarize a world from completed construction sites and household runtime.
 ///
-/// Only placements with a `Complete` construction site count toward
-/// population, housing, or jobs. A placement without a site (for example a
-/// legacy save that has not been backfilled) is ignored.
+/// A placement without a site (for example a legacy save that has not been
+/// backfilled) is ignored. Households for incomplete or removed placements are
+/// filtered out even if the runtime is stale.
 #[must_use]
 pub fn summarize(
     placements: &PlacementStore,
     construction: &ConstructionStore,
+    runtime: &CityRuntime,
     settlements: usize,
 ) -> CitySummary {
     let complete: BTreeSet<u64> = construction
@@ -63,18 +72,44 @@ pub fn summarize(
         completed_buildings += 1;
     }
 
-    let population = housing_capacity;
-    let employed = population.min(jobs);
-    let unemployed = population.saturating_sub(employed);
-    let happiness = if population == 0 {
-        0.0
+    let mut population = 0_u64;
+    let mut workers = 0_u64;
+    let mut food = 0.0;
+    let mut water = 0.0;
+    let mut rest = 0.0;
+    let mut happiness = 0.0;
+    for (&id, household) in &runtime.households {
+        if !complete.contains(&id) {
+            continue;
+        }
+        let residents = u64::from(household.residents);
+        if residents == 0 {
+            continue;
+        }
+        population += residents;
+        workers += u64::from(household.workers);
+        let weight = household.residents as f32;
+        food += household.food * weight;
+        water += household.water * weight;
+        rest += household.rest * weight;
+        happiness += household.happiness() * weight;
+    }
+    if population > 0 {
+        let scale = 1.0 / population as f32;
+        food *= scale;
+        water *= scale;
+        rest *= scale;
+        happiness *= scale;
     } else {
-        let employment = employed as f32 / population as f32;
-        // 3.1 has no vacancy: population equals completed housing capacity.
-        // Keep the signal employment-only until 3.2 adds an independent
-        // occupancy input; a dead occupancy term would be misleading.
-        (0.55 + 0.45 * employment).clamp(0.0, 1.0)
-    };
+        food = 0.0;
+        water = 0.0;
+        rest = 0.0;
+        happiness = 0.0;
+    }
+
+    let employed = workers.min(jobs);
+    let unemployed = population.saturating_sub(employed);
+    let vacancies = housing_capacity.saturating_sub(population);
     let construction_sites = construction
         .sites
         .values()
@@ -84,10 +119,14 @@ pub fn summarize(
     CitySummary {
         population,
         housing_capacity,
+        vacancies,
         jobs,
         employed,
         unemployed,
         happiness,
+        food,
+        water,
+        rest,
         completed_buildings,
         construction_sites,
         settlements,
@@ -119,34 +158,70 @@ mod tests {
         }
     }
 
+    fn complete_site(construction: &mut ConstructionStore, id: u64) {
+        construction.add_site(id, 100).expect("site");
+        construction.sites.get_mut(&id).expect("site").phase = ConstructionPhase::Complete;
+    }
+
+    fn slots(placements: &PlacementStore, construction: &ConstructionStore) -> Vec<(u64, u32)> {
+        placements
+            .placements
+            .iter()
+            .filter(|placement| {
+                construction
+                    .site(placement.id)
+                    .is_some_and(|site| site.is_complete())
+                    && placement.resident_capacity > 0
+            })
+            .map(|placement| (placement.id, placement.resident_capacity))
+            .collect()
+    }
+
     #[test]
     fn empty_world_has_zero_metrics() {
         let summary = summarize(
             &PlacementStore::new(2026),
             &ConstructionStore::new(4, 1_000_000),
+            &CityRuntime::new(2026),
             0,
         );
         assert_eq!(summary, CitySummary::default());
     }
 
     #[test]
-    fn completed_housing_and_jobs_are_counted() {
+    fn completed_housing_and_jobs_are_counted_after_move_in() {
         let mut placements = PlacementStore::new(2026);
         placements.placements.push(placement(1, 2, 2));
         let mut construction = ConstructionStore::new(4, 1_000_000);
-        construction.add_site(1, 100).expect("site");
-        construction.sites.get_mut(&1).expect("site").phase = ConstructionPhase::Complete;
+        complete_site(&mut construction, 1);
+        let mut runtime = CityRuntime::new(2026);
+        let slots = slots(&placements, &construction);
+        runtime.tick(10.0, 2, &slots);
 
-        let summary = summarize(&placements, &construction, 1);
+        let summary = summarize(&placements, &construction, &runtime, 1);
         assert_eq!(summary.population, 2);
         assert_eq!(summary.housing_capacity, 2);
+        assert_eq!(summary.vacancies, 0);
         assert_eq!(summary.jobs, 2);
         assert_eq!(summary.employed, 2);
         assert_eq!(summary.unemployed, 0);
         assert_eq!(summary.completed_buildings, 1);
         assert_eq!(summary.construction_sites, 0);
         assert_eq!(summary.settlements, 1);
-        assert!(summary.happiness > 0.99);
+        assert!(summary.happiness > 0.9);
+        assert!(summary.food > 0.9);
+    }
+
+    #[test]
+    fn finished_housing_starts_vacant() {
+        let mut placements = PlacementStore::new(2026);
+        placements.placements.push(placement(1, 2, 2));
+        let mut construction = ConstructionStore::new(4, 1_000_000);
+        complete_site(&mut construction, 1);
+        let summary = summarize(&placements, &construction, &CityRuntime::new(2026), 0);
+        assert_eq!(summary.population, 0);
+        assert_eq!(summary.vacancies, 2);
+        assert_eq!(summary.happiness, 0.0);
     }
 
     #[test]
@@ -156,7 +231,7 @@ mod tests {
         let mut construction = ConstructionStore::new(4, 1_000_000);
         construction.add_site(1, 100).expect("site");
 
-        let summary = summarize(&placements, &construction, 0);
+        let summary = summarize(&placements, &construction, &CityRuntime::new(2026), 0);
         assert_eq!(summary.population, 0);
         assert_eq!(summary.construction_sites, 1);
         assert_eq!(summary.completed_buildings, 0);
@@ -167,7 +242,12 @@ mod tests {
     fn a_placement_without_a_site_is_ignored() {
         let mut placements = PlacementStore::new(2026);
         placements.placements.push(placement(1, 4, 4));
-        let summary = summarize(&placements, &ConstructionStore::new(4, 1_000_000), 0);
+        let summary = summarize(
+            &placements,
+            &ConstructionStore::new(4, 1_000_000),
+            &CityRuntime::new(2026),
+            0,
+        );
         assert_eq!(summary, CitySummary::default());
     }
 
@@ -176,10 +256,9 @@ mod tests {
         let mut placements = PlacementStore::new(2026);
         placements.placements.push(placement(1, 0, 5));
         let mut construction = ConstructionStore::new(4, 1_000_000);
-        construction.add_site(1, 100).expect("site");
-        construction.sites.get_mut(&1).expect("site").phase = ConstructionPhase::Complete;
+        complete_site(&mut construction, 1);
 
-        let summary = summarize(&placements, &construction, 0);
+        let summary = summarize(&placements, &construction, &CityRuntime::new(2026), 0);
         assert_eq!(summary.population, 0);
         assert_eq!(summary.jobs, 5);
         assert_eq!(summary.employed, 0);
@@ -192,13 +271,15 @@ mod tests {
         let mut placements = PlacementStore::new(2026);
         placements.placements.push(placement(1, 10, 2));
         let mut construction = ConstructionStore::new(4, 1_000_000);
-        construction.add_site(1, 100).expect("site");
-        construction.sites.get_mut(&1).expect("site").phase = ConstructionPhase::Complete;
+        complete_site(&mut construction, 1);
+        let mut runtime = CityRuntime::new(2026);
+        let slots = slots(&placements, &construction);
+        runtime.tick(10.0, 2, &slots);
 
-        let summary = summarize(&placements, &construction, 0);
+        let summary = summarize(&placements, &construction, &runtime, 0);
         assert_eq!(summary.population, 10);
         assert_eq!(summary.employed, 2);
         assert_eq!(summary.unemployed, 8);
-        assert!(summary.happiness < 0.75);
+        assert!(summary.happiness < 0.8);
     }
 }
