@@ -15,6 +15,10 @@ func _ready() -> void:
 	var demo: ArrayMesh = core.build_demo_mesh()
 	print("Demo mesh surfaces: ", demo.get_surface_count())
 
+	if OS.get_cmdline_user_args().has("--volume-smoke"):
+		_run_volume_smoke(core)
+		return
+
 	streamer = TerrainStreamer.new()
 	streamer.seed = 2026
 	streamer.view_radius = 1
@@ -46,6 +50,61 @@ func _ready() -> void:
 
 	if OS.get_cmdline_user_args().has("--smoke"):
 		_run_smoke()
+
+func _run_volume_smoke(core) -> void:
+	var status := "ok"
+	if not core.create_editor_volume(0, 0, 0):
+		status = "create_failed"
+	elif not core.editor_fill_box(0, 0, 0, 160, 1, 160, 1):
+		status = "fill_failed"
+	elif not core.editor_set_voxel(10, 1, 10, 5):
+		status = "set_failed"
+	elif core.editor_get_voxel(10, 1, 10) != 5:
+		status = "get_mismatch"
+	elif core.editor_set_voxel(9999, 0, 0, 1):
+		status = "oob_set_allowed"
+	elif core.editor_set_voxel(0, 0, 0, 65536):
+		status = "bad_material_allowed"
+	elif not core.editor_clear():
+		status = "clear_failed"
+	elif not core.editor_fill_box(0, 0, 0, 160, 1, 160, 1):
+		status = "refill_failed"
+	elif not core.editor_set_voxel(10, 1, 10, 5):
+		status = "reset_failed"
+
+	var size: Dictionary = core.editor_volume_size_voxels()
+	var mesh: ArrayMesh = core.build_editor_volume_mesh()
+	var stats: Dictionary = core.editor_volume_stats()
+	var bounds: PackedFloat32Array = core.editor_volume_bounds()
+	var solid := int(stats.get("solid_voxels", -1))
+	var quads := int(stats.get("last_mesh_quads", -1))
+	var vertices := int(stats.get("last_mesh_vertices", -1))
+	var surfaces := mesh.get_surface_count()
+	if status == "ok" and not bool(size.get("created", false)):
+		status = "size_missing"
+	elif status == "ok" and size.get("voxels", PackedInt32Array()) != PackedInt32Array([160, 96, 160]):
+		status = "size_mismatch"
+	elif status == "ok" and solid != 25601:
+		status = "solid_mismatch"
+	elif status == "ok" and surfaces != 1:
+		status = "surface_mismatch"
+	elif status == "ok" and (quads != 14 or vertices != 56):
+		status = "mesh_mismatch"
+	elif status == "ok" and (bounds.size() != 3 or absf(bounds[0] - 16.0) > 0.001 or absf(bounds[1] - 9.6) > 0.001 or absf(bounds[2] - 16.0) > 0.001):
+		status = "bounds_mismatch"
+
+	print("VOLUME_SMOKE solid=%d quads=%d vertices=%d surfaces=%d bounds=%.1f,%.1f,%.1f mesh_ms=%.1f status=%s" % [
+		solid,
+		quads,
+		vertices,
+		surfaces,
+		bounds[0] if bounds.size() > 0 else -1.0,
+		bounds[1] if bounds.size() > 1 else -1.0,
+		bounds[2] if bounds.size() > 2 else -1.0,
+		float(stats.get("mesh_ms", 0.0)),
+		status,
+	])
+	get_tree().quit(0 if status == "ok" else 1)
 
 func _run_smoke() -> void:
 	var started := Time.get_ticks_msec()

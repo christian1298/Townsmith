@@ -2,7 +2,7 @@
 title: Start Here
 project: Townsmith
 status: active
-updated: 2026-11-19
+updated: 2026-11-20
 tags:
   - townsmith
   - moc
@@ -31,7 +31,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Item | State |
 |---|---|
 | Phase | Phase 0 spike in progress |
-| Code | **Phase 0 in progress:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, chunked editable volume + cross-chunk meshing, 49 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, seam-aware terrain mesh + LOD + skirts, 58 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `core_city` (synthetic Early/Mid/Late layouts, 10 tests), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, a Godot 4.7 GDExtension bridge that streams terrain chunks on Rust worker threads with distance LOD (6 bridge tests), a MultiMesh city renderer with Early/Mid/Late routes, and a 200-instance voxel-hut route. Headless smoke passes. |
+| Code | **Phase 0 in progress:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, chunked editable volume + cross-chunk meshing, 49 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, seam-aware terrain mesh + LOD + skirts, 58 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `core_city` (synthetic Early/Mid/Late layouts, 10 tests), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, a Godot 4.7 GDExtension bridge that streams terrain chunks on Rust worker threads with distance LOD (11 bridge tests), a MultiMesh city renderer with Early/Mid/Late routes, a 200-instance voxel-hut route, and an editable multi-chunk volume bridge. Headless smoke passes. |
 | Engine | **Accepted:** Godot 4 shell + Rust core via GDExtension. The Phase 0 spike passed; the 3060-class 1M 30 FPS gate remains open for Phase 5. See [[04 - Engine and Stack]] and [[10 - Decisions]]. |
 | Team | **Accepted:** 2–3 full-time generalists; Rust/Godot experience or willingness to learn. |
 | Language | **Accepted:** Rust is the primary implementation language from Phase 0; GDScript is shell/UI only; C++ is the fallback. See D-011. |
@@ -191,3 +191,4 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 | [[25 - Phase 0 Results]] | Measured Phase 0 results and D-003 recommendation | You close Phase 0 or plan the vertical slice |
 | [[26 - Vertical Slice Spec]] | First playable editor/house/blueprint scope and acceptance tests | You start Phase 1 |
 | [[27 - Voxel Volume]] | Chunked editable volume, cross-chunk meshing, limits, benchmark | You edit or mesh buildings |
+| [[29 - Volume Editor Bridge]] | GDExtension volume API, packed mesh upload, smoke | You wire the first-person editor |

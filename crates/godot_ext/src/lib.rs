@@ -9,17 +9,21 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use godot::builtin::{
-    PackedColorArray, PackedFloat32Array, PackedInt32Array, PackedVector3Array, VarArray, Variant,
+    PackedColorArray, PackedFloat32Array, PackedInt32Array, PackedVector2Array, PackedVector3Array,
+    VarArray, Variant,
 };
 use godot::classes::mesh::{ArrayType, PrimitiveType};
 use godot::classes::{ArrayMesh, SurfaceTool};
 use godot::prelude::*;
 
 use core_city::{CityLayout, CityTier};
+use core_voxel::coords::{MaterialId, CHUNK_SIZE, VOXEL_SIZE_M};
 use core_voxel::demo;
-use core_voxel::mesh::greedy_mesh;
+use core_voxel::mesh::{greedy_mesh, MeshBuffers};
+use core_voxel::volume::{VolumeConfig, VolumePos, VoxelVolume, MAX_CHUNKS, MAX_CHUNKS_PER_AXIS};
 use core_world::{
     terrain_mesh_lod_with_sampler_and_skirt, TerrainMesh, TerrainPos, WorldChunkCoord,
     WorldGenerator, DEFAULT_SKIRT_DEPTH_M, WORLD_CHUNK_SIZE,
@@ -184,17 +188,59 @@ fn worker_loop(jobs: Arc<Mutex<Receiver<TerrainJob>>>, results: Sender<TerrainRe
     }
 }
 
+/// One editor volume plus the stats of its most recent mesh build.
+///
+/// The volume itself is single-threaded in practice; the `Mutex` in
+/// [`TownsmithCore`] keeps the Godot class `Sync` and makes accidental
+/// cross-thread access safe rather than undefined.
+struct EditorState {
+    volume: VoxelVolume,
+    mesh_builds: u64,
+    mesh_dirty: bool,
+    last_mesh_quads: usize,
+    last_mesh_vertices: usize,
+    last_mesh_indices: usize,
+    mesh_ms: f64,
+}
+
+impl EditorState {
+    fn new(volume: VoxelVolume) -> Self {
+        Self {
+            volume,
+            mesh_builds: 0,
+            // A newly created volume has no mesh yet, so consumers that act on
+            // the dirty flag must build the initial surface.
+            mesh_dirty: true,
+            last_mesh_quads: 0,
+            last_mesh_vertices: 0,
+            last_mesh_indices: 0,
+            mesh_ms: 0.0,
+        }
+    }
+
+    /// Mark the volume as edited and forget the stats of the now-stale mesh.
+    fn mark_dirty(&mut self) {
+        self.mesh_dirty = true;
+        self.last_mesh_quads = 0;
+        self.last_mesh_vertices = 0;
+        self.last_mesh_indices = 0;
+        self.mesh_ms = 0.0;
+    }
+}
+
 /// Coarse bridge object used by the Godot shell.
 #[derive(GodotClass)]
 #[class(init, base=RefCounted)]
 struct TownsmithCore {
     terrain: Mutex<Option<TerrainBridge>>,
+    editor: Mutex<Option<EditorState>>,
 }
 
 impl Default for TownsmithCore {
     fn default() -> Self {
         Self {
             terrain: Mutex::new(None),
+            editor: Mutex::new(None),
         }
     }
 }
@@ -367,6 +413,409 @@ impl TownsmithCore {
         }
         output
     }
+
+    /// Create or replace the editor [`VoxelVolume`].
+    ///
+    /// `chunks_x`, `chunks_y`, and `chunks_z` count 32³ chunks. Pass
+    /// `0, 0, 0` to select the default 5 × 3 × 5 volume
+    /// (16 m × 9.6 m × 16 m). Mixed zero axes, negative values, an axis above
+    /// [`MAX_CHUNKS_PER_AXIS`], or more than [`MAX_CHUNKS`] total chunks are
+    /// rejected. A rejected call returns `false` and leaves an existing volume
+    /// untouched.
+    ///
+    /// **Main thread only.** This method creates no Godot resources, but it
+    /// mutates the bridge state and is part of the single-threaded editor API.
+    #[func]
+    fn create_editor_volume(&self, chunks_x: i64, chunks_y: i64, chunks_z: i64) -> bool {
+        let config = match editor_config_from_args(chunks_x, chunks_y, chunks_z) {
+            Ok(config) => config,
+            Err(message) => {
+                eprintln!("Townsmith: {message}");
+                return false;
+            }
+        };
+        let volume = match VoxelVolume::new(config) {
+            Ok(volume) => volume,
+            Err(error) => {
+                eprintln!("Townsmith: invalid editor volume: {error}");
+                return false;
+            }
+        };
+
+        let mut guard = self
+            .editor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *guard = Some(EditorState::new(volume));
+        true
+    }
+
+    /// Voxel configuration of the current editor volume.
+    ///
+    /// Returns a dictionary with `created` (`bool`), `chunks` and `voxels`
+    /// (`PackedInt32Array`, `[x, y, z]`), `bounds_m` (`PackedFloat32Array`),
+    /// `chunk_count` (`int`), `chunk_size` (`int`), and `voxel_size_m`
+    /// (`float`). Without a volume it returns
+    /// `{ "created": false, "error": "no_editor_volume" }`.
+    ///
+    /// **Main thread only.**
+    #[func]
+    fn editor_volume_size_voxels(&self) -> VarDictionary {
+        let mut result = VarDictionary::new();
+        let guard = self
+            .editor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(state) = guard.as_ref() else {
+            result.set("created", false);
+            result.set("error", "no_editor_volume");
+            return result;
+        };
+
+        result.set("created", true);
+        volume_config_to_dictionary(state.volume.config(), &mut result);
+        result
+    }
+
+    /// Volume extents in meters as `[x, y, z]`.
+    ///
+    /// Returns an empty `PackedFloat32Array` when no editor volume exists.
+    ///
+    /// **Main thread only.**
+    #[func]
+    fn editor_volume_bounds(&self) -> PackedFloat32Array {
+        let guard = self
+            .editor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        guard
+            .as_ref()
+            .map_or_else(PackedFloat32Array::new, |state| {
+                PackedFloat32Array::from(state.volume.config().bounds_m().to_vec())
+            })
+    }
+
+    /// Write one 10 cm voxel in the editor volume.
+    ///
+    /// `material` is `0..=65535`; `0` clears the voxel. Negative or
+    /// out-of-volume coordinates, a missing volume, and out-of-range materials
+    /// return `false` without changing anything. A successful write marks the
+    /// current mesh stats stale until [`Self::build_editor_volume_mesh`] runs.
+    ///
+    /// **Main thread only.**
+    #[func]
+    fn editor_set_voxel(&self, x: i64, y: i64, z: i64, material: i64) -> bool {
+        let Some(pos) = volume_pos_from_args(x, y, z) else {
+            return false;
+        };
+        let Some(material) = material_from_args(material) else {
+            return false;
+        };
+
+        let mut guard = self
+            .editor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(state) = guard.as_mut() else {
+            return false;
+        };
+        if state.volume.set_voxel(pos, material).is_err() {
+            return false;
+        }
+        state.mark_dirty();
+        true
+    }
+
+    /// Fill a half-open box `[min, max)` in the editor volume.
+    ///
+    /// The box is validated before anything is written, so a rejected call
+    /// leaves the volume unchanged. `max` is exclusive, matching
+    /// [`VoxelVolume::fill_box`]. Material and error behavior matches
+    /// [`Self::editor_set_voxel`].
+    ///
+    /// **Main thread only.**
+    // GDScript call sites pass six coordinates plus the material; a struct
+    // argument would make the Godot API awkward and slower to call.
+    #[allow(clippy::too_many_arguments)]
+    #[func]
+    fn editor_fill_box(
+        &self,
+        min_x: i64,
+        min_y: i64,
+        min_z: i64,
+        max_x: i64,
+        max_y: i64,
+        max_z: i64,
+        material: i64,
+    ) -> bool {
+        let Some(min) = volume_pos_from_args(min_x, min_y, min_z) else {
+            return false;
+        };
+        let Some(max) = volume_pos_from_args(max_x, max_y, max_z) else {
+            return false;
+        };
+        let Some(material) = material_from_args(material) else {
+            return false;
+        };
+
+        let mut guard = self
+            .editor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(state) = guard.as_mut() else {
+            return false;
+        };
+        if state.volume.fill_box(min, max, material).is_err() {
+            return false;
+        }
+        state.mark_dirty();
+        true
+    }
+
+    /// Remove every allocated chunk from the editor volume.
+    ///
+    /// Returns `false` when no editor volume exists. The volume keeps its
+    /// configured dimensions, so it can be filled again immediately.
+    ///
+    /// **Main thread only.**
+    #[func]
+    fn editor_clear(&self) -> bool {
+        let mut guard = self
+            .editor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(state) = guard.as_mut() else {
+            return false;
+        };
+        state.volume.clear();
+        state.mark_dirty();
+        true
+    }
+
+    /// Read one 10 cm voxel from the editor volume.
+    ///
+    /// Returns the material id, or `-1` when there is no volume, the
+    /// coordinate is negative or outside the volume, or the coordinate does
+    /// not fit a volume position.
+    ///
+    /// **Main thread only.**
+    #[func]
+    fn editor_get_voxel(&self, x: i64, y: i64, z: i64) -> i64 {
+        let Some(pos) = volume_pos_from_args(x, y, z) else {
+            return -1;
+        };
+        let guard = self
+            .editor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(state) = guard.as_ref() else {
+            return -1;
+        };
+        state.volume.get_voxel(pos).map_or(-1, i64::from)
+    }
+
+    /// Mesh the whole editor volume into one `ArrayMesh` surface.
+    ///
+    /// Uses packed arrays (`VERTEX`, `NORMAL`, `TEX_UV`, `INDEX`) in one
+    /// neutral-material surface. Per-vertex material ids are intentionally not
+    /// uploaded; multi-material rendering comes later. UVs are in meters, so a
+    /// textured material must repeat.
+    ///
+    /// **Synchronous and main-thread only.** Whole-volume greedy meshing is a
+    /// correctness-first path: the two-story benchmark volume is ~75 ms on a
+    /// desktop CPU, and larger volumes are much slower. The editor must
+    /// debounce edits or move remeshing to a worker before calling this per
+    /// frame. An empty or missing volume returns an empty `ArrayMesh`.
+    #[func]
+    fn build_editor_volume_mesh(&self) -> Gd<ArrayMesh> {
+        let mut guard = self
+            .editor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(state) = guard.as_mut() else {
+            return ArrayMesh::new_gd();
+        };
+
+        let started = Instant::now();
+        let buffers = state.volume.mesh();
+        let mesh = match voxel_mesh_to_godot(&buffers) {
+            Ok(mesh) => mesh,
+            Err(message) => {
+                eprintln!("Townsmith: {message}");
+                return ArrayMesh::new_gd();
+            }
+        };
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+        state.mesh_builds = state.mesh_builds.saturating_add(1);
+        state.mesh_dirty = false;
+        state.last_mesh_quads = buffers.quad_count();
+        state.last_mesh_vertices = buffers.vertices.len();
+        state.last_mesh_indices = buffers.indices.len();
+        state.mesh_ms = elapsed_ms;
+        mesh
+    }
+
+    /// Current editor volume and mesh statistics.
+    ///
+    /// Returns `created` (`bool`), the configuration keys from
+    /// [`Self::editor_volume_size_voxels`], `solid_voxels`, `allocated_chunks`,
+    /// `chunk_capacity`, `mesh_dirty`, `mesh_builds`, `last_mesh_quads`,
+    /// `last_mesh_vertices`, `last_mesh_indices`, and `mesh_ms` (core meshing
+    /// plus packed-array conversion for the last build). Without a volume it
+    /// returns `{ "created": false, "error": "no_editor_volume" }`.
+    ///
+    /// **Main thread only.**
+    #[func]
+    fn editor_volume_stats(&self) -> VarDictionary {
+        let mut result = VarDictionary::new();
+        let guard = self
+            .editor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(state) = guard.as_ref() else {
+            result.set("created", false);
+            result.set("error", "no_editor_volume");
+            return result;
+        };
+
+        result.set("created", true);
+        volume_config_to_dictionary(state.volume.config(), &mut result);
+        result.set("solid_voxels", state.volume.solid_count() as i64);
+        result.set("allocated_chunks", state.volume.chunks_allocated() as i64);
+        result.set("chunk_capacity", MAX_CHUNKS as i64);
+        result.set("mesh_dirty", state.mesh_dirty);
+        result.set("mesh_builds", state.mesh_builds as i64);
+        result.set("last_mesh_quads", state.last_mesh_quads as i64);
+        result.set("last_mesh_vertices", state.last_mesh_vertices as i64);
+        result.set("last_mesh_indices", state.last_mesh_indices as i64);
+        result.set("mesh_ms", state.mesh_ms);
+        result
+    }
+}
+
+/// Parse the GDScript chunk arguments, treating `0, 0, 0` as the default
+/// 5 × 3 × 5 volume.
+fn editor_config_from_args(
+    chunks_x: i64,
+    chunks_y: i64,
+    chunks_z: i64,
+) -> Result<VolumeConfig, String> {
+    if chunks_x == 0 && chunks_y == 0 && chunks_z == 0 {
+        return Ok(VolumeConfig::default());
+    }
+
+    let axis = |name: &str, value: i64| -> Result<u32, String> {
+        let count = u32::try_from(value).map_err(|_| {
+            format!(
+                "editor volume {name} chunk count {value} must be between 1 and {MAX_CHUNKS_PER_AXIS}"
+            )
+        })?;
+        if count > MAX_CHUNKS_PER_AXIS {
+            return Err(format!(
+                "editor volume {name} chunk count {count} exceeds the maximum {MAX_CHUNKS_PER_AXIS}"
+            ));
+        }
+        Ok(count)
+    };
+
+    let chunks_x = axis("x", chunks_x)?;
+    let chunks_y = axis("y", chunks_y)?;
+    let chunks_z = axis("z", chunks_z)?;
+    VolumeConfig::new(chunks_x, chunks_y, chunks_z)
+        .map_err(|error| format!("invalid editor volume: {error}"))
+}
+
+/// Convert GDScript integer coordinates to a volume position without wrapping.
+fn volume_pos_from_args(x: i64, y: i64, z: i64) -> Option<VolumePos> {
+    Some(VolumePos::new(
+        u32::try_from(x).ok()?,
+        u32::try_from(y).ok()?,
+        u32::try_from(z).ok()?,
+    ))
+}
+
+/// Convert a GDScript material code to the core's `u16` material id.
+fn material_from_args(material: i64) -> Option<MaterialId> {
+    u16::try_from(material).ok()
+}
+
+fn volume_config_to_dictionary(config: VolumeConfig, target: &mut VarDictionary) {
+    let chunks: Vec<i32> = config.chunks().iter().map(|&value| value as i32).collect();
+    let voxels: Vec<i32> = config.voxels().iter().map(|&value| value as i32).collect();
+
+    target.set("chunks", &PackedInt32Array::from(chunks).to_variant());
+    target.set("chunk_count", config.chunk_count() as i64);
+    target.set("voxels", &PackedInt32Array::from(voxels).to_variant());
+    target.set(
+        "bounds_m",
+        &PackedFloat32Array::from(config.bounds_m().to_vec()).to_variant(),
+    );
+    target.set("chunk_size", CHUNK_SIZE as i64);
+    target.set("voxel_size_m", f64::from(VOXEL_SIZE_M));
+}
+
+/// Upload one engine-neutral voxel mesh as a single packed-array surface.
+///
+/// Vertex colors and per-vertex material ids are deliberately omitted: the
+/// editor uses one material override for now. UVs are passed through in meters.
+fn voxel_mesh_to_godot(buffers: &MeshBuffers) -> Result<Gd<ArrayMesh>, &'static str> {
+    if buffers.vertices.is_empty() || buffers.indices.is_empty() {
+        return Ok(ArrayMesh::new_gd());
+    }
+
+    let vertex_count = buffers.vertices.len();
+    let mut vertices = Vec::with_capacity(vertex_count);
+    let mut normals = Vec::with_capacity(vertex_count);
+    let mut uvs = Vec::with_capacity(vertex_count);
+
+    for vertex in &buffers.vertices {
+        vertices.push(Vector3::new(
+            vertex.position[0],
+            vertex.position[1],
+            vertex.position[2],
+        ));
+        normals.push(Vector3::new(
+            vertex.normal[0],
+            vertex.normal[1],
+            vertex.normal[2],
+        ));
+        uvs.push(Vector2::new(vertex.uv[0], vertex.uv[1]));
+    }
+
+    let mut indices = Vec::with_capacity(buffers.indices.len());
+    for &index in &buffers.indices {
+        if index as usize >= vertex_count {
+            return Err("editor volume mesh has an index outside its vertex buffer");
+        }
+        let Ok(index) = i32::try_from(index) else {
+            return Err("editor volume mesh exceeds the 32-bit Godot index range");
+        };
+        indices.push(index);
+    }
+
+    let mut arrays = VarArray::new();
+    arrays.resize(ArrayType::MAX.ord() as usize, &Variant::nil());
+    arrays.set(
+        ArrayType::VERTEX.ord() as usize,
+        &PackedVector3Array::from(vertices),
+    );
+    arrays.set(
+        ArrayType::NORMAL.ord() as usize,
+        &PackedVector3Array::from(normals),
+    );
+    arrays.set(
+        ArrayType::TEX_UV.ord() as usize,
+        &PackedVector2Array::from(uvs),
+    );
+    arrays.set(
+        ArrayType::INDEX.ord() as usize,
+        &PackedInt32Array::from(indices),
+    );
+
+    let mut mesh = ArrayMesh::new_gd();
+    mesh.add_surface_from_arrays(PrimitiveType::TRIANGLES, &arrays);
+    Ok(mesh)
 }
 
 fn clamp_step(step: i64) -> usize {
@@ -571,6 +1020,45 @@ mod tests {
         assert_eq!(city_tier_from_code(-1), None);
         assert_eq!(city_tier_from_code(3), None);
         assert_eq!(city_tier_from_code(99), None);
+    }
+
+    #[test]
+    fn editor_config_accepts_default_and_mixed_axes() {
+        let default = editor_config_from_args(0, 0, 0).expect("default config");
+        assert_eq!(default.chunks(), [5, 3, 5]);
+
+        let custom = editor_config_from_args(2, 4, 6).expect("custom config");
+        assert_eq!(custom.chunks(), [2, 4, 6]);
+    }
+
+    #[test]
+    fn editor_config_rejects_mixed_zero_axes() {
+        assert!(editor_config_from_args(0, 3, 5).is_err());
+        assert!(editor_config_from_args(5, 0, 5).is_err());
+        assert!(editor_config_from_args(5, 3, 0).is_err());
+    }
+
+    #[test]
+    fn editor_config_rejects_negative_and_oversized_axes() {
+        assert!(editor_config_from_args(-1, 3, 5).is_err());
+        assert!(editor_config_from_args(33, 3, 5).is_err());
+        assert!(editor_config_from_args(32, 32, 32).is_err());
+    }
+
+    #[test]
+    fn material_conversion_checks_the_u16_range() {
+        assert_eq!(material_from_args(0), Some(0));
+        assert_eq!(material_from_args(1), Some(1));
+        assert_eq!(material_from_args(65_535), Some(65_535));
+        assert_eq!(material_from_args(-1), None);
+        assert_eq!(material_from_args(65_536), None);
+    }
+
+    #[test]
+    fn volume_position_rejects_negative_and_large_values() {
+        assert_eq!(volume_pos_from_args(0, 0, 0), Some(VolumePos::new(0, 0, 0)));
+        assert_eq!(volume_pos_from_args(-1, 0, 0), None);
+        assert_eq!(volume_pos_from_args(0, i64::MAX, 0), None);
     }
 
     #[test]
