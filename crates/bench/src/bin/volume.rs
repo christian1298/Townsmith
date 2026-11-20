@@ -7,63 +7,10 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use core_voxel::demo::{ROOF, STONE, WOOD};
-use core_voxel::error::VoxelError;
-use core_voxel::volume::{VolumeConfig, VolumePos, VoxelVolume};
-use core_voxel::MaterialId;
+use core_voxel::demo;
 
-const PARTITION: MaterialId = 4;
 const WARMUP_ITERATIONS: usize = 3;
 const MEASURED_ITERATIONS: usize = 20;
-
-fn pos(x: u32, y: u32, z: u32) -> VolumePos {
-    VolumePos::new(x, y, z)
-}
-
-fn build_house(volume: &mut VoxelVolume) -> Result<(), VoxelError> {
-    // Ground floor slab.
-    volume.fill_box(pos(8, 0, 8), pos(152, 2, 152), WOOD)?;
-
-    // Perimeter shell, then hollow the interior.
-    volume.fill_box(pos(8, 2, 8), pos(152, 80, 152), STONE)?;
-    volume.fill_box(pos(10, 2, 10), pos(150, 80, 150), core_voxel::AIR)?;
-
-    // First-floor slab with a stairwell opening.
-    volume.fill_box(pos(10, 40, 10), pos(150, 42, 150), WOOD)?;
-    volume.fill_box(pos(112, 40, 20), pos(136, 42, 58), core_voxel::AIR)?;
-
-    // Roof with a 0.2 m overhang.
-    volume.fill_box(pos(6, 80, 6), pos(154, 84, 154), ROOF)?;
-
-    // Interior partitions on both floors.
-    volume.fill_box(pos(78, 2, 10), pos(80, 40, 70), PARTITION)?;
-    volume.fill_box(pos(78, 42, 10), pos(80, 80, 70), PARTITION)?;
-    volume.fill_box(pos(78, 2, 30), pos(80, 26, 42), core_voxel::AIR)?;
-    volume.fill_box(pos(78, 42, 30), pos(80, 66, 42), core_voxel::AIR)?;
-
-    // Front door on the south wall (z = 8..10).
-    volume.fill_box(pos(68, 2, 8), pos(80, 26, 10), core_voxel::AIR)?;
-
-    // Windows on both floors of all four walls.
-    for y in [16, 52] {
-        for (x0, x1) in [(32, 48), (104, 120)] {
-            volume.fill_box(pos(x0, y, 8), pos(x1, y + 16, 10), core_voxel::AIR)?;
-            volume.fill_box(pos(x0, y, 150), pos(x1, y + 16, 152), core_voxel::AIR)?;
-        }
-        for (z0, z1) in [(32, 48), (104, 120)] {
-            volume.fill_box(pos(8, y, z0), pos(10, y + 16, z1), core_voxel::AIR)?;
-            volume.fill_box(pos(150, y, z0), pos(152, y + 16, z1), core_voxel::AIR)?;
-        }
-    }
-
-    // Straight stair inside the opening: 19 steps of 2 voxels rise and depth.
-    for step in 0..19_u32 {
-        let z = 20 + step * 2;
-        volume.fill_box(pos(112, 2, z), pos(128, 4 + step * 2, z + 2), PARTITION)?;
-    }
-
-    Ok(())
-}
 
 fn median(samples: &mut [f64]) -> f64 {
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -76,9 +23,8 @@ fn median(samples: &mut [f64]) -> f64 {
 }
 
 fn main() {
-    let config = VolumeConfig::default();
-    let mut volume = VoxelVolume::new(config).expect("default volume config is valid");
-    build_house(&mut volume).expect("deterministic house fits the default volume");
+    let volume = demo::two_story_house().expect("deterministic house fits the default volume");
+    let config = volume.config();
 
     for _ in 0..WARMUP_ITERATIONS {
         black_box(volume.mesh());
