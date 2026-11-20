@@ -527,6 +527,64 @@ impl TownsmithCore {
         surface.commit().unwrap_or_else(ArrayMesh::new_gd)
     }
 
+    /// Build the deterministic vertical-slice two-story house as a Godot mesh.
+    ///
+    /// The Rust fixture ([`demo::two_story_house`]) fills the default
+    /// 5 × 3 × 5 chunk volume (16 m × 9.6 m × 16 m) and is shared with the
+    /// `townsmith-bench` volume benchmark. The result is one packed-array
+    /// surface with positions, normals, meter-scaled UVs, and indices. Returns
+    /// an empty `ArrayMesh` if the fixture cannot be built.
+    ///
+    /// **Synchronous and main-thread only.** Whole-volume greedy meshing is
+    /// ~75 ms on a desktop CPU; call this once at load, never per frame.
+    #[func]
+    fn build_slice_house_mesh(&self) -> Gd<ArrayMesh> {
+        let Ok(volume) = demo::two_story_house() else {
+            eprintln!("Townsmith: could not build the slice house fixture");
+            return ArrayMesh::new_gd();
+        };
+        match voxel_mesh_to_godot(&volume.mesh()) {
+            Ok(mesh) => mesh,
+            Err(message) => {
+                eprintln!("Townsmith: {message}");
+                ArrayMesh::new_gd()
+            }
+        }
+    }
+
+    /// Counts for the deterministic vertical-slice house fixture.
+    ///
+    /// Returns `solid_voxels`, `quads`, `vertices`, `indices`, `buffer_bytes`
+    /// (position/normal/UV vertex payload plus the index payload, in bytes),
+    /// and `checksum` (16 lowercase hex digits). Godot surface counts are not
+    /// reported here; query the returned `ArrayMesh` instead.
+    ///
+    /// **Synchronous and main-thread only.** This remeshes the fixture, so use
+    /// it once at load for the benchmark report.
+    #[func]
+    fn slice_house_stats(&self) -> VarDictionary {
+        let mut result = VarDictionary::new();
+        let Ok(volume) = demo::two_story_house() else {
+            result.set("error", "slice_house_build_failed");
+            return result;
+        };
+        let buffers = volume.mesh();
+        let vertex_bytes = buffers.vertices.len() * (3 * 4 + 3 * 4 + 2 * 4);
+        let index_bytes = buffers.indices.len() * 4;
+        let checksum = buffers.checksum();
+
+        result.set("solid_voxels", i64::from(volume.solid_count()));
+        result.set("quads", buffers.quad_count() as i64);
+        result.set("vertices", buffers.vertices.len() as i64);
+        result.set("indices", buffers.indices.len() as i64);
+        result.set("buffer_bytes", (vertex_bytes + index_bytes) as i64);
+        result.set(
+            "checksum",
+            &GString::from(&format!("{checksum:016x}")).to_variant(),
+        );
+        result
+    }
+
     /// Generate one 256 m terrain chunk synchronously.
     ///
     /// Kept for tooling and tests. The streaming shell should use

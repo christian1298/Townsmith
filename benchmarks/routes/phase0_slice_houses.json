@@ -1,0 +1,13 @@
+{
+  "id": "phase0_slice_houses_v1",
+  "description": "Vertical-slice acceptance route: one two-story house mesh reused by 21 MultiMesh copies on a 7x3 grid, 20 m apart, orbited at 6-18 m altitude so all 21 houses stay in view.",
+  "duration_seconds": 30,
+  "warmup_seconds": 3,
+  "waypoints": [
+    { "t": 0.0, "position": [-85, 7, 100], "look_at": [0, 3, 0], "fov": 70 },
+    { "t": 0.25, "position": [85, 7, 100], "look_at": [0, 3, 0], "fov": 70 },
+    { "t": 0.5, "position": [105, 18, 0], "look_at": [0, 3, 0], "fov": 68 },
+    { "t": 0.75, "position": [0, 14, -105], "look_at": [0, 3, 0], "fov": 70 },
+    { "t": 1.0, "position": [-105, 11, -55], "look_at": [0, 3, 0], "fov": 70 }
+  ]
+}

@@ -157,7 +157,7 @@ v1 ships BLAKE3 and a Stored zip; zstd (and deflate) are future format versions.
 | Build a 2-story house with 2 bedrooms, kitchen, bathroom | Test house passes room detection with exactly those rooms |
 | Save, reload, place a copy | `.tsbp` roundtrip hash equal; copy placement identical |
 | Stats report capacity, cost, rooms correctly | Golden JSON for the test house; ±1% cost tolerance |
-| 60 FPS with house + 20 copies in view | 21 houses, 1080p, p99 ≤ 16.7 ms on the reference machine |
+| 60 FPS with house + 20 copies in view | **Pass** on RTX 4080: 6,267 FPS avg / 4,975 1% low, p99 0.20 ms; see [[39 - Slice House Benchmark]] |
 | No data loss on undo/redo or save/load | 500 random edits + undo/redo replay; save/load hash equal |
 | EN/DE UI without missing keys or clipped text | 0 missing keys; placeholder lint pass; German layout review |
 
