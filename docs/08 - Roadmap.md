@@ -148,6 +148,8 @@ tags:
 
 ### Phase 3 — Simulation v1 (8–12 weeks)
 
+The staged cut is in [[49 - Phase 3 Slice Plan]]: city ledger, households/needs, jobs/wages, primary industries, utilities, economy, traffic, dashboard, and a headless 30-day runner.
+
 **Goals**
 - The city feels alive and the player can affect it.
 - A complete loop: housing → jobs → needs → taxes → services.

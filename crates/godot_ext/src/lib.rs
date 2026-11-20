@@ -27,10 +27,10 @@ use core_blueprint::{
     PropRecord, RoomRecord,
 };
 use core_city::{
-    normalize_rotation, CityLayout, CityTier, ConstructionSite, ConstructionStore, Lot, LotError,
-    LotRequest, LotStore, Placement, PlacementError, PlacementRequest, PlacementStore, RoadError,
-    RoadRequest, RoadSegment, RoadStore, Settlement, SettlementError, SettlementRequest,
-    SettlementStore, Zone, MAX_WORLD_COORD_M,
+    normalize_rotation, summarize, CityLayout, CitySummary, CityTier, ConstructionSite,
+    ConstructionStore, Lot, LotError, LotRequest, LotStore, Placement, PlacementError,
+    PlacementRequest, PlacementStore, RoadError, RoadRequest, RoadSegment, RoadStore, Settlement,
+    SettlementError, SettlementRequest, SettlementStore, Zone, MAX_WORLD_COORD_M,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -1806,6 +1806,44 @@ impl TownsmithCore {
             "checksum",
             &GString::from(&format!("{:016x}", store.checksum())),
         );
+        result
+    }
+
+    /// Derived city ledger from completed buildings.
+    ///
+    /// This is computed on demand; it is not a separate save field. Only
+    /// completed construction sites contribute population or jobs.
+    #[func]
+    fn city_summary(&self) -> VarDictionary {
+        // Hold the three stores in the established world -> construction ->
+        // settlement order so the HUD cannot read a torn placement/site
+        // snapshot. `summarize` only needs references, so no clone is needed.
+        let placements = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        let construction = self
+            .construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let settlements = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let settlement_count = settlements.as_ref().map_or(0, SettlementStore::count);
+        let summary = placements
+            .as_ref()
+            .map_or_else(CitySummary::default, |placements| {
+                summarize(placements, &construction, settlement_count)
+            });
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("population", summary.population as i64);
+        result.set("housing_capacity", summary.housing_capacity as i64);
+        result.set("jobs", summary.jobs as i64);
+        result.set("employed", summary.employed as i64);
+        result.set("unemployed", summary.unemployed as i64);
+        result.set("happiness", f64::from(summary.happiness));
+        result.set("completed_buildings", summary.completed_buildings as i64);
+        result.set("construction_sites", summary.construction_sites as i64);
+        result.set("settlements", summary.settlements as i64);
         result
     }
 
