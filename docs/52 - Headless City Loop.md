@@ -13,7 +13,7 @@ tags:
 # 52 — Headless City Loop
 
 > [!info] What this note is
-> A deterministic 30-day fast-forward over construction, move-in, jobs, commute, primary industries, needs, wages, and the treasury. It gives Phase 3 a regression number before utilities and the remaining economy slices change the balance.
+> A deterministic 30-day fast-forward over construction, move-in, jobs, commute, primary industries, water/power utilities, needs, wages, and the treasury. It gives Phase 3 a stable regression number before the remaining economy slices change the balance.
 
 ## 1. Run
 
@@ -41,7 +41,9 @@ Each house has:
 
 Move-in is 5 residents/s city-wide. Ten of the fifty buildings are industry sites: ids 1–4 farms, 5–7 lumberjacks, 8–10 hunting lodges. Every house has ten residents and ten jobs, so each site is staffed by ten workers.
 
-Each fixed step ticks construction, industry production/consumption, home/workplace assignment and needs, then the treasury.
+Five utility sites are designated on completed houses: water on ids 1 and 10, power on ids 1, 5, and 10. They are added when their building completes.
+
+Each fixed step ticks construction, utility coverage, industry production/consumption, home/workplace assignment and needs, then the treasury.
 
 ## 2. Default result
 
@@ -54,9 +56,12 @@ average commute       0 m
 daily wages           10,000
 balance               -27,500
 daily net             -4,250
-happiness             0.667
-food / water / rest   1.00 / 0 / 0
+happiness             1.000
+food / water / rest   1.00 / 1.00 / 1.00
 industry sites        10
+utility sites         5 (2 water, 3 power)
+water supply          100% (500 / 600)
+power supply          100% (625 / 900)
 food production       660 / day
 wood production       240 / day
 hides production      60 / day
@@ -64,14 +69,15 @@ stock                 wood 7,199 · food 4,799 · hides 1,800
 food supply           100%
 ```
 
-Recorded checksum: `fe84b6a6d06678ca` (FNV-1a over the compact JSON without the checksum field).
+Recorded checksum: `e0d935b2a4421285` (FNV-1a over the compact JSON without the checksum field).
 
 Secondary values are pinned:
 
-- population runtime: `91d57794af95ef8a`
+- population runtime: `c0d28b58ce38145a`
 - construction store: `aa3e36ad3cc1e717`
 - treasury: `1b6a7631bd9dd0ac`
 - industry: `1b536bce524f0c76`
+- utilities: `44e47a38faeb0edb`
 
 ## 3. What it proves
 
@@ -80,20 +86,21 @@ Secondary values are pinned:
 - Households fill vacant homes, then take the nearest jobs.
 - Staffed farms, lumberjacks, and hunting lodges fill the stockpile.
 - Residents eat from the food stock and food need reaches 100%.
+- Water and power coverage keep water and rest needs at 100%, and full power keeps industry at full output.
+- Water/power service survives the fixed step loop with deterministic coverage.
 - Wages and the city ledger aggregate consistently.
 - Repeated runs produce the same checksums.
-- The five-house unit test completes, staffs its sites, and produces food and wood in one simulated day.
+- The five-house unit test completes, staffs its sites, adds utilities, and reaches full service in one simulated day.
 
 ## 4. Current finding
 
-Food now closes: 660 food/day against 500 residents, a 100% supply ratio, and a 4,800-food stock after 30 days. Water and rest still have no supply, so they sit at zero and happiness is **0.667**. This is not a tuning target; it is the visible 3.5 gap.
-
-The runner should not be used to claim “30 stable days” until 3.5 adds water/service replenishment and 3.6 finishes the budget. It currently pins the *mechanics*, not a healthy city.
+The city is healthy at full service: 660 food/day against 500 residents, 100% food/water/power supply, 1.0 needs, and **1.00** happiness. The remaining 30-day problem is cash: **−27,500** and **−4,250/day**. The runner still should not be used to claim “30 stable days” until 3.6 makes near-bankruptcy recoverable; it now pins the *mechanics and service loop*, not a sustainable budget.
 
 ## 5. Limits
 
 - Industry is included ([[54 - Primary Industries]]), but there are no storage buildings, transport time, or wood/hide consumers.
-- No water, power, or service coverage; water/rest needs still collapse.
+- Water/power coverage is a radius with fixed capacity; there are no pipes, wires, or network flow.
+- Utility sites are added only when their building completes, so early needs can dip before coverage is online.
 - No traffic or road-distance commute; all homes/workplaces are co-located, so commute is zero.
 - One aggregate household per house; no named citizens.
 - The fixed grid does not validate terrain, roads, lots, or settlements.
@@ -103,11 +110,11 @@ The runner should not be used to claim “30 stable days” until 3.5 adds water
 ## 6. Tests
 
 - `city_loop` bin test: five houses complete, fill 50 residents, staff their sites, and produce food/wood in one simulated day.
-- Workspace: **304 tests + 1 doctest**.
+- Workspace: **321 tests + 1 doctest**.
 
 ## 7. Next
 
-1. 3.5: water/power coverage and service replenishment for water/rest.
-2. 3.6: construction draw-down, loans, and bankruptcy consequences.
-3. Add a month-long scenario matrix (early town, mid city) and a baseline JSON under `benchmarks/results/`.
-4. Tune industry rates against the treasury and the headless baseline.
+1. 3.6: construction draw-down, loans, and bankruptcy consequences.
+2. Add a month-long scenario matrix (early town, mid city) and a baseline JSON under `benchmarks/results/`.
+3. Tune industry rates against the treasury and the headless baseline.
+4. Add a utility-outage scenario to the runner (water shortage and power outage) and pin the degraded result.

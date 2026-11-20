@@ -39,6 +39,12 @@ const REST_DECAY_PER_S: f32 = 0.0002;
 /// Food satisfaction restored per simulated second at full supply.
 pub const FOOD_REPLENISH_PER_S: f32 = 0.002;
 
+/// Water satisfaction restored per simulated second at full service.
+pub const WATER_REPLENISH_PER_S: f32 = 0.002;
+
+/// Rest satisfaction restored per simulated second at full power service.
+pub const REST_REPLENISH_PER_S: f32 = 0.0018;
+
 /// Largest per-workplace staffing value accepted from a save.
 const MAX_STAFFING_PER_WORKPLACE: u32 = 1_000_000;
 
@@ -268,8 +274,8 @@ impl CityRuntime {
     /// Advance move-in, workplace assignment, and needs by `dt_s` seconds.
     ///
     /// `food_supply` is the share of resident food demand met this step,
-    /// 0..=1. It restores food satisfaction; water and rest still only decay
-    /// until the utility slice.
+    /// 0..=1. Water and rest still decay; use [`Self::tick_with_supplies`] for
+    /// utility service.
     pub fn tick_with_workplaces_and_supply(
         &mut self,
         dt_s: f64,
@@ -277,12 +283,27 @@ impl CityRuntime {
         workplaces: &[Workplace],
         food_supply: f32,
     ) -> PopulationReport {
+        self.tick_with_supplies(dt_s, homes, workplaces, food_supply, 0.0, 0.0)
+    }
+
+    /// Advance move-in, workplace assignment, and needs with service shares.
+    ///
+    /// `food_supply`, `water_supply`, and `power_supply` are 0..=1 service
+    /// shares. Power supports rest at home (lighting, heating, and comfort) as
+    /// well as industry production, so a power outage reduces both.
+    pub fn tick_with_supplies(
+        &mut self,
+        dt_s: f64,
+        homes: &[Home],
+        workplaces: &[Workplace],
+        food_supply: f32,
+        water_supply: f32,
+        power_supply: f32,
+    ) -> PopulationReport {
         self.sync_homes(homes);
-        let supply = if food_supply.is_finite() {
-            food_supply.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        let food = normalize_supply(food_supply);
+        let water = normalize_supply(water_supply);
+        let power = normalize_supply(power_supply);
         let dt = if dt_s.is_finite() {
             dt_s.clamp(0.0, MAX_TICK_SECONDS) as f32
         } else {
@@ -372,10 +393,14 @@ impl CityRuntime {
 
         for household in self.households.values_mut() {
             household.food = (household.food - FOOD_DECAY_PER_S * dt
-                + FOOD_REPLENISH_PER_S * supply * dt)
+                + FOOD_REPLENISH_PER_S * food * dt)
                 .clamp(0.0, 1.0);
-            household.water = (household.water - WATER_DECAY_PER_S * dt).max(0.0);
-            household.rest = (household.rest - REST_DECAY_PER_S * dt).max(0.0);
+            household.water = (household.water - WATER_DECAY_PER_S * dt
+                + WATER_REPLENISH_PER_S * water * dt)
+                .clamp(0.0, 1.0);
+            household.rest = (household.rest - REST_DECAY_PER_S * dt
+                + REST_REPLENISH_PER_S * power * dt)
+                .clamp(0.0, 1.0);
             household.clamp_to_capacity();
         }
 
@@ -575,6 +600,14 @@ impl CityRuntime {
             hash = hash.wrapping_mul(PRIME);
         }
         hash
+    }
+}
+
+fn normalize_supply(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
     }
 }
 
@@ -955,6 +988,60 @@ mod tests {
         value.as_object_mut().expect("object").remove("staffing");
         let decoded = CityRuntime::from_json(&value.to_string()).expect("decode");
         assert!(decoded.staffing.is_empty());
+    }
+
+    #[test]
+    fn water_and_rest_replenish_with_service() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.set_move_in_per_second(2.0);
+        runtime.tick_with_supplies(
+            1_000.0,
+            &[Home {
+                id: 1,
+                capacity: 2,
+                center: [0.0, 0.0],
+            }],
+            &[],
+            0.0,
+            0.0,
+            0.0,
+        );
+        let before = runtime.households[&1].clone();
+        assert!(before.water < 0.8);
+        assert!(before.rest < 0.9);
+        runtime.tick_with_supplies(
+            300.0,
+            &[Home {
+                id: 1,
+                capacity: 2,
+                center: [0.0, 0.0],
+            }],
+            &[],
+            1.0,
+            1.0,
+            1.0,
+        );
+        let after = &runtime.households[&1];
+        assert!(after.water > before.water);
+        assert!(after.rest > before.rest);
+        assert!(after.water <= 1.0);
+        assert!(after.rest <= 1.0);
+    }
+
+    #[test]
+    fn service_shares_are_clamped() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.set_move_in_per_second(2.0);
+        let homes = [Home {
+            id: 1,
+            capacity: 1,
+            center: [0.0, 0.0],
+        }];
+        runtime.tick_with_supplies(10.0, &homes, &[], f32::NAN, -1.0, 5.0);
+        let household = &runtime.households[&1];
+        assert!(household.food < 1.0);
+        assert!(household.water < 1.0);
+        assert!(household.rest <= 1.0);
     }
 
     #[test]

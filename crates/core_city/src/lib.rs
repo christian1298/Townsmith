@@ -40,6 +40,7 @@ pub mod placement;
 pub mod population;
 pub mod road;
 pub mod settlement;
+pub mod utilities;
 
 use std::error::Error;
 use std::fmt;
@@ -85,6 +86,12 @@ pub use settlement::{
     Settlement, SettlementError, SettlementRequest, SettlementStore, MAX_SETTLEMENTS,
     MAX_SETTLEMENT_ID, MAX_SETTLEMENT_NAME_CHARS, MAX_SETTLEMENT_OWNER_CHARS,
     MAX_SETTLEMENT_RADIUS_M, MIN_SETTLEMENT_RADIUS_M, SETTLEMENT_FORMAT_VERSION,
+};
+pub use utilities::{
+    UtilityConsumer, UtilityError, UtilityKind, UtilityReport, UtilitySite, UtilityStore,
+    DEFAULT_POWER_RADIUS_M, DEFAULT_WATER_RADIUS_M, MAX_UTILITY_CAPACITY, MAX_UTILITY_RADIUS_M,
+    MAX_UTILITY_SITES, POWER_CAPACITY_PER_SITE, POWER_PER_RESIDENT, POWER_PER_WORKER,
+    UTILITIES_FORMAT_VERSION, WATER_CAPACITY_PER_SITE, WATER_PER_RESIDENT,
 };
 
 /// Floor-to-floor height used by the synthetic layout, in meters.

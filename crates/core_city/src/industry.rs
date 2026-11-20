@@ -206,6 +206,25 @@ impl IndustryStore {
         staffing: &BTreeMap<u64, u32>,
         population: u64,
     ) -> IndustryTick {
+        self.tick_with_power(dt_s, staffing, population, 1.0)
+    }
+
+    /// Advance production and food consumption with a power service share.
+    ///
+    /// `power_supply` is 0..=1. Production scales with it; residents eat at
+    /// the full rate even during a power outage.
+    pub fn tick_with_power(
+        &mut self,
+        dt_s: f64,
+        staffing: &BTreeMap<u64, u32>,
+        population: u64,
+        power_supply: f32,
+    ) -> IndustryTick {
+        let power = if power_supply.is_finite() {
+            power_supply.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let dt = if dt_s.is_finite() {
             dt_s.clamp(0.0, MAX_INDUSTRY_TICK_SECONDS)
         } else {
@@ -223,7 +242,7 @@ impl IndustryStore {
             }
             workers += u64::from(staffed);
             let (site_wood, site_food, site_hides) = site.kind.output_per_worker_day();
-            let worker_days = f64::from(staffed) * days;
+            let worker_days = f64::from(staffed) * days * f64::from(power);
             wood += site_wood * worker_days;
             food += site_food * worker_days;
             hides += site_hides * worker_days;
@@ -257,6 +276,7 @@ impl IndustryStore {
             hides,
             food_consumed: consumed,
             food_supply: self.food_supply,
+            power_supply: power,
             workers,
             stockpile: self.stockpile,
         }
@@ -333,6 +353,8 @@ pub struct IndustryTick {
     pub food_consumed: f64,
     /// Food satisfaction supplied to households, 0..=1.
     pub food_supply: f32,
+    /// Power service share used this tick, 0..=1.
+    pub power_supply: f32,
     /// Staffed industry workers this tick.
     pub workers: u64,
     /// Stockpile after the tick.
@@ -479,6 +501,31 @@ mod tests {
         let decoded = IndustryStore::from_json(&json).expect("decode");
         assert_eq!(decoded, store);
         assert_eq!(decoded.checksum(), store.checksum());
+    }
+
+    #[test]
+    fn power_limits_production() {
+        let mut store = IndustryStore::new(2026);
+        store.add_site(1, IndustryKind::Farm).expect("site");
+        let staffing = staffing(&[(1, 1)]);
+        let half = store.tick_with_power(DAY_SECONDS, &staffing, 0, 0.5);
+        assert!((half.food - 6.0).abs() < 0.001);
+        assert_eq!(half.power_supply, 0.5);
+        let full = store.tick_with_power(DAY_SECONDS, &staffing, 0, 1.0);
+        assert!((full.food - 12.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_power_outage_stalls_production_but_not_eating() {
+        let mut store = IndustryStore::new(2026);
+        store.add_site(1, IndustryKind::Farm).expect("site");
+        store.stockpile.food = 10.0;
+        let staffing = staffing(&[(1, 1)]);
+        let tick = store.tick_with_power(DAY_SECONDS, &staffing, 2, 0.0);
+        assert_eq!(tick.food, 0.0);
+        assert_eq!(tick.food_consumed, 2.0);
+        assert_eq!(store.stockpile.food, 8.0);
+        assert_eq!(store.food_supply, 1.0);
     }
 
     #[test]

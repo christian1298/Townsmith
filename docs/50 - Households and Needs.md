@@ -135,7 +135,7 @@ Needs: food 60% · water 40% · rest 80%
 - `core_city::population`: 15 tests after 3.4 (move-in, jobs, needs, sync, JSON, validation, remove/clear, commute/wages, staffing, food supply).
 - `core_city::metrics`: completed, vacant, unfinished, no-site, jobs-only, shortage.
 - `godot_ext`: population JSON roundtrip and old-save/unsupported-version cases.
-- Workspace: **304 tests + 1 doctest**.
+- Workspace: **321 tests + 1 doctest**.
 
 ## 8. Limits
 
@@ -150,6 +150,6 @@ Needs: food 60% · water 40% · rest 80%
 
 ## 9. Next
 
-1. 3.5: water/power coverage and service replenishment ([[54 - Primary Industries]] covers food).
+1. 3.6: construction draw-down, loans, and bankruptcy consequences.
 2. 3.6: taxes, net income, upkeep, and construction budgets.
 3. Tune the needs rates against the 30-day runner once water and rest are supplied.

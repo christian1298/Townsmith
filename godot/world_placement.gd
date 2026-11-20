@@ -41,6 +41,10 @@ var industry_root: Node3D
 var industry_nodes: Dictionary = {}
 var industry_kinds: Dictionary = {}
 var industry_time := 0.0
+var utility_root: Node3D
+var utility_nodes: Dictionary = {}
+var utility_kinds: Dictionary = {}
+var utility_time := 0.0
 var lot_zone := "residential"
 var selection_box: MeshInstance3D
 var selected_id := -1
@@ -87,6 +91,7 @@ func _ready() -> void:
 	_setup_lots()
 	_setup_settlements()
 	_setup_industry()
+	_setup_utilities()
 	if _ensure_blueprint():
 		_refresh_preview(true)
 	else:
@@ -120,6 +125,11 @@ func _process(delta: float) -> void:
 				var worker = spinner.get_child(0) if spinner.get_child_count() > 0 else null
 				if worker != null and is_instance_valid(worker):
 					worker.position.y = 0.8 + absf(sin(industry_time * 3.0)) * 0.35
+	utility_time += delta
+	for node in utility_nodes.values():
+		if is_instance_valid(node):
+			var base_y := float(node.get_meta("base_y", 0.0))
+			node.position.y = base_y + sin(utility_time * 1.6) * 0.08
 	if mode == "mayor" and mayor_camera != null:
 		var ground: float = core.world_height_at(
 			SEED, mayor_camera.target.x, mayor_camera.target.z
@@ -179,6 +189,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					_toggle_crew()
 				KEY_I:
 					_cycle_industry()
+				KEY_U:
+					_cycle_utility()
 				KEY_V:
 					core.construction_add_materials(10000)
 					_update_hud()
@@ -644,6 +656,114 @@ func _cycle_industry() -> void:
 	_refresh_industry_visuals()
 	_update_hud()
 
+func _setup_utilities() -> void:
+	utility_root = Node3D.new()
+	utility_root.name = "Utilities"
+	add_child(utility_root)
+
+func _utility_color(kind: String) -> Color:
+	if kind == "power":
+		return Color(0.95, 0.8, 0.25)
+	return Color(0.25, 0.65, 0.95)
+
+func _refresh_utility_visuals() -> void:
+	if utility_root == null:
+		return
+	for node in utility_nodes.values():
+		if is_instance_valid(node):
+			node.free()
+	utility_nodes.clear()
+	utility_kinds.clear()
+	if core == null:
+		return
+	var state: Dictionary = core.utilities_state()
+	for site in state.get("sites", []):
+		var id := int(site.get("placement_id", -1))
+		if id < 0:
+			continue
+		var kind := str(site.get("kind", ""))
+		if kind != "water" and kind != "power":
+			continue
+		if not utility_kinds.has(id):
+			utility_kinds[id] = []
+		utility_kinds[id].append(kind)
+		var pivot := Node3D.new()
+		pivot.name = "%s%d" % [kind.capitalize(), id]
+		var base_y := float(site.get("center_y", 40.0))
+		var offset := -1.4 if kind == "water" else 1.4
+		pivot.position = Vector3(
+			float(site.get("center_x", 0.0)) + offset,
+			base_y,
+			float(site.get("center_z", 0.0))
+		)
+		pivot.set_meta("base_y", base_y)
+		var color := _utility_color(kind)
+		var base := MeshInstance3D.new()
+		var base_box := BoxMesh.new()
+		base_box.size = Vector3(2.4, 0.22, 2.4)
+		base.mesh = base_box
+		base.position.y = 0.11
+		var base_material := StandardMaterial3D.new()
+		base_material.albedo_color = color
+		base_material.emission_enabled = true
+		base_material.emission = color * 0.25
+		base.material_override = base_material
+		pivot.add_child(base)
+		var pipe := MeshInstance3D.new()
+		var pipe_box := BoxMesh.new()
+		pipe_box.size = Vector3(0.42, 2.6, 0.42)
+		pipe.mesh = pipe_box
+		pipe.position.y = 1.4
+		var pipe_material := StandardMaterial3D.new()
+		pipe_material.albedo_color = color
+		pipe.material_override = pipe_material
+		pivot.add_child(pipe)
+		var label := Label3D.new()
+		label.text = kind.capitalize()
+		label.font_size = 36
+		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		label.position.y = 3.2
+		label.modulate = color
+		pivot.add_child(label)
+		utility_root.add_child(pivot)
+		utility_nodes["%s:%d" % [kind, id]] = pivot
+
+func _cycle_utility() -> void:
+	if selected_id < 0:
+		_set_modal("Select a building first (RMB)", true)
+		return
+	var selected := _selected_placement()
+	if int(selected.get("job_slots", 0)) <= 0:
+		_set_modal("This building has no job slots", true)
+		return
+	var kinds: Array = utility_kinds.get(selected_id, [])
+	var has_water := kinds.has("water")
+	var has_power := kinds.has("power")
+	if not has_water and not has_power:
+		var result: Dictionary = core.utility_add_site(SEED, selected_id, "water")
+		if not bool(result.get("ok", false)):
+			_set_modal("Utility failed: " + str(result.get("error_code", "")), true)
+			return
+		_set_modal("Utility: water", false)
+	elif has_water and not has_power:
+		var result: Dictionary = core.utility_add_site(SEED, selected_id, "power")
+		if not bool(result.get("ok", false)):
+			_set_modal("Utility failed: " + str(result.get("error_code", "")), true)
+			return
+		_set_modal("Utility: water + power", false)
+	elif has_power and not has_water:
+		var result: Dictionary = core.utility_add_site(SEED, selected_id, "water")
+		if not bool(result.get("ok", false)):
+			_set_modal("Utility failed: " + str(result.get("error_code", "")), true)
+			return
+		_set_modal("Utility: water + power", false)
+	else:
+		core.utility_remove_site(SEED, selected_id, "water")
+		core.utility_remove_site(SEED, selected_id, "power")
+		_set_modal("Utility removed", false)
+	_refresh_utility_visuals()
+	_update_hud()
+
 func _found_settlement() -> bool:
 	var state: Dictionary = core.settlements()
 	var used: Dictionary = {}
@@ -886,12 +1006,15 @@ func _update_hud() -> void:
 		var industry_kind := str(industry_kinds.get(selected_id, ""))
 		if industry_kind != "":
 			selected_line += "  ·  industry " + industry_kind
+		var utility_kinds_here: Array = utility_kinds.get(selected_id, [])
+		if utility_kinds_here.size() > 0:
+			selected_line += "  ·  utility " + ", ".join(utility_kinds_here)
 	if mode == "architect":
 		hud.text = "Townsmith — Architect View (read-only)  (seed %d)\nBlueprint: %s\nFirst-person view at the selected door · M / Esc returns to Mayor" % [
 			SEED, blueprint_name,
 		]
 	else:
-		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew on/off · I industry · V +10k materials · F5 save · F9 load" % [
+		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew on/off · I industry · U utility · V +10k materials · F5 save · F9 load" % [
 			SEED, blueprint_name, rooms, capacity,
 		]
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
@@ -917,6 +1040,15 @@ func _update_hud() -> void:
 			float(industry.get("hides", 0.0)),
 			float(industry.get("food_supply", 0.0)) * 100.0,
 		]
+	var utilities: Dictionary = core.utilities_state()
+	var utilities_text := "—"
+	if bool(utilities.get("open", false)):
+		utilities_text = "water %.0f%% (%d sites) · power %.0f%% (%d sites)" % [
+			float(utilities.get("water_supply", 0.0)) * 100.0,
+			int(utilities.get("water_sites", 0)),
+			float(utilities.get("power_supply", 0.0)) * 100.0,
+			int(utilities.get("power_sites", 0)),
+		]
 	var happiness_text := "—"
 	var needs_text := "—"
 	if int(city.get("population", 0)) > 0:
@@ -926,7 +1058,7 @@ func _update_hud() -> void:
 			float(city.get("water", 0.0)) * 100.0,
 			float(city.get("rest", 0.0)) * 100.0,
 		]
-	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nIndustry: %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
+	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nIndustry: %s\nUtilities: %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
 		selected_line,
 		int(target_x),
 		int(target_z),
@@ -948,6 +1080,7 @@ func _update_hud() -> void:
 		needs_text,
 		treasury_text,
 		industry_text,
+		utilities_text,
 		int(construction.get("active", 0)),
 		int(construction.get("stalled", 0)),
 		int(construction.get("crew_capacity", 0)),
@@ -1408,6 +1541,7 @@ func _advance_construction(seconds: float) -> Dictionary:
 	if seconds <= 0.0:
 		return {}
 	var report: Dictionary = core.construction_tick(seconds)
+	core.utilities_refresh(SEED)
 	core.industry_tick(SEED, seconds)
 	core.population_tick(SEED, seconds)
 	core.economy_tick(SEED, seconds)
@@ -1435,6 +1569,7 @@ func _clear_placements() -> void:
 	_clear_placed_nodes()
 	core.world_clear_placements()
 	_refresh_industry_visuals()
+	_refresh_utility_visuals()
 	_set_modal("", false)
 	_refresh_preview(true)
 	_update_hud()
@@ -1465,6 +1600,7 @@ func _load_world() -> bool:
 	_rebuild_lots()
 	_rebuild_settlements()
 	_refresh_industry_visuals()
+	_refresh_utility_visuals()
 	streamer.invalidate_all()
 	var state: Dictionary = core.world_placements()
 	var construction_index := _construction_index()
@@ -1524,6 +1660,7 @@ func _run_scene_smoke() -> void:
 	var occupancy_before_ok := false
 	var occupancy_after_ok := false
 	var industry_ok := false
+	var utility_ok := false
 	var save_ok := false
 	var clear_ok := false
 	var load_ok := false
@@ -1766,6 +1903,28 @@ func _run_scene_smoke() -> void:
 				occupancy_after_ok = occupancy_after_ok and float(city_after.get("food", 0.0)) > 0.0
 				occupancy_after_ok = occupancy_after_ok and float(city_after.get("water", 0.0)) > 0.0
 				occupancy_after_ok = occupancy_after_ok and float(city_after.get("rest", 0.0)) > 0.0
+				core.population_tick(SEED, 1000.0)
+				var utility_before: Dictionary = core.city_summary()
+				var before_water := float(utility_before.get("water", 0.0))
+				var before_rest := float(utility_before.get("rest", 0.0))
+				var water_added: Dictionary = core.utility_add_site(SEED, 1, "water")
+				var power_added: Dictionary = core.utility_add_site(SEED, 1, "power")
+				_refresh_utility_visuals()
+				var utility_report: Dictionary = core.utilities_refresh(SEED)
+				utility_ok = bool(water_added.get("ok", false)) and bool(power_added.get("ok", false))
+				utility_ok = utility_ok and bool(utility_report.get("open", false))
+				utility_ok = utility_ok and int(utility_report.get("water_sites", 0)) == 1
+				utility_ok = utility_ok and int(utility_report.get("power_sites", 0)) == 1
+				utility_ok = utility_ok and float(utility_report.get("water_supply", 0.0)) > 0.99
+				utility_ok = utility_ok and float(utility_report.get("power_supply", 0.0)) > 0.99
+				utility_ok = utility_ok and utility_nodes.size() == 2
+				utility_ok = utility_ok and before_water < 0.8
+				core.population_tick(SEED, 300.0)
+				var utility_after: Dictionary = core.city_summary()
+				var after_water := float(utility_after.get("water", 0.0))
+				var after_rest := float(utility_after.get("rest", 0.0))
+				utility_ok = utility_ok and after_water > before_water
+				utility_ok = utility_ok and after_rest >= before_rest
 				industry_ok = true
 				for kind in ["lumberjack", "farm", "hunt"]:
 					var added: Dictionary = core.industry_add_site(SEED, 1, kind)
@@ -1813,10 +1972,15 @@ func _run_scene_smoke() -> void:
 					var economy_checksum: String = str(core.economy_checksum())
 					var industry_checksum: String = str(core.industry_checksum())
 					var industry_stock := float(core.industry_state().get("food", 0.0))
+					var utility_checksum: String = str(core.utilities_checksum())
+					var utility_state_before: Dictionary = core.utilities_state()
+					var utility_water := float(utility_state_before.get("water_supply", 0.0))
+					var utility_power := float(utility_state_before.get("power_supply", 0.0))
 					var populated := _save_world()
 					core.population_clear()
 					core.economy_clear()
 					core.industry_clear()
+					core.utilities_clear()
 					var reloaded := _load_world()
 					var city_persisted: Dictionary = core.city_summary()
 					var households: Dictionary = core.population_state()
@@ -1844,12 +2008,25 @@ func _run_scene_smoke() -> void:
 					occupancy_after_ok = occupancy_after_ok and absf(float(industry_persisted.get("food", 0.0)) - industry_stock) < 0.01
 					occupancy_after_ok = occupancy_after_ok and str(core.industry_checksum()) == industry_checksum
 					occupancy_after_ok = occupancy_after_ok and industry_nodes.size() == 1
+					var utility_persisted: Dictionary = core.utilities_state()
+					var utility_persisted_ok := bool(utility_persisted.get("open", false))
+					utility_persisted_ok = utility_persisted_ok and int(utility_persisted.get("site_count", 0)) == 2
+					utility_persisted_ok = utility_persisted_ok and int(utility_persisted.get("water_sites", 0)) == 1
+					utility_persisted_ok = utility_persisted_ok and int(utility_persisted.get("power_sites", 0)) == 1
+					utility_persisted_ok = utility_persisted_ok and absf(float(utility_persisted.get("water_supply", 0.0)) - utility_water) < 0.01
+					utility_persisted_ok = utility_persisted_ok and absf(float(utility_persisted.get("power_supply", 0.0)) - utility_power) < 0.01
+					utility_persisted_ok = utility_persisted_ok and str(core.utilities_checksum()) == utility_checksum
+					utility_persisted_ok = utility_persisted_ok and str(utility_persisted.get("checksum", "")) == str(core.utilities_checksum())
+					utility_persisted_ok = utility_persisted_ok and utility_nodes.size() == 2
+					utility_ok = utility_ok and utility_persisted_ok
 				if not build_done_ok:
 					status = "construction_complete_failed"
 				elif not (occupancy_before_ok and occupancy_after_ok):
 					status = "occupancy_failed"
 				elif not industry_ok:
 					status = "industry_failed"
+				elif not utility_ok:
+					status = "utility_failed"
 			if not load_ok:
 				status = "load_failed"
 
@@ -1864,6 +2041,7 @@ func _run_scene_smoke() -> void:
 		var before_failed_settlement_checksum: String = str(core.settlement_checksum())
 		var before_failed_economy: String = str(core.economy_checksum())
 		var before_failed_industry: String = str(core.industry_checksum())
+		var before_failed_utility: String = str(core.utilities_checksum())
 		var blueprint_backup := blueprint_path + ".bak"
 		if DirAccess.rename_absolute(blueprint_path, blueprint_backup) != OK:
 			status = "load_guard_backup_failed"
@@ -1877,6 +2055,8 @@ func _run_scene_smoke() -> void:
 				status = "load_failure_changed_economy"
 			elif str(core.industry_checksum()) != before_failed_industry:
 				status = "load_failure_changed_industry"
+			elif str(core.utilities_checksum()) != before_failed_utility:
+				status = "load_failure_changed_utility"
 			elif core.lot_count() != before_failed_lots or str(core.lot_checksum()) != before_failed_lot_checksum:
 				status = "load_failure_changed_lots"
 			elif core.settlement_count() != before_failed_settlements or str(core.settlement_checksum()) != before_failed_settlement_checksum:
@@ -1887,7 +2067,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s occupancy=%s industry=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s occupancy=%s industry=%s utilities=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -1901,6 +2081,7 @@ func _run_scene_smoke() -> void:
 		"ok" if build_done_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
+		"ok" if utility_ok else "failed",
 		"ok" if select_ok else "failed",
 		"ok" if enter_ok else "failed",
 		"ok" if return_ok else "failed",
