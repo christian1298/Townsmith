@@ -28,9 +28,9 @@ use core_blueprint::{
 };
 use core_city::{
     normalize_rotation, summarize, CityLayout, CityRuntime, CitySummary, CityTier,
-    ConstructionSite, ConstructionStore, Lot, LotError, LotRequest, LotStore, Placement,
+    ConstructionSite, ConstructionStore, Home, Lot, LotError, LotRequest, LotStore, Placement,
     PlacementError, PlacementRequest, PlacementStore, RoadError, RoadRequest, RoadSegment,
-    RoadStore, Settlement, SettlementError, SettlementRequest, SettlementStore, Zone,
+    RoadStore, Settlement, SettlementError, SettlementRequest, SettlementStore, Workplace, Zone,
     MAX_WORLD_COORD_M,
 };
 use core_rooms::{
@@ -1874,6 +1874,8 @@ impl TownsmithCore {
         result.set("food", f64::from(summary.food));
         result.set("water", f64::from(summary.water));
         result.set("rest", f64::from(summary.rest));
+        result.set("average_commute_m", f64::from(summary.average_commute_m));
+        result.set("daily_wages", summary.daily_wages);
         result.set("completed_buildings", summary.completed_buildings as i64);
         result.set("construction_sites", summary.construction_sites as i64);
         result.set("settlements", summary.settlements as i64);
@@ -1904,12 +1906,12 @@ impl TownsmithCore {
             .construction
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (slots, jobs) = match placements.as_ref() {
+        let (homes, workplaces) = match placements.as_ref() {
             Some(placements) => (
-                completed_slots(placements, &construction),
-                completed_jobs(placements, &construction),
+                completed_homes(placements, &construction),
+                completed_workplaces(placements, &construction),
             ),
-            None => (Vec::new(), 0),
+            None => (Vec::new(), Vec::new()),
         };
         let mut population = self
             .population
@@ -1925,7 +1927,7 @@ impl TownsmithCore {
             );
         }
         let runtime = population.get_or_insert_with(|| CityRuntime::new(seed));
-        let report = runtime.tick(seconds, jobs, &slots);
+        let report = runtime.tick_with_workplaces(seconds, &homes, &workplaces);
         let mut result = VarDictionary::new();
         result.set("ok", true);
         result.set("moved_in", i64::from(report.moved_in));
@@ -1933,6 +1935,8 @@ impl TownsmithCore {
         result.set("vacancies", report.vacancies as i64);
         result.set("workers", report.workers as i64);
         result.set("happiness", f64::from(runtime.happiness()));
+        result.set("average_commute_m", f64::from(runtime.average_commute_m()));
+        result.set("daily_wages", runtime.daily_wages());
         result.set(
             "checksum",
             &GString::from(&format!("{:016x}", runtime.checksum())),
@@ -1959,6 +1963,8 @@ impl TownsmithCore {
                 result.set("vacancies", runtime.vacancies() as i64);
                 result.set("workers", runtime.workers() as i64);
                 result.set("happiness", f64::from(runtime.happiness()));
+                result.set("average_commute_m", f64::from(runtime.average_commute_m()));
+                result.set("daily_wages", runtime.daily_wages());
                 let mut households: Array<VarDictionary> = Array::new();
                 for (&id, household) in &runtime.households {
                     let mut item = VarDictionary::new();
@@ -1969,6 +1975,8 @@ impl TownsmithCore {
                     item.set("food", f64::from(household.food));
                     item.set("water", f64::from(household.water));
                     item.set("rest", f64::from(household.rest));
+                    item.set("commute_m", f64::from(household.commute_m));
+                    item.set("income_per_day", household.income_per_day);
                     item.set("happiness", f64::from(household.happiness()));
                     households.push(&item);
                 }
@@ -3691,17 +3699,43 @@ fn completed_slots(
         .collect()
 }
 
-fn completed_jobs(placements: &PlacementStore, construction: &ConstructionStore) -> u64 {
+fn completed_homes(placements: &PlacementStore, construction: &ConstructionStore) -> Vec<Home> {
     placements
         .placements
         .iter()
         .filter(|placement| {
-            construction
-                .site(placement.id)
-                .is_some_and(|site| site.is_complete())
+            placement.resident_capacity > 0
+                && construction
+                    .site(placement.id)
+                    .is_some_and(|site| site.is_complete())
         })
-        .map(|placement| u64::from(placement.job_slots))
-        .sum()
+        .map(|placement| Home {
+            id: placement.id,
+            capacity: placement.resident_capacity,
+            center: [placement.center[0], placement.center[2]],
+        })
+        .collect()
+}
+
+fn completed_workplaces(
+    placements: &PlacementStore,
+    construction: &ConstructionStore,
+) -> Vec<Workplace> {
+    placements
+        .placements
+        .iter()
+        .filter(|placement| {
+            placement.job_slots > 0
+                && construction
+                    .site(placement.id)
+                    .is_some_and(|site| site.is_complete())
+        })
+        .map(|placement| Workplace {
+            id: placement.id,
+            slots: placement.job_slots,
+            center: [placement.center[0], placement.center[2]],
+        })
+        .collect()
 }
 
 fn attach_construction(json: &str, store: &ConstructionStore) -> Result<String, String> {

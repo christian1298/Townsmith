@@ -20,6 +20,12 @@ pub const MAX_MOVE_IN_PER_SECOND: f32 = 100.0;
 /// Upper bound for one simulation step.
 pub const MAX_TICK_SECONDS: f64 = 3600.0;
 
+/// Abstract wage per employed resident per game day.
+pub const WAGE_PER_WORKER_PER_DAY: f64 = 20.0;
+
+/// Commute distance at which the happiness commute term reaches zero.
+pub const MAX_COMMUTE_M: f32 = 200.0;
+
 /// Maximum households in one save.
 pub const MAX_HOUSEHOLDS: usize = 100_000;
 
@@ -29,6 +35,28 @@ const FOOD_DECAY_PER_S: f32 = 0.0004;
 const WATER_DECAY_PER_S: f32 = 0.0006;
 /// Rest satisfaction lost per simulated second.
 const REST_DECAY_PER_S: f32 = 0.0002;
+
+/// One completed residential building available to households.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Home {
+    /// Placement id.
+    pub id: u64,
+    /// Housing capacity in residents.
+    pub capacity: u32,
+    /// World position in metres.
+    pub center: [f32; 2],
+}
+
+/// One completed workplace with open job slots.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Workplace {
+    /// Placement id.
+    pub id: u64,
+    /// Job slots at this workplace.
+    pub slots: u32,
+    /// World position in metres.
+    pub center: [f32; 2],
+}
 
 /// One occupied residential building.
 ///
@@ -48,6 +76,15 @@ pub struct Household {
     pub water: f32,
     /// Rest satisfaction, 0..=1.
     pub rest: f32,
+    /// Average commute to assigned workplaces in metres.
+    #[serde(default)]
+    pub commute_m: f32,
+    /// Gross wage income per game day.
+    #[serde(default)]
+    pub income_per_day: f64,
+    /// Home position in metres; not part of the saved identity.
+    #[serde(default)]
+    pub home: [f32; 2],
 }
 
 impl Household {
@@ -59,6 +96,9 @@ impl Household {
             food: 1.0,
             water: 1.0,
             rest: 1.0,
+            commute_m: 0.0,
+            income_per_day: 0.0,
+            home: [0.0, 0.0],
         }
     }
 
@@ -80,7 +120,8 @@ impl Household {
             return 0.0;
         }
         let employment = self.workers as f32 / self.residents as f32;
-        (0.6 * self.needs() + 0.4 * employment).clamp(0.0, 1.0)
+        let commute = 1.0 - (self.commute_m / MAX_COMMUTE_M).clamp(0.0, 1.0);
+        (0.5 * self.needs() + 0.3 * employment + 0.2 * commute).clamp(0.0, 1.0)
     }
 }
 
@@ -158,9 +199,50 @@ impl CityRuntime {
         }
     }
 
+    /// Synchronize households and record each home's world position.
+    pub fn sync_homes(&mut self, homes: &[Home]) {
+        let slots: Vec<(u64, u32)> = homes.iter().map(|home| (home.id, home.capacity)).collect();
+        self.sync(&slots);
+        for home in homes {
+            if let Some(household) = self.households.get_mut(&home.id) {
+                household.home = home.center;
+            }
+        }
+    }
+
     /// Advance move-in, jobs, and needs by `dt_s` seconds.
+    ///
+    /// Compatibility wrapper for callers without workplace positions; all
+    /// jobs are treated as one workplace at the origin.
     pub fn tick(&mut self, dt_s: f64, jobs: u64, slots: &[(u64, u32)]) -> PopulationReport {
-        self.sync(slots);
+        let homes: Vec<Home> = slots
+            .iter()
+            .map(|(id, capacity)| Home {
+                id: *id,
+                capacity: *capacity,
+                center: [0.0, 0.0],
+            })
+            .collect();
+        let workplaces = if jobs == 0 {
+            Vec::new()
+        } else {
+            vec![Workplace {
+                id: 0,
+                slots: u32::try_from(jobs).unwrap_or(u32::MAX),
+                center: [0.0, 0.0],
+            }]
+        };
+        self.tick_with_workplaces(dt_s, &homes, &workplaces)
+    }
+
+    /// Advance move-in, workplace assignment, and needs by `dt_s` seconds.
+    pub fn tick_with_workplaces(
+        &mut self,
+        dt_s: f64,
+        homes: &[Home],
+        workplaces: &[Workplace],
+    ) -> PopulationReport {
+        self.sync_homes(homes);
         let dt = if dt_s.is_finite() {
             dt_s.clamp(0.0, MAX_TICK_SECONDS) as f32
         } else {
@@ -187,11 +269,48 @@ impl CityRuntime {
         }
         self.move_in_carry = (desired - target as f32).clamp(0.0, 0.999_999);
 
-        let mut remaining_jobs = jobs;
+        let mut remaining: Vec<u32> = workplaces.iter().map(|work| work.slots).collect();
         for household in self.households.values_mut() {
-            let workers = u64::from(household.residents).min(remaining_jobs);
-            household.workers = u32::try_from(workers).unwrap_or(u32::MAX);
-            remaining_jobs -= workers;
+            if household.residents == 0 {
+                household.workers = 0;
+                household.commute_m = 0.0;
+                household.income_per_day = 0.0;
+                continue;
+            }
+            let mut need = household.residents;
+            let mut assigned = 0_u32;
+            let mut weighted = 0.0_f32;
+            while need > 0 {
+                let mut best: Option<usize> = None;
+                let mut best_distance = f32::INFINITY;
+                for (index, work) in workplaces.iter().enumerate() {
+                    if remaining[index] == 0 {
+                        continue;
+                    }
+                    let dx = work.center[0] - household.home[0];
+                    let dz = work.center[1] - household.home[1];
+                    let distance = dx * dx + dz * dz;
+                    if distance < best_distance {
+                        best_distance = distance;
+                        best = Some(index);
+                    }
+                }
+                let Some(index) = best else {
+                    break;
+                };
+                let take = need.min(remaining[index]);
+                remaining[index] -= take;
+                assigned += take;
+                need -= take;
+                weighted += best_distance.sqrt() * take as f32;
+            }
+            household.workers = assigned;
+            household.commute_m = if assigned > 0 {
+                weighted / assigned as f32
+            } else {
+                0.0
+            };
+            household.income_per_day = f64::from(assigned) * WAGE_PER_WORKER_PER_DAY;
         }
 
         for household in self.households.values_mut() {
@@ -240,6 +359,29 @@ impl CityRuntime {
             .values()
             .map(|household| u64::from(household.workers))
             .sum()
+    }
+
+    /// Gross wages paid per game day.
+    #[must_use]
+    pub fn daily_wages(&self) -> f64 {
+        self.households
+            .values()
+            .map(|household| household.income_per_day)
+            .sum()
+    }
+
+    /// Resident-weighted average commute distance in metres.
+    #[must_use]
+    pub fn average_commute_m(&self) -> f32 {
+        let population = self.population();
+        if population == 0 {
+            return 0.0;
+        }
+        self.households
+            .values()
+            .map(|household| household.commute_m * household.residents as f32)
+            .sum::<f32>()
+            / population as f32
     }
 
     /// Resident-weighted average need satisfaction.
@@ -335,6 +477,21 @@ impl CityRuntime {
                         "household need is out of range",
                     ));
                 }
+            }
+            if !household.commute_m.is_finite() || household.commute_m < 0.0 {
+                return Err(PopulationError::InvalidRuntime(
+                    "household commute is out of range",
+                ));
+            }
+            if !household.income_per_day.is_finite() || household.income_per_day < 0.0 {
+                return Err(PopulationError::InvalidRuntime(
+                    "household income is out of range",
+                ));
+            }
+            if household.home.iter().any(|value| !value.is_finite()) {
+                return Err(PopulationError::InvalidRuntime(
+                    "household home is not finite",
+                ));
             }
         }
         Ok(())
@@ -476,6 +633,114 @@ mod tests {
     }
 
     #[test]
+    fn commute_and_wages_use_the_nearest_workplace() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.set_move_in_per_second(2.0);
+        let homes = [
+            Home {
+                id: 1,
+                capacity: 1,
+                center: [0.0, 0.0],
+            },
+            Home {
+                id: 2,
+                capacity: 1,
+                center: [100.0, 0.0],
+            },
+        ];
+        let workplaces = [
+            Workplace {
+                id: 10,
+                slots: 1,
+                center: [10.0, 0.0],
+            },
+            Workplace {
+                id: 11,
+                slots: 1,
+                center: [90.0, 0.0],
+            },
+        ];
+        runtime.tick_with_workplaces(1.0, &homes, &workplaces);
+        assert_eq!(runtime.workers(), 2);
+        assert_eq!(runtime.households[&1].workers, 1);
+        assert_eq!(runtime.households[&2].workers, 1);
+        assert!((runtime.households[&1].commute_m - 10.0).abs() < 0.001);
+        assert!((runtime.households[&2].commute_m - 10.0).abs() < 0.001);
+        assert!((runtime.daily_wages() - 40.0).abs() < 0.001);
+        assert!((runtime.average_commute_m() - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_workplace_shortage_assigns_the_closest_household() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.set_move_in_per_second(2.0);
+        let homes = [
+            Home {
+                id: 1,
+                capacity: 1,
+                center: [0.0, 0.0],
+            },
+            Home {
+                id: 2,
+                capacity: 1,
+                center: [100.0, 0.0],
+            },
+        ];
+        let workplaces = [Workplace {
+            id: 10,
+            slots: 1,
+            center: [10.0, 0.0],
+        }];
+        runtime.tick_with_workplaces(1.0, &homes, &workplaces);
+        assert_eq!(runtime.households[&1].workers, 1);
+        assert_eq!(runtime.households[&2].workers, 0);
+        assert_eq!(runtime.households[&2].income_per_day, 0.0);
+    }
+
+    #[test]
+    fn long_commutes_lower_happiness() {
+        let homes = [Home {
+            id: 1,
+            capacity: 1,
+            center: [0.0, 0.0],
+        }];
+        let near = [Workplace {
+            id: 10,
+            slots: 1,
+            center: [0.0, 0.0],
+        }];
+        let far = [Workplace {
+            id: 10,
+            slots: 1,
+            center: [150.0, 0.0],
+        }];
+        let mut close = CityRuntime::new(2026);
+        close.set_move_in_per_second(2.0);
+        close.tick_with_workplaces(1.0, &homes, &near);
+        let mut distant = CityRuntime::new(2026);
+        distant.set_move_in_per_second(2.0);
+        distant.tick_with_workplaces(1.0, &homes, &far);
+        assert!(distant.households[&1].commute_m > 100.0);
+        assert!(distant.happiness() < close.happiness());
+    }
+
+    #[test]
+    fn old_household_saves_default_commute_and_income() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.set_move_in_per_second(2.0);
+        runtime.tick(1.0, 1, &[(1, 1)]);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&runtime.to_json_pretty().expect("json")).expect("value");
+        let household = value["households"]["1"].as_object_mut().expect("household");
+        household.remove("commute_m");
+        household.remove("income_per_day");
+        household.remove("home");
+        let decoded = CityRuntime::from_json(&value.to_string()).expect("decode");
+        assert_eq!(decoded.households[&1].commute_m, 0.0);
+        assert_eq!(decoded.households[&1].income_per_day, 0.0);
+    }
+
+    #[test]
     fn invalid_runtime_is_rejected() {
         let mut runtime = CityRuntime::new(2026);
         runtime.move_in_per_second = f32::NAN;
@@ -490,6 +755,9 @@ mod tests {
                 food: 1.0,
                 water: 1.0,
                 rest: 1.0,
+                commute_m: 0.0,
+                income_per_day: 0.0,
+                home: [0.0, 0.0],
             },
         );
         assert!(runtime.validate().is_err());

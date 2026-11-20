@@ -35,7 +35,7 @@ Out:
 - named citizens or individual agent records;
 - household composition, births/deaths, migration pressure, or tenure;
 - food/water production or utility coverage (3.5);
-- wages, taxes, commute, or a real economy (3.3/3.6);
+- taxes, net income, or a real economy (3.6); commute/wages are in [[51 - Jobs and Wages]];
 - sickness, aging, education, or services;
 - day/night and seasonal modifiers.
 
@@ -119,7 +119,7 @@ City: population 2 / housing 2 (0 vacant) · jobs 2 (2 employed) · happiness 76
 Needs: food 60% · water 40% · rest 80%
 ```
 
-`population_set_rate` is available to the shell but no key binding is added yet; 3.3 will make jobs and wages the main tuning surface.
+`population_set_rate` is available to the shell but no key binding is added yet; [[51 - Jobs and Wages]] adds commute and wages.
 
 ## 6. Smoke
 
@@ -135,7 +135,7 @@ Needs: food 60% · water 40% · rest 80%
 - `core_city::population`: 8 tests (move-in, jobs, needs, sync, JSON, validation, remove/clear).
 - `core_city::metrics`: completed, vacant, unfinished, no-site, jobs-only, shortage.
 - `godot_ext`: population JSON roundtrip and old-save/unsupported-version cases.
-- Workspace: **270 tests + 1 doctest**.
+- Workspace: **274 tests + 1 doctest**.
 
 ## 8. Limits
 
@@ -150,7 +150,7 @@ Needs: food 60% · water 40% · rest 80%
 
 ## 9. Next
 
-1. 3.3: wages, job assignment by household/building, commute distance, income.
+1. 3.4: primary industries ([[51 - Jobs and Wages]] covers 3.3).
 2. 3.4: primary industries and food supply.
 3. 3.5: water/power coverage and needs replenishment.
 4. 3.9: a headless 30-day runner before tuning the rates.

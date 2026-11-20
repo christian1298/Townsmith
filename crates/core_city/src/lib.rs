@@ -58,9 +58,9 @@ pub use placement::{
     MAX_SLOPE_M, MAX_WORLD_COORD_M, PLACEMENT_GAP_M, WATER_LEVEL_M, WORLD_SAVE_FORMAT_VERSION,
 };
 pub use population::{
-    CityRuntime, Household, PopulationError, PopulationReport, MAX_HOUSEHOLDS,
-    MAX_MOVE_IN_PER_SECOND, MAX_TICK_SECONDS as MAX_POPULATION_TICK_SECONDS,
-    POPULATION_FORMAT_VERSION,
+    CityRuntime, Home, Household, PopulationError, PopulationReport, Workplace, MAX_COMMUTE_M,
+    MAX_HOUSEHOLDS, MAX_MOVE_IN_PER_SECOND, MAX_TICK_SECONDS as MAX_POPULATION_TICK_SECONDS,
+    POPULATION_FORMAT_VERSION, WAGE_PER_WORKER_PER_DAY,
 };
 pub use road::{
     RoadError, RoadRequest, RoadSegment, RoadStore, MAX_ROADS, MAX_ROAD_LENGTH_M, MAX_ROAD_SLOPE_M,

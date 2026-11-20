@@ -34,8 +34,8 @@ The full feature list is in [[08 - Roadmap]]. This plan cuts it into reviewable 
 |---|---|---|
 | **3.1** | City ledger: completed buildings → population, housing, jobs, employment, happiness | **Done** — PR #56 |
 | **3.2** | Households and move-in: vacant homes fill over time; simple needs and happiness | **Done** — PR #58, see [[50 - Households and Needs]] |
-| **3.3** | Jobs and wages: assign residents to job slots, commute distance, income | Next |
-| **3.4** | Primary industries: lumberjack, farmer, hunter with visible loops and storage | Planned |
+| **3.3** | Jobs and wages: assign residents to job slots, commute distance, income | **This PR** — see [[51 - Jobs and Wages]] |
+| **3.4** | Primary industries: lumberjack, farmer, hunter with visible loops and storage | Next |
 | **3.5** | Utilities: water or power first, coverage, shortages, happiness/production effects | Planned |
 | **3.6** | Economy: taxes, upkeep, construction draw-down, loans, bankruptcy | Planned |
 | **3.7** | Traffic: road graph, flow fields, visual vehicles | Planned |
@@ -152,9 +152,30 @@ See [[50 - Households and Needs]] for the structs, rates, persistence, HUD, and 
 - `smoke_world_scene.sh` — occupancy before/after, needs, persistence; marker `occupancy=ok`.
 - clippy and fmt.
 
+## 6c. Stage 3.3 scope
+
+### In
+
+- Nearest-workplace assignment across completed job buildings.
+- `commute_m` and `income_per_day` per household; city average commute and daily wages.
+- Fixed gross wage of 20 per worker per game day.
+- Commute term in happiness; 0.5 needs / 0.3 employment / 0.2 commute.
+- Persist the new household fields; old saves default them to zero.
+- HUD city line: commute and wages.
+- Smoke checks commute 0 m and wages 40/day for the acceptance house, including after save/load.
+
+### Out
+
+- Named citizens, one record per job slot, trades, shifts, attendance.
+- Road-distance or time-based commutes, traffic, transit.
+- Taxes, rent, net income, budgets, treasury.
+- Workplace production and inventories.
+
+See [[51 - Jobs and Wages]] for the data, formula, tests, and limits.
+
 ## 7. Next
 
-1. 3.3: wages, job assignment by household/building, commute distance, income.
+1. 3.4: lumberjack, farmer, and hunter loops with visible work and storage.
 2. Materialize a few named citizens for selection and stories.
 3. Add a headless runner before the first industry loop so balance changes are measurable.
 4. Keep the 500-citizen/50-building 60 FPS gate visible from the first slice.
