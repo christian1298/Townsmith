@@ -146,6 +146,16 @@ func _run_world_placement_smoke(core) -> void:
 	if status == "ok" and not bool(validation.get("ok", false)):
 		status = "validate_failed:" + validation_error
 
+	# A rejected first placement must not leave an empty store behind.
+	var rejected_water: Dictionary = core.world_place_blueprint(
+		SEED, blueprint_path, 128.0, 128.0, 0
+	)
+	if status == "ok" and (bool(rejected_water.get("ok", true)) or str(rejected_water.get("error_code", "")) != "water"):
+		status = "water_not_rejected"
+	var rejected_state: Dictionary = core.world_placements()
+	if status == "ok" and bool(rejected_state.get("open", true)):
+		status = "rejected_created_store"
+
 	var placed: Dictionary = core.world_place_blueprint(
 		SEED, blueprint_path, SITE_X, SITE_Z, 0
 	)
@@ -205,6 +215,20 @@ func _run_world_placement_smoke(core) -> void:
 	var loaded_checksum := str(core.world_placement_checksum())
 	if status == "ok" and (core.world_placement_count() != 1 or loaded_checksum != checksum):
 		status = "load_mismatch"
+
+	# A failed load must not replace the active store.
+	if status == "ok":
+		var blueprint_backup := blueprint_path + ".bak"
+		if DirAccess.rename_absolute(blueprint_path, blueprint_backup) != OK:
+			status = "backup_failed"
+		else:
+			var failed_load: Dictionary = core.world_load(save_path)
+			if not bool(failed_load.get("ok", true)) and str(failed_load.get("error_code", "")) != "missing_blueprint":
+				status = "load_missing_not_rejected"
+			elif core.world_placement_count() != 1 or str(core.world_placement_checksum()) != checksum:
+				status = "load_failure_replaced"
+			if DirAccess.rename_absolute(blueprint_backup, blueprint_path) != OK:
+				status = "restore_failed"
 
 	var mesh: ArrayMesh = core.build_blueprint_mesh(blueprint_path)
 	var surfaces := mesh.get_surface_count()

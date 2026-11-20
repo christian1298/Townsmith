@@ -6,6 +6,7 @@
 //! resource creation stays on the main thread.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -22,8 +23,8 @@ use godot::classes::{ArrayMesh, SurfaceTool};
 use godot::prelude::*;
 
 use core_blueprint::{
-    load_tsbp, save_tsbp_with_hash, Blueprint, BlueprintMetadata, BlueprintStats, PropRecord,
-    RoomRecord,
+    load_tsbp, save_tsbp_with_hash, Blueprint, BlueprintError, BlueprintMetadata, BlueprintStats,
+    PropRecord, RoomRecord,
 };
 use core_city::{
     normalize_rotation, CityLayout, CityTier, Placement, PlacementError, PlacementRequest,
@@ -815,9 +816,20 @@ impl TownsmithCore {
                 );
             }
         }
-        let store = guard.get_or_insert_with(|| PlacementStore::new(seed));
-        match store.place(&request, height_at) {
+        let created = guard.is_none();
+        let placed = {
+            let store = guard.get_or_insert_with(|| PlacementStore::new(seed));
+            store.place(&request, height_at)
+        };
+        if placed.is_err() && created {
+            // A rejected first placement must not leave an empty store with
+            // this seed behind; otherwise a later attempt with another seed
+            // would fail with `seed_mismatch`.
+            *guard = None;
+        }
+        match placed {
             Ok(placement) => {
+                let store = guard.as_ref().expect("a successful place keeps a store");
                 let mut result = VarDictionary::new();
                 result.set("ok", true);
                 result.set("seed", seed as i64);
@@ -844,6 +856,7 @@ impl TownsmithCore {
         result.set("ok", true);
         match guard.as_ref() {
             Some(store) => {
+                result.set("open", true);
                 let mut placements: Array<VarDictionary> = Array::new();
                 for placement in &store.placements {
                     placements.push(&placement_to_dictionary(placement));
@@ -858,6 +871,7 @@ impl TownsmithCore {
                 result.set("placements", &placements.to_variant());
             }
             None => {
+                result.set("open", false);
                 result.set("seed", 0);
                 result.set("next_id", 1);
                 result.set("count", 0);
@@ -945,6 +959,19 @@ impl TownsmithCore {
             Ok(path) => path,
             Err(error) => return placement_simple_error("invalid_save_path", error),
         };
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => return placement_simple_error("load_failed", error.to_string()),
+        };
+        if metadata.len() > MAX_WORLD_SAVE_BYTES {
+            return placement_simple_error(
+                "save_too_large",
+                format!(
+                    "world save is {} bytes; the limit is {MAX_WORLD_SAVE_BYTES}",
+                    metadata.len()
+                ),
+            );
+        }
         let json = match std::fs::read_to_string(&path) {
             Ok(json) => json,
             Err(error) => return placement_simple_error("load_failed", error.to_string()),
@@ -954,11 +981,20 @@ impl TownsmithCore {
             Err(error) => return placement_error_result(&error),
         };
         for placement in &store.placements {
-            let package = match load_tsbp(Path::new(&placement.blueprint_path)) {
+            let package_path = match blueprint_path_from_arg(&placement.blueprint_path) {
+                Ok(path) => path,
+                Err(error) => {
+                    return placement_simple_error(
+                        "invalid_blueprint_path",
+                        format!("{}: {error}", placement.blueprint_path),
+                    )
+                }
+            };
+            let package = match load_tsbp(&package_path) {
                 Ok(package) => package,
                 Err(error) => {
                     return placement_simple_error(
-                        "missing_blueprint",
+                        blueprint_error_code(&error),
                         format!("{}: {error}", placement.blueprint_path),
                     )
                 }
@@ -971,6 +1007,20 @@ impl TownsmithCore {
                         placement.blueprint_path,
                         placement.blueprint_hash,
                         package.metadata.content_hash
+                    ),
+                );
+            }
+            if package.metadata.id != placement.blueprint_id
+                || package.metadata.name != placement.name
+                || package.metadata.bounds_m != placement.bounds_m
+                || package.metadata.stats.resident_capacity != placement.resident_capacity
+                || package.metadata.stats.job_slots != placement.job_slots
+            {
+                return placement_simple_error(
+                    "blueprint_metadata_mismatch",
+                    format!(
+                        "{} metadata does not match the placement record",
+                        placement.blueprint_path
                     ),
                 );
             }
@@ -1689,7 +1739,6 @@ impl TownsmithCore {
     }
 }
 
-/// Validate a GDScript blueprint path.
 fn placement_simple_error(code: &str, message: impl Into<String>) -> VarDictionary {
     let message = message.into();
     let mut result = VarDictionary::new();
@@ -1697,6 +1746,19 @@ fn placement_simple_error(code: &str, message: impl Into<String>) -> VarDictiona
     result.set("error_code", code);
     result.set("error", &GString::from(message.as_str()));
     result
+}
+
+fn blueprint_error_code(error: &BlueprintError) -> &'static str {
+    match error {
+        BlueprintError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            "missing_blueprint"
+        }
+        BlueprintError::Io(_) => "blueprint_io_error",
+        BlueprintError::HashMismatch { .. } => "blueprint_hash_mismatch",
+        BlueprintError::UnsupportedVersion(_) => "unsupported_blueprint_version",
+        BlueprintError::MissingDependency(_) => "missing_blueprint_dependency",
+        _ => "invalid_blueprint",
+    }
 }
 
 fn placement_error_result(error: &PlacementError) -> VarDictionary {
@@ -1816,13 +1878,15 @@ fn world_save_path_from_arg(raw: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Refuse absurdly large world saves before reading them into memory.
+const MAX_WORLD_SAVE_BYTES: u64 = 64 * 1024 * 1024;
+
 fn write_text_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     let temp = path.with_extension("json.tmp");
-    std::fs::write(&temp, contents)?;
-    #[cfg(windows)]
-    if path.exists() {
-        std::fs::remove_file(path)?;
-    }
+    let mut file = std::fs::File::create(&temp)?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
     if let Err(error) = std::fs::rename(&temp, path) {
         let _ = std::fs::remove_file(&temp);
         return Err(error);
@@ -1830,6 +1894,7 @@ fn write_text_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Validate a GDScript blueprint path.
 fn blueprint_path_from_arg(raw: &str) -> Result<PathBuf, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -2247,6 +2312,26 @@ mod tests {
         );
         assert!(
             blueprint_path_from_arg(&std::env::temp_dir().join("house").to_string_lossy()).is_err()
+        );
+    }
+
+    #[test]
+    fn world_save_path_requires_an_absolute_json_path() {
+        let abs = std::env::temp_dir().join("world.json");
+        let abs_upper = std::env::temp_dir().join("world.JSON");
+        let traversal = std::env::temp_dir().join("..").join("world.json");
+        assert!(world_save_path_from_arg(&format!(" {} ", abs.display())).is_ok());
+        assert!(world_save_path_from_arg(&abs_upper.to_string_lossy()).is_ok());
+        assert!(world_save_path_from_arg("").is_err());
+        assert!(world_save_path_from_arg("world.json").is_err());
+        assert!(world_save_path_from_arg(&traversal.to_string_lossy()).is_err());
+        assert!(world_save_path_from_arg(
+            &std::env::temp_dir().join("world.tsbp").to_string_lossy()
+        )
+        .is_err());
+        assert!(
+            world_save_path_from_arg(&std::env::temp_dir().join("world").to_string_lossy())
+                .is_err()
         );
     }
 

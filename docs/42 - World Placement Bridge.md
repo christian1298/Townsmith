@@ -24,7 +24,7 @@ tags:
 |---|---|---|
 | `world_validate_placement(seed, path, x, z, rotation)` | `Dictionary` | Load and validate a `.tsbp` site without mutating; `ok`, `center`, `foundation_m`, `footprint`, `rotation_deg`, `bounds`, `blueprint_hash` |
 | `world_place_blueprint(seed, path, x, z, rotation)` | `Dictionary` | Validate and append; `ok`, `seed`, `count`, `checksum`, `placement` |
-| `world_placements()` | `Dictionary` | `seed`, `next_id`, `count`, `checksum`, `placements[]` |
+| `world_placements()` | `Dictionary` | `open`, `seed`, `next_id`, `count`, `checksum`, `placements[]` |
 | `world_placement_count()` | `int` | Placement count |
 | `world_placement_checksum()` | `String` | Stable 64-bit checksum, hex |
 | `world_clear_placements()` | `bool` | Clear placements; keep the seed |
@@ -95,7 +95,7 @@ The sampler uses `WorldGenerator::height_at` on the 1 m grid, not the currently 
 - `next_id` that is zero or not greater than every stored id;
 - duplicate placement ids;
 - records whose footprint does not match bounds + rotation, or whose foundation, height, centre, or cost is inconsistent;
-- a missing package or a package whose content hash differs from the placement record;
+- a missing package, an invalid/relative package path, a package whose content hash differs from the placement record, or a package whose id/name/bounds/capacity/jobs do not match the record;
 - a load with a different seed than the active store.
 
 The current store is only replaced after the whole file and every package have passed. A failed load leaves the current store untouched.
@@ -116,9 +116,11 @@ The smoke runs on `main.tscn` with `--world-placement-smoke`, builds the shared 
 
 It also checks:
 
+- a water site at `(128, 128)` returns `error_code=water` and does **not** create an empty store;
 - an overlapping placement returns `error_code=overlap`;
 - a 45° rotation returns `error_code=invalid_rotation`;
 - save → clear → load restores the same checksum;
+- renaming the package away makes `world_load` fail with `missing_blueprint` while the active store and checksum stay unchanged;
 - the blueprint mesh has one surface and vertices.
 
 Recorded marker:
@@ -133,14 +135,15 @@ WORLD_PLACEMENT rooms=4 capacity=2 cost=38028.80 placements=1 foundation=1.0 che
 - Placement is instant. D-023's phased construction site is stage 2D.
 - There is no preview scene or rotate/place input yet; that is stage 2A.4.
 - Terrain edits and dirty-chunk remeshing are stage 2B. The placement save does not include terrain deltas.
-- `world_load` re-verifies package hashes but does not re-run slope/water sampling. Terrain edits can invalidate an old site; the gameplay layer will revalidate before construction.
+- `world_load` re-verifies package hashes and metadata (id, name, bounds, capacity, jobs) but does not re-run slope/water sampling. Terrain edits can invalidate an old site; the gameplay layer will revalidate before construction.
 - No collision, road access, utility access, or lot ownership yet.
 - The acceptance house's bounds are the whole 16 × 9.6 × 16 m volume, not a tight mesh bound, so its placed footprint is 16 × 16 m.
 
 ## 6. Tests
 
 - `core_city` placement validation and persistence: 13 tests.
-- Workspace: **198 tests + 1 doctest**.
+- `godot_ext` save-path validation: 1 new test.
+- Workspace: **199 tests + 1 doctest**.
 - Godot headless: `WORLD_PLACEMENT ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 
