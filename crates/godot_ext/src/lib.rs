@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -25,7 +25,10 @@ use core_blueprint::{
     load_tsbp, save_tsbp_with_hash, Blueprint, BlueprintMetadata, BlueprintStats, PropRecord,
     RoomRecord,
 };
-use core_city::{CityLayout, CityTier};
+use core_city::{
+    normalize_rotation, CityLayout, CityTier, Placement, PlacementError, PlacementRequest,
+    PlacementStore, MAX_WORLD_COORD_M,
+};
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
     RoomMaterials, RoomStats, FLOOR_BAND_M,
@@ -482,6 +485,7 @@ impl EditorState {
 struct TownsmithCore {
     terrain: Mutex<Option<TerrainBridge>>,
     editor: Mutex<Option<EditorState>>,
+    world: Mutex<Option<PlacementStore>>,
 }
 
 impl Default for TownsmithCore {
@@ -489,6 +493,7 @@ impl Default for TownsmithCore {
         Self {
             terrain: Mutex::new(None),
             editor: Mutex::new(None),
+            world: Mutex::new(None),
         }
     }
 }
@@ -718,6 +723,296 @@ impl TownsmithCore {
             output.set("error", error);
         }
         output
+    }
+
+    /// Validate a blueprint placement without mutating the world.
+    ///
+    /// Returns `{ ok, center, foundation_m, footprint, rotation_deg,
+    /// blueprint_hash, bounds }` on success and `{ ok: false, error,
+    /// error_code }` on failure.
+    #[func]
+    fn world_validate_placement(
+        &self,
+        seed: i64,
+        path: GString,
+        x: f64,
+        z: f64,
+        rotation: i64,
+    ) -> VarDictionary {
+        let (seed, request) = match world_placement_request(seed, &path.to_string(), x, z, rotation)
+        {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let generator = WorldGenerator::new(seed);
+        let height_at = |cell_x, cell_z| generator.height_at(TerrainPos::new(cell_x, cell_z));
+        let guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = guard.as_ref() {
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the placement store belongs to a different seed",
+                );
+            }
+        }
+        let result = match guard.as_ref() {
+            Some(store) => store.validate(&request, height_at),
+            None => PlacementStore::new(seed).validate(&request, height_at),
+        };
+        match result {
+            Ok(plan) => {
+                let mut result = VarDictionary::new();
+                result.set("ok", true);
+                result.set(
+                    "center",
+                    &PackedFloat32Array::from(plan.center.to_vec()).to_variant(),
+                );
+                result.set("foundation_m", f64::from(plan.foundation_m));
+                result.set(
+                    "footprint",
+                    &PackedFloat32Array::from(plan.footprint_m.to_vec()).to_variant(),
+                );
+                result.set("rotation_deg", i64::from(plan.rotation_deg));
+                result.set(
+                    "blueprint_hash",
+                    &GString::from(request.blueprint_hash.as_str()),
+                );
+                result.set(
+                    "bounds",
+                    &PackedFloat32Array::from(request.bounds_m.to_vec()).to_variant(),
+                );
+                result
+            }
+            Err(error) => placement_error_result(&error),
+        }
+    }
+
+    /// Place a `.tsbp` blueprint in the world after validation.
+    ///
+    /// Returns `{ ok, seed, count, checksum, placement }` on success.
+    #[func]
+    fn world_place_blueprint(
+        &self,
+        seed: i64,
+        path: GString,
+        x: f64,
+        z: f64,
+        rotation: i64,
+    ) -> VarDictionary {
+        let (seed, request) = match world_placement_request(seed, &path.to_string(), x, z, rotation)
+        {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let generator = WorldGenerator::new(seed);
+        let height_at = |cell_x, cell_z| generator.height_at(TerrainPos::new(cell_x, cell_z));
+        let mut guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = guard.as_ref() {
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the placement store belongs to a different seed",
+                );
+            }
+        }
+        let store = guard.get_or_insert_with(|| PlacementStore::new(seed));
+        match store.place(&request, height_at) {
+            Ok(placement) => {
+                let mut result = VarDictionary::new();
+                result.set("ok", true);
+                result.set("seed", seed as i64);
+                result.set("count", store.placements.len() as i64);
+                result.set(
+                    "checksum",
+                    &GString::from(&format!("{:016x}", store.checksum())),
+                );
+                result.set(
+                    "placement",
+                    &placement_to_dictionary(&placement).to_variant(),
+                );
+                result
+            }
+            Err(error) => placement_error_result(&error),
+        }
+    }
+
+    /// Return the active placement store.
+    #[func]
+    fn world_placements(&self) -> VarDictionary {
+        let guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        match guard.as_ref() {
+            Some(store) => {
+                let mut placements: Array<VarDictionary> = Array::new();
+                for placement in &store.placements {
+                    placements.push(&placement_to_dictionary(placement));
+                }
+                result.set("seed", store.seed as i64);
+                result.set("next_id", store.next_id as i64);
+                result.set("count", store.placements.len() as i64);
+                result.set(
+                    "checksum",
+                    &GString::from(&format!("{:016x}", store.checksum())),
+                );
+                result.set("placements", &placements.to_variant());
+            }
+            None => {
+                result.set("seed", 0);
+                result.set("next_id", 1);
+                result.set("count", 0);
+                result.set("checksum", &GString::from("0000000000000000"));
+                result.set("placements", &Array::<VarDictionary>::new().to_variant());
+            }
+        }
+        result
+    }
+
+    /// Number of placements in the active world.
+    #[func]
+    fn world_placement_count(&self) -> i64 {
+        let guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        guard
+            .as_ref()
+            .map_or(0, |store| store.placements.len() as i64)
+    }
+
+    /// Stable checksum of the active placement store.
+    #[func]
+    fn world_placement_checksum(&self) -> GString {
+        let guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        let checksum = guard.as_ref().map_or(0, PlacementStore::checksum);
+        GString::from(&format!("{checksum:016x}"))
+    }
+
+    /// Remove every placement. The seed and an empty store stay open.
+    #[func]
+    fn world_clear_placements(&self) -> bool {
+        let mut guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = guard.as_mut() {
+            store.clear();
+        }
+        true
+    }
+
+    /// Remove one placement by id.
+    #[func]
+    fn world_remove_placement(&self, id: i64) -> bool {
+        let Ok(id) = u64::try_from(id) else {
+            return false;
+        };
+        let mut guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        guard.as_mut().is_some_and(|store| store.remove(id))
+    }
+
+    /// Write the placement store as JSON.
+    #[func]
+    fn world_save(&self, path: GString) -> VarDictionary {
+        let path = match world_save_path_from_arg(&path.to_string()) {
+            Ok(path) => path,
+            Err(error) => return placement_simple_error("invalid_save_path", error),
+        };
+        let store = {
+            let guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            guard.as_ref().cloned()
+        };
+        let Some(store) = store else {
+            return placement_simple_error("no_world", "no world placement store is open");
+        };
+        let json = match store.to_json_pretty() {
+            Ok(json) => json,
+            Err(error) => return placement_error_result(&error),
+        };
+        if let Err(error) = write_text_atomic(&path, &json) {
+            return placement_simple_error("save_failed", error.to_string());
+        }
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("path", &GString::from(path.to_string_lossy().as_ref()));
+        result.set("seed", store.seed as i64);
+        result.set("count", store.placements.len() as i64);
+        result.set(
+            "checksum",
+            &GString::from(&format!("{:016x}", store.checksum())),
+        );
+        result
+    }
+
+    /// Read a world placement save and verify its blueprint packages.
+    #[func]
+    fn world_load(&self, path: GString) -> VarDictionary {
+        let path = match world_save_path_from_arg(&path.to_string()) {
+            Ok(path) => path,
+            Err(error) => return placement_simple_error("invalid_save_path", error),
+        };
+        let json = match std::fs::read_to_string(&path) {
+            Ok(json) => json,
+            Err(error) => return placement_simple_error("load_failed", error.to_string()),
+        };
+        let store = match PlacementStore::from_json(&json) {
+            Ok(store) => store,
+            Err(error) => return placement_error_result(&error),
+        };
+        for placement in &store.placements {
+            let package = match load_tsbp(Path::new(&placement.blueprint_path)) {
+                Ok(package) => package,
+                Err(error) => {
+                    return placement_simple_error(
+                        "missing_blueprint",
+                        format!("{}: {error}", placement.blueprint_path),
+                    )
+                }
+            };
+            if package.metadata.content_hash != placement.blueprint_hash {
+                return placement_simple_error(
+                    "blueprint_hash_mismatch",
+                    format!(
+                        "{} expected {} but the package is {}",
+                        placement.blueprint_path,
+                        placement.blueprint_hash,
+                        package.metadata.content_hash
+                    ),
+                );
+            }
+        }
+        let seed = store.seed;
+        let count = store.placements.len() as i64;
+        let checksum = store.checksum();
+        let mut guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(current) = guard.as_ref() {
+            if current.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the loaded save belongs to a different seed",
+                );
+            }
+        }
+        *guard = Some(store);
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("path", &GString::from(path.to_string_lossy().as_ref()));
+        result.set("seed", seed as i64);
+        result.set("count", count);
+        result.set("checksum", &GString::from(&format!("{checksum:016x}")));
+        result
+    }
+
+    /// Sample one terrain height for the placement preview.
+    ///
+    /// Returns `-1.0` for invalid coordinates.
+    #[func]
+    fn world_height_at(&self, seed: i64, x: f64, z: f64) -> f64 {
+        let Ok(seed) = u64::try_from(seed) else {
+            return -1.0;
+        };
+        if !x.is_finite() || !z.is_finite() {
+            return -1.0;
+        }
+        if x.abs() > f64::from(MAX_WORLD_COORD_M) || z.abs() > f64::from(MAX_WORLD_COORD_M) {
+            return -1.0;
+        }
+        let generator = WorldGenerator::new(seed);
+        f64::from(generator.height_at(TerrainPos::new(x.floor() as i64, z.floor() as i64)))
     }
 
     /// Create or replace the editor [`VoxelVolume`].
@@ -1395,6 +1690,146 @@ impl TownsmithCore {
 }
 
 /// Validate a GDScript blueprint path.
+fn placement_simple_error(code: &str, message: impl Into<String>) -> VarDictionary {
+    let message = message.into();
+    let mut result = VarDictionary::new();
+    result.set("ok", false);
+    result.set("error_code", code);
+    result.set("error", &GString::from(message.as_str()));
+    result
+}
+
+fn placement_error_result(error: &PlacementError) -> VarDictionary {
+    placement_simple_error(error.code(), error.to_string())
+}
+
+fn placement_to_dictionary(placement: &Placement) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("id", placement.id as i64);
+    result.set(
+        "blueprint_id",
+        &GString::from(placement.blueprint_id.as_str()),
+    );
+    result.set(
+        "blueprint_hash",
+        &GString::from(placement.blueprint_hash.as_str()),
+    );
+    result.set(
+        "blueprint_path",
+        &GString::from(placement.blueprint_path.as_str()),
+    );
+    result.set("name", &GString::from(placement.name.as_str()));
+    result.set(
+        "center",
+        &PackedFloat32Array::from(placement.center.to_vec()).to_variant(),
+    );
+    result.set("rotation_deg", i64::from(placement.rotation_deg));
+    result.set(
+        "footprint",
+        &PackedFloat32Array::from(placement.footprint_m.to_vec()).to_variant(),
+    );
+    result.set(
+        "bounds",
+        &PackedFloat32Array::from(placement.bounds_m.to_vec()).to_variant(),
+    );
+    result.set("foundation_m", f64::from(placement.foundation_m));
+    result.set("material_cost", placement.material_cost);
+    result.set("resident_capacity", i64::from(placement.resident_capacity));
+    result.set("job_slots", i64::from(placement.job_slots));
+    result
+}
+
+fn world_placement_request(
+    seed: i64,
+    path: &str,
+    x: f64,
+    z: f64,
+    rotation: i64,
+) -> Result<(u64, PlacementRequest), VarDictionary> {
+    let seed = u64::try_from(seed)
+        .map_err(|_| placement_simple_error("invalid_seed", "world seed must be non-negative"))?;
+    let rotation = normalize_rotation(rotation).map_err(|error| placement_error_result(&error))?;
+    let path = blueprint_path_from_arg(path)
+        .map_err(|error| placement_simple_error("invalid_blueprint_path", error))?;
+    let blueprint = load_tsbp(&path).map_err(|error| {
+        placement_simple_error(
+            "blueprint_load_failed",
+            format!("{}: {error}", path.display()),
+        )
+    })?;
+    let request = placement_request_from_blueprint(&blueprint, &path, x as f32, z as f32, rotation);
+    Ok((seed, request))
+}
+
+fn placement_request_from_blueprint(
+    blueprint: &Blueprint,
+    path: &Path,
+    center_x: f32,
+    center_z: f32,
+    rotation_deg: u16,
+) -> PlacementRequest {
+    let (materials, _) = count_materials(&blueprint.volume);
+    let computed_cost = slice_material_cost(&materials);
+    let stored_cost = blueprint.metadata.stats.material_cost;
+    let material_cost = if stored_cost.is_finite() && stored_cost > 0.0 {
+        stored_cost
+    } else {
+        computed_cost
+    };
+    PlacementRequest {
+        blueprint_id: blueprint.metadata.id.clone(),
+        blueprint_hash: blueprint.metadata.content_hash.clone(),
+        blueprint_path: path.to_string_lossy().to_string(),
+        name: blueprint.metadata.name.clone(),
+        bounds_m: blueprint.metadata.bounds_m,
+        center_x,
+        center_z,
+        rotation_deg,
+        material_cost,
+        resident_capacity: blueprint.metadata.stats.resident_capacity,
+        job_slots: blueprint.metadata.stats.job_slots,
+    }
+}
+
+fn world_save_path_from_arg(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("world save path is empty".to_string());
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err("world save path must be absolute".to_string());
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("world save path must not contain '..'".to_string());
+    }
+    let extension_ok = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
+    if !extension_ok {
+        return Err("world save path must end with .json".to_string());
+    }
+    Ok(path)
+}
+
+fn write_text_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, contents)?;
+    #[cfg(windows)]
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    if let Err(error) = std::fs::rename(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn blueprint_path_from_arg(raw: &str) -> Result<PathBuf, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {

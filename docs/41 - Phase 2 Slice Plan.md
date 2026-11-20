@@ -36,9 +36,9 @@ The slice follows accepted decisions:
 | Stage | Deliverable | Status |
 |---|---|---|
 | **2A.1** | Placement records and terrain validation | **Done** — PR #44 |
-| **2A.2** | Placement store, JSON save format, checksum | **This PR** |
-| **2A.3** | GDExtension placement/save/load API and headless smoke | Planned |
-| **2A.4** | Streamed-world scene, preview, rotate/place/save/load controls | Planned |
+| **2A.2** | Placement store, JSON save format, checksum | **Done** — PR #45 |
+| **2A.3** | GDExtension placement/save/load API and headless smoke | **This PR** — see [[42 - World Placement Bridge]] |
+| **2A.4** | Streamed-world scene, preview, rotate/place/save/load controls | Next |
 | **2B** | Terrain edit deltas applied to streamed chunks, saved/reloaded | Planned |
 | **2C** | Mayor camera, selection, mode switch at a door | Planned |
 | **2D** | Construction site v0: phased progress, materials, crews | Planned |
@@ -204,9 +204,9 @@ GODOT=/path/to/godot ./scripts/smoke_world_placement.sh
 The smoke:
 
 1. Builds the shared acceptance house and saves it to a temporary `.tsbp`.
-2. Searches a deterministic grid near the origin for a slope-valid site.
+2. Uses the deterministic fixture site: seed 2026, centre `(169, 125)`, 16 × 16 m, heights 40–41 m.
 3. Places the house; asserts rooms/capacity/cost/footprint/foundation and that a second overlapping placement is rejected.
-4. Verifies water, steep-slope, bad-rotation, and missing-package errors with readable codes.
+4. Verifies overlap and bad-rotation rejection; water/slope rejection is covered by the core placement tests.
 5. Saves the world JSON, clears the store, reloads, and compares the placement checksum.
 6. Builds the placement mesh and asserts the expected surface count and vertex count.
 7. Prints a stable marker.
@@ -214,7 +214,7 @@ The smoke:
 Expected marker shape:
 
 ```text
-WORLD_PLACEMENT rooms=4 capacity=2 cost=38028.80 placements=1 foundation=... checksum=... save=ok load=ok mesh=ok status=ok
+WORLD_PLACEMENT rooms=4 capacity=2 cost=38028.80 placements=1 foundation=1.0 checksum=... save=ok load=ok mesh=ok status=ok
 ```
 
 ## 9. Tests

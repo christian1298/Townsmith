@@ -1,0 +1,152 @@
+---
+title: World Placement Bridge
+project: Townsmith
+status: active
+updated: 2026-11-20
+tags:
+  - townsmith
+  - phase-2
+  - world
+  - placement
+  - godot
+---
+
+# 42 — World Placement Bridge
+
+> [!info] What this note is
+> The GDExtension API that stores placed blueprints, validates a site against terrain, and saves/loads the placement layer. The rules and data model are in [[41 - Phase 2 Slice Plan]]; this note records the bridge and headless smoke.
+
+## 1. API
+
+`TownsmithCore` owns an optional `PlacementStore` alongside the terrain pool and editor volume. All methods are **main-thread only**.
+
+| Method | Returns | Purpose |
+|---|---|---|
+| `world_validate_placement(seed, path, x, z, rotation)` | `Dictionary` | Load and validate a `.tsbp` site without mutating; `ok`, `center`, `foundation_m`, `footprint`, `rotation_deg`, `bounds`, `blueprint_hash` |
+| `world_place_blueprint(seed, path, x, z, rotation)` | `Dictionary` | Validate and append; `ok`, `seed`, `count`, `checksum`, `placement` |
+| `world_placements()` | `Dictionary` | `seed`, `next_id`, `count`, `checksum`, `placements[]` |
+| `world_placement_count()` | `int` | Placement count |
+| `world_placement_checksum()` | `String` | Stable 64-bit checksum, hex |
+| `world_clear_placements()` | `bool` | Clear placements; keep the seed |
+| `world_remove_placement(id)` | `bool` | Remove one placement |
+| `world_save(path)` | `Dictionary` | Write world JSON atomically |
+| `world_load(path)` | `Dictionary` | Read JSON, verify structure and every blueprint package |
+| `world_height_at(seed, x, z)` | `float` | One terrain sample for the preview; `-1.0` on invalid input |
+
+`x` and `z` are the **centre** of the rotated footprint in world metres. The blueprint mesh is volume-local with its minimum corner at `(0, 0, 0)`; a renderer offsets it by `-bounds_m / 2` on X/Z, then rotates around Y. `rotation` is normalized to 0/90/180/270.
+
+## 2. Validation
+
+`world_placement_request` loads the package with `load_tsbp`, which verifies the BLAKE3 content hash, bounds, solid count, palette/RLE stream, and dependencies. It then builds a `PlacementRequest` from the metadata:
+
+- `blueprint_id`, `content_hash`, package path, name;
+- `bounds_m`;
+- material cost (stored when finite/positive, otherwise recomputed from the slice price table);
+- resident capacity and job slots.
+
+`core_city::placement` applies the terrain rules:
+
+| Rule | Value |
+|---|---|
+| Water | every sampled cell must be above `WATER_LEVEL_M = 24` |
+| Slope | elevation range ≤ `2.0 m` |
+| Foundation | base at the maximum sampled height; foundation height is the range |
+| Overlap | rotated footprints need a `0.5 m` gap |
+| Footprint | ≤ `48 m × 48 m` |
+| Height | ≤ `512 m` |
+| Coordinates | finite; `abs(x)`, `abs(z)` ≤ `1,000,000 m` |
+| Rotation | multiple of 90°, normalized |
+| Cost | finite and non-negative |
+
+The sampler uses `WorldGenerator::height_at` on the 1 m grid, not the currently loaded chunks, so placement does not depend on streaming state.
+
+## 3. Save format
+
+`world_save` writes the `PlacementStore` as pretty JSON:
+
+```json
+{
+  "format_version": 1,
+  "seed": 2026,
+  "next_id": 2,
+  "placements": [
+    {
+      "id": 1,
+      "blueprint_id": "local:acceptance_house",
+      "blueprint_hash": "blake3:...",
+      "blueprint_path": "/absolute/path/acceptance_house.tsbp",
+      "name": "Acceptance House",
+      "center": [169.0, 41.0, 125.0],
+      "rotation_deg": 0,
+      "footprint_m": [16.0, 16.0],
+      "bounds_m": [16.0, 9.6, 16.0],
+      "foundation_m": 1.0,
+      "material_cost": 38028.8,
+      "resident_capacity": 2,
+      "job_slots": 2
+    }
+  ]
+}
+```
+
+`world_load` rejects:
+
+- malformed JSON or an unknown `format_version`;
+- `next_id` that is zero or not greater than every stored id;
+- duplicate placement ids;
+- records whose footprint does not match bounds + rotation, or whose foundation, height, centre, or cost is inconsistent;
+- a missing package or a package whose content hash differs from the placement record;
+- a load with a different seed than the active store.
+
+The current store is only replaced after the whole file and every package have passed. A failed load leaves the current store untouched.
+
+## 4. Smoke
+
+```bash
+GODOT=/path/to/godot ./scripts/smoke_world_placement.sh
+```
+
+The smoke runs on `main.tscn` with `--world-placement-smoke`, builds the shared acceptance house in the editor, saves it to `user://world_placement_smoke/acceptance_house.tsbp`, and places it at the fixture site:
+
+- seed `2026`;
+- centre `(169, 125)`;
+- 16 m × 16 m volume footprint;
+- terrain heights 40–41 m, so centre Y = 41 and foundation = 1 m;
+- 4 rooms, capacity 2, jobs 2, cost 38,028.8.
+
+It also checks:
+
+- an overlapping placement returns `error_code=overlap`;
+- a 45° rotation returns `error_code=invalid_rotation`;
+- save → clear → load restores the same checksum;
+- the blueprint mesh has one surface and vertices.
+
+Recorded marker:
+
+```text
+WORLD_PLACEMENT rooms=4 capacity=2 cost=38028.80 placements=1 foundation=1.0 checksum=... save=ok load=ok mesh=ok status=ok
+```
+
+## 5. Limits
+
+- The world save references **absolute package paths**. It is valid on the same machine but is not portable; a content-addressed local library is a follow-up.
+- Placement is instant. D-023's phased construction site is stage 2D.
+- There is no preview scene or rotate/place input yet; that is stage 2A.4.
+- Terrain edits and dirty-chunk remeshing are stage 2B. The placement save does not include terrain deltas.
+- `world_load` re-verifies package hashes but does not re-run slope/water sampling. Terrain edits can invalidate an old site; the gameplay layer will revalidate before construction.
+- No collision, road access, utility access, or lot ownership yet.
+- The acceptance house's bounds are the whole 16 × 9.6 × 16 m volume, not a tight mesh bound, so its placed footprint is 16 × 16 m.
+
+## 6. Tests
+
+- `core_city` placement validation and persistence: 13 tests.
+- Workspace: **198 tests + 1 doctest**.
+- Godot headless: `WORLD_PLACEMENT ... status=ok`.
+- CI runs the smoke in the Linux Godot job.
+
+## 7. Next
+
+1. Add the streamed-world preview, ghost material, rotate/place input, and mode HUD (2A.4).
+2. Replace absolute package paths with a content-addressed library beside the save.
+3. Add terrain edit deltas and dirty-chunk remeshing (2B).
+4. Move placement into a construction site (2D).
