@@ -132,16 +132,16 @@ Needs: food 60% · water 40% · rest 80%
 
 ## 7. Tests
 
-- `core_city::population`: 12 tests after 3.3 (move-in, jobs, needs, sync, JSON, validation, remove/clear, commute/wages).
+- `core_city::population`: 15 tests after 3.4 (move-in, jobs, needs, sync, JSON, validation, remove/clear, commute/wages, staffing, food supply).
 - `core_city::metrics`: completed, vacant, unfinished, no-site, jobs-only, shortage.
 - `godot_ext`: population JSON roundtrip and old-save/unsupported-version cases.
-- Workspace: **286 tests + 1 doctest**.
+- Workspace: **304 tests + 1 doctest**.
 
 ## 8. Limits
 
 - One aggregate household per building; no named people yet.
 - Move-in ignores jobs, housing quality, and migration pressure.
-- Needs are open-loop: no food/water supply or service coverage.
+- Food is supplied by [[54 - Primary Industries]]; water and rest remain open-loop until 3.5.
 - Jobs are assigned by nearest workplace, not qualification; 3.3 adds commute and wages.
 - Taxes, net income, upkeep, and construction budgets are 3.6.
 - English-only developer HUD.
@@ -150,6 +150,6 @@ Needs: food 60% · water 40% · rest 80%
 
 ## 9. Next
 
-1. 3.4: primary industries and food supply.
-2. 3.5: water/power coverage and needs replenishment.
-3. 3.9: a headless 30-day runner before tuning the rates.
+1. 3.5: water/power coverage and service replenishment ([[54 - Primary Industries]] covers food).
+2. 3.6: taxes, net income, upkeep, and construction budgets.
+3. Tune the needs rates against the 30-day runner once water and rest are supplied.

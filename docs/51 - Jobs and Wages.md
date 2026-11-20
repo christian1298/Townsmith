@@ -120,9 +120,9 @@ The non-zero commute and split-assignment cases are covered by the core tests, b
 ## 6. Tests
 
 - `core_city`: 7 new tests — global nearest-slot order, id-order independence, split assignment, shortage, commute happiness, JSON roundtrip, old-save defaults.
-- `core_city` total: **88 tests**.
-- `godot_ext`: **34 tests** (no new bridge test; the scene smoke covers the bridge path).
-- Workspace: **286 tests + 1 doctest**.
+- `core_city` total: **102 tests**.
+- `godot_ext`: **37 tests** total; the scene smoke covers the bridge path.
+- Workspace: **304 tests + 1 doctest**.
 
 ## 7. Limits
 
@@ -135,7 +135,7 @@ The non-zero commute and split-assignment cases are covered by the core tests, b
 
 ## 8. Next
 
-1. 3.4: lumberjack, farmer, and hunter loops with visible work and storage.
+1. 3.5: water/power coverage and service replenishment.
 2. Replace the O(H×W) assignment with a spatial grid before scaling.
 3. Add road-distance commute when the traffic graph arrives (3.7).
 4. Add wages to the budget/treasury in 3.6.

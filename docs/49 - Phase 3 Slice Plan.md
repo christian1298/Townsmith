@@ -35,8 +35,8 @@ The full feature list is in [[08 - Roadmap]]. This plan cuts it into reviewable 
 | **3.1** | City ledger: completed buildings → population, housing, jobs, employment, happiness | **Done** — PR #56 |
 | **3.2** | Households and move-in: vacant homes fill over time; simple needs and happiness | **Done** — PR #58, see [[50 - Households and Needs]] |
 | **3.3** | Jobs and wages: assign residents to job slots, commute distance, income | **Done** — PR #60, see [[51 - Jobs and Wages]] |
-| **3.4** | Primary industries: lumberjack, farmer, hunter with visible loops and storage | Next |
-| **3.5** | Utilities: water or power first, coverage, shortages, happiness/production effects | Planned |
+| **3.4** | Primary industries: lumberjack, farmer, hunter with visible loops and storage | **Done** — PR #64, see [[54 - Primary Industries]] |
+| **3.5** | Utilities: water or power first, coverage, shortages, happiness/production effects | Next |
 | **3.6** | Economy: taxes, upkeep, construction draw-down, loans, bankruptcy | **Partial** — PR #62, treasury/taxes; see [[53 - Treasury and Taxes]] |
 | **3.7** | Traffic: road graph, flow fields, visual vehicles | Planned |
 | **3.8** | Dashboard and advisor: city metrics, district panel, notifications | Planned |
@@ -173,9 +173,41 @@ See [[50 - Households and Needs]] for the structs, rates, persistence, HUD, and 
 
 See [[51 - Jobs and Wages]] for the data, formula, tests, and limits.
 
+## 6d. Stage 3.4 scope
+
+### In
+
+- `core_city::industry`: lumberjack, farm, and hunt sites, wood/food/hide stockpiles, and a food-supply ratio.
+- Per-workplace staffing from the household runtime; industry production uses actual assigned workers.
+- Residents eat from the food stock; food need replenishes at full supply.
+- Bridge APIs, world save/load with seed and orphan checks, and HUD stock/supply line.
+- `I` cycles a selected building through none → lumberjack → farm → hunt → none.
+- Visible rotating beacons and labels at industry sites.
+- The 30-day runner designates ten sites and reports stockpiles.
+
+### Out
+
+- Storage buildings, capacity, spoilage, transport, or markets.
+- Individual workers, vehicles, tools, shifts, or a citizen work animation.
+- Wood/hide consumers and crafting.
+- Water/power/services (3.5).
+- Seasonal or terrain-dependent yields.
+
+### Data
+
+See [[54 - Primary Industries]] for rates, structs, tick order, persistence, HUD, tests, and limits.
+
+### Verification
+
+- `cargo test -p core_city` — industry, staffing, and food-replenishment tests.
+- `cargo test --workspace`.
+- `smoke_world_scene.sh` — industry site, production, supply, beacon, save/clear/load; marker `industry=ok` (checked by the script).
+- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `fe84b6a6d06678ca`.
+- clippy and fmt.
+
 ## 7. Next
 
-1. 3.4: lumberjack, farmer, and hunter loops with visible work and storage.
-2. Materialize a few named citizens for selection and stories.
-3. Add a headless runner before the first industry loop so balance changes are measurable.
+1. 3.5: water/power coverage and service replenishment for water/rest.
+2. 3.6: construction draw-down, loans, and bankruptcy consequences.
+3. Materialize a few named citizens for selection and stories.
 4. Keep the 500-citizen/50-building 60 FPS gate visible from the first slice.

@@ -36,6 +36,12 @@ const WATER_DECAY_PER_S: f32 = 0.0006;
 /// Rest satisfaction lost per simulated second.
 const REST_DECAY_PER_S: f32 = 0.0002;
 
+/// Food satisfaction restored per simulated second at full supply.
+pub const FOOD_REPLENISH_PER_S: f32 = 0.002;
+
+/// Largest per-workplace staffing value accepted from a save.
+const MAX_STAFFING_PER_WORKPLACE: u32 = 1_000_000;
+
 /// One completed residential building available to households.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Home {
@@ -143,6 +149,11 @@ pub struct CityRuntime {
     pub move_in_carry: f32,
     /// Households keyed by placement id.
     pub households: BTreeMap<u64, Household>,
+    /// Workers assigned to each workplace in the last tick, keyed by
+    /// placement id. Derived state, saved so industry production resumes
+    /// immediately after loading.
+    #[serde(default)]
+    pub staffing: BTreeMap<u64, u32>,
 }
 
 impl CityRuntime {
@@ -155,6 +166,7 @@ impl CityRuntime {
             move_in_per_second: 1.0,
             move_in_carry: 0.0,
             households: BTreeMap::new(),
+            staffing: BTreeMap::new(),
         }
     }
 
@@ -170,11 +182,13 @@ impl CityRuntime {
     /// Remove a household by placement id.
     pub fn remove(&mut self, placement_id: u64) {
         self.households.remove(&placement_id);
+        self.staffing.remove(&placement_id);
     }
 
     /// Remove every household.
     pub fn clear(&mut self) {
         self.households.clear();
+        self.staffing.clear();
         self.move_in_carry = 0.0;
     }
 
@@ -240,13 +254,35 @@ impl CityRuntime {
     }
 
     /// Advance move-in, workplace assignment, and needs by `dt_s` seconds.
+    ///
+    /// Compatibility wrapper with no food supply; needs keep decaying.
     pub fn tick_with_workplaces(
         &mut self,
         dt_s: f64,
         homes: &[Home],
         workplaces: &[Workplace],
     ) -> PopulationReport {
+        self.tick_with_workplaces_and_supply(dt_s, homes, workplaces, 0.0)
+    }
+
+    /// Advance move-in, workplace assignment, and needs by `dt_s` seconds.
+    ///
+    /// `food_supply` is the share of resident food demand met this step,
+    /// 0..=1. It restores food satisfaction; water and rest still only decay
+    /// until the utility slice.
+    pub fn tick_with_workplaces_and_supply(
+        &mut self,
+        dt_s: f64,
+        homes: &[Home],
+        workplaces: &[Workplace],
+        food_supply: f32,
+    ) -> PopulationReport {
         self.sync_homes(homes);
+        let supply = if food_supply.is_finite() {
+            food_supply.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let dt = if dt_s.is_finite() {
             dt_s.clamp(0.0, MAX_TICK_SECONDS) as f32
         } else {
@@ -301,6 +337,7 @@ impl CityRuntime {
                 .then(left.2.cmp(&right.2))
         });
         let mut assignments: BTreeMap<u64, (u32, f32)> = BTreeMap::new();
+        let mut staffing_out: BTreeMap<u64, u32> = BTreeMap::new();
         for (distance_sq, id, index) in pairs {
             if remaining[index] == 0 {
                 continue;
@@ -317,7 +354,11 @@ impl CityRuntime {
             let entry = assignments.entry(id).or_insert((0, 0.0));
             entry.0 += take;
             entry.1 += distance_sq.sqrt() * take as f32;
+            let workplace_id = workplaces[index].id;
+            let staffed = staffing_out.entry(workplace_id).or_insert(0);
+            *staffed = staffed.saturating_add(take);
         }
+        self.staffing = staffing_out;
         for (&id, household) in &mut self.households {
             let (workers, weighted) = assignments.get(&id).copied().unwrap_or((0, 0.0));
             household.workers = workers;
@@ -330,7 +371,9 @@ impl CityRuntime {
         }
 
         for household in self.households.values_mut() {
-            household.food = (household.food - FOOD_DECAY_PER_S * dt).max(0.0);
+            household.food = (household.food - FOOD_DECAY_PER_S * dt
+                + FOOD_REPLENISH_PER_S * supply * dt)
+                .clamp(0.0, 1.0);
             household.water = (household.water - WATER_DECAY_PER_S * dt).max(0.0);
             household.rest = (household.rest - REST_DECAY_PER_S * dt).max(0.0);
             household.clamp_to_capacity();
@@ -507,6 +550,13 @@ impl CityRuntime {
             if household.home.iter().any(|value| !value.is_finite()) {
                 return Err(PopulationError::InvalidRuntime(
                     "household home is not finite",
+                ));
+            }
+        }
+        for (&workplace_id, &staffed) in &self.staffing {
+            if workplace_id > i64::MAX as u64 || staffed > MAX_STAFFING_PER_WORKPLACE {
+                return Err(PopulationError::InvalidRuntime(
+                    "workplace staffing is out of range",
                 ));
             }
         }
@@ -829,6 +879,82 @@ mod tests {
         assert_eq!(decoded, runtime);
         assert!((decoded.households[&1].commute_m - 25.0).abs() < 0.001);
         assert!((decoded.households[&1].income_per_day - 20.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn staffing_records_workers_per_workplace() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.set_move_in_per_second(2.0);
+        let homes = [
+            Home {
+                id: 1,
+                capacity: 1,
+                center: [0.0, 0.0],
+            },
+            Home {
+                id: 2,
+                capacity: 1,
+                center: [10.0, 0.0],
+            },
+        ];
+        let workplaces = [
+            Workplace {
+                id: 10,
+                slots: 1,
+                center: [0.0, 0.0],
+            },
+            Workplace {
+                id: 11,
+                slots: 1,
+                center: [10.0, 0.0],
+            },
+        ];
+        runtime.tick_with_workplaces(1.0, &homes, &workplaces);
+        assert_eq!(runtime.staffing.get(&10), Some(&1));
+        assert_eq!(runtime.staffing.get(&11), Some(&1));
+        assert_eq!(runtime.staffing.values().sum::<u32>(), 2);
+        assert_eq!(
+            runtime.staffing.values().sum::<u32>(),
+            runtime.workers() as u32
+        );
+    }
+
+    #[test]
+    fn food_supply_replenishes_the_food_need() {
+        let homes = [Home {
+            id: 1,
+            capacity: 1,
+            center: [0.0, 0.0],
+        }];
+        let workplaces = [Workplace {
+            id: 10,
+            slots: 1,
+            center: [0.0, 0.0],
+        }];
+        let mut fed = CityRuntime::new(2026);
+        fed.set_move_in_per_second(2.0);
+        fed.tick_with_workplaces_and_supply(1.0, &homes, &workplaces, 1.0);
+        let mut hungry = CityRuntime::new(2026);
+        hungry.set_move_in_per_second(2.0);
+        hungry.tick_with_workplaces_and_supply(1.0, &homes, &workplaces, 0.0);
+        fed.households.get_mut(&1).expect("home").food = 0.5;
+        hungry.households.get_mut(&1).expect("home").food = 0.5;
+        fed.tick_with_workplaces_and_supply(100.0, &homes, &workplaces, 1.0);
+        hungry.tick_with_workplaces_and_supply(100.0, &homes, &workplaces, 0.0);
+        assert!(fed.households[&1].food > 0.5);
+        assert!(hungry.households[&1].food < 0.5);
+    }
+
+    #[test]
+    fn old_saves_without_staffing_load_empty() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.set_move_in_per_second(2.0);
+        runtime.tick(1.0, 1, &[(1, 1)]);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&runtime.to_json_pretty().expect("json")).expect("value");
+        value.as_object_mut().expect("object").remove("staffing");
+        let decoded = CityRuntime::from_json(&value.to_string()).expect("decode");
+        assert!(decoded.staffing.is_empty());
     }
 
     #[test]
