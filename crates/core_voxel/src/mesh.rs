@@ -296,8 +296,11 @@ fn emit_quad(
         });
     }
 
+    // Godot treats clockwise triangles as front-facing when viewed from the
+    // outside. The corners above are counter-clockwise around `normal`, so
+    // emit the reversed order; otherwise CULL_BACK hides every outward face.
     mesh.indices
-        .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        .extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
 }
 
 fn grid_coord(axis: usize, slice: i32, u: i32, v: i32) -> [i32; 3] {
@@ -398,6 +401,30 @@ mod tests {
         }
         assert_eq!(positive, [4, 4, 4]);
         assert_eq!(negative, [4, 4, 4]);
+    }
+
+    #[test]
+    fn godot_front_faces_are_clockwise_against_the_normal() {
+        let mut chunk = VoxelChunk::new();
+        chunk.set(2, 3, 4, 1).unwrap();
+        chunk.set(6, 3, 4, 2).unwrap();
+        let mesh = greedy_mesh(&chunk);
+
+        for triangle in mesh.indices.chunks(3) {
+            let p0 = mesh.vertices[triangle[0] as usize].position;
+            let p1 = mesh.vertices[triangle[1] as usize].position;
+            let p2 = mesh.vertices[triangle[2] as usize].position;
+            let normal = mesh.vertices[triangle[0] as usize].normal;
+            let edge1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+            let edge2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+            let cross = [
+                edge1[1] * edge2[2] - edge1[2] * edge2[1],
+                edge1[2] * edge2[0] - edge1[0] * edge2[2],
+                edge1[0] * edge2[1] - edge1[1] * edge2[0],
+            ];
+            let dot = cross[0] * normal[0] + cross[1] * normal[1] + cross[2] * normal[2];
+            assert!(dot < 0.0, "Godot front face is not clockwise: dot={dot}");
+        }
     }
 
     #[test]
