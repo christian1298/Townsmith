@@ -269,6 +269,7 @@ func _rebuild_volume_mesh() -> void:
 ## Toggle the translucent room boxes/labels. Detection runs on demand.
 func _toggle_room_overlay() -> void:
 	if _room_overlay != null:
+		remove_child(_room_overlay)
 		_room_overlay.queue_free()
 		_room_overlay = null
 		_room_overlay_on = false
@@ -279,6 +280,7 @@ func _toggle_room_overlay() -> void:
 
 func _rebuild_room_overlay() -> void:
 	if _room_overlay != null:
+		remove_child(_room_overlay)
 		_room_overlay.queue_free()
 	_room_overlay = Node3D.new()
 	_room_overlay.name = "RoomOverlay"
@@ -286,6 +288,10 @@ func _rebuild_room_overlay() -> void:
 
 	var stats: Dictionary = _core.editor_room_stats()
 	if not bool(stats.get("ok", false)):
+		remove_child(_room_overlay)
+		_room_overlay.queue_free()
+		_room_overlay = null
+		_room_overlay_on = false
 		_set_status("Room overlay failed: %s" % str(stats.get("error", "unknown error")))
 		return
 	var rooms: Array = stats.get("rooms", [])
@@ -311,7 +317,7 @@ func _rebuild_room_overlay() -> void:
 		label.text = "%s\n%.1f m²" % [kind, float(room.get("area_m2", 0.0))]
 		label.position = instance.position + Vector3(0.0, ROOM_OVERLAY_HEIGHT_M * 0.5 + 0.4, 0.0)
 		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-		label.no_depth_test = true
+		label.no_depth_test = false
 		label.font_size = 48
 		label.pixel_size = 0.005
 		label.outline_size = 8

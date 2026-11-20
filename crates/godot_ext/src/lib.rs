@@ -24,7 +24,7 @@ use core_blueprint::{
     load_tsbp, save_tsbp_with_hash, Blueprint, BlueprintMetadata, BlueprintStats, RoomRecord,
 };
 use core_city::{CityLayout, CityTier};
-use core_rooms::{detect_rooms, RoomMaterials, RoomStats};
+use core_rooms::{detect_rooms, RoomBounds, RoomMaterials, RoomStats, FLOOR_BAND_M};
 use core_voxel::coords::{MaterialId, CHUNK_SIZE, VOXEL_SIZE_M};
 use core_voxel::demo;
 use core_voxel::mesh::{greedy_mesh, MeshBuffers};
@@ -80,7 +80,24 @@ fn blueprint_from_editor_volume(id: String, name: String, volume: VoxelVolume) -
     Blueprint::new(metadata, volume)
 }
 
+fn room_bounds_payload(bounds: &RoomBounds, floor: u32) -> ([f32; 4], [f32; 3]) {
+    let bounds_m = [
+        bounds.min_x as f32 * VOXEL_SIZE_M,
+        bounds.min_z as f32 * VOXEL_SIZE_M,
+        (bounds.max_x + 1) as f32 * VOXEL_SIZE_M,
+        (bounds.max_z + 1) as f32 * VOXEL_SIZE_M,
+    ];
+    let band_height_m = bounds.band_height_voxels as f32 * VOXEL_SIZE_M;
+    let center_m = [
+        (bounds.min_x + bounds.max_x + 1) as f32 * 0.5 * VOXEL_SIZE_M,
+        floor as f32 * FLOOR_BAND_M + band_height_m * 0.5,
+        (bounds.min_z + bounds.max_z + 1) as f32 * 0.5 * VOXEL_SIZE_M,
+    ];
+    (bounds_m, center_m)
+}
+
 fn room_stats_to_dictionary(stats: &RoomStats) -> VarDictionary {
+    debug_assert_eq!(stats.rooms.len(), stats.room_bounds.len());
     let mut result = VarDictionary::new();
     let mut rooms: Array<VarDictionary> = Array::new();
     for (room, bounds) in stats.rooms.iter().zip(&stats.room_bounds) {
@@ -93,17 +110,7 @@ fn room_stats_to_dictionary(stats: &RoomStats) -> VarDictionary {
         item.set("beds", room.beds as i64);
         item.set("doors", room.doors as i64);
         item.set("windows", room.windows as i64);
-        let bounds_m = [
-            bounds.min_x as f32 * VOXEL_SIZE_M,
-            bounds.min_z as f32 * VOXEL_SIZE_M,
-            (bounds.max_x + 1) as f32 * VOXEL_SIZE_M,
-            (bounds.max_z + 1) as f32 * VOXEL_SIZE_M,
-        ];
-        let center_m = [
-            (bounds.min_x + bounds.max_x + 1) as f32 * 0.5 * VOXEL_SIZE_M,
-            (bounds.floor as f32 + 0.5) * 3.0,
-            (bounds.min_z + bounds.max_z + 1) as f32 * 0.5 * VOXEL_SIZE_M,
-        ];
+        let (bounds_m, center_m) = room_bounds_payload(bounds, room.floor);
         item.set(
             "bounds_m",
             &PackedFloat32Array::from(bounds_m.to_vec()).to_variant(),
@@ -1448,6 +1455,29 @@ mod tests {
         assert_eq!(loaded.metadata.rooms, blueprint.metadata.rooms);
         assert_eq!(loaded.metadata.materials, blueprint.metadata.materials);
         assert_eq!(loaded.metadata.stats, blueprint.metadata.stats);
+    }
+
+    #[test]
+    fn room_bounds_payload_maps_cells_to_meters() {
+        let bounds = RoomBounds {
+            min_x: 1,
+            max_x: 38,
+            min_z: 1,
+            max_z: 38,
+            floor: 0,
+            band_height_voxels: 30,
+        };
+        let (bounds_m, center_m) = room_bounds_payload(&bounds, 0);
+        assert_eq!(bounds_m, [0.1, 0.1, 3.9, 3.9]);
+        assert_eq!(center_m, [2.0, 1.5, 2.0]);
+
+        let partial = RoomBounds {
+            floor: 3,
+            band_height_voxels: 6,
+            ..bounds
+        };
+        let (_, partial_center) = room_bounds_payload(&partial, 3);
+        assert_eq!(partial_center[1], 9.3);
     }
 
     #[test]

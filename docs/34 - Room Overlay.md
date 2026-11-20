@@ -48,7 +48,7 @@ tags:
 }
 ```
 
-`bounds_m` and `center_m` are volume-local metres; the editor adds the volume origin.
+`bounds_m` and `center_m` are volume-local metres; the editor adds the volume origin. `bounds_m` is `[min_x, min_z, max_x, max_z]` with **exclusive max** (`max_cell + 1`), covering interior air cells only, not walls. `center_m.y` is the actual band centre, including partial top bands.
 
 ## 3. Smoke
 
@@ -71,7 +71,7 @@ Detection is ~2 ms for the test house and runs only on toggle/rebuild. The overl
 
 ## 5. Limitations
 
-- Room bounds are the floor-band rectangle, not the true room volume.
+- Room bounds are the floor-band interior rectangle, not the true room volume, and exclude walls.
 - Overlay boxes can clip walls/stairs; they are a diagnostic, not final art.
 - No room selection, hover, or per-room inspection yet.
 - No props, so most rooms show `empty`.

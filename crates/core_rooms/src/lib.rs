@@ -177,6 +177,8 @@ pub struct RoomBounds {
     pub max_z: u32,
     /// Floor band index.
     pub floor: u32,
+    /// Height of this band in 10 cm voxels (the top band can be partial).
+    pub band_height_voxels: u32,
 }
 
 /// Aggregate room and material stats for one volume.
@@ -198,7 +200,7 @@ pub struct RoomStats {
     ///
     /// Skipped by serde so the benchmark checksum remains focused on gameplay
     /// stats; shells use it for overlays.
-    #[serde(skip)]
+    #[serde(default, skip_serializing)]
     pub room_bounds: Vec<RoomBounds>,
 }
 
@@ -277,6 +279,7 @@ pub fn detect_rooms(
                 max_x,
                 min_z,
                 max_z,
+                band_height_voxels: (band_end - band_start) as u32,
             });
         }
 
@@ -341,6 +344,7 @@ pub fn detect_rooms(
             min_z: room.min_z,
             max_z: room.max_z,
             floor: room.floor,
+            band_height_voxels: room.band_height_voxels,
         });
     }
 
@@ -375,6 +379,7 @@ struct PendingRoom {
     max_x: u32,
     min_z: u32,
     max_z: u32,
+    band_height_voxels: u32,
 }
 
 impl PendingRoom {
