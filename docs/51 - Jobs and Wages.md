@@ -69,7 +69,7 @@ pub struct Household {
 1. syncs households with completed homes;
 2. fills vacancies from the move-in rate;
 3. assigns each household's residents to the nearest workplace with free slots, splitting across workplaces when needed;
-4. sets `commute_m` to the resident-weighted average of the assigned distances;
+4. sets `commute_m` to the worker-weighted average of the assigned distances;
 5. sets `income_per_day = workers × 20`;
 6. decays food, water, and rest;
 7. clamps capacity invariants.
@@ -110,22 +110,23 @@ Commute X m · wages Y/day
 
 The world-scene smoke completes the acceptance house, moves two residents in, and asserts:
 
-- average commute is 0 m (home and workplace are the same building);
-- daily wages are 40 (2 workers × 20);
-- the same values survive save → clear → load;
-- household records include commute and income;
+- average commute is 0 m and daily wages are 40 (2 workers × 20) for the same-building case;
+- the values survive save → clear → load;
+- the loaded city and household records include `average_commute_m`, `commute_m`, and `income_per_day`;
 - marker remains `occupancy=ok`.
+
+The non-zero commute and split-assignment cases are covered by the core tests, because the smoke only has one combined home/workplace.
 
 ## 6. Tests
 
-- `core_city`: 4 new tests — nearest workplace assignment, shortage picks the closest household, long commutes lower happiness, old saves default commute/income.
-- `core_city` total: **79 tests**.
+- `core_city`: 7 new tests — global nearest-slot order, id-order independence, split assignment, shortage, commute happiness, JSON roundtrip, old-save defaults.
+- `core_city` total: **82 tests**.
 - `godot_ext`: **32 tests** (no new bridge test; the scene smoke covers the bridge path).
-- Workspace: **274 tests + 1 doctest**.
+- Workspace: **277 tests + 1 doctest**.
 
 ## 7. Limits
 
-- Assignment is O(households × workplaces); fine for the slice, not for 100k buildings. A spatial index is required before the 1M gate.
+- Assignment materializes every household/workplace pair, sorts by distance, and greedily consumes the closest slots: O(H × W) memory and O(H × W log(H × W)) time. Fine for the slice, not for 100k buildings. A spatial index is required before the 1M gate.
 - A household can split workers across workplaces, but only the weighted average commute is stored.
 - Wages are fixed and gross; no trade/skill differences.
 - Commute is straight-line metres, not road distance or time.

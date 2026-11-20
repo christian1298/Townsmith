@@ -75,13 +75,13 @@ Default rate: **1 resident/second** for the developer slice; the value is saved 
 
 ### Jobs
 
-`workers = min(residents, remaining job slots)` per household in id order. This is a placeholder assignment, not a commute model: the first households take the available jobs. Unemployed residents remain in the household and lower happiness.
+3.2 uses `workers = min(residents, remaining jobs)` in id order. [[51 - Jobs and Wages]] replaces this with nearest-workplace assignment, commute distance, and gross wages; unemployed residents remain in the household and lower happiness.
 
 ### Needs and happiness
 
 - Food decays 0.0004/s, water 0.0006/s, rest 0.0002/s.
 - They are not replenished yet; 3.5 adds supply and services. The decay is deliberately slow so a short session does not collapse.
-- Household happiness: `0.6 * average(food, water, rest) + 0.4 * employment`.
+- Household happiness: `0.5 * needs + 0.3 * employment + 0.2 * commute` (commute added in [[51 - Jobs and Wages]]; 0 when unemployed).
 - City happiness is resident-weighted.
 - With no residents, all needs and happiness are zero and the HUD shows `—` rather than a fake 0%.
 
@@ -132,25 +132,24 @@ Needs: food 60% · water 40% · rest 80%
 
 ## 7. Tests
 
-- `core_city::population`: 8 tests (move-in, jobs, needs, sync, JSON, validation, remove/clear).
+- `core_city::population`: 12 tests after 3.3 (move-in, jobs, needs, sync, JSON, validation, remove/clear, commute/wages).
 - `core_city::metrics`: completed, vacant, unfinished, no-site, jobs-only, shortage.
 - `godot_ext`: population JSON roundtrip and old-save/unsupported-version cases.
-- Workspace: **274 tests + 1 doctest**.
+- Workspace: **277 tests + 1 doctest**.
 
 ## 8. Limits
 
 - One aggregate household per building; no named people yet.
 - Move-in ignores jobs, housing quality, and migration pressure.
 - Needs are open-loop: no food/water supply or service coverage.
-- Jobs are assigned by id, not commute or qualification.
-- Real income, taxes, upkeep, and construction budgets are 3.3/3.6.
+- Jobs are assigned by nearest workplace, not qualification; 3.3 adds commute and wages.
+- Taxes, net income, upkeep, and construction budgets are 3.6.
 - English-only developer HUD.
 - The runtime is saved in the world JSON, not a separate simulation database.
 - `construction_clear` can remove sites under standing placements; the next sync removes those households, so population drops. Guard this before exposing the call as player UI.
 
 ## 9. Next
 
-1. 3.4: primary industries ([[51 - Jobs and Wages]] covers 3.3).
-2. 3.4: primary industries and food supply.
-3. 3.5: water/power coverage and needs replenishment.
-4. 3.9: a headless 30-day runner before tuning the rates.
+1. 3.4: primary industries and food supply.
+2. 3.5: water/power coverage and needs replenishment.
+3. 3.9: a headless 30-day runner before tuning the rates.

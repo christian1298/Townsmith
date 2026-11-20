@@ -1596,8 +1596,8 @@ func _run_scene_smoke() -> void:
 				_advance_construction(2.0)
 				pacing_ok = pacing_ok and int(core.city_summary().get("population", -1)) == 2
 				var city_after: Dictionary = core.city_summary()
-				occupancy_after_ok = occupancy_after_ok and pacing_ok
-				occupancy_after_ok = int(city_after.get("population", -1)) == 2
+				occupancy_after_ok = pacing_ok
+				occupancy_after_ok = occupancy_after_ok and int(city_after.get("population", -1)) == 2
 				occupancy_after_ok = occupancy_after_ok and int(city_after.get("housing_capacity", -1)) == 2
 				occupancy_after_ok = occupancy_after_ok and int(city_after.get("jobs", -1)) == 2
 				occupancy_after_ok = occupancy_after_ok and int(city_after.get("employed", -1)) == 2
@@ -1621,7 +1621,13 @@ func _run_scene_smoke() -> void:
 					occupancy_after_ok = occupancy_after_ok and int(city_persisted.get("population", -1)) == 2
 					occupancy_after_ok = occupancy_after_ok and int(city_persisted.get("vacancies", -1)) == 0
 					occupancy_after_ok = occupancy_after_ok and absf(float(city_persisted.get("daily_wages", 0.0)) - 40.0) < 0.01
-					occupancy_after_ok = occupancy_after_ok and int(households.get("households", []).size()) == 1
+					occupancy_after_ok = occupancy_after_ok and absf(float(city_persisted.get("average_commute_m", -1.0))) < 0.001
+					var household_list: Array = households.get("households", [])
+					occupancy_after_ok = occupancy_after_ok and household_list.size() == 1
+					if household_list.size() == 1:
+						var saved_household: Dictionary = household_list[0]
+						occupancy_after_ok = occupancy_after_ok and absf(float(saved_household.get("commute_m", -1.0))) < 0.001
+						occupancy_after_ok = occupancy_after_ok and absf(float(saved_household.get("income_per_day", 0.0)) - 40.0) < 0.01
 					occupancy_after_ok = occupancy_after_ok and str(core.population_checksum()) == population_checksum
 				if not build_done_ok:
 					status = "construction_complete_failed"

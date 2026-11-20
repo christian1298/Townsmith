@@ -82,7 +82,7 @@ pub struct Household {
     /// Gross wage income per game day.
     #[serde(default)]
     pub income_per_day: f64,
-    /// Home position in metres; not part of the saved identity.
+    /// Home position in metres; refreshed from the placement on tick.
     #[serde(default)]
     pub home: [f32; 2],
 }
@@ -120,7 +120,11 @@ impl Household {
             return 0.0;
         }
         let employment = self.workers as f32 / self.residents as f32;
-        let commute = 1.0 - (self.commute_m / MAX_COMMUTE_M).clamp(0.0, 1.0);
+        let commute = if self.workers == 0 {
+            0.0
+        } else {
+            1.0 - (self.commute_m / MAX_COMMUTE_M).clamp(0.0, 1.0)
+        };
         (0.5 * self.needs() + 0.3 * employment + 0.2 * commute).clamp(0.0, 1.0)
     }
 }
@@ -270,47 +274,59 @@ impl CityRuntime {
         self.move_in_carry = (desired - target as f32).clamp(0.0, 0.999_999);
 
         let mut remaining: Vec<u32> = workplaces.iter().map(|work| work.slots).collect();
-        for household in self.households.values_mut() {
+        let mut need: BTreeMap<u64, u32> = self
+            .households
+            .iter()
+            .filter(|(_, household)| household.residents > 0)
+            .map(|(&id, household)| (id, household.residents))
+            .collect();
+        let mut pairs: Vec<(f32, u64, usize)> = Vec::new();
+        for (&id, household) in &self.households {
             if household.residents == 0 {
-                household.workers = 0;
-                household.commute_m = 0.0;
-                household.income_per_day = 0.0;
                 continue;
             }
-            let mut need = household.residents;
-            let mut assigned = 0_u32;
-            let mut weighted = 0.0_f32;
-            while need > 0 {
-                let mut best: Option<usize> = None;
-                let mut best_distance = f32::INFINITY;
-                for (index, work) in workplaces.iter().enumerate() {
-                    if remaining[index] == 0 {
-                        continue;
-                    }
-                    let dx = work.center[0] - household.home[0];
-                    let dz = work.center[1] - household.home[1];
-                    let distance = dx * dx + dz * dz;
-                    if distance < best_distance {
-                        best_distance = distance;
-                        best = Some(index);
-                    }
+            for (index, work) in workplaces.iter().enumerate() {
+                if work.slots == 0 {
+                    continue;
                 }
-                let Some(index) = best else {
-                    break;
-                };
-                let take = need.min(remaining[index]);
-                remaining[index] -= take;
-                assigned += take;
-                need -= take;
-                weighted += best_distance.sqrt() * take as f32;
+                let dx = work.center[0] - household.home[0];
+                let dz = work.center[1] - household.home[1];
+                pairs.push((dx * dx + dz * dz, id, index));
             }
-            household.workers = assigned;
-            household.commute_m = if assigned > 0 {
-                weighted / assigned as f32
+        }
+        pairs.sort_by(|left, right| {
+            left.0
+                .total_cmp(&right.0)
+                .then(left.1.cmp(&right.1))
+                .then(left.2.cmp(&right.2))
+        });
+        let mut assignments: BTreeMap<u64, (u32, f32)> = BTreeMap::new();
+        for (distance_sq, id, index) in pairs {
+            if remaining[index] == 0 {
+                continue;
+            }
+            let Some(left) = need.get_mut(&id) else {
+                continue;
+            };
+            if *left == 0 {
+                continue;
+            }
+            let take = (*left).min(remaining[index]);
+            remaining[index] -= take;
+            *left -= take;
+            let entry = assignments.entry(id).or_insert((0, 0.0));
+            entry.0 += take;
+            entry.1 += distance_sq.sqrt() * take as f32;
+        }
+        for (&id, household) in &mut self.households {
+            let (workers, weighted) = assignments.get(&id).copied().unwrap_or((0, 0.0));
+            household.workers = workers;
+            household.commute_m = if workers > 0 {
+                weighted / workers as f32
             } else {
                 0.0
             };
-            household.income_per_day = f64::from(assigned) * WAGE_PER_WORKER_PER_DAY;
+            household.income_per_day = f64::from(workers) * WAGE_PER_WORKER_PER_DAY;
         }
 
         for household in self.households.values_mut() {
@@ -738,6 +754,81 @@ mod tests {
         let decoded = CityRuntime::from_json(&value.to_string()).expect("decode");
         assert_eq!(decoded.households[&1].commute_m, 0.0);
         assert_eq!(decoded.households[&1].income_per_day, 0.0);
+    }
+
+    #[test]
+    fn the_nearest_household_wins_regardless_of_id_order() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.set_move_in_per_second(2.0);
+        let homes = [
+            Home {
+                id: 1,
+                capacity: 1,
+                center: [100.0, 0.0],
+            },
+            Home {
+                id: 2,
+                capacity: 1,
+                center: [0.0, 0.0],
+            },
+        ];
+        let workplaces = [Workplace {
+            id: 10,
+            slots: 1,
+            center: [0.0, 0.0],
+        }];
+        runtime.tick_with_workplaces(1.0, &homes, &workplaces);
+        assert_eq!(runtime.households[&1].workers, 0);
+        assert_eq!(runtime.households[&2].workers, 1);
+    }
+
+    #[test]
+    fn residents_split_across_workplaces_by_distance() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.set_move_in_per_second(2.0);
+        let homes = [Home {
+            id: 1,
+            capacity: 2,
+            center: [0.0, 0.0],
+        }];
+        let workplaces = [
+            Workplace {
+                id: 10,
+                slots: 1,
+                center: [10.0, 0.0],
+            },
+            Workplace {
+                id: 11,
+                slots: 1,
+                center: [100.0, 0.0],
+            },
+        ];
+        runtime.tick_with_workplaces(1.0, &homes, &workplaces);
+        assert_eq!(runtime.households[&1].workers, 2);
+        assert!((runtime.households[&1].commute_m - 55.0).abs() < 0.001);
+        assert!((runtime.households[&1].income_per_day - 40.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn commute_and_income_round_trip_through_json() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.set_move_in_per_second(2.0);
+        let homes = [Home {
+            id: 1,
+            capacity: 1,
+            center: [0.0, 0.0],
+        }];
+        let workplaces = [Workplace {
+            id: 10,
+            slots: 1,
+            center: [25.0, 0.0],
+        }];
+        runtime.tick_with_workplaces(1.0, &homes, &workplaces);
+        let json = runtime.to_json_pretty().expect("json");
+        let decoded = CityRuntime::from_json(&json).expect("decode");
+        assert_eq!(decoded, runtime);
+        assert!((decoded.households[&1].commute_m - 25.0).abs() < 0.001);
+        assert!((decoded.households[&1].income_per_day - 20.0).abs() < 0.001);
     }
 
     #[test]
