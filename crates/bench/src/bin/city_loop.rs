@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use core_city::{
     summarize, CityRuntime, ConstructionStore, Economy, Home, IndustryKind, IndustryStore,
     Placement, PlacementPlan, PlacementRequest, PlacementStore, UtilityConsumer, UtilityKind,
-    UtilityReport, UtilityStore, Workplace,
+    UtilityReport, UtilityStore, Workplace, MAX_LOAN,
 };
 
 const DEFAULT_DAYS: u64 = 30;
@@ -22,6 +22,9 @@ const JOBS_PER_HOUSE: u32 = 10;
 const SOLID_VOXELS: u64 = 10_000;
 const CREW_CAPACITY: u16 = 8;
 const MATERIALS_STOCK: u64 = 10_000_000;
+const CONSTRUCTION_COST_PER_HOUSE: f64 = 3_000.0;
+const RECOVERY_TAX_PER_RESIDENT: f64 = 20.0;
+const RECOVERY_TAX_PER_JOB: f64 = 4.0;
 
 fn main() {
     let days = arg_value("--days")
@@ -62,7 +65,7 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
             center_x: x,
             center_z: z,
             rotation_deg: 0,
-            material_cost: 0.0,
+            material_cost: CONSTRUCTION_COST_PER_HOUSE,
             resident_capacity: CAPACITY_PER_HOUSE,
             job_slots: JOBS_PER_HOUSE,
             solid_voxels: SOLID_VOXELS,
@@ -100,9 +103,27 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
     let mut runtime = CityRuntime::new(seed);
     runtime.set_move_in_per_second(5.0);
     let mut economy = Economy::new(seed);
+    let construction_cost = houses as f64 * CONSTRUCTION_COST_PER_HOUSE;
+    let loan_amount = (construction_cost - 50_000.0).clamp(50_000.0, MAX_LOAN);
+    economy
+        .take_loan(
+            loan_amount,
+            core_city::DEFAULT_LOAN_RATE_PER_DAY,
+            core_city::DEFAULT_LOAN_TERM_DAYS,
+        )
+        .expect("construction loan");
+    economy.charge_construction(construction_cost);
+    let recovery_day = days as f64 / 2.0;
+    let mut recovered = false;
+    let mut min_balance = economy.balance;
+    let mut min_balance_day = 0.0;
     let step_count = (days as f64 * 86_400.0 / step).ceil() as u64;
     for _ in 0..step_count {
         construction.tick(step);
+        if !recovered && economy.days_elapsed >= recovery_day {
+            economy.set_taxes(RECOVERY_TAX_PER_RESIDENT, RECOVERY_TAX_PER_JOB);
+            recovered = true;
+        }
         for (&id, kind) in water_ids
             .iter()
             .map(|id| (id, UtilityKind::Water))
@@ -200,6 +221,10 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
             runtime.workers().min(jobs),
             completed,
         );
+        if economy.balance < min_balance {
+            min_balance = economy.balance;
+            min_balance_day = economy.days_elapsed;
+        }
     }
 
     let summary = summarize(&placements, &construction, &runtime, 0);
@@ -246,7 +271,18 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
         "power_capacity": utility_report.power_capacity,
         "utility_checksum": format!("{:016x}", utilities.checksum()),
         "balance": economy.balance,
+        "min_balance": min_balance,
+        "min_balance_day": min_balance_day,
         "daily_net": economy.daily_net(summary.population, summary.employed, summary.completed_buildings as u64),
+        "construction_cost": construction_cost,
+        "construction_spent": economy.construction_spent,
+        "loan_amount": loan_amount,
+        "loan_count": economy.loans.len(),
+        "debt": economy.debt(),
+        "loan_payment_per_day": economy.loan_payment_per_day(),
+        "tax_per_resident_per_day": economy.tax_per_resident_per_day,
+        "business_tax_per_job_per_day": economy.business_tax_per_job_per_day,
+        "recovery_day": recovery_day,
         "bankrupt": economy.bankrupt,
         "economy_checksum": format!("{:016x}", economy.checksum()),
     });
@@ -290,7 +326,9 @@ mod tests {
         assert_eq!(result["employed"], 50);
         assert_eq!(result["completed_buildings"], 5);
         assert_eq!(result["construction_sites"], 0);
-        assert!(result["balance"].as_f64().expect("balance") < 100_000.0);
+        assert!(result["construction_spent"].as_f64().expect("spent") > 0.0);
+        assert!(result["debt"].as_f64().expect("debt") > 0.0);
+        assert!(result["balance"].as_f64().expect("balance") > 0.0);
         assert_eq!(result["bankrupt"], false);
         assert!(result["construction_checksum"].as_str().is_some());
         assert!(result["economy_checksum"].as_str().is_some());

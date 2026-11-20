@@ -182,19 +182,23 @@ Utility sites are added only when their building completes. Final result:
 | Water / power supply | 100% / 100% |
 | Food / water / rest | 1.0 / 1.0 / 1.0 |
 | Happiness | 1.00 |
-| Balance after 30 days | −27,500 |
-| Daily net | −4,250 |
+| Construction cost | 150,000 |
+| Loan | 100,000 |
+| Minimum balance | −18,610 at day 15 |
+| Balance after 30 days | 2,822 |
+| Debt after 30 days | 91,781 |
+| Daily net | +1,430 |
 
 Checksums:
 
-- city **`e0d935b2a4421285`**
+- city **`1d78a3cac4fb0f22`**
 - population `c0d28b58ce38145a`
 - construction `aa3e36ad3cc1e717`
-- economy `1b6a7631bd9dd0ac`
+- economy `f57d4378435f03ee`
 - industry `1b536bce524f0c76`
 - utilities `44e47a38faeb0edb`
 
-The city now stays healthy at full service; the remaining 30-day problem is the negative cash flow, which 3.6 must make recoverable.
+The city now stays healthy at full service and the 30-day run is financially recoverable: a construction loan and a day-15 tax change carry it from a −18,610 dip back to 2,822, with 91,781 of debt remaining. [[53 - Treasury and Taxes]] covers the ledger, draw-down, and loan model.
 
 ## 9. Tests
 
@@ -202,7 +206,7 @@ The city now stays healthy at full service; the remaining 30-day problem is the 
 - `core_city::population`: 2 new tests — water/rest replenishment and supply clamping.
 - `core_city::industry`: 2 new tests — power scaling and outage with eating.
 - `godot_ext`: 2 new tests — utility JSON roundtrip/old save closed, invalid site rejection.
-- `core_city`: **117 tests**; bridge: **40 tests**; workspace: **321 tests + 1 doctest (322 passed)**.
+- `core_city`: **124 tests**; bridge: **41 tests**; workspace: **329 tests + 1 doctest (330 passed)**.
 - `city_loop` asserts full service, healthy needs, and a stable checksum.
 - World-scene smoke adds water and power, verifies shortage recovery, production, save/clear/load, and beacons; marker `utilities=ok` is checked by the script.
 
@@ -221,7 +225,6 @@ The city now stays healthy at full service; the remaining 30-day problem is the 
 
 ## 11. Next
 
-1. 3.6: construction draw-down from placement cost, loans, and bankruptcy consequences.
+1. 3.7: road graph, traffic, and road-distance commute.
 2. Add service funding and utility upkeep to the treasury.
-3. 3.7: road graph and traffic; later use road distance for utilities and commute.
-4. 3.8: dashboard/advisor with utility shortage notifications.
+3. 3.8: dashboard/advisor with utility shortage notifications.

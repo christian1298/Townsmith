@@ -194,15 +194,19 @@ All fifty buildings have ten residents and ten job slots. Each household fills i
 | Happiness | 1.000 |
 | Utility sites | 5 (2 water, 3 power) |
 | Water / power supply | 100% / 100% |
-| Treasury after 30 days | −27,500 |
-| Daily net | −4,250 |
+| Construction cost | 150,000 |
+| Loan | 100,000 |
+| Minimum balance | −18,610 at day 15 |
+| Treasury after 30 days | 2,822 |
+| Debt after 30 days | 91,781 |
+| Daily net | +1,430 |
 
 Checksums:
 
-- city loop: `e0d935b2a4421285`
+- city loop: `1d78a3cac4fb0f22`
 - population runtime: `c0d28b58ce38145a`
 - construction: `aa3e36ad3cc1e717`
-- treasury: `1b6a7631bd9dd0ac`
+- treasury: `f57d4378435f03ee`
 - industry: `1b536bce524f0c76`
 - utilities: `44e47a38faeb0edb`
 
@@ -214,7 +218,7 @@ Food now reaches the city and stays at 100%; [[55 - Utilities]] keeps water and 
 - `core_city::population`: 3 new tests — per-workplace staffing, food replenishment, old saves without staffing.
 - `godot_ext`: 4 new tests — industry JSON roundtrip/old save, unknown kind/invalid stock, staffing roundtrip, stale-staffing sanitize.
 - `city_loop`: the five-house test asserts sites, food stock, wood production, full supply, and happiness > 0.6.
-- Workspace: **321 tests + 1 doctest** (52 voxel, 62 world, 26 simulation, 117 city, 11 blueprint, 12 rooms, 40 bridge, 1 city-loop).
+- Workspace: **329 tests + 1 doctest** (52 voxel, 62 world, 26 simulation, 124 city, 11 blueprint, 12 rooms, 41 bridge, 1 city-loop).
 
 ## 8. Limits
 
@@ -231,7 +235,7 @@ Food now reaches the city and stays at 100%; [[55 - Utilities]] keeps water and 
 
 ## 9. Next
 
-1. 3.6: construction draw-down, loans, and bankruptcy consequences.
+1. 3.7: road graph and traffic.
 2. Replace the O(H × W) assignment with a spatial index before scaling.
-3. Add a wood consumer (construction draw-down) and a hide consumer (crafting/trade).
+3. Add a wood consumer for construction materials and a hide consumer (crafting/trade).
 4. Tune industry rates against the treasury and the headless runner.
