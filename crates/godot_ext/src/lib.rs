@@ -2148,6 +2148,17 @@ impl TownsmithCore {
         let Ok(seed) = u64::try_from(seed) else {
             return placement_simple_error("invalid_seed", "world seed must be non-negative");
         };
+        {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(store) = world.as_ref() {
+                if store.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the placement store belongs to a different seed",
+                    );
+                }
+            }
+        }
         let mut guard = self
             .economy
             .lock()

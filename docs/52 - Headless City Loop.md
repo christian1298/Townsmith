@@ -58,7 +58,7 @@ food / water / rest   0 / 0 / 0
 
 Recorded checksum: `99107bbac66966c7` (FNV-1a over the compact JSON without the checksum field).
 
-Two secondary values are pinned:
+Three secondary values are pinned:
 
 - population runtime: `0f9c870855e6f78e`
 - construction store: `aa3e36ad3cc1e717`

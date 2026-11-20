@@ -168,6 +168,9 @@ impl Economy {
         if !self.days_elapsed.is_finite() || self.days_elapsed < 0.0 {
             return Err(EconomyError::Invalid("elapsed days"));
         }
+        if self.bankrupt != (self.balance <= BANKRUPTCY_THRESHOLD) {
+            return Err(EconomyError::Invalid("bankruptcy flag"));
+        }
         Ok(())
     }
 

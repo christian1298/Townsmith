@@ -1623,11 +1623,19 @@ func _run_scene_smoke() -> void:
 				occupancy_after_ok = occupancy_after_ok and float(city_after.get("food", 0.0)) > 0.0
 				occupancy_after_ok = occupancy_after_ok and float(city_after.get("water", 0.0)) > 0.0
 				occupancy_after_ok = occupancy_after_ok and float(city_after.get("rest", 0.0)) > 0.0
+				var economy_after: Dictionary = core.economy_state()
+				occupancy_after_ok = occupancy_after_ok and bool(economy_after.get("open", false))
+				occupancy_after_ok = occupancy_after_ok and float(economy_after.get("balance", 100000.0)) < 100000.0
+				occupancy_after_ok = occupancy_after_ok and float(economy_after.get("daily_net", 0.0)) < 0.0
+				occupancy_after_ok = occupancy_after_ok and not bool(economy_after.get("bankrupt", true))
+				var economy_balance := float(economy_after.get("balance", 0.0))
+				var economy_net := float(economy_after.get("daily_net", 0.0))
 				if occupancy_after_ok:
 					var population_checksum: String = str(core.population_checksum())
 					var economy_checksum: String = str(core.economy_checksum())
 					var populated := _save_world()
 					core.population_clear()
+					core.economy_clear()
 					var reloaded := _load_world()
 					var city_persisted: Dictionary = core.city_summary()
 					var households: Dictionary = core.population_state()
@@ -1644,7 +1652,11 @@ func _run_scene_smoke() -> void:
 						occupancy_after_ok = occupancy_after_ok and absf(float(saved_household.get("income_per_day", 0.0)) - 40.0) < 0.01
 					occupancy_after_ok = occupancy_after_ok and str(core.population_checksum()) == population_checksum
 					occupancy_after_ok = occupancy_after_ok and str(core.economy_checksum()) == economy_checksum
-					occupancy_after_ok = occupancy_after_ok and bool(core.economy_state().get("open", false))
+					var economy_persisted: Dictionary = core.economy_state()
+					occupancy_after_ok = occupancy_after_ok and bool(economy_persisted.get("open", false))
+					occupancy_after_ok = occupancy_after_ok and absf(float(economy_persisted.get("balance", 0.0)) - economy_balance) < 0.01
+					occupancy_after_ok = occupancy_after_ok and absf(float(economy_persisted.get("daily_net", 0.0)) - economy_net) < 0.01
+					occupancy_after_ok = occupancy_after_ok and not bool(economy_persisted.get("bankrupt", true))
 				if not build_done_ok:
 					status = "construction_complete_failed"
 				elif not (occupancy_before_ok and occupancy_after_ok):
@@ -1661,6 +1673,7 @@ func _run_scene_smoke() -> void:
 		var before_failed_lot_checksum: String = str(core.lot_checksum())
 		var before_failed_settlements: int = core.settlement_count()
 		var before_failed_settlement_checksum: String = str(core.settlement_checksum())
+		var before_failed_economy: String = str(core.economy_checksum())
 		var blueprint_backup := blueprint_path + ".bak"
 		if DirAccess.rename_absolute(blueprint_path, blueprint_backup) != OK:
 			status = "load_guard_backup_failed"
@@ -1670,6 +1683,8 @@ func _run_scene_smoke() -> void:
 				status = "load_failure_changed_scene"
 			elif core.terrain_delta_count() != before_failed_edits or str(core.terrain_delta_checksum()) != before_failed_checksum:
 				status = "load_failure_changed_deltas"
+			elif str(core.economy_checksum()) != before_failed_economy:
+				status = "load_failure_changed_economy"
 			elif core.lot_count() != before_failed_lots or str(core.lot_checksum()) != before_failed_lot_checksum:
 				status = "load_failure_changed_lots"
 			elif core.settlement_count() != before_failed_settlements or str(core.settlement_checksum()) != before_failed_settlement_checksum:
