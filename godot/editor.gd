@@ -145,6 +145,14 @@ func _ready() -> void:
 	if _is_blueprint_smoke():
 		_run_blueprint_smoke()
 		return
+	if _is_acceptance_smoke():
+		_run_acceptance_smoke()
+		return
+	if _is_layout_smoke():
+		_build_ui()
+		_apply_locale(false)
+		call_deferred("_run_layout_smoke")
+		return
 
 	_build_shell()
 	_build_ui()
@@ -685,6 +693,8 @@ func _refresh_room_panel(stats: Dictionary = {}) -> void:
 			int(stats.get("solid_voxels", 0)),
 			material_count,
 		]),
+		_i18n.t("base.editor.rooms.cost", [
+			_num(float(stats.get("material_cost", 0.0)))]),
 		"",
 	])
 	if rooms.is_empty():
@@ -1004,7 +1014,8 @@ func _format_stats(stats: Dictionary) -> String:
 	]) + "\n" + _i18n.t("base.editor.stats.chunks_volume", [
 		int(stats.get("allocated_chunks", 0)),
 		_num(_volume_bounds.x), _num(_volume_bounds.y), _num(_volume_bounds.z),
-	])
+	]) + "\n" + _i18n.t("base.editor.stats.cost", [
+		_num(float(stats.get("material_cost", 0.0)))])
 
 func _set_status(text: String) -> void:
 	if _status_label != null:
@@ -1346,6 +1357,240 @@ func _run_blueprint_smoke() -> void:
 	])
 	get_tree().quit(0 if status == "ok" else 1)
 
+## End-to-end vertical-slice acceptance check.
+##
+## Builds the shared two-story acceptance house, asserts room/cost stats, saves
+## and reloads the package, places a mesh copy in the scene, and replays 500
+## deterministic random edits through undo/redo with content-hash checks.
+func _run_acceptance_smoke() -> void:
+	var status := "ok"
+	var rooms_status := "not_run"
+	var copy_status := "not_run"
+	var undo_status := "not_run"
+	var room_count := 0
+	var bedrooms := 0
+	var kitchens := 0
+	var bathrooms := 0
+	var capacity := 0
+	var jobs := 0
+	var cost := 0.0
+	var solid := 0
+	var baseline_hash := ""
+
+	var save_path := ProjectSettings.globalize_path("user://slice_acceptance.tsbp")
+	var edited_path := ProjectSettings.globalize_path("user://slice_acceptance_edited.tsbp")
+	var undo_path := ProjectSettings.globalize_path("user://slice_acceptance_undo.tsbp")
+	var redo_path := ProjectSettings.globalize_path("user://slice_acceptance_redo.tsbp")
+	for path in [save_path, edited_path, undo_path, redo_path]:
+		if FileAccess.file_exists(path):
+			DirAccess.remove_absolute(path)
+
+	if not _core.editor_build_acceptance_house():
+		status = "build_failed"
+
+	var stats: Dictionary = {}
+	if status == "ok":
+		stats = _core.editor_room_stats()
+		var rooms: Array = stats.get("rooms", [])
+		room_count = rooms.size()
+		var types := {}
+		for room in rooms:
+			var kind := str(room.get("type", ""))
+			types[kind] = int(types.get(kind, 0)) + 1
+		bedrooms = int(types.get("bedroom", 0))
+		kitchens = int(types.get("kitchen", 0))
+		bathrooms = int(types.get("bathroom", 0))
+		capacity = int(stats.get("resident_capacity", 0))
+		jobs = int(stats.get("job_slots", 0))
+		cost = float(stats.get("material_cost", 0.0))
+		solid = int(stats.get("solid_voxels", 0))
+		if not bool(stats.get("ok", false)):
+			status = "stats_failed"
+		elif room_count != 4 or bedrooms != 2 or kitchens != 1 or bathrooms != 1:
+			status = "room_types"
+		elif capacity != 2 or jobs != 2:
+			status = "capacity"
+		elif absf(cost - 38028.8) > 0.1:
+			status = "cost"
+		elif solid != 64224:
+			status = "solid"
+		else:
+			rooms_status = "ok"
+
+	var saved: Dictionary = {}
+	if status == "ok":
+		saved = _core.editor_save_blueprint(
+			save_path, "local:slice_acceptance", "Slice Acceptance")
+		if not bool(saved.get("ok", false)):
+			status = "save_failed"
+		elif int(saved.get("rooms", -1)) != 4 or int(saved.get("props", -1)) != 8:
+			status = "save_metadata"
+		elif absf(float(saved.get("material_cost", 0.0)) - cost) > 0.1:
+			status = "save_cost"
+		else:
+			baseline_hash = str(saved.get("hash", ""))
+			if not baseline_hash.begins_with("blake3:"):
+				status = "save_hash"
+
+	if status == "ok" and not _core.editor_clear():
+		status = "clear_failed"
+
+	var loaded: Dictionary = {}
+	if status == "ok":
+		loaded = _core.editor_load_blueprint(save_path)
+		if not bool(loaded.get("ok", false)):
+			status = "load_failed"
+		elif str(loaded.get("hash", "")) != baseline_hash:
+			status = "load_hash"
+		elif int(loaded.get("rooms", -1)) != 4 or int(loaded.get("props", -1)) != 8:
+			status = "load_metadata"
+		elif int(loaded.get("solid_voxels", -1)) != 64224:
+			status = "load_solid"
+		elif absf(float(loaded.get("material_cost", 0.0)) - cost) > 0.1:
+			status = "load_cost"
+
+	if status == "ok":
+		var editor_mesh: ArrayMesh = _core.build_editor_volume_mesh()
+		var copy_mesh: ArrayMesh = _core.build_blueprint_mesh(save_path)
+		if editor_mesh.get_surface_count() != 1:
+			status = "mesh_surface"
+		elif copy_mesh.get_surface_count() != 1:
+			status = "copy_surface"
+		elif not copy_mesh.get_aabb().size.is_equal_approx(editor_mesh.get_aabb().size):
+			status = "copy_aabb"
+		else:
+			var editor_arrays := editor_mesh.surface_get_arrays(0)
+			var copy_arrays := copy_mesh.surface_get_arrays(0)
+			if editor_arrays[Mesh.ARRAY_VERTEX] != copy_arrays[Mesh.ARRAY_VERTEX]:
+				status = "copy_vertices"
+			elif editor_arrays[Mesh.ARRAY_INDEX] != copy_arrays[Mesh.ARRAY_INDEX]:
+				status = "copy_indices"
+			else:
+				var copy := MeshInstance3D.new()
+				copy.name = "BlueprintCopy"
+				copy.mesh = copy_mesh
+				copy.position = Vector3(20.0, 0.0, 0.0)
+				copy.material_override = _flat_material(VOXEL_COLOR)
+				add_child(copy)
+				if get_node_or_null("BlueprintCopy") == null:
+					status = "copy_node"
+				else:
+					copy_status = "ok"
+
+	if status == "ok":
+		_history.clear()
+		_redo.clear()
+		var rng := RandomNumberGenerator.new()
+		rng.seed = 20261120
+		var attempts := 0
+		while _history.size() < 500 and attempts < 20000:
+			attempts += 1
+			var cell := Vector3i(
+				rng.randi_range(0, _volume_voxels.x - 1),
+				rng.randi_range(0, _volume_voxels.y - 1),
+				rng.randi_range(0, _volume_voxels.z - 1))
+			_set_voxel_with_history(cell, rng.randi_range(0, 5))
+		if _history.size() != 500:
+			status = "undo_setup"
+		else:
+			var edited: Dictionary = _core.editor_save_blueprint(
+				edited_path, "local:slice_acceptance_edited", "Slice Acceptance Edited")
+			if not bool(edited.get("ok", false)):
+				status = "undo_save"
+			else:
+				var edited_hash := str(edited.get("hash", ""))
+				if edited_hash == baseline_hash:
+					status = "undo_noop"
+				else:
+					for _index in 500:
+						_undo_last()
+					if not _history.is_empty() or _redo.size() != 500:
+						status = "undo_replay"
+					else:
+						var undone: Dictionary = _core.editor_save_blueprint(
+							undo_path, "local:slice_acceptance", "Slice Acceptance")
+						if not bool(undone.get("ok", false)) or str(undone.get("hash", "")) != baseline_hash:
+							status = "undo_hash"
+						else:
+							for _index in 500:
+								_redo_last()
+							if _redo.size() != 0 or _history.size() != 500:
+								status = "redo_replay"
+							else:
+								var redone: Dictionary = _core.editor_save_blueprint(
+									redo_path, "local:slice_acceptance_edited", "Slice Acceptance Edited")
+								if not bool(redone.get("ok", false)) or str(redone.get("hash", "")) != edited_hash:
+									status = "redo_hash"
+								else:
+									undo_status = "ok"
+
+	for path in [save_path, edited_path, undo_path, redo_path]:
+		if FileAccess.file_exists(path):
+			DirAccess.remove_absolute(path)
+
+	print("SLICE_ACCEPTANCE rooms=%d bedrooms=%d kitchen=%d bathroom=%d capacity=%d jobs=%d cost=%.2f solid=%d hash=%s copy=%s rooms_check=%s undo=%s status=%s" % [
+		room_count, bedrooms, kitchens, bathrooms, capacity, jobs, cost, solid,
+		baseline_hash, copy_status, rooms_status, undo_status, status,
+	])
+	get_tree().quit(0 if status == "ok" else 1)
+
+## German layout budget check.
+##
+## Builds the real editor UI headlessly and asserts that every fixed-width
+## label and button's minimum text size fits its rect in EN and DE. It cannot
+## replace a visual pass, but it catches the common text-expansion regressions.
+func _run_layout_smoke() -> void:
+	await get_tree().process_frame
+	var status := "ok"
+	var locale_status := {"en": "ok", "de": "ok"}
+	var checks := 0
+	var stats := {
+		"ok": true,
+		"rooms": [{
+			"id": "room_0", "type": "bedroom", "floor": 1,
+			"area_m2": 20.2, "volume_m3": 60.5, "beds": 1, "desks": 1,
+			"doors": 4, "windows": 8,
+			"bounds_m": PackedFloat32Array([0.0, 0.0, 4.0, 4.0]),
+			"center_m": PackedFloat32Array([2.0, 4.5, 2.0]),
+		}],
+		"resident_capacity": 2,
+		"job_slots": 2,
+		"class": "upper",
+		"solid_voxels": 64224,
+		"material_cost": 38028.8,
+		"materials": {"material:1": 35296, "material:2": 9600},
+	}
+	for locale in ["en", "de"]:
+		_i18n.set_locale(locale)
+		_apply_locale(false)
+		_status("base.editor.status.saved", [
+			"River House", "blake3:0123456789abcdef"])
+		_stats_label.text = _format_stats(stats)
+		_refresh_room_panel(stats)
+		await get_tree().process_frame
+		var controls := {
+			"palette": _palette_label,
+			"stats": _stats_label,
+			"status": _status_label,
+			"language": _language_label,
+			"help": _help_label,
+			"blueprint_name": _blueprint_name,
+			"save": _save_button,
+			"load": _load_button,
+		}
+		for name in controls:
+			var control: Control = controls[name]
+			checks += 1
+			if control.get_combined_minimum_size().x > control.size.x + 0.5:
+				status = "%s:%s" % [locale, name]
+				locale_status[locale] = name
+				break
+		if status != "ok":
+			break
+	print("LAYOUT_SMOKE en=%s de=%s checks=%d status=%s" % [
+		locale_status["en"], locale_status["de"], checks, status])
+	get_tree().quit(0 if status == "ok" else 1)
+
 func _is_locale_smoke() -> bool:
 	return OS.get_cmdline_user_args().has("--locale-smoke")
 
@@ -1360,6 +1605,12 @@ func _is_undo_smoke() -> bool:
 
 func _is_blueprint_smoke() -> bool:
 	return OS.get_cmdline_user_args().has("--blueprint-smoke")
+
+func _is_acceptance_smoke() -> bool:
+	return OS.get_cmdline_user_args().has("--acceptance-smoke")
+
+func _is_layout_smoke() -> bool:
+	return OS.get_cmdline_user_args().has("--layout-smoke")
 
 ## Headless contract check for undo/redo.
 func _run_undo_smoke() -> void:

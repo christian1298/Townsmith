@@ -85,6 +85,7 @@ const TABLES := {
 		# Stats overlay.
 		"base.editor.stats.solid_quads": "solid={0}  quads={1}  mesh={2} ms",
 		"base.editor.stats.chunks_volume": "chunks={0}  volume={1} x {2} x {3} m",
+		"base.editor.stats.cost": "cost={0}",
 		"base.editor.stats.build": "build={0} ms  builds={1}",
 		"base.editor.stats.remesh_pending": "remesh pending...",
 
@@ -108,6 +109,7 @@ const TABLES := {
 		"base.editor.rooms.header": "ROOM STATS   [ ] select room   R hide",
 		"base.editor.rooms.summary": "rooms {0} · capacity {1} · jobs {2} · class {3}",
 		"base.editor.rooms.solid": "solid {0} · material kinds {1}",
+		"base.editor.rooms.cost": "material cost {0}",
 		"base.editor.rooms.none": "no enclosed rooms",
 		"base.editor.rooms.unavailable": "stats unavailable: {0}",
 		"base.editor.rooms.line": "{0} {1} · {2} · floor {3} · {4} m² · beds {5} · desks {6} · doors {7} · windows {8}",
@@ -169,7 +171,7 @@ const TABLES := {
 		"base.editor.status.redo": "Wiederholen",
 		"base.editor.status.room_view_off": "Raumansicht aus",
 		"base.editor.status.room_overlay_failed": "Raumansicht fehlgeschlagen: {0}",
-		"base.editor.status.room_view_summary": "Raumansicht: {0} Räume · Kapazität {1} · Arbeitsplätze {2}  ([ ] wechseln, R ausblenden)",
+		"base.editor.status.room_view_summary": "Raumansicht: {0} erkannt · Kapazität {1} · Arbeitsplätze {2}  ([ ] wechseln, R ausblenden)",
 		"base.editor.status.room_view_off_hint": "Die Raumansicht ist aus (R)",
 		"base.editor.status.no_rooms": "Keine Räume zur Auswahl",
 		"base.editor.status.room_selected": "Ausgewählt: {0} · {1}  ([ ] wechseln, R ausblenden)",
@@ -197,11 +199,12 @@ const TABLES := {
 		# Statistik-Overlay.
 		"base.editor.stats.solid_quads": "Voxel={0}  Quads={1}  Mesh={2} ms",
 		"base.editor.stats.chunks_volume": "Chunks={0}  Volumen={1} x {2} x {3} m",
-		"base.editor.stats.build": "Aufbau={0} ms  Aufbauten={1}",
+		"base.editor.stats.cost": "Kosten={0}",
+		"base.editor.stats.build": "Berechnung {0} ms · Durchläufe {1}",
 		"base.editor.stats.remesh_pending": "Neuberechnung ausstehend …",
 
 		# Hilfe und Steuerung.
-		"base.editor.help.move": "WASD bewegen   Leertaste/Strg hoch/runter   Shift schneller   Esc Maus freigeben",
+		"base.editor.help.move": "WASD bewegen   Leertaste/Strg hoch/runter   Umschalt: schneller   Esc: Maus freigeben",
 		"base.editor.help.edit": "Linksklick entfernen   Rechtsklick platzieren   Tasten 1–5: Material wählen",
 		"base.editor.help.tools": "R Raumansicht   [ ] Raum wechseln   L Sprache   Strg+Z rückgängig   Strg+Y wiederholen   F5 speichern   F9 laden",
 
@@ -218,8 +221,9 @@ const TABLES := {
 
 		# Raumstatistik und Overlay.
 		"base.editor.rooms.header": "RAUMSTATISTIK   [ ] Raum wechseln   R ausblenden",
-		"base.editor.rooms.summary": "Räume {0} · Kapazität {1} · Arbeitsplätze {2} · Klasse {3}",
+		"base.editor.rooms.summary": "Räume: {0} · Kapazität {1} · Arbeitsplätze {2} · Klasse {3}",
 		"base.editor.rooms.solid": "Voxel {0} · Materialarten {1}",
+		"base.editor.rooms.cost": "Materialkosten {0}",
 		"base.editor.rooms.none": "keine geschlossenen Räume",
 		"base.editor.rooms.unavailable": "Statistik nicht verfügbar: {0}",
 		"base.editor.rooms.line": "{0} {1} · {2} · Etage {3} · {4} m² · Betten {5} · Schreibtische {6} · Türen {7} · Fenster {8}",

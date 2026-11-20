@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use core_blueprint::{
     compute_hash, encode_voxels, load_tsbp, save_tsbp, save_tsbp_with_hash, Blueprint,
-    BlueprintError, BlueprintMetadata, FORMAT_VERSION,
+    BlueprintError, BlueprintMetadata, BlueprintStats, FORMAT_VERSION,
 };
 use core_voxel::volume::{VolumeConfig, VolumePos, VoxelVolume};
 
@@ -198,6 +198,43 @@ fn rejects_missing_entries_and_bad_zip() {
     let bad = dir.join("bad.tsbp");
     fs::write(&bad, b"not a zip").unwrap();
     assert!(matches!(load_tsbp(&bad), Err(BlueprintError::Zip(_))));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn material_cost_roundtrips_and_zero_stays_omitted() {
+    let dir = temp_dir("cost");
+    let path = dir.join("cost.tsbp");
+    let mut blueprint = test_blueprint();
+    assert_eq!(blueprint.metadata.stats.material_cost, 0.0);
+    assert!(
+        serde_json::to_value(BlueprintStats::default())
+            .expect("stats serialize")
+            .get("material_cost")
+            .is_none(),
+        "zero cost must stay out of the canonical JSON"
+    );
+
+    blueprint.metadata.stats.material_cost = 12.5;
+    save_tsbp(&path, &blueprint).expect("save");
+    let loaded = load_tsbp(&path).expect("load");
+    assert_eq!(loaded.metadata.stats.material_cost, 12.5);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn rejects_non_finite_or_negative_material_cost() {
+    let dir = temp_dir("cost-invalid");
+    for cost in [f64::NAN, f64::INFINITY, -1.0] {
+        let path = dir.join(format!("cost-{cost}.tsbp"));
+        let mut blueprint = test_blueprint();
+        blueprint.metadata.stats.material_cost = cost;
+        assert!(matches!(
+            save_tsbp(&path, &blueprint),
+            Err(BlueprintError::Format(_))
+        ));
+        assert!(!path.exists());
+    }
     fs::remove_dir_all(dir).unwrap();
 }
 

@@ -97,6 +97,7 @@ The stats overlay shows:
 ```text
 solid=<voxels>  quads=<greedy quads>  mesh=<core ms>
 chunks=<allocated>  volume=16.0 x 9.6 x 16.0 m
+cost=<abstract units>
 build=<wall ms>  builds=<count>
 ```
 
@@ -108,13 +109,16 @@ This is a correctness-first loop. A **dense** 25,601-voxel debug floor took ~1.4
 
 ```bash
 GODOT=/path/to/godot ./scripts/smoke_editor.sh
+GODOT=/path/to/godot ./scripts/smoke_layout.sh
+GODOT=/path/to/godot ./scripts/smoke_acceptance.sh
 ```
 
-The script builds the debug GDExtension, retries the first headless import once (Godot 4.7 can abort the first import in a clean worktree), then runs three headless contracts:
+The script builds the debug GDExtension, retries the first headless import once (Godot 4.7 can abort the first import in a clean worktree), then runs three editor contracts:
 
 1. **Editor smoke** (`--editor-smoke`) — volume, edit, mesh, raycast.
 2. **Room overlay smoke** (`--room-overlay-smoke`) — sealed room, detection, overlay nodes.
-3. **Undo smoke** (`--undo-smoke`) — set/remove, undo, redo.
+4. **Layout smoke** (`--layout-smoke`) — EN/DE text fits 16 fixed-width controls.
+5. **Slice acceptance** (`--acceptance-smoke`) — shared house, rooms/cost, save/load/copy, 500-edit undo/redo.
 
 The editor smoke path, inside `editor.gd`:
 
@@ -147,15 +151,15 @@ CI runs the script in the Godot headless smoke job after `smoke_volume.sh`.
 - **No per-material rendering.** All voxels share one neutral material override.
 - **One-voxel brush.** There is no 2×2×2/3×3×3 brush, paint, pick, box, copy/paste, rotate, or mirror.
 - **Whole-volume remesh.** Every rebuild remeshes the entire 16 × 9.6 × 16 m volume on the main thread; no dirty-chunk path or worker yet.
-- **Room view is read-only.** Press R for boxes, labels, and the stats panel; there is no click-to-select, structural overlay, or cost panel yet.
+- **Room view is read-only.** Press R for boxes, labels, and the stats panel, including material cost; there is no click-to-select or structural overlay yet.
 - **Localization is wired** for the editor HUD, room panel, palette, save/load, and statuses; see [[38 - Editor Localization]]. Some log/error strings intentionally stay English for developers.
 - **Mouse capture is not focus-aware.** Losing window focus while captured is not handled beyond `Esc`.
 - **Single scene, no menus.** Launching the scene drops straight into the camera; there is no start screen, settings, or rebind UI.
 
 ## 9. Next
 
-1. Blueprint save/load from the editor volume (next slice step).
+1. Record the 30-minute playtest and usability issues (Q-101).
 2. Dirty-chunk remesh and a worker-thread mesh path.
-3. Undo/redo and edit batches at the bridge boundary.
-4. Multi-material mesh surfaces from the content registry so the palette is visible.
-5. Ghost preview, brush sizes, paint/pick, prop rotation, and room stats.
+3. Multi-material mesh surfaces from the content registry so the palette is visible.
+4. Deferred editor tools: ghost preview, brushes, paint/pick, selection/transform, prop rotation/undo.
+5. Phase 2 build-anywhere placement on streamed terrain.

@@ -4,7 +4,7 @@
 
 Townsmith is a city-builder about authorship: design buildings voxel by voxel in first person, then place them in a living city you manage from above. The city builds itself over time with materials, crews, and trades; citizens live, work, and react to the world you shape.
 
-> **Status:** pre-production / Phase 0 spike. The Rust voxel core, deterministic terrain worldgen/streaming, 1M-cohort tick path, and Godot 4.7 GDExtension bridge run headless; the Godot preview streams 256 m terrain chunks on Rust worker threads with distance LOD and packed-array mesh upload, a MultiMesh city renderer covers 200–100,000 buildings, a 21-house slice benchmark passes the 60 FPS target, 200 greedy-meshed voxel huts run as instanced geometry, the core and route benchmark harnesses produce JSON, but there is no gameplay yet. The design and technical plan live in an Obsidian-compatible vault in [`docs/`](docs/). The engine choice remains proposed until the spike completes.
+> **Status:** pre-production / Phase 1 vertical slice. The Rust voxel core, deterministic terrain worldgen/streaming, 1M-cohort tick path, and Godot 4.7 GDExtension bridge run headless; the first-person editor builds and saves blueprints, detects rooms/capacity/cost, and the 21-house slice benchmark passes the 60 FPS target. Technical slice acceptance is recorded in `docs/40`; the 30-minute human playtest is the remaining gate. There is no Mayor Mode or city simulation yet. The design and technical plan live in an Obsidian-compatible vault in [`docs/`](docs/).
 
 ## At a glance
 
@@ -18,7 +18,7 @@ Townsmith is a city-builder about authorship: design buildings voxel by voxel in
 | **Multiplayer** | Co-op and dedicated servers |
 | **Platform** | Linux and Windows |
 | **Stack** | Godot 4.7 shell + Rust core (spike in progress) |
-| **Status** | Phase 0; voxel, worldgen/streaming, cohort, and multi-chunk terrain preview |
+| **Status** | Phase 1 vertical slice — technical acceptance passed; playtest open |
 
 ## What makes it different
 
@@ -64,6 +64,10 @@ cargo test -p godot_ext                   # terrain worker bridge tests
 ./scripts/build_godot_ext.sh              # build the GDExtension library
 GODOT=/path/to/godot ./scripts/run_godot.sh
 GODOT=/path/to/godot ./scripts/smoke_godot.sh
+GODOT=/path/to/godot ./scripts/smoke_editor.sh
+GODOT=/path/to/godot ./scripts/smoke_acceptance.sh
+GODOT=/path/to/godot ./scripts/smoke_layout.sh
+GODOT=/path/to/godot ./scripts/smoke_slice.sh
 cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort

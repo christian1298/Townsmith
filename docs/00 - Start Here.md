@@ -30,8 +30,8 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 
 | Item | State |
 |---|---|
-| Phase | **Phase 1 vertical slice** in progress |
-| Code | **Vertical slice in progress:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, chunked editable volume + cross-chunk meshing, 50 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, seam-aware terrain mesh + LOD + skirts, 58 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `core_city` (synthetic Early/Mid/Late layouts, 10 tests), `core_blueprint` (`.tsbp` v1 packages, 9 tests), `core_rooms` (room detection + stats, 10 tests), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, a Godot 4.7 GDExtension bridge with terrain workers, city layout, editable volume, and blueprint save/load APIs (14 bridge tests), a MultiMesh city renderer, a 200-instance voxel-hut route, a first-person editor with `VOLUME_SMOKE`, `EDITOR_SMOKE`, `ROOM_OVERLAY_SMOKE`, `UNDO_SMOKE`, and `BLUEPRINT_SMOKE` paths, and a room detector. Headless smoke passes. |
+| Phase | **Phase 1 vertical slice** — technical acceptance passed; 30-minute playtest open (Q-101) |
+| Code | **Vertical slice:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, chunked editable volume + cross-chunk meshing, 52 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, seam-aware terrain mesh + LOD + skirts, 58 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `core_city` (synthetic Early/Mid/Late layouts, 10 tests), `core_blueprint` (`.tsbp` v1 packages + material cost, 11 tests), `core_rooms` (room detection + shared acceptance house, 12 tests + 1 doctest), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, a Godot 4.7 GDExtension bridge with terrain workers, city layout, editable volume, blueprint, copy-mesh, and acceptance APIs (16 bridge tests), a MultiMesh city renderer, a 200-instance voxel-hut route, a first-person editor with `VOLUME_SMOKE`, `EDITOR_SMOKE`, `ROOM_OVERLAY_SMOKE`, `UNDO_SMOKE`, `BLUEPRINT_SMOKE`, `LOCALE_SMOKE`, `LAYOUT_SMOKE`, and `SLICE_ACCEPTANCE` paths. Headless smoke passes. |
 | Engine | **Accepted:** Godot 4 shell + Rust core via GDExtension. The Phase 0 spike passed; the 3060-class 1M 30 FPS gate remains open for Phase 5. See [[04 - Engine and Stack]] and [[10 - Decisions]]. |
 | Team | **Accepted:** 2–3 full-time generalists; Rust/Godot experience or willingness to learn. |
 | Language | **Accepted:** Rust is the primary implementation language from Phase 0; GDScript is shell/UI only; C++ is the fallback. See D-011. |
@@ -47,7 +47,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with real 10 cm building detail is tractable. The box-city MultiMesh path is measured well above target on an RTX 4080; the target 3060-class run and voxel building LOD remain. See [[03 - Voxel and Scale]], [[23 - City Rendering Benchmark]], and [[09 - Open Questions]]. |
-| Next action | Run the 21-house slice benchmark; EN/DE editor strings are implemented. Keep the 3060-class 1M gate for Phase 5. See [[26 - Vertical Slice Spec]]. |
+| Next action | Record the 30-minute slice playtest (Q-101), then start Phase 2 planning. Technical acceptance and the 21-house result are in [[40 - Slice Acceptance Results]]. Keep the 3060-class 1M gate for Phase 5. |
 
 > [!warning] This is a plan, not a commitment
 > Numbers in these docs are **planning targets**, not measured results. Anything marked *Assumption* or *Proposed* must be validated before it becomes an accepted decision.
@@ -153,12 +153,11 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 ## Next actions
 
-1. Run the 21-house slice benchmark; rooms/stats metadata, overlay, panel, undo/redo, props, and EN/DE editor strings are done.
-2. Add dirty-chunk remeshing and prop rotation/undo.
-3. Run the 21-house performance pass.
-4. Run the 21-house / 60 FPS slice benchmark.
-5. Keep the 3060-class 1M performance gate open for Phase 5; D-003 is accepted for the architecture.
-6. Write the first content schemas (materials, rooms, props) from [[06 - Modding and Resource Packs]].
+1. Run and record the 30-minute slice playtest (Q-101); technical acceptance is complete.
+2. Start Phase 2 planning: open world, build-anywhere placement, Mayor Mode.
+3. Finish deferred editor work: paint/pick, brushes, selection/copy/rotate/mirror, structural v0, thumbnails, AO/texture arrays.
+4. Keep the 3060-class 1M performance gate open for Phase 5; D-003 is accepted for the architecture.
+5. Write the first content schemas (materials, rooms, props) from [[06 - Modding and Resource Packs]].
 
 ## Document map
 
@@ -201,3 +200,6 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 | [[35 - Editor Undo Redo]] | Single-edit undo/redo, history shape, smoke | You work on editor history |
 | [[36 - Editor Props]] | Bed/stove/toilet/desk placement, metadata, room effects | You work on props or room inference |
 | [[37 - Room Stats Panel]] | Room totals, room list, selection, panel smoke | You work on the room inspector |
+| [[38 - Editor Localization]] | 95-key EN/DE editor tables, toggle, placeholder checks, layout smoke | You touch editor text or translations |
+| [[39 - Slice House Benchmark]] | 21-house MultiMesh benchmark, post-winding results, limits | You measure the slice render path |
+| [[40 - Slice Acceptance Results]] | Acceptance matrix, commands, cost model, open playtest | You close Phase 1 or plan Phase 2 |

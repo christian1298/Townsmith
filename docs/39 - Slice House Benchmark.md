@@ -75,4 +75,4 @@ The smoke asserts 21 instances, one surface, positive quads, and the fixture cou
 1. Replace the demo fixture with a committed `.tsbp` test-house asset.
 2. Add prop/room visuals and a material palette.
 3. Add shadows/lighting presets.
-4. Feed the result into the vertical-slice acceptance report.
+4. Feed the result into the vertical-slice acceptance report. **Done** — [[40 - Slice Acceptance Results]].

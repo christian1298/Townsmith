@@ -2,7 +2,7 @@
 title: Voxel Volume
 project: Townsmith
 status: active
-updated: 2026-11-19
+updated: 2026-11-20
 tags:
   - townsmith
   - voxel
@@ -95,7 +95,7 @@ The whole-volume mesh is intentionally a correctness-first implementation. Empty
 
 ## 6. Tests
 
-`core_voxel` now has **49 tests**, including:
+`core_voxel` now has **52 tests**, including:
 
 - cross-chunk set/get and fill;
 - typed out-of-bounds errors and all-or-nothing fill;

@@ -238,6 +238,11 @@ fn validate_metadata(metadata: &BlueprintMetadata) -> Result<(), BlueprintError>
             )));
         }
     }
+    if !metadata.stats.material_cost.is_finite() || metadata.stats.material_cost < 0.0 {
+        return Err(BlueprintError::Format(
+            "stats.material_cost must be finite and non-negative".to_string(),
+        ));
+    }
     Ok(())
 }
 
