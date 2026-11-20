@@ -78,13 +78,13 @@ Each loan's balance falls by its principal payment; interest is paid from the tr
 
 `world_place_blueprint` now:
 
-1. opens the treasury for the world seed if needed;
+1. checks the existing treasury, or the 100,000 starting balance when none exists;
 2. rejects a bankrupt city (`bankrupt`);
-3. rejects a placement the current balance cannot cover (`insufficient_funds`);
+3. rejects a placement the balance cannot cover (`insufficient_funds`);
 4. places the building and creates its construction site;
-5. charges the blueprint `material_cost` and records it in `construction_spent`.
+5. opens the treasury if needed, charges the blueprint `material_cost`, and records it in `construction_spent`.
 
-If the charge races with another spend, the placement and site are rolled back and the call returns `insufficient_funds`.
+A rejected placement does not open a treasury, so a failed first placement cannot pin the world to that seed. If the charge races with another spend, the placement and site are rolled back and the call returns `insufficient_funds`.
 
 The acceptance house costs **38,028.80**; placing it leaves **61,971.20** before operating costs.
 
@@ -175,18 +175,19 @@ BANKRUPT · -50000 balance · +0/day · tax 20/8 · debt 0
 
 The world-scene smoke checks:
 
-- placement charged `construction_spent > 0` and `balance + spent <= 100,000`;
+- a rejected first placement leaves the treasury closed (no seed-poisoning side effect);
+- placement charged exactly the blueprint `material_cost` and debited the same amount;
 - the acceptance house starts negative at standard taxes;
-- borrowing 50,000 raises cash and debt by the same amount;
+- borrowing 50,000 raises cash and debt by exactly the same amount;
 - high taxes turn daily net positive;
 - save → clear → load preserves balance, daily net, debt, and treasury checksum;
 - marker `economy=ok` (checked by `scripts/smoke_world_scene.sh`).
 
 ## 11. Tests
 
-- `core_city::economy`: 13 tests — starting balance, income/expenses, clamped rates, bankruptcy, construction affordability, loan cash/interest/repayment, payoff, bankruptcy borrowing block, debt limit, daily net, JSON/checksum, old-save debt default, invalid balance.
+- `core_city::economy`: 14 tests — starting balance, income/expenses, clamped rates, bankruptcy, construction affordability, loan cash/interest/repayment, payoff, bankruptcy borrowing block, payment underflow, debt limit, daily net, JSON/checksum, old-save debt default, invalid balance.
 - `godot_ext`: 41 tests, including economy JSON/loan roundtrip, old-save loans default, and invalid balance.
-- `core_city` total **124**; bridge **41**; workspace **329 tests + 1 doctest**.
+- `core_city` total **125**; bridge **41**; workspace **330 tests + 1 doctest**.
 - `city_loop` bin test asserts construction spending, debt, positive final balance, and no bankruptcy.
 - 30-day city-loop checksum: `1d78a3cac4fb0f22`.
 

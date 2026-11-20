@@ -153,7 +153,7 @@ GODOT=/path/to/godot ./scripts/smoke_world_scene.sh
 `WORLD_SCENE` exercises the green/red ghost, water rejection, a 90° ghost rotation, a terrain edit and dirty chunk, placing at the fixture site, save/load of placements + deltas, rebuilding the placed node and foundation, and a failed load leaving the scene untouched. Terrain-edit details are in [[43 - Terrain Edits]]. Recorded marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok occupancy=ok industry=ok utilities=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok occupancy=ok industry=ok utilities=ok economy=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 ## 5. Scene
@@ -184,9 +184,9 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 
 ## 7. Tests
 
-- `core_city`: placement persistence, construction, roads, lots, settlements, households, treasury/loans, industry, and utilities; **124 tests**.
-- `godot_ext`: **40 tests** total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
-- Workspace: **329 tests + 1 doctest**.
+- `core_city`: placement persistence, construction, roads, lots, settlements, households, treasury/loans, industry, and utilities; **125 tests**.
+- `godot_ext`: **41 tests** total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
+- Workspace: **330 tests + 1 doctest**.
 - Godot headless: `WORLD_PLACEMENT ... status=ok` and `WORLD_SCENE ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 

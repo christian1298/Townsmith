@@ -16,6 +16,7 @@ const FIXTURE_X := 169.0
 const FIXTURE_Z := 125.0
 const DEFAULT_BLUEPRINT := "acceptance_house.tsbp"
 const DEFAULT_SAVE := "world.json"
+const STARTING_TREASURY := 100000.0
 const LOAN_AMOUNT := 50000.0
 const TAX_POLICIES := [
 	{"name": "low", "resident": 4.0, "business": 2.0},
@@ -1722,6 +1723,10 @@ func _run_scene_smoke() -> void:
 	target_z = 128.0
 	_refresh_preview(true)
 	water_ok = not preview_valid and preview_error == "water" and ghost_material.albedo_color.r > ghost_material.albedo_color.g
+	var water_place: Dictionary = core.world_place_blueprint(SEED, blueprint_path, 128.0, 128.0, 0)
+	var economy_after_reject: Dictionary = core.economy_state()
+	water_ok = water_ok and not bool(water_place.get("ok", true))
+	water_ok = water_ok and not bool(economy_after_reject.get("open", true))
 	if not water_ok and status == "ok":
 		status = "water_failed:" + preview_error
 
@@ -1788,9 +1793,11 @@ func _run_scene_smoke() -> void:
 		place_ok = absf(node.rotation_degrees.y - 90.0) < 0.001 and _foundation_matches_bounds(node)
 		var economy_after_place: Dictionary = core.economy_state()
 		var construction_spent := float(economy_after_place.get("construction_spent", 0.0))
+		var expected_cost := float(blueprint_info.get("material_cost", -1.0))
 		place_ok = place_ok and bool(economy_after_place.get("open", false))
-		place_ok = place_ok and construction_spent > 0.0
-		place_ok = place_ok and float(economy_after_place.get("balance", 0.0)) + construction_spent <= 100000.01
+		place_ok = place_ok and expected_cost > 0.0
+		place_ok = place_ok and absf(construction_spent - expected_cost) < 0.01
+		place_ok = place_ok and absf(float(economy_after_place.get("balance", 0.0)) - (STARTING_TREASURY - expected_cost)) < 0.01
 	if not place_ok and status == "ok":
 		status = "place_failed:" + preview_error
 
@@ -2014,10 +2021,14 @@ func _run_scene_smoke() -> void:
 				occupancy_after_ok = occupancy_after_ok and float(economy_after.get("balance", 100000.0)) < 100000.0
 				occupancy_after_ok = occupancy_after_ok and float(economy_after.get("daily_net", 0.0)) < 0.0
 				occupancy_after_ok = occupancy_after_ok and not bool(economy_after.get("bankrupt", true))
-				var loan_state: Dictionary = core.economy_borrow(SEED, 50000.0)
+				var balance_before_loan := float(economy_after.get("balance", 0.0))
+				var loan_state: Dictionary = core.economy_borrow(SEED, LOAN_AMOUNT)
 				var tax_state: Dictionary = core.economy_set_taxes(SEED, 100.0, 8.0)
 				var economy_recovered: Dictionary = core.economy_state()
 				economy_ok = bool(loan_state.get("ok", false)) and bool(tax_state.get("ok", false))
+				economy_ok = economy_ok and absf(
+					float(economy_recovered.get("balance", 0.0)) - (balance_before_loan + LOAN_AMOUNT)
+				) < 0.01
 				economy_ok = economy_ok and float(economy_recovered.get("debt", 0.0)) > 49999.0
 				economy_ok = economy_ok and float(economy_recovered.get("daily_net", 0.0)) > 0.0
 				occupancy_after_ok = occupancy_after_ok and economy_ok

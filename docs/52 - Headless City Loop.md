@@ -27,10 +27,10 @@ Arguments:
 | Flag | Default | Meaning |
 |---|---:|---|
 | `--days` | 30 | Simulated game days |
-| `--houses` | 50 | Houses in the fixed grid |
+| `--houses` | 50 | Houses in the fixed grid (maximum 116 with the current financing) |
 | `--step` | 300 | Simulation step in seconds |
 
-The city is a 10 × 5 grid of 8 × 8 m houses starting at `(128, 128)`, 20 m apart.
+The default city is a 10 × 5 grid of 8 × 8 m houses starting at `(128, 128)`, 20 m apart. The runner caps `--houses` at 116 so the starting balance plus the maximum loan can cover the flat construction cost.
 
 Each house has:
 
@@ -122,7 +122,7 @@ This is a scripted recovery, not a balanced default. The standard 8/4 policy sti
 ## 6. Tests
 
 - `city_loop` bin test: five houses complete, fill 50 residents, staff their sites, produce food/wood, and record construction spending and debt in one simulated day.
-- Workspace: **329 tests + 1 doctest**.
+- Workspace: **330 tests + 1 doctest**.
 
 ## 7. Next
 

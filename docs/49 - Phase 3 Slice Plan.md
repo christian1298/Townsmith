@@ -232,7 +232,7 @@ See [[55 - Utilities]] for rates, formulas, tick order, persistence, HUD, tests,
 ### Verification
 
 - `cargo test -p core_city` — utilities, population service, industry power tests.
-- `cargo test --workspace` — **329 tests + 1 doctest (330 passed)**.
+- `cargo test --workspace` — **330 tests + 1 doctest (331 passed)**.
 - `smoke_world_scene.sh` — water/power service, needs recovery, production, persistence, beacons; marker `utilities=ok` (checked by the script).
 - `cargo run --release -p townsmith-bench --bin city_loop` — checksum `1d78a3cac4fb0f22`.
 - clippy and fmt.
@@ -265,7 +265,7 @@ See [[53 - Treasury and Taxes]] for the ledger, loan model, formulas, controls, 
 ### Verification
 
 - `cargo test -p core_city` — economy construction, loan, bankruptcy, and old-save tests.
-- `cargo test --workspace` — **329 tests + 1 doctest (330 passed)**.
+- `cargo test --workspace` — **330 tests + 1 doctest (331 passed)**.
 - `smoke_world_scene.sh` — placement charge, loan, tax recovery, save/load; marker `economy=ok` (checked by the script).
 - `cargo run --release -p townsmith-bench --bin city_loop` — checksum `1d78a3cac4fb0f22`.
 - clippy and fmt.

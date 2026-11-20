@@ -225,11 +225,15 @@ impl Economy {
         if self.debt() + amount > MAX_TOTAL_DEBT {
             return Err(EconomyError::Invalid("total debt limit reached"));
         }
+        let payment_per_day = amount / term_days;
+        if !payment_per_day.is_finite() || payment_per_day <= 0.0 {
+            return Err(EconomyError::Invalid("loan payment is out of range"));
+        }
         self.loans.push(Loan {
             principal: amount,
             balance: amount,
             rate_per_day,
-            payment_per_day: amount / term_days,
+            payment_per_day,
         });
         self.balance += amount;
         self.bankrupt = self.balance <= BANKRUPTCY_THRESHOLD;
@@ -517,6 +521,13 @@ mod tests {
         assert!(economy.bankrupt);
         assert!(economy.take_loan(1_000.0, 0.0, 30.0).is_err());
         assert!(!economy.try_charge_construction(1.0));
+    }
+
+    #[test]
+    fn a_loan_with_an_unrepresentable_payment_is_rejected() {
+        let mut economy = Economy::new(2026);
+        assert!(economy.take_loan(f64::from_bits(1), 0.0, 365.0).is_err());
+        assert!(economy.loans.is_empty());
     }
 
     #[test]

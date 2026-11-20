@@ -33,7 +33,7 @@ use core_city::{
     RoadRequest, RoadSegment, RoadStore, Settlement, SettlementError, SettlementRequest,
     SettlementStore, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
     DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT,
-    MAX_WORLD_COORD_M,
+    MAX_WORLD_COORD_M, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -952,7 +952,7 @@ impl TownsmithCore {
             }
         }
         {
-            let mut economy = self
+            let economy = self
                 .economy
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
@@ -962,19 +962,28 @@ impl TownsmithCore {
                     "the treasury belongs to a different seed",
                 );
             }
-            let economy = economy.get_or_insert_with(|| Economy::new(seed));
-            if economy.bankrupt {
-                return placement_simple_error(
-                    "bankrupt",
-                    "the city is bankrupt and cannot start new construction",
-                );
-            }
-            if !economy.can_afford(request.material_cost) {
+            if let Some(economy) = economy.as_ref() {
+                if economy.bankrupt {
+                    return placement_simple_error(
+                        "bankrupt",
+                        "the city is bankrupt and cannot start new construction",
+                    );
+                }
+                if !economy.can_afford(request.material_cost) {
+                    return placement_simple_error(
+                        "insufficient_funds",
+                        format!(
+                            "construction needs {:.0} but the treasury has {:.0}",
+                            request.material_cost, economy.balance
+                        ),
+                    );
+                }
+            } else if request.material_cost > STARTING_BALANCE {
                 return placement_simple_error(
                     "insufficient_funds",
                     format!(
-                        "construction needs {:.0} but the treasury has {:.0}",
-                        request.material_cost, economy.balance
+                        "construction needs {:.0} but a new treasury has {:.0}",
+                        request.material_cost, STARTING_BALANCE
                     ),
                 );
             }

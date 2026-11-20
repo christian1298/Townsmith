@@ -23,6 +23,7 @@ const SOLID_VOXELS: u64 = 10_000;
 const CREW_CAPACITY: u16 = 8;
 const MATERIALS_STOCK: u64 = 10_000_000;
 const CONSTRUCTION_COST_PER_HOUSE: f64 = 3_000.0;
+const MAX_FINANCED_HOUSES: u64 = 116;
 const RECOVERY_TAX_PER_RESIDENT: f64 = 20.0;
 const RECOVERY_TAX_PER_JOB: f64 = 4.0;
 
@@ -38,6 +39,12 @@ fn main() {
         .unwrap_or(DEFAULT_STEP_SECONDS);
     if days == 0 || houses == 0 || !step.is_finite() || step <= 0.0 {
         eprintln!("usage: city_loop [--days N] [--houses N] [--step SECONDS]");
+        std::process::exit(2);
+    }
+    if houses > MAX_FINANCED_HOUSES {
+        eprintln!(
+            "city_loop: at most {MAX_FINANCED_HOUSES} houses are supported by the starting balance and loan limit"
+        );
         std::process::exit(2);
     }
 
