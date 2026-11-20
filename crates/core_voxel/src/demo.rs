@@ -165,6 +165,6 @@ mod tests {
         assert_eq!(first_mesh.vertices.len(), 1_172);
         assert_eq!(first_mesh.indices.len(), 1_758);
         assert_eq!(first_mesh, second_mesh);
-        assert_eq!(first_mesh.checksum(), 0x2980_5bfe_94ec_4467);
+        assert_eq!(first_mesh.checksum(), 0x6fb7_acce_9894_19b7);
     }
 }

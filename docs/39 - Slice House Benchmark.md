@@ -23,7 +23,7 @@ tags:
 - Shadows off; no GI; no LOD.
 - Time-based camera route `phase0_slice_houses_v1`, 30 s / 3 s warm-up.
 
-The fixture is the same 5×3×5 volume used by the volume benchmark: 266,432 solid voxels, **293 quads**, 1,172 vertices, checksum `29805bfe94ec4467`.
+The fixture is the same 5×3×5 volume used by the volume benchmark: 266,432 solid voxels, **293 quads**, 1,172 vertices, checksum `6fb7acce989419b7`.
 
 ## 2. Commands
 
@@ -43,8 +43,8 @@ RTX 4080, 1920×1080, vsync off, GL Compatibility:
 
 | Metric | Value |
 |---|---:|
-| FPS average | **6,267** |
-| FPS 1% low | **4,975** |
+| FPS average | **6,195** |
+| FPS 1% low | **4,484** |
 | Frame median | 0.156 ms |
 | Frame p99 | 0.201 ms |
 | Hitches > 16 ms | 0 |
