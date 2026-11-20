@@ -29,7 +29,7 @@ The slice follows accepted decisions:
 - D-016: procedural, chunked, effectively infinite world; build anywhere.
 - D-026: workshop-authored blueprints; placement in the world.
 - Q-011: local 10 cm grid, 90° rotation, foundation cut/fill.
-- D-023: the final game creates a construction site. This slice uses an instant placement placeholder so the world/save path can be tested before construction state exists.
+- D-023: placing a blueprint creates a construction site. 2A used an instant placeholder; 2D replaces it with a phased site ([[45 - Construction Sites]]).
 
 ## 2. Stages
 
@@ -41,12 +41,12 @@ The slice follows accepted decisions:
 | **2A.4** | Streamed-world scene, preview, rotate/place/save/load controls | **Done** — PR #47, see [[42 - World Placement Bridge]] |
 | **2B** | Terrain edit deltas applied to streamed chunks, saved/reloaded | **Done** — PR #48, see [[43 - Terrain Edits]] |
 | **2C** | Mayor camera, selection, mode switch at a door | **Done** — PR #49, see [[44 - Mayor Mode]] |
-| **2D** | Construction site v0: phased progress, materials, crews | **In progress** — core model |
-| **2E** | Roads, lots, settlement boundaries, zoning | Planned |
+| **2D** | Construction site v0: phased progress, materials, crews | **This PR** — see [[45 - Construction Sites]] |
+| **2E** | Roads, lots, settlement boundaries, zoning | Next |
 
-Each stage is a separate branch, worktree, and PR. Do not mix 2A with terrain editing or construction state. 2A is split so geometry, persistence, the bridge, and the shell each stay reviewable.
+Each stage is a separate branch, worktree, and PR. Do not mix placement, terrain edits, Mayor Mode, and construction state in one change. Each slice keeps geometry, persistence, the bridge, and the shell reviewable.
 
-## 3. Stage 2A–2C scope
+## 3. Stage 2A–2D scope
 
 ### In
 
@@ -57,7 +57,7 @@ Each stage is a separate branch, worktree, and PR. Do not mix 2A with terrain ed
 - Save/load of `seed + placements + terrain deltas` as JSON; blueprint packages are referenced by path.
 - Height edits, dirty-chunk remeshing, and delta save/load (2B).
 - A Mayor camera, right-click building selection with an inspection highlight, and a first-person door transition back to Mayor (2C).
-- A deterministic construction state machine with seven phases, shared crew/material pools, and JSON state (2D core).
+- A phased construction site created by placement, with a shared crew pool, material stockpile, partial visuals, completion, and save/load (2D; [[45 - Construction Sites]]).
 - A headless smoke that places the acceptance house, verifies water, overlap, and rotation rejection, saves, clears, reloads, compares the placement checksum, and confirms a failed load leaves the store untouched. Slope rules stay covered by the core placement tests.
 
 ### Out
@@ -68,6 +68,7 @@ Each stage is a separate branch, worktree, and PR. Do not mix 2A with terrain ed
 - Multiplayer authority and command validation.
 - Collision, pathfinding, citizens, or simulation.
 - Voxel editing inside a placed building; the workshop editor handoff and blueprint versioning are a later slice.
+- Individual construction workers, vehicles, trade skills, delivery trips, budgets, inspections, and demolition; 2D is a global-pool state machine.
 
 ## 4. Data model
 
@@ -246,7 +247,7 @@ Add the world placement smoke to the Linux Godot job. Windows keeps the Rust gat
 | Slope threshold rejects most terrain | Preview plus manual height edits (2B); automatic terraces come later |
 | Foundation box looks crude | It is a placeholder for cut/fill and voxel foundations |
 | No road access check | 2E; the error model already has a place for it |
-| Instant placement contradicts D-023 | Temporary technical placeholder; construction sites are 2D |
+| Placements are not instantly finished (D-023) | Construction v0 creates a site; construction detail comes later — see [[45 - Construction Sites]] |
 | Placement data grows with city size | Store is O(placements); spatial indexing comes with lots/zoning |
 | Preview sampling every frame | One `height_at` call per frame for the ghost; full footprint validation is cached until the target changes |
 

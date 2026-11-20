@@ -33,6 +33,7 @@ var ghost_foundation: MeshInstance3D
 var ghost_material: StandardMaterial3D
 var placed_material: StandardMaterial3D
 var foundation_material: StandardMaterial3D
+var construction_material: StandardMaterial3D
 
 var hud: Label
 var status_label: Label
@@ -45,6 +46,8 @@ var blueprint_info: Dictionary = {}
 var blueprint_info_cache: Dictionary = {}
 var mesh_cache: Dictionary = {}
 var placed_nodes: Dictionary = {}
+var construction_nodes: Dictionary = {}
+var construction_tick_accum := 0.0
 var first_click_guard := true
 
 var rotation_deg := 0
@@ -75,7 +78,11 @@ func _ready() -> void:
 	if DisplayServer.get_name() != "headless":
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	construction_tick_accum += delta
+	if construction_tick_accum >= 0.25:
+		_advance_construction(construction_tick_accum)
+		construction_tick_accum = fmod(construction_tick_accum, 0.25)
 	if mode == "mayor" and mayor_camera != null:
 		var ground: float = core.world_height_at(
 			SEED, mayor_camera.target.x, mayor_camera.target.z
@@ -118,6 +125,11 @@ func _unhandled_input(event: InputEvent) -> void:
 					_edit_target(1)
 				KEY_Z:
 					_edit_target(-1)
+				KEY_C:
+					_toggle_crew()
+				KEY_V:
+					core.construction_add_materials(10000)
+					_update_hud()
 				KEY_DELETE:
 					_clear_placements()
 				KEY_ENTER, KEY_KP_ENTER:
@@ -285,6 +297,11 @@ func _setup_ghost() -> void:
 	foundation_material.albedo_color = Color(0.45, 0.45, 0.42)
 	foundation_material.roughness = 1.0
 	foundation_material.metallic = 0.0
+	construction_material = StandardMaterial3D.new()
+	construction_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	construction_material.albedo_color = Color(0.95, 0.62, 0.25, 0.55)
+	construction_material.roughness = 1.0
+	construction_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 func _setup_selection() -> void:
 	selection_box = MeshInstance3D.new()
@@ -409,11 +426,12 @@ func _update_hud() -> void:
 			SEED, blueprint_name,
 		]
 	else:
-		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower\nLMB place · RMB select · Enter: enter selected building · F5 save · F9 load" % [
+		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower\nLMB place · RMB select · Enter: enter selected building\nC crew on/off · V +10k materials · F5 save · F9 load" % [
 			SEED, blueprint_name, rooms, capacity,
 		]
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
-	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Terrain edits: %d   Save: %s" % [
+	var construction: Dictionary = core.construction_summary()
+	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Terrain edits: %d   Construction: %d active / %d stalled\nCrew: %d   Materials: %d L   Save: %s" % [
 		selected_line,
 		int(target_x),
 		int(target_z),
@@ -421,6 +439,10 @@ func _update_hud() -> void:
 		state,
 		core.world_placement_count(),
 		core.terrain_delta_count(),
+		int(construction.get("active", 0)),
+		int(construction.get("stalled", 0)),
+		int(construction.get("crew_capacity", 0)),
+		int(construction.get("materials_stock", 0)),
 		save_path,
 	]
 
@@ -641,34 +663,61 @@ func _place_at_target() -> bool:
 		_set_modal("Placement failed: " + preview_error, true)
 		_update_hud()
 		return false
-	_add_placement_node(result.get("placement", {}))
-	_set_modal("", false)
+	_add_placement_visual(result.get("placement", {}))
+	_set_modal("Construction site created", false)
 	_refresh_preview(true)
 	return true
 
-func _add_placement_node(placement: Dictionary) -> void:
+func _add_placement_visual(placement: Dictionary, site_override: Dictionary = {}) -> void:
+	var site := site_override
+	if site.is_empty():
+		site = _construction_site_for(int(placement.get("id", -1)))
+	if site.is_empty() or bool(site.get("complete", false)):
+		_add_placement_node(placement)
+	else:
+		_add_construction_node(placement, site)
+
+func _construction_index() -> Dictionary:
+	var index: Dictionary = {}
+	var state: Dictionary = core.construction_sites()
+	for site in state.get("sites", []):
+		index[int(site.get("id", -1))] = site
+	return index
+
+func _construction_site_for(id: int) -> Dictionary:
+	if id < 0:
+		return {}
+	var state: Dictionary = core.construction_sites()
+	for site in state.get("sites", []):
+		if int(site.get("id", -1)) == id:
+			return site
+	return {}
+
+func _create_placement_pivot(
+	placement: Dictionary, material: StandardMaterial3D, y_scale: float
+) -> Node3D:
 	var id := int(placement.get("id", -1))
 	if id < 0 or placed_nodes.has(id):
-		return
+		return null
 	var path := str(placement.get("blueprint_path", blueprint_path))
 	var mesh: ArrayMesh = mesh_cache.get(path)
 	if mesh == null:
 		mesh = core.build_blueprint_mesh(path)
 		if mesh.get_surface_count() == 0:
-			return
+			return null
 		mesh_cache[path] = mesh
 	var bounds: PackedFloat32Array = placement.get("bounds", PackedFloat32Array())
 	var center: PackedFloat32Array = placement.get("center", PackedFloat32Array())
-	var footprint: PackedFloat32Array = placement.get("footprint", PackedFloat32Array())
-	if bounds.size() != 3 or center.size() != 3 or footprint.size() != 2:
-		return
+	if bounds.size() != 3 or center.size() != 3:
+		return null
 	var pivot := Node3D.new()
 	pivot.position = Vector3(center[0], center[1], center[2])
 	pivot.rotation_degrees = Vector3(0.0, float(placement.get("rotation_deg", 0)), 0.0)
 	var mesh_node := MeshInstance3D.new()
 	mesh_node.mesh = mesh
 	mesh_node.position = Vector3(-bounds[0] * 0.5, 0.0, -bounds[2] * 0.5)
-	mesh_node.material_override = placed_material
+	mesh_node.scale.y = maxf(y_scale, 0.01)
+	mesh_node.material_override = material
 	pivot.add_child(mesh_node)
 	var foundation := float(placement.get("foundation_m", 0.0))
 	if foundation > 0.001:
@@ -679,14 +728,93 @@ func _add_placement_node(placement: Dictionary) -> void:
 		foundation_node.position = Vector3(0.0, -foundation * 0.5, 0.0)
 		foundation_node.material_override = foundation_material
 		pivot.add_child(foundation_node)
+	return pivot
+
+func _add_placement_node(placement: Dictionary) -> void:
+	var pivot := _create_placement_pivot(placement, placed_material, 1.0)
+	if pivot == null:
+		return
+	placed_root.add_child(pivot)
+	placed_nodes[int(placement.get("id", -1))] = pivot
+
+func _add_construction_node(placement: Dictionary, site: Dictionary) -> void:
+	var id := int(placement.get("id", -1))
+	var progress := clampf(float(site.get("progress", 0.0)), 0.02, 0.98)
+	var pivot := _create_placement_pivot(placement, construction_material, progress)
+	if pivot == null:
+		return
+	var bounds: PackedFloat32Array = placement.get("bounds", PackedFloat32Array())
+	var label := Label3D.new()
+	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	label.no_depth_test = true
+	label.font_size = 28
+	label.position = Vector3(0.0, (bounds[1] if bounds.size() == 3 else 6.0) + 1.2, 0.0)
+	label.text = _construction_label(site)
+	pivot.add_child(label)
 	placed_root.add_child(pivot)
 	placed_nodes[id] = pivot
+	construction_nodes[id] = {
+		"pivot": pivot,
+		"mesh": pivot.get_child(0),
+		"label": label,
+		"placement": placement,
+	}
+
+func _construction_label(site: Dictionary) -> String:
+	var phase := str(site.get("phase_label", site.get("phase", "Construction")))
+	var percent := roundi(float(site.get("progress", 0.0)) * 100.0)
+	var stall := str(site.get("stall_reason", ""))
+	if stall != "":
+		return "%s %d%% · stalled: %s" % [phase, percent, stall]
+	return "%s %d%%" % [phase, percent]
+
+func _refresh_construction_visuals() -> void:
+	if construction_nodes.is_empty():
+		return
+	var state: Dictionary = core.construction_sites()
+	var sites: Dictionary = {}
+	for site in state.get("sites", []):
+		sites[int(site.get("id", -1))] = site
+	for id in construction_nodes.keys().duplicate():
+		var entry: Dictionary = construction_nodes[id]
+		var site: Dictionary = sites.get(id, {})
+		if site.is_empty() or bool(site.get("complete", false)):
+			var pivot: Node3D = entry.get("pivot")
+			if is_instance_valid(pivot):
+				pivot.free()
+			placed_nodes.erase(id)
+			construction_nodes.erase(id)
+			_add_placement_node(entry.get("placement", {}))
+			continue
+		var mesh: MeshInstance3D = entry.get("mesh")
+		var label: Label3D = entry.get("label")
+		if is_instance_valid(mesh):
+			mesh.scale.y = clampf(float(site.get("progress", 0.0)), 0.02, 0.98)
+		if is_instance_valid(label):
+			label.text = _construction_label(site)
+
+func _advance_construction(seconds: float) -> Dictionary:
+	if seconds <= 0.0:
+		return {}
+	var report: Dictionary = core.construction_tick(seconds)
+	_refresh_construction_visuals()
+	_update_hud()
+	return report
+
+func _toggle_crew() -> void:
+	var summary: Dictionary = core.construction_summary()
+	var capacity := int(summary.get("crew_capacity", 4))
+	var next := 0 if capacity > 0 else 4
+	if core.construction_set_crew(next):
+		_set_modal("Construction crew: %d" % next, false)
+	_update_hud()
 
 func _clear_placed_nodes() -> void:
 	for node in placed_nodes.values():
 		if is_instance_valid(node):
 			node.free()
 	placed_nodes.clear()
+	construction_nodes.clear()
 
 func _clear_placements() -> void:
 	_clear_selection()
@@ -700,8 +828,9 @@ func _save_world() -> bool:
 	var result: Dictionary = core.world_save(save_path)
 	var ok := bool(result.get("ok", false))
 	if ok:
-		_set_modal("Saved %d placement(s), %d terrain edit(s) to %s" % [
-			core.world_placement_count(), core.terrain_delta_count(), save_path
+		_set_modal("Saved %d placement(s), %d terrain edit(s), %d site(s) to %s" % [
+			core.world_placement_count(), core.terrain_delta_count(),
+			int(result.get("construction_sites", 0)), save_path
 		], false)
 	else:
 		_set_modal("Save failed: " + str(result.get("error_code", result.get("error", ""))), true)
@@ -718,8 +847,11 @@ func _load_world() -> bool:
 	_clear_placed_nodes()
 	streamer.invalidate_all()
 	var state: Dictionary = core.world_placements()
+	var construction_index := _construction_index()
 	for placement in state.get("placements", []):
-		_add_placement_node(placement)
+		_add_placement_visual(
+			placement, construction_index.get(int(placement.get("id", -1)), {})
+		)
 	if placed_nodes.size() != int(state.get("count", -1)):
 		_set_modal(
 			"Loaded %d placement(s) but rebuilt %d" % [
@@ -764,6 +896,8 @@ func _run_scene_smoke() -> void:
 	var select_ok := false
 	var enter_ok := false
 	var return_ok := false
+	var build_ok := false
+	var build_done_ok := false
 	var save_ok := false
 	var clear_ok := false
 	var load_ok := false
@@ -811,6 +945,17 @@ func _run_scene_smoke() -> void:
 		status = "place_failed:" + preview_error
 
 	if status == "ok":
+		var site := _construction_site_for(1)
+		build_ok = not site.is_empty() and core.construction_summary().sites == 1
+		build_ok = build_ok and construction_nodes.has(1) and int(site.get("crew_required", 0)) >= 1
+		var before_progress := float(site.get("progress", 0.0))
+		_advance_construction(2.0)
+		var after_site := _construction_site_for(1)
+		build_ok = build_ok and float(after_site.get("progress", 0.0)) > before_progress
+		if not build_ok:
+			status = "construction_failed"
+
+	if status == "ok":
 		mayor_camera.focus(Vector3(FIXTURE_X, 42.0, FIXTURE_Z), 60.0)
 		mayor_camera.current = true
 		architect_camera.current = false
@@ -846,7 +991,9 @@ func _run_scene_smoke() -> void:
 		elif not return_ok:
 			status = "return_failed"
 
+	var saved_site_progress := 0.0
 	if status == "ok":
+		saved_site_progress = float(_construction_site_for(1).get("progress", 0.0))
 		save_ok = _save_world()
 		if not save_ok:
 			status = "save_failed"
@@ -855,6 +1002,7 @@ func _run_scene_smoke() -> void:
 		var edit_checksum := str(core.terrain_delta_checksum())
 		_clear_placements()
 		clear_ok = core.world_placement_count() == 0 and placed_root.get_child_count() == 0
+		clear_ok = clear_ok and core.construction_summary().sites == 0
 		if not clear_ok:
 			status = "clear_failed"
 		else:
@@ -869,6 +1017,26 @@ func _run_scene_smoke() -> void:
 				load_ok = load_ok and absf(core.world_height_at(SEED, FIXTURE_X, FIXTURE_Z) - 42.0) < 0.001
 				load_ok = load_ok and str(core.terrain_delta_checksum()) == edit_checksum
 				load_ok = load_ok and core.terrain_deltas_seed() == SEED
+				load_ok = load_ok and construction_nodes.has(1) and not placed_nodes.is_empty()
+				var loaded_site := _construction_site_for(1)
+				load_ok = load_ok and absf(float(loaded_site.get("progress", -1.0)) - saved_site_progress) < 0.001
+				var loaded_entry: Dictionary = construction_nodes.get(1, {})
+				var loaded_mesh: MeshInstance3D = loaded_entry.get("mesh")
+				var loaded_label: Label3D = loaded_entry.get("label")
+				load_ok = load_ok and is_instance_valid(loaded_mesh)
+				load_ok = load_ok and absf(loaded_mesh.scale.y - saved_site_progress) < 0.01
+				load_ok = load_ok and is_instance_valid(loaded_label) and loaded_label.text.contains("%")
+			if load_ok:
+				_advance_construction(1000.0)
+				var done_site := _construction_site_for(1)
+				build_done_ok = bool(done_site.get("complete", false)) and construction_nodes.is_empty()
+				build_done_ok = build_done_ok and placed_nodes.has(1) and placed_root.get_child_count() == 1
+				build_done_ok = build_done_ok and _foundation_matches_bounds(placed_root.get_child(0))
+				var finished_mesh := placed_root.get_child(0).get_child(0) as MeshInstance3D
+				build_done_ok = build_done_ok and finished_mesh != null and finished_mesh.material_override == placed_material
+				build_done_ok = build_done_ok and absf(finished_mesh.scale.y - 1.0) < 0.001
+				if not build_done_ok:
+					status = "construction_complete_failed"
 			if not load_ok:
 				status = "load_failed"
 
@@ -892,13 +1060,15 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s build=%s done=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
 		"ok" if rotation_ok else "failed",
 		"ok" if edit_ok else "failed",
 		"ok" if place_ok else "failed",
+		"ok" if build_ok else "failed",
+		"ok" if build_done_ok else "failed",
 		"ok" if select_ok else "failed",
 		"ok" if enter_ok else "failed",
 		"ok" if return_ok else "failed",
