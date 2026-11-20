@@ -883,7 +883,8 @@ impl TownsmithCore {
     /// The fixture lives in `core_rooms::demo`: 8 m × 6 m × 6 m, two floors,
     /// kitchen, bathroom, two bedrooms, doors, windows, and eight props. It is
     /// shared by the room benchmark and the end-to-end slice smoke so the
-    /// acceptance numbers cannot drift between them.
+    /// acceptance numbers cannot drift between them. This always installs the
+    /// default 5 × 3 × 5 chunk volume (16 m × 9.6 m × 16 m).
     ///
     /// Returns `false` when no editor volume exists.
     ///
@@ -898,6 +899,7 @@ impl TownsmithCore {
             return false;
         }
         let mut state = EditorState::new(room_demo::acceptance_house());
+        let dims = state.volume.config().voxels();
         state.props = room_demo::acceptance_props()
             .into_iter()
             .filter_map(|prop| {
@@ -909,9 +911,16 @@ impl TownsmithCore {
                 if cell.iter().any(|value| *value < 0.0) {
                     return None;
                 }
+                let cell = [cell[0] as u32, cell[1] as u32, cell[2] as u32];
+                if cell[0] as usize >= dims[0]
+                    || cell[1] as usize >= dims[1]
+                    || cell[2] as usize >= dims[2]
+                {
+                    return None;
+                }
                 Some(EditorProp {
                     kind: prop.kind,
-                    cell: [cell[0] as u32, cell[1] as u32, cell[2] as u32],
+                    cell,
                     rotation: 0.0,
                 })
             })
@@ -1284,7 +1293,16 @@ impl TownsmithCore {
         let hash = blueprint.metadata.content_hash.clone();
         let solid_voxels = blueprint.metadata.solid_voxels;
         let (materials, _) = count_materials(&blueprint.volume);
-        let material_cost = slice_material_cost(&materials);
+        let computed_cost = slice_material_cost(&materials);
+        // Prefer a plausible stored value so save/load proves the metadata
+        // roundtrip. Older packages without the field, or corrupt values, use
+        // the current price table. Gameplay must still re-derive cost.
+        let stored_cost = blueprint.metadata.stats.material_cost;
+        let material_cost = if stored_cost.is_finite() && stored_cost > 0.0 {
+            stored_cost
+        } else {
+            computed_cost
+        };
         let bounds = PackedFloat32Array::from(blueprint.metadata.bounds_m.to_vec());
         let rooms = blueprint.metadata.rooms.len() as i64;
         let name = blueprint.metadata.name.clone();

@@ -26,7 +26,7 @@ tags:
 | Criterion | Result | Evidence |
 |---|---|---|
 | 2-story house with 2 bedrooms, kitchen, bathroom | **Pass** | `core_rooms::demo::acceptance_house`: 4 rooms, 2 bedrooms, 1 kitchen, 1 bathroom |
-| Save, reload, place a copy | **Pass** | `.tsbp` hash equal after load; `build_blueprint_mesh()` copy at +20 m, equal AABB |
+| Save, reload, place a copy | **Pass** | `.tsbp` hash equal after load; `build_blueprint_mesh()` copy at +20 m with equal vertex/index arrays and AABB |
 | Capacity, cost, rooms | **Pass** | capacity 2, jobs 2, cost **38,028.8**, 64,224 solid voxels |
 | 60 FPS with 21 houses | **Pass** | RTX 4080 1080p: **6,195 FPS avg / 4,484 1% low**, 0 hitches; [[39 - Slice House Benchmark]] |
 | 500 edits, undo/redo, save/load | **Pass** | 500 random edits; undo and redo content hashes match the before/after packages |
@@ -59,7 +59,7 @@ BLUEPRINT_SMOKE solid=257 props=1 hash=blake3:... status=ok
 SLICE_HOUSE_SMOKE instances=21 quads=293 status=ok
 ```
 
-The workspace suite is **185 tests + 1 doctest**, all green. Linux, Windows, and Godot headless CI run the same gates.
+The workspace suite is **185 tests + 1 doctest**, all green. Linux and Windows run the Rust gates; the Linux Godot job runs the headless smokes (Windows does not run Godot yet).
 
 ## 4. Cost model
 
@@ -89,7 +89,7 @@ The cost is stored in `stats.material_cost` in `blueprint.json`. Zero is omitted
 
 ## 5. What “place a copy” means in this slice
 
-The editor owns one volume. The acceptance scene saves the house to `.tsbp`, reloads it, and calls `build_blueprint_mesh(path)` to mesh the same package as a second `MeshInstance3D` at +20 m. The copy's surface count and AABB match the edited volume. This proves the package → mesh path that city placement will use in Phase 2.
+The editor owns one volume. The acceptance scene saves the house to `.tsbp`, reloads it, and calls `build_blueprint_mesh(path)` to mesh the same package as a second `MeshInstance3D` at +20 m. The copy's surface count, vertex/index arrays, and AABB match the edited volume. This proves the package → mesh path that city placement will use in Phase 2.
 
 In-editor selection/copy/paste/rotate/mirror remains deferred; see [[26 - Vertical Slice Spec]] §3.
 

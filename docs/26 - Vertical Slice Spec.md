@@ -172,7 +172,7 @@ v1 ships BLAKE3 and a Stored zip; zstd (and deflate) are future format versions.
 |---|---|---|
 | Build a 2-story house with 2 bedrooms, kitchen, bathroom | Test house passes room detection with exactly those rooms | **Pass** — shared `core_rooms::demo` fixture: 4 rooms, 2 bedrooms, 1 kitchen, 1 bathroom |
 | Save, reload, place a copy | `.tsbp` roundtrip hash equal; copy placement identical | **Pass** — hash equal after load; `build_blueprint_mesh()` places a copy at +20 m in the acceptance scene |
-| Stats report capacity, cost, rooms correctly | Golden JSON for the test house; ±1% cost tolerance | **Pass** — capacity 2, jobs 2, cost **38,028.8** at 64,224 solid voxels |
+| Stats report capacity, cost, rooms correctly | Golden expected values in the acceptance smoke; ±1% cost tolerance | **Pass** — capacity 2, jobs 2, cost **38,028.8** at 64,224 solid voxels |
 | 60 FPS with house + 21 copies in view | **Pass** on RTX 4080: 6,195 FPS avg / 4,484 1% low, p99 0.22 ms; see [[39 - Slice House Benchmark]] | **Pass** |
 | No data loss on undo/redo or save/load | 500 random edits + undo/redo replay; save/load hash equal | **Pass** — 500 deterministic edits, undo/redo content hashes equal |
 | EN/DE UI without missing keys or clipped text | 0 missing keys; placeholder lint pass; German layout review | **Pass mechanically** — 95 keys/locale, parity + placeholder checks, 16-control width budget; visual pass still recommended (Q-101) |

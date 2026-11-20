@@ -1459,16 +1459,23 @@ func _run_acceptance_smoke() -> void:
 		elif not copy_mesh.get_aabb().size.is_equal_approx(editor_mesh.get_aabb().size):
 			status = "copy_aabb"
 		else:
-			var copy := MeshInstance3D.new()
-			copy.name = "BlueprintCopy"
-			copy.mesh = copy_mesh
-			copy.position = Vector3(20.0, 0.0, 0.0)
-			copy.material_override = _flat_material(VOXEL_COLOR)
-			add_child(copy)
-			if get_node_or_null("BlueprintCopy") == null:
-				status = "copy_node"
+			var editor_arrays := editor_mesh.surface_get_arrays(0)
+			var copy_arrays := copy_mesh.surface_get_arrays(0)
+			if editor_arrays[Mesh.ARRAY_VERTEX] != copy_arrays[Mesh.ARRAY_VERTEX]:
+				status = "copy_vertices"
+			elif editor_arrays[Mesh.ARRAY_INDEX] != copy_arrays[Mesh.ARRAY_INDEX]:
+				status = "copy_indices"
 			else:
-				copy_status = "ok"
+				var copy := MeshInstance3D.new()
+				copy.name = "BlueprintCopy"
+				copy.mesh = copy_mesh
+				copy.position = Vector3(20.0, 0.0, 0.0)
+				copy.material_override = _flat_material(VOXEL_COLOR)
+				add_child(copy)
+				if get_node_or_null("BlueprintCopy") == null:
+					status = "copy_node"
+				else:
+					copy_status = "ok"
 
 	if status == "ok":
 		_history.clear()
@@ -1492,27 +1499,30 @@ func _run_acceptance_smoke() -> void:
 				status = "undo_save"
 			else:
 				var edited_hash := str(edited.get("hash", ""))
-				for _index in 500:
-					_undo_last()
-				if not _history.is_empty() or _redo.size() != 500:
-					status = "undo_replay"
+				if edited_hash == baseline_hash:
+					status = "undo_noop"
 				else:
-					var undone: Dictionary = _core.editor_save_blueprint(
-						undo_path, "local:slice_acceptance", "Slice Acceptance")
-					if not bool(undone.get("ok", false)) or str(undone.get("hash", "")) != baseline_hash:
-						status = "undo_hash"
+					for _index in 500:
+						_undo_last()
+					if not _history.is_empty() or _redo.size() != 500:
+						status = "undo_replay"
 					else:
-						for _index in 500:
-							_redo_last()
-						if _redo.size() != 0 or _history.size() != 500:
-							status = "redo_replay"
+						var undone: Dictionary = _core.editor_save_blueprint(
+							undo_path, "local:slice_acceptance", "Slice Acceptance")
+						if not bool(undone.get("ok", false)) or str(undone.get("hash", "")) != baseline_hash:
+							status = "undo_hash"
 						else:
-							var redone: Dictionary = _core.editor_save_blueprint(
-								redo_path, "local:slice_acceptance_edited", "Slice Acceptance Edited")
-							if not bool(redone.get("ok", false)) or str(redone.get("hash", "")) != edited_hash:
-								status = "redo_hash"
+							for _index in 500:
+								_redo_last()
+							if _redo.size() != 0 or _history.size() != 500:
+								status = "redo_replay"
 							else:
-								undo_status = "ok"
+								var redone: Dictionary = _core.editor_save_blueprint(
+									redo_path, "local:slice_acceptance_edited", "Slice Acceptance Edited")
+								if not bool(redone.get("ok", false)) or str(redone.get("hash", "")) != edited_hash:
+									status = "redo_hash"
+								else:
+									undo_status = "ok"
 
 	for path in [save_path, edited_path, undo_path, redo_path]:
 		if FileAccess.file_exists(path):
