@@ -67,6 +67,20 @@ if [[ "$ROOMS" != "1" || "$NODES" != "2" || "$TYPE" != "bedroom" || "$CAPACITY" 
 	exit 1
 fi
 
+PANEL_LINE="$(grep "ROOM_PANEL_SMOKE " <<<"$OUTPUT" | tail -1 || true)"
+if [[ -z "$PANEL_LINE" ]]; then
+	echo "Room panel smoke failed: no marker" >&2
+	exit 1
+fi
+PANEL_ROOMS="$(sed -n 's/.*rooms=\([0-9][0-9]*\).*/\1/p' <<<"$PANEL_LINE")"
+PANEL_SELECTED="$(sed -n 's/.*selected=\([a-z_]*\).*/\1/p' <<<"$PANEL_LINE")"
+PANEL_CAPACITY="$(sed -n 's/.*capacity=\([0-9][0-9]*\).*/\1/p' <<<"$PANEL_LINE")"
+PANEL_STATUS="$(sed -n 's/.*status=\([a-z_]*\).*/\1/p' <<<"$PANEL_LINE")"
+if [[ "$PANEL_ROOMS" != "1" || "$PANEL_SELECTED" != "bedroom" || "$PANEL_CAPACITY" != "1" || "$PANEL_STATUS" != "ok" ]]; then
+	echo "Room panel smoke contract mismatch: $PANEL_LINE" >&2
+	exit 1
+fi
+
 set +e
 OUTPUT="$(timeout 60s "$GODOT_BIN" --headless --path "$ROOT/godot" res://editor.tscn -- --undo-smoke 2>&1)"
 GODOT_STATUS=$?

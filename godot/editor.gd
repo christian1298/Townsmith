@@ -58,6 +58,11 @@ const DEFAULT_BLUEPRINT_NAME := "River House"
 const BLUEPRINT_DIR := "user://blueprints"
 const BLUEPRINT_EXT := "tsbp"
 const ROOM_OVERLAY_HEIGHT_M := 2.8
+const ROOM_SELECTED_COLOR := Color(1.0, 0.9, 0.35)
+const FLOOR_BAND_M := 3.0
+const PROP_KIND_BED := 0
+const PROP_KIND_DESK := 7
+const ROOM_PANEL_WIDTH := 500.0
 const MAX_HISTORY := 500
 
 var _core
@@ -78,6 +83,11 @@ var _save_dialog: FileDialog
 var _load_dialog: FileDialog
 var _room_overlay: Node3D
 var _room_overlay_on := false
+var _room_panel: PanelContainer
+var _room_panel_label: RichTextLabel
+var _room_panel_plain := ""
+var _room_stats_cache: Dictionary = {}
+var _selected_room := -1
 var _prop_root: Node3D
 var _prop_nodes: Dictionary = {}
 var _active_prop := -1
@@ -151,6 +161,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 		if key == KEY_R:
 			_toggle_room_overlay()
+			return
+		if event.keycode == KEY_BRACKETLEFT:
+			_cycle_room(-1)
+			return
+		if event.keycode == KEY_BRACKETRIGHT:
+			_cycle_room(1)
 			return
 		for index in PROPS.size():
 			if key == KEY_6 + index:
@@ -442,14 +458,16 @@ func _rebuild_volume_mesh() -> void:
 	if _room_overlay_on:
 		_rebuild_room_overlay()
 
-## Toggle the translucent room boxes/labels. Detection runs on demand.
+## Toggle the translucent room boxes/labels and the stats panel. Detection
+## runs on demand. Selection is retained while the room view is hidden.
 func _toggle_room_overlay() -> void:
 	if _room_overlay != null:
 		remove_child(_room_overlay)
 		_room_overlay.queue_free()
 		_room_overlay = null
 		_room_overlay_on = false
-		_set_status("Room overlay off")
+		_set_room_panel_visible(false)
+		_set_status("Room view off")
 		return
 	_room_overlay_on = true
 	_rebuild_room_overlay()
@@ -468,29 +486,46 @@ func _rebuild_room_overlay() -> void:
 		_room_overlay.queue_free()
 		_room_overlay = null
 		_room_overlay_on = false
+		_set_room_panel_visible(false)
 		_set_status("Room overlay failed: %s" % str(stats.get("error", "unknown error")))
 		return
+	_room_stats_cache = stats
 	var rooms: Array = stats.get("rooms", [])
-	for room in rooms:
+	if rooms.is_empty():
+		_selected_room = -1
+	elif _selected_room < 0:
+		_selected_room = 0
+	else:
+		_selected_room = clampi(_selected_room, 0, rooms.size() - 1)
+
+	for index in rooms.size():
+		var room: Dictionary = rooms[index]
 		var bounds: PackedFloat32Array = room.get("bounds_m", PackedFloat32Array())
 		var center: PackedFloat32Array = room.get("center_m", PackedFloat32Array())
 		if bounds.size() < 4 or center.size() < 3:
 			continue
 		var kind := str(room.get("type", "room"))
-		var color := _room_color(kind)
+		var selected := index == _selected_room
+		var color := ROOM_SELECTED_COLOR if selected else _room_color(kind)
+		var alpha := 0.45 if selected else 0.22
 		var width := bounds[2] - bounds[0]
 		var depth := bounds[3] - bounds[1]
 		var box := BoxMesh.new()
 		box.size = Vector3(width, ROOM_OVERLAY_HEIGHT_M, depth)
 		var instance := MeshInstance3D.new()
 		instance.mesh = box
-		instance.material_override = _room_material(color)
+		instance.material_override = _room_material(color, alpha)
 		instance.position = _volume_origin + Vector3(center[0], center[1], center[2])
 		instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		_room_overlay.add_child(instance)
 
 		var label := Label3D.new()
-		label.text = "%s\n%.1f m²" % [kind, float(room.get("area_m2", 0.0))]
+		label.text = "%s%s\n%s\n%.1f m²" % [
+			"> " if selected else "",
+			kind,
+			str(room.get("id", "room_%d" % index)),
+			float(room.get("area_m2", 0.0)),
+		]
 		label.position = instance.position + Vector3(0.0, ROOM_OVERLAY_HEIGHT_M * 0.5 + 0.4, 0.0)
 		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		label.no_depth_test = false
@@ -500,15 +535,17 @@ func _rebuild_room_overlay() -> void:
 		label.modulate = color
 		_room_overlay.add_child(label)
 
-	_set_status("Room overlay: %d room(s), capacity %d, jobs %d" % [
+	_set_room_panel_visible(true)
+	_refresh_room_panel(stats)
+	_set_status("Room view: %d room(s), capacity %d, jobs %d  ([ ] select, R hide)" % [
 		rooms.size(),
 		int(stats.get("resident_capacity", 0)),
 		int(stats.get("job_slots", 0)),
 	])
 
-func _room_material(color: Color) -> StandardMaterial3D:
+func _room_material(color: Color, alpha: float = 0.22) -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(color.r, color.g, color.b, 0.22)
+	material.albedo_color = Color(color.r, color.g, color.b, alpha)
 	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
@@ -528,6 +565,185 @@ func _room_color(kind: String) -> Color:
 			return Color(0.45, 0.9, 0.45)
 		_:
 			return Color(0.8, 0.8, 0.8)
+
+## Build the read-only room/stats panel on the right side of the editor UI.
+##
+## The panel is populated from the same `editor_room_stats()` snapshot as the
+## 3D overlay, so both views always agree. It starts hidden and is shown by
+## the room view toggle (R).
+func _build_room_panel(parent: Control) -> void:
+	_room_panel = PanelContainer.new()
+	_room_panel.name = "RoomStatsPanel"
+	_room_panel.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	_room_panel.offset_left = -ROOM_PANEL_WIDTH - 16.0
+	_room_panel.offset_right = -16.0
+	_room_panel.offset_top = 136.0
+	_room_panel.offset_bottom = 496.0
+	_room_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_room_panel.visible = false
+
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.04, 0.05, 0.07, 0.82)
+	style.border_color = Color(1.0, 1.0, 1.0, 0.18)
+	style.set_border_width_all(1)
+	style.set_corner_radius_all(6)
+	style.set_content_margin_all(10)
+	_room_panel.add_theme_stylebox_override("panel", style)
+
+	_room_panel_label = RichTextLabel.new()
+	_room_panel_label.name = "RoomStatsText"
+	_room_panel_label.bbcode_enabled = false
+	_room_panel_label.fit_content = false
+	_room_panel_label.scroll_active = true
+	_room_panel_label.autowrap_mode = TextServer.AUTOWRAP_OFF
+	_room_panel_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_room_panel_label.add_theme_font_size_override("normal_font_size", 13)
+	_room_panel.add_child(_room_panel_label)
+	parent.add_child(_room_panel)
+
+func _set_room_panel_visible(is_visible: bool) -> void:
+	if _room_panel != null:
+		_room_panel.visible = is_visible
+
+## Rebuild the panel text from a room-stats snapshot.
+##
+## Passing `stats` avoids a second detection pass when the caller (the overlay)
+## already queried it. Selection is clamped to the new room count.
+func _refresh_room_panel(stats: Dictionary = {}) -> void:
+	if _room_panel_label == null:
+		return
+	if stats.is_empty():
+		stats = _core.editor_room_stats()
+	if not bool(stats.get("ok", false)):
+		_selected_room = -1
+		_room_stats_cache = {}
+		_set_room_panel_text("ROOM STATS\nstats unavailable: %s" % str(stats.get("error", "unknown")))
+		return
+	_room_stats_cache = stats
+	var rooms: Array = stats.get("rooms", [])
+	if rooms.is_empty():
+		_selected_room = -1
+	elif _selected_room < 0:
+		_selected_room = 0
+	else:
+		_selected_room = clampi(_selected_room, 0, rooms.size() - 1)
+
+	var props: Array = _core.editor_props().get("props", [])
+	var materials: Dictionary = stats.get("materials", {})
+	var material_count := materials.size()
+	var lines := PackedStringArray([
+		"ROOM STATS   [ ] select room   R hide",
+		"rooms %d · capacity %d · jobs %d · class %s" % [
+			rooms.size(),
+			int(stats.get("resident_capacity", 0)),
+			int(stats.get("job_slots", 0)),
+			str(stats.get("class", "unknown")),
+		],
+		"solid %d · material kinds %d" % [
+			int(stats.get("solid_voxels", 0)),
+			material_count,
+		],
+		"",
+	])
+	if rooms.is_empty():
+		lines.append("no enclosed rooms")
+	else:
+		for index in rooms.size():
+			lines.append(_format_room_line(rooms[index], index))
+		lines.append("")
+		lines.append(_format_room_detail(rooms[_selected_room], _selected_room, props))
+	_set_room_panel_text("\n".join(lines))
+
+func _set_room_panel_text(text: String) -> void:
+	_room_panel_plain = text
+	if _room_panel_label != null:
+		_room_panel_label.text = text
+
+func _format_room_line(room: Dictionary, index: int) -> String:
+	var marker := ">" if index == _selected_room else " "
+	return "%s %s · %s · floor %d · %.1f m² · beds %d · doors %d · windows %d" % [
+		marker,
+		str(room.get("id", "room_%d" % index)),
+		str(room.get("type", "room")),
+		int(room.get("floor", 0)),
+		float(room.get("area_m2", 0.0)),
+		int(room.get("beds", 0)),
+		int(room.get("doors", 0)),
+		int(room.get("windows", 0)),
+	]
+
+## One selected-room detail block.
+##
+## Capacity contribution is the room's beds. The bridge does not expose
+## per-room desk counts, so job contribution is counted from desk props whose
+## origin falls inside this room's X/Z bounds and 3 m floor band. That matches
+## the detector's prop-to-room assignment for normal layouts.
+func _format_room_detail(room: Dictionary, index: int, props: Array) -> String:
+	var floor_index := int(room.get("floor", 0))
+	var lines := PackedStringArray([
+		"selected %s · %s · floor %d" % [
+			str(room.get("id", "room_%d" % index)),
+			str(room.get("type", "room")),
+			floor_index,
+		],
+		"area %.1f m² · volume %.1f m³ · cap +%d · jobs +%d" % [
+			float(room.get("area_m2", 0.0)),
+			float(room.get("volume_m3", 0.0)),
+			int(room.get("beds", 0)),
+			_count_room_desks(room, props),
+		],
+	])
+	var bounds: PackedFloat32Array = room.get("bounds_m", PackedFloat32Array())
+	if bounds.size() >= 4:
+		lines.append("bounds x %.1f-%.1f m · z %.1f-%.1f m · y %.1f-%.1f m" % [
+			bounds[0], bounds[2],
+			bounds[1], bounds[3],
+			floor_index * FLOOR_BAND_M,
+			(floor_index + 1) * FLOOR_BAND_M,
+		])
+	return "\n".join(lines)
+
+func _count_room_desks(room: Dictionary, props: Array) -> int:
+	var bounds: PackedFloat32Array = room.get("bounds_m", PackedFloat32Array())
+	if bounds.size() < 4:
+		return 0
+	var floor_index := int(room.get("floor", 0))
+	var y_min := floor_index * FLOOR_BAND_M
+	var y_max := y_min + FLOOR_BAND_M
+	var count := 0
+	for prop in props:
+		if int(prop.get("kind", -1)) != PROP_KIND_DESK:
+			continue
+		var x := (float(prop.get("x", 0)) + 0.5) * _voxel_size_m
+		var y := float(prop.get("y", 0)) * _voxel_size_m
+		var z := (float(prop.get("z", 0)) + 0.5) * _voxel_size_m
+		if x < bounds[0] or x >= bounds[2] or z < bounds[1] or z >= bounds[3]:
+			continue
+		if y < y_min or y >= y_max:
+			continue
+		count += 1
+	return count
+
+## Cycle the selected room. `[` steps back, `]` steps forward.
+func _cycle_room(step: int) -> void:
+	if not _room_overlay_on:
+		_set_status("Room view is off (R)")
+		return
+	var rooms: Array = _room_stats_cache.get("rooms", [])
+	if rooms.is_empty():
+		_set_status("No rooms to select")
+		return
+	if _selected_room < 0:
+		_selected_room = 0
+	else:
+		_selected_room = posmod(_selected_room + step, rooms.size())
+	_rebuild_room_overlay()
+	var refreshed_rooms: Array = _room_stats_cache.get("rooms", [])
+	var selected: Dictionary = refreshed_rooms[_selected_room]
+	_set_status("Selected %s · %s  ([ ] cycle, R hide)" % [
+		str(selected.get("id", "room_%d" % _selected_room)),
+		str(selected.get("type", "room")),
+	])
 
 func _build_shell() -> void:
 	var world_environment := WorldEnvironment.new()
@@ -631,8 +847,10 @@ func _build_ui() -> void:
 	help.text = "\n".join(PackedStringArray([
 		"WASD move   Space/Ctrl up/down   Shift boost   Esc release mouse",
 		"Left click remove   Right click place   Keys 1-5 select material",
-		"R room overlay   Ctrl+Z undo   Ctrl+Y redo   F5 save   F9 load   Remesh 250 ms after edit",
+		"R room view   [ ] select room   Ctrl+Z undo   Ctrl+Y redo   F5 save   F9 load",
 	]))
+
+	_build_room_panel(ui)
 
 	var blueprint_bar := HBoxContainer.new()
 	blueprint_bar.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
@@ -866,6 +1084,8 @@ func _load_blueprint(path: String) -> bool:
 	_blueprint_name.text = str(result.get("name", _blueprint_name.text))
 	_history.clear()
 	_redo.clear()
+	_selected_room = -1
+	_room_stats_cache = {}
 	_remesh_pending = false
 	_rebuild_volume_mesh()
 	_refresh_prop_nodes()
@@ -1027,12 +1247,17 @@ func _run_undo_smoke() -> void:
 	print("UNDO_SMOKE undo=%s redo=%s status=%s" % [undo_status, redo_status, status])
 	get_tree().quit(0 if status == "ok" else 1)
 
-## Headless contract check for the room overlay.
+## Headless contract check for the room overlay and stats panel.
 ##
-## Builds a sealed room, toggles the overlay, and asserts the detector and
-## overlay node tree. Uses the same volume created in `_ready`.
+## Builds a sealed room, toggles the room view, and asserts the detector,
+## overlay node tree, panel text, and selected room. Uses the same volume
+## created in `_ready`.
 func _run_room_overlay_smoke() -> void:
 	var status := "ok"
+	var panel_status := "not_run"
+	var stats: Dictionary = {}
+	var rooms: Array = []
+	_build_room_smoke_ui()
 	if not _core.editor_fill_box(0, 0, 0, 40, 1, 40, 2):
 		status = "floor_failed"
 	elif not _core.editor_fill_box(0, 30, 0, 40, 31, 40, 3):
@@ -1053,8 +1278,8 @@ func _run_room_overlay_smoke() -> void:
 		status = "bed_failed"
 	else:
 		_toggle_room_overlay()
-		var stats: Dictionary = _core.editor_room_stats()
-		var rooms: Array = stats.get("rooms", [])
+		stats = _core.editor_room_stats()
+		rooms = stats.get("rooms", [])
 		if not bool(stats.get("ok", false)):
 			status = "stats_failed"
 		elif rooms.size() != 1:
@@ -1065,15 +1290,49 @@ func _run_room_overlay_smoke() -> void:
 			status = "capacity"
 		elif _room_overlay == null or _room_overlay.get_child_count() < 1:
 			status = "overlay_nodes"
+		elif _room_panel == null or not _room_panel.visible:
+			status = "panel_hidden"
+		elif not _room_panel_plain.contains("room_0 · bedroom"):
+			status = "panel_bedroom"
+		elif not _room_panel_plain.contains("capacity 1"):
+			status = "panel_capacity"
+		elif _selected_room < 0 or _selected_room >= rooms.size():
+			status = "panel_selected_range"
+		elif str(rooms[_selected_room].get("type", "")) != "bedroom":
+			status = "panel_selected"
 		else:
+			panel_status = "ok"
 			print("ROOM_OVERLAY_SMOKE rooms=%d nodes=%d type=%s capacity=%d status=ok" % [
 				rooms.size(), _room_overlay.get_child_count(),
 				str(rooms[0].get("type", "")), int(stats.get("resident_capacity", 0))])
+
+	var selected := "none"
+	if _selected_room >= 0 and _selected_room < rooms.size():
+		selected = str(rooms[_selected_room].get("type", "none"))
+	if status != "ok" and panel_status == "not_run":
+		panel_status = status
+	print("ROOM_PANEL_SMOKE rooms=%d selected=%s capacity=%d status=%s" % [
+		rooms.size(),
+		selected,
+		int(stats.get("resident_capacity", 0)),
+		panel_status,
+	])
 	if status != "ok":
 		print("ROOM_OVERLAY_SMOKE rooms=0 nodes=0 type=none capacity=0 status=%s" % status)
 		get_tree().quit(1)
 		return
 	get_tree().quit(0)
+
+## Minimal UI host so the headless smoke exercises the real panel builder.
+func _build_room_smoke_ui() -> void:
+	var layer := CanvasLayer.new()
+	layer.name = "RoomSmokeUI"
+	add_child(layer)
+	var ui := Control.new()
+	ui.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ui.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(ui)
+	_build_room_panel(ui)
 
 ## Headless contract check for CI.
 ##

@@ -51,7 +51,8 @@ GODOT=/path/to/godot ./scripts/run_godot.sh   # defaults to main.tscn
 | Right click | Place the active material or prop in the empty cell before the hit |
 | `1` … `5` | Select timber, stone, roof, glass, door |
 | `6` … `9` | Select bed, stove, toilet, desk prop |
-| `R` | Toggle the room overlay |
+| `R` | Toggle the room view: overlay boxes, labels, and stats panel |
+| `[` / `]` | Select previous/next room while the room view is open |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo the last voxel edit |
 | Mouse wheel | Unbound in v0 |
 
@@ -141,12 +142,12 @@ CI runs the script in the Godot headless smoke job after `smoke_volume.sh`.
 ## 8. Limitations
 
 - **Single-edit undo only.** Place/remove are undoable; multi-voxel tools and blueprint loads are not. See [[35 - Editor Undo Redo]].
-- **Room overlay is available**, but there is no room selection or separate room-stats panel yet.
+- **Room view includes a stats panel.** Press R to show boxes, labels, and the room list/detail panel; `[`/`]` selects a room. See [[37 - Room Stats Panel]].
 - **No walk mode or collision.** The camera flies; there is no gravity, capsule, or ground contact.
 - **No per-material rendering.** All voxels share one neutral material override.
 - **One-voxel brush.** There is no 2×2×2/3×3×3 brush, paint, pick, box, copy/paste, rotate, or mirror.
 - **Whole-volume remesh.** Every rebuild remeshes the entire 16 × 9.6 × 16 m volume on the main thread; no dirty-chunk path or worker yet.
-- **Room overlay is diagnostic.** Press R for room boxes/labels; there is no room selection, structural overlay, or cost panel yet.
+- **Room view is read-only.** Press R for boxes, labels, and the stats panel; there is no click-to-select, structural overlay, or cost panel yet.
 - **Localization is not wired.** The overlay strings are literal English; key-based strings arrive with [[16 - Localization]].
 - **Mouse capture is not focus-aware.** Losing window focus while captured is not handled beyond `Esc`.
 - **Single scene, no menus.** Launching the scene drops straight into the camera; there is no start screen, settings, or rebind UI.
