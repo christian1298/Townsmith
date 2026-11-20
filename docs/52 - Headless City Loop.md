@@ -50,16 +50,19 @@ completed buildings   50
 construction sites    0
 average commute       0 m
 daily wages           10,000
+balance               -27,500
+daily net             -4,250
 happiness             0.50
 food / water / rest   0 / 0 / 0
 ```
 
-Recorded checksum: `2982ae0599a9c56e` (FNV-1a over the compact JSON without the checksum field).
+Recorded checksum: `99107bbac66966c7` (FNV-1a over the compact JSON without the checksum field).
 
-Two secondary values are pinned:
+Three secondary values are pinned:
 
 - population runtime: `0f9c870855e6f78e`
 - construction store: `aa3e36ad3cc1e717`
+- treasury: `1b6a7631bd9dd0ac`
 
 ## 3. What it proves
 
@@ -78,7 +81,7 @@ The runner should not be used to claim “30 stable days” until 3.5 adds reple
 
 ## 5. Limits
 
-- No primary industries, food/water supply, utilities, services, taxes, or budget.
+- No primary industries, food/water supply, utilities, or services. Treasury/taxes are included [[53 - Treasury and Taxes]].
 - No traffic or road-distance commute; all homes/workplaces are co-located, so commute is zero.
 - One aggregate household per house; no named citizens.
 - The fixed grid does not validate terrain, roads, lots, or settlements.
@@ -88,7 +91,7 @@ The runner should not be used to claim “30 stable days” until 3.5 adds reple
 ## 6. Tests
 
 - `city_loop` bin test: five houses complete and fill 50 residents in one simulated day.
-- Workspace: **278 tests + 1 doctest**.
+- Workspace: **286 tests + 1 doctest**.
 
 ## 7. Next
 
