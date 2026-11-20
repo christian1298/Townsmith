@@ -19,10 +19,11 @@ tags:
 
 | Path | Purpose | Status |
 |---|---|---|
-| `crates/core_voxel` | 32³ chunk, palette/RLE, greedy mesher, chunked volume + cross-chunk meshing | Working, 49 tests |
+| `crates/core_voxel` | 32³ chunk, palette/RLE, greedy mesher, chunked volume + cross-chunk meshing | Working, 50 tests |
 | `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming, terrain mesh + LOD + seam skirts | Working, 58 tests |
 | `crates/core_sim` | 1M-scale cohort simulation plus deterministic 2,000 active agents | Working, 26 tests |
 | `crates/core_city` | Deterministic synthetic Early/Mid/Late city layouts for rendering benchmarks | Working, 10 tests |
+| `crates/core_blueprint` | `.tsbp` v1 package: zip, metadata, RLE voxel stream, BLAKE3 hash | Working, 8 tests |
 | `crates/server` | Headless cohort tick harness (no GPU, no socket yet) | Working |
 | `crates/bench` | Voxel, worldgen, terrain, cohort, active-agent, and city-layout microbenchmarks | Working |
 | `benchmarks/` | Route JSON, results, and benchmark notes | Harness v0 |
@@ -160,7 +161,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 | Terrain LOD 2, 256 m chunk | 65,536 cells | — | 25,327 quads | ~0.39 ms |
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **154 tests**: 49 voxel, 58 world, 26 simulation, 10 city, and 11 bridge tests.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **163 tests**: 50 voxel, 58 world, 26 simulation, 10 city, 8 blueprint, and 11 bridge tests.
 
 ## 3. Known limitations
 
@@ -169,24 +170,26 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 - LOD is distance-based (mesh stride), not a full imposter/HLOD pipeline. A 2 m perimeter skirt hides T-junction cracks between different LOD steps; extreme height differences, lighting seams, or biome color seams can still show.
 - The benchmark quads above are for the skirt-free `terrain_mesh_lod` path; streamed chunks add up to 1,024 skirt quads at LOD 1 (see [[21 - LOD Seams]]).
 - Boundary culling samples the deterministic generator, not live edited heights. Edited edge cells can render missing or doubled walls until the sampler reads the delta store.
-- No binary save format; palette/RLE and terrain deltas exist only as in-memory structs and a phase 0 blob.
-- The Godot benchmark has single-chunk and multi-chunk terrain routes; it is not the Early/Mid/Late city benchmark yet, and headless frame times are not render measurements.
+- Blueprint packages use `.tsbp` v1 (zip + RLE + BLAKE3). Terrain deltas still use the phase 0 blob; a world save format is later.
+- The Godot benchmark has terrain, streaming, and Early/Mid/Late box-city routes plus a 200-voxel-hut route; a real voxel city scene is later, and headless frame times are not render measurements.
 - Async chunk completion order is scheduling-dependent; the camera/settings are deterministic, but the frame at which a chunk appears is not yet deterministic (D-020 caveat).
 - The headless server has no networking, persistence, or commands yet; it only proves the CPU tick path.
 - Windows CI validates compile, clippy, and tests only. The Godot headless smoke, benchmark routes, and packaging stay Linux-only, and `godot/townsmith_core.gdextension` still declares only `linux.*` library paths, so a Windows Godot run needs `windows.*` entries before it can be added.
-- The engine choice is still **proposed** until the Phase 0 spike completes.
+- The engine choice is **accepted** (D-003); the 3060-class 1M 30 FPS gate remains a Phase 5 performance gate.
 
 ## 4. Next steps
 
-1. Add a depth-based shoreline/foam pass on top of the water shader.
-2. Run the Early/Mid/Late city routes on the 8-core/16-thread + RTX 3060-class target with a display.
-3. Measure the 30 FPS 1M-population (100k-building) rendering target and record FPS/1% lows/hitches.
-4. Decide D-003 (Godot + Rust) from measured results.
+1. Implement room detection and stats on the `VoxelVolume` (rooms, props, material cost, capacity).
+2. Build the first-person editor shell: camera, raycast place/remove, room overlay, save/load UI.
+3. Add English/German editor UI tables and the language selector.
+4. Run the 21-house / 60 FPS slice benchmark.
+5. Keep the 3060-class 1M performance gate open for Phase 5.
 
 ## 5. Commands
 
 ```bash
 cargo test -p core_voxel
+cargo test -p core_blueprint
 ./scripts/check.sh
 ./scripts/build_godot_ext.sh
 GODOT=/path/to/godot ./scripts/run_godot.sh
@@ -196,6 +199,7 @@ CITY_TIER=late GODOT=/path/to/godot ./scripts/bench_godot.sh 1 5 benchmarks/rout
 GODOT=/path/to/godot ./scripts/smoke_city.sh
 VOXEL_INSTANCES=200 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_voxel_instances.json
 GODOT=/path/to/godot ./scripts/smoke_voxel.sh
+GODOT=/path/to/godot ./scripts/smoke_volume.sh
 cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort
