@@ -6,8 +6,8 @@
 //! street grid, split into Early, Mid, and Late tiers.
 //!
 //! Phase 2 adds [`placement`]: the validated instance of a saved blueprint on
-//! the terrain, including slope, water, and overlap checks. Persistence lives in
-//! a follow-up module so the geometry rules can be reviewed on their own.
+//! the terrain, including slope, water, and overlap checks plus a small JSON
+//! save format.
 //!
 //! The crate is engine-agnostic and has no dependencies. It does not read
 //! terrain, generate road geometry, place citizens, or render anything. A shell
@@ -38,8 +38,8 @@ use std::fmt;
 
 pub use placement::{
     footprint_for, normalize_rotation, validate_placement, Placement, PlacementError,
-    PlacementPlan, PlacementRequest, MAX_BUILDING_HEIGHT_M, MAX_FOOTPRINT_M, MAX_SLOPE_M,
-    MAX_WORLD_COORD_M, PLACEMENT_GAP_M, WATER_LEVEL_M,
+    PlacementPlan, PlacementRequest, PlacementStore, MAX_BUILDING_HEIGHT_M, MAX_FOOTPRINT_M,
+    MAX_SLOPE_M, MAX_WORLD_COORD_M, PLACEMENT_GAP_M, WATER_LEVEL_M, WORLD_SAVE_FORMAT_VERSION,
 };
 
 /// Floor-to-floor height used by the synthetic layout, in meters.

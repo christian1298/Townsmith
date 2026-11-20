@@ -35,8 +35,8 @@ The slice follows accepted decisions:
 
 | Stage | Deliverable | Status |
 |---|---|---|
-| **2A.1** | Placement records and terrain validation | **First implementation PR** |
-| **2A.2** | Placement store, JSON save format, checksum | Next |
+| **2A.1** | Placement records and terrain validation | **Done** — PR #44 |
+| **2A.2** | Placement store, JSON save format, checksum | **This PR** |
 | **2A.3** | GDExtension placement/save/load API and headless smoke | Planned |
 | **2A.4** | Streamed-world scene, preview, rotate/place/save/load controls | Planned |
 | **2B** | Terrain edit deltas applied to streamed chunks, saved/reloaded | Planned |

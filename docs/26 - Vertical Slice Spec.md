@@ -245,7 +245,7 @@ Construction sites, NPCs, Mayor Mode, zoning, terrain, city simulation, multipla
 
 - The demo script works end to end without developer tools. **Technical path passes**; the UI playtest is open.
 - All acceptance checks pass and are recorded in a short results note. **Done** — [[40 - Slice Acceptance Results]].
-- `cargo test --workspace`, Godot headless smoke, and the 21-house benchmark are green. **Done** — 192 tests + 1 doctest, all smokes pass.
+- `cargo test --workspace`, Godot headless smoke, and the 21-house benchmark are green. **Done** — 198 tests + 1 doctest, all smokes pass.
 - A human has played for at least 30 minutes and the top three usability issues are recorded. **Open** — Q-101.
 
 The vertical slice is **technically accepted**; the manual playtest is the remaining exit gate.
