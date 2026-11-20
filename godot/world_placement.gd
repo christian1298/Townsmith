@@ -515,10 +515,18 @@ func _setup_settlements() -> void:
 	settlement_material.albedo_color = Color(0.95, 0.78, 0.2, 0.95)
 
 func _found_settlement() -> bool:
-	var count: int = core.settlement_count()
+	var state: Dictionary = core.settlements()
+	var used: Dictionary = {}
+	for settlement in state.get("settlements", []):
+		used[str(settlement.get("name", "")).to_lower()] = true
+	var index: int = core.settlement_count() + 1
+	var name := "Settlement %d" % index
+	while used.has(name.to_lower()):
+		index += 1
+		name = "Settlement %d" % index
 	var result: Dictionary = core.settlement_found(
 		SEED,
-		"Settlement %d" % (count + 1),
+		name,
 		"player",
 		roundi(target_x),
 		roundi(target_z),
@@ -566,6 +574,8 @@ func _add_settlement_node(settlement: Dictionary) -> void:
 		return
 	var root := Node3D.new()
 	root.position = Vector3(center[0], ground, center[1])
+	root.set_meta("radius_m", radius)
+	root.set_meta("owner", str(settlement.get("owner", "player")))
 
 	var ring_mesh := ImmediateMesh.new()
 	ring_mesh.surface_begin(Mesh.PRIMITIVE_LINES, settlement_material)
@@ -613,12 +623,19 @@ func _settlement_node_matches(settlement: Dictionary) -> bool:
 		return false
 	var ring := root.get_child(0) as MeshInstance3D
 	var label := root.get_child(1) as Label3D
+	if ring == null or not (ring.mesh is ImmediateMesh) or label == null:
+		return false
+	var radius := float(settlement.get("radius_m", -1))
+	var owner := str(settlement.get("owner", ""))
+	var arrays: Array = ring.mesh.surface_get_arrays(0)
+	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
 	return (
-		ring != null
-		and ring.mesh is ImmediateMesh
-		and ring.mesh.get_surface_count() == 1
-		and label != null
+		ring.mesh.get_surface_count() == 1
+		and vertices.size() == 128
 		and label.text.begins_with(str(settlement.get("name", "")))
+		and label.text.contains(owner)
+		and absf(float(root.get_meta("radius_m", -1)) - radius) < 0.001
+		and str(root.get_meta("owner", "")) == owner
 		and absf(root.position.x - center[0]) < 0.001
 		and absf(root.position.z - center[1]) < 0.001
 	)
@@ -1518,6 +1535,10 @@ func _run_scene_smoke() -> void:
 					var settlements_state: Dictionary = core.settlements()
 					var settlement_list: Array = settlements_state.get("settlements", [])
 					load_ok = load_ok and settlement_list.size() == 1 and _settlement_node_matches(settlement_list[0])
+					var owner_after: Dictionary = core.settlement_at(int(FIXTURE_X), int(FIXTURE_Z))
+					var owner_record: Dictionary = owner_after.get("settlement", {})
+					load_ok = load_ok and bool(owner_after.get("found", false))
+					load_ok = load_ok and str(owner_record.get("owner", "")) == "player"
 				load_ok = load_ok and construction_nodes.has(1) and not placed_nodes.is_empty()
 				var loaded_site := _construction_site_for(1)
 				load_ok = load_ok and absf(float(loaded_site.get("progress", -1.0)) - saved_site_progress) < 0.001

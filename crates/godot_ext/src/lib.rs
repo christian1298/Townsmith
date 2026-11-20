@@ -1655,6 +1655,12 @@ impl TownsmithCore {
     /// Owner of a world cell, or `{ ok, found: false }`.
     #[func]
     fn settlement_at(&self, x: i64, z: i64) -> VarDictionary {
+        if x.unsigned_abs() > 1_000_000 || z.unsigned_abs() > 1_000_000 {
+            return placement_simple_error(
+                "coordinate_out_of_range",
+                "settlement lookup coordinates must be within ±1,000,000 m",
+            );
+        }
         let (Ok(x), Ok(z)) = (i32::try_from(x), i32::try_from(z)) else {
             return placement_simple_error(
                 "coordinate_out_of_range",
@@ -4193,6 +4199,45 @@ mod tests {
         store.format_version = 99;
         let json = attach_lots("{}", &store).expect("attach");
         assert!(lots_from_world_json(&json).is_err());
+    }
+
+    #[test]
+    fn settlement_world_json_round_trips_and_old_saves_are_closed() {
+        let mut store = SettlementStore::new(2026);
+        store
+            .found(&SettlementRequest {
+                name: "Riverbend".to_string(),
+                owner: "player".to_string(),
+                center: [10, 20],
+                radius_m: 64,
+            })
+            .expect("settlement");
+        let json = attach_settlements("{}", &store).expect("attach");
+        let decoded = settlements_from_world_json(&json)
+            .expect("parse")
+            .expect("present");
+        assert_eq!(decoded, store);
+        assert!(settlements_from_world_json("{}")
+            .expect("old save")
+            .is_none());
+    }
+
+    #[test]
+    fn settlement_world_json_rejects_bad_next_id() {
+        let mut store = SettlementStore::new(2026);
+        store
+            .found(&SettlementRequest {
+                name: "Riverbend".to_string(),
+                owner: "player".to_string(),
+                center: [10, 20],
+                radius_m: 64,
+            })
+            .expect("settlement");
+        let mut value = serde_json::to_value(&store).expect("value");
+        value["next_id"] = serde_json::json!(1);
+        let json = serde_json::to_string(&value).expect("json");
+        let error = settlements_from_world_json(&json).expect_err("reject");
+        assert_eq!(error.0, "invalid_settlements");
     }
 
     #[test]

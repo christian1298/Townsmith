@@ -100,7 +100,7 @@ The sampler uses `WorldGenerator::height_at` on the 1 m grid, not the currently 
 }
 ```
 
-2B adds an optional `terrain_deltas` (hex `TSDL`) + `terrain_checksum` pair when edits exist; 2D adds a `construction` object when sites exist; 2E adds optional `roads`, `lots`, and `settlements` objects. See [[43 - Terrain Edits]], [[45 - Construction Sites]], [[46 - Road Network]], and [[47 - Lots and Zoning]].
+2B adds an optional `terrain_deltas` (hex `TSDL`) + `terrain_checksum` pair when edits exist; 2D adds a `construction` object when sites exist; 2E adds optional `roads`, `lots`, and `settlements` objects. See [[43 - Terrain Edits]], [[45 - Construction Sites]], [[46 - Road Network]], [[47 - Lots and Zoning]], and [[48 - Settlement Boundaries]].
 
 `world_load` rejects:
 
@@ -185,7 +185,7 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 
 - `core_city`: placement persistence, construction, roads, lots, and settlements; **57 tests**.
 - `godot_ext`: **28 tests** total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
-- Workspace: **241 tests + 1 doctest**.
+- Workspace: **253 tests + 1 doctest**.
 - Godot headless: `WORLD_PLACEMENT ... status=ok` and `WORLD_SCENE ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 

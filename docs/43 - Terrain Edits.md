@@ -139,7 +139,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 
 - `core_world`: 62 tests, including delta-aware sampling, checksum stability, malformed-stream bounds, unload/reload persistence, and streaming roundtrip.
 - `godot_ext`: 22 tests, including worker meshing with deltas, hex roundtrip, and world-JSON delta roundtrip/checksum rejection.
-- `cargo test --workspace`: **241 tests + 1 doctest**.
+- `cargo test --workspace`: **253 tests + 1 doctest**.
 - `smoke_world_scene.sh`: `WORLD_SCENE ... edits=ok ... status=ok`.
 - `smoke_world_placement.sh` still passes on saves without terrain fields.
 

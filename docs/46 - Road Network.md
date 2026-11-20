@@ -154,7 +154,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 
 - `core_city::road`: 8 tests — geometry, width-edge water/rise rejection, extreme-coordinate overflow, JSON/checksum, duplicate/next-id rejection, remove/clear.
 - `core_city`: 42 tests.
-- Workspace: **241 tests + 1 doctest**.
+- Workspace: **253 tests + 1 doctest**.
 - Godot: `WORLD_SCENE ... roads=ok ... status=ok`.
 
 ## 9. Limits
@@ -170,8 +170,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 
 ## 10. Next
 
-1. Generate lots along frontage and add zoning (2E.3).
-2. Settlement boundaries and ownership (2E.4, [[48 - Settlement Boundaries]]).
-2. Add settlement boundaries and ownership (2E.4).
+1. Generate lots along frontage and add zoning (2E.3, done).
+2. Settlement boundaries and ownership (2E.4, done — [[48 - Settlement Boundaries]]).
 3. Add road width selection, intersections, and terrain-conforming strips.
 4. Replace the fixed rise limit with a grade/curve model.

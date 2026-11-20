@@ -125,7 +125,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 
 - `core_city`: 7 lot tests + 1 road-frontage test; core_city **50 tests**.
 - `godot_ext`: 2 lot JSON tests; bridge **28 tests**.
-- Workspace: **241 tests + 1 doctest**.
+- Workspace: **253 tests + 1 doctest**.
 
 ## 8. Limits
 
@@ -139,8 +139,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 
 ## 9. Next
 
-1. 2E.4: settlement boundaries, ownership, and a first zoned-growth rule.
+1. 2E.4: settlement boundaries and ownership (done — [[48 - Settlement Boundaries]]).
 2. Link placements to lots and reject building/lot mismatches.
-3. Settlement boundaries and ownership (2E.4, [[48 - Settlement Boundaries]]).
 3. Revalidate parcels after road or terrain edits.
 4. Add lot hover/selection and a zone overlay legend.

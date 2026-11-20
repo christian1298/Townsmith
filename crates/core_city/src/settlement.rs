@@ -53,17 +53,17 @@ impl Settlement {
     /// Whether a world cell is inside the soft boundary.
     #[must_use]
     pub fn contains(&self, x: i32, z: i32) -> bool {
-        let dx = i64::from(x) - i64::from(self.center[0]);
-        let dz = i64::from(z) - i64::from(self.center[1]);
-        let radius = i64::from(self.radius_m);
+        let dx = i128::from(x) - i128::from(self.center[0]);
+        let dz = i128::from(z) - i128::from(self.center[1]);
+        let radius = i128::from(self.radius_m);
         dx * dx + dz * dz <= radius * radius
     }
 
     /// Squared distance from the centre, used for nearest-owner ties.
     #[must_use]
-    pub fn distance_squared(&self, x: i32, z: i32) -> i64 {
-        let dx = i64::from(x) - i64::from(self.center[0]);
-        let dz = i64::from(z) - i64::from(self.center[1]);
+    pub fn distance_squared(&self, x: i32, z: i32) -> i128 {
+        let dx = i128::from(x) - i128::from(self.center[0]);
+        let dz = i128::from(z) - i128::from(self.center[1]);
         dx * dx + dz * dz
     }
 }
@@ -267,7 +267,7 @@ impl SettlementStore {
     /// Found a settlement and return it.
     pub fn found(&mut self, request: &SettlementRequest) -> Result<Settlement, SettlementError> {
         self.validate(request)?;
-        if self.next_id > MAX_SETTLEMENT_ID {
+        if self.next_id >= MAX_SETTLEMENT_ID {
             return Err(SettlementError::IdExhausted);
         }
         let settlement = Settlement {
@@ -359,6 +359,14 @@ impl SettlementStore {
             if !ids.insert(settlement.id) {
                 return Err(SettlementError::DuplicateId { id: settlement.id });
             }
+            if settlement.name != settlement.name.trim()
+                || settlement.owner != settlement.owner.trim()
+            {
+                return Err(SettlementError::InvalidRecord {
+                    id: settlement.id,
+                    reason: "untrimmed name or owner",
+                });
+            }
             let request = SettlementRequest {
                 name: settlement.name.clone(),
                 owner: settlement.owner.clone(),
@@ -382,7 +390,7 @@ impl SettlementStore {
             }
             max_id = max_id.max(settlement.id);
         }
-        if self.next_id == 0 || self.next_id <= max_id || self.next_id > MAX_SETTLEMENT_ID + 1 {
+        if self.next_id == 0 || self.next_id <= max_id || self.next_id >= MAX_SETTLEMENT_ID {
             return Err(SettlementError::InvalidNextId {
                 next_id: self.next_id,
             });
@@ -396,6 +404,12 @@ fn validate_request(request: &SettlementRequest) -> Result<(), SettlementError> 
     if name.is_empty() {
         return Err(SettlementError::EmptyName);
     }
+    if name.chars().any(char::is_control) {
+        return Err(SettlementError::InvalidRecord {
+            id: 0,
+            reason: "name contains a control character",
+        });
+    }
     if name.chars().count() > MAX_SETTLEMENT_NAME_CHARS {
         return Err(SettlementError::NameTooLong {
             limit: MAX_SETTLEMENT_NAME_CHARS,
@@ -404,6 +418,12 @@ fn validate_request(request: &SettlementRequest) -> Result<(), SettlementError> 
     let owner = request.owner.trim();
     if owner.is_empty() {
         return Err(SettlementError::EmptyOwner);
+    }
+    if owner.chars().any(char::is_control) {
+        return Err(SettlementError::InvalidRecord {
+            id: 0,
+            reason: "owner contains a control character",
+        });
     }
     if owner.chars().count() > MAX_SETTLEMENT_OWNER_CHARS {
         return Err(SettlementError::OwnerTooLong {
@@ -525,6 +545,36 @@ mod tests {
             bad_next.validate_loaded(),
             Err(SettlementError::InvalidNextId { next_id: 1 })
         );
+    }
+
+    #[test]
+    fn extreme_lookup_coordinates_do_not_overflow() {
+        let mut store = SettlementStore::new(2026);
+        let settlement = store
+            .found(&request("Edge", -1_000_000, -1_000_000, 16))
+            .expect("found");
+        assert!(!settlement.contains(i32::MAX, i32::MAX));
+        assert!(!settlement.contains(-1_000_000, i32::MAX));
+    }
+
+    #[test]
+    fn nearest_tie_breaks_on_the_lower_id() {
+        let mut store = SettlementStore::new(2026);
+        store.found(&request("First", -10, 0, 32)).expect("first");
+        store.found(&request("Second", 10, 0, 32)).expect("second");
+        assert_eq!(
+            store.owner_at(0, 0).map(|settlement| settlement.id),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn load_rejects_untrimmed_names() {
+        let mut store = SettlementStore::new(2026);
+        let settlement = store.found(&request("A", 0, 0, 32)).expect("found");
+        let mut padded = store.clone();
+        padded.settlements[0].name = format!("{} ", settlement.name);
+        assert!(padded.validate_loaded().is_err());
     }
 
     #[test]
