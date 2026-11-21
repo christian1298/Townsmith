@@ -370,7 +370,7 @@ The existing world JSON `population` object gets an optional sibling `named_citi
 | **N1 — Identity layer (derived)** | Deterministic ids, names, household slot sync, read-only bridge | **Done** — PR #98; 500-resident city produces stable names; `cargo test -p core_city named`; no save or checksum change; 4k identities generate in < 100 ms under the debug test guard |
 | **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | **Partial — PR #101**; selected HUD line and F2 citizen panel show stable names and household stats; follow camera and EN/DE card are next |
 | **N3 — Materialization** | Active pool, hysteresis, route cache, fade, active cap | 2k active + 200 detailed in the benchmark route; ≤ 1 ms decision; no pop in the smoke; no route per citizen |
-| **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | Roundtrip and old-save tests; lifecycle scenario exact; new city-loop baseline documented; no checksum drift for lifecycle-off |
+| **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | **Partial — PR #103**; persistence landed ([[70 - Named Persistence]]), lifecycle/aging/death next |
 | **N5 — Cohort bridge (later)** | Sample from cohorts, district stories, 1M identity store | 1M cohort benchmark unchanged; materialization near camera; no per-citizen tick |
 
 ### N1 checks
@@ -428,12 +428,18 @@ Not yet implemented: follow camera, a full household list, job/age rows, and the
 - Camera teleport storm: cap respected and no duplicates
 - No per-citizen route builds (instrument counter)
 
+### N4 persistence implementation
+
+`NamedSave` v1 stores `format_version`, `seed`, `max`, and sorted identity records (`id`, `placement_id`, `slot`, `name`). The bridge writes an optional `named_citizens` object after `population`, checks the seed, syncs with the loaded households, drops orphans, and commits atomically with the other stores. Old saves load an empty pool that fills on demand. Save/load results expose `named`, `named_max`, and `named_checksum`; population/city checksums are unchanged. See [[70 - Named Persistence]].
+
+Lifecycle fields (age, job, death), migration, and a lifecycle-on baseline remain open.
+
 ### N4 checks
 
-- Save/load roundtrip and tolerant old save
-- Lifecycle scenario with fixed seed and expected events
-- `bench_city_loop.sh` baseline updated deliberately
-- Docs 50, 51, 52, and 58 updated with the new fields and limits
+- Save/load roundtrip and tolerant old save — pass ([[70 - Named Persistence]]).
+- Lifecycle scenario with fixed seed and expected events — open.
+- `bench_city_loop.sh` baseline unchanged for lifecycle-off — pass.
+- Docs 70 and the named save/load result fields are documented.
 
 ## 13. First-slice exclusions (explicit)
 

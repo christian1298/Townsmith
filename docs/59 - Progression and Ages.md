@@ -23,7 +23,7 @@ tags:
 | **4.2** | Material tiers and structural limits: stories, spans, foundations, composite construction | **Done** — PR #78, see [[60 - Structural Limits]] |
 | **4.3** | Research pool and data-driven tech tree | **Done** — PR #80, see [[61 - Research]] |
 | **4.4** | Starter content library, service tiers, age-specific construction trades | **Done** — services #84, starter library #86, trades #87, see [[64 - Construction Trades]] |
-| **4.5** | Tutorial scenario and the wood-to-industrial balance pass | **Partial** — tutorial #88; first balance report landed, Industrial-scale tuning still open |
+| **4.5** | Tutorial scenario and the wood-to-industrial balance pass | **Partial** — tutorial #88, early/mid/late balance #91, Industrial probe #105; Modern/1M tuning open |
 
 ## 2. Ages
 
@@ -101,10 +101,10 @@ A row is **sustainable** when the final balance is non-negative and the treasury
 ## 6. Tests
 
 - `core_city::progression`: 6 tests — thresholds, boundary populations, next threshold/progress, final age, stable names/materials, determinism, age-id aliases.
-- `core_city` total: **214 tests**; `core_structure` **19 tests + 1 doctest**.
-- `godot_ext`: **50 tests**; the scene smoke covers `progression_state`, structural limits, research generation, the tutorial checklist, and the HUD; structural age rejection is covered by the bridge helper and core placement tests.
+- `core_city` total: **218 tests**; `core_structure` **19 tests + 1 doctest**.
+- `godot_ext`: **52 tests**; the scene smoke covers `progression_state`, structural limits, research generation, the tutorial checklist, and the HUD; structural age rejection is covered by the bridge helper and core placement tests.
 - `city_loop` bin: 5 tests, including the deterministic balance report that maps the runner populations to Wood and Masonry.
-- Workspace: **458 tests + 2 doctests (460 passed)**.
+- Workspace: **470 tests + 2 doctests (472 passed)**.
 - Smoke marker includes `age=ok`, `research=ok`, `tutorial=ok`, `starter=ok`, and `trades=ok`.
 
 ## 7. Limits

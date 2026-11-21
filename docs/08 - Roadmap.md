@@ -181,7 +181,7 @@ The staged cut is in [[49 - Phase 3 Slice Plan]]: city ledger, households/needs,
 ### Phase 4 — Progression and content (6–8 weeks)
 
 > [!info] Slice plan
-> Phase 4 starts with [[59 - Progression and Ages]], [[60 - Structural Limits]], and [[61 - Research]]: population-driven ages, material/story/span rules, the research pool with structural age gates, civic services, and a starter building library are implemented. Construction trades and the tutorial checklist are implemented; the first early/mid/late balance report landed, and Industrial-scale tuning is next. See [[68 - Metropolis Gate]] for the separate 1M gate.
+> Phase 4 starts with [[59 - Progression and Ages]], [[60 - Structural Limits]], and [[61 - Research]]: population-driven ages, material/story/span rules, the research pool with structural age gates, civic services, and a starter building library are implemented. Construction trades and the tutorial checklist are implemented; the early/mid/late balance report, degraded outage matrix, and 20,000-resident Industrial probe are in. Industrial financing and Modern/1M tuning are next. See [[68 - Metropolis Gate]] for the separate 1M gate.
 
 **Goals**
 - The long arc: wood → masonry → industrial → modern.

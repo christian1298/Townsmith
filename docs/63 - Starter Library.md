@@ -127,7 +127,7 @@ The world-scene smoke checks:
 
 - `core_city::library`: 3 tests — unique ids/lookup, non-empty catalogs per age, age/structure agreement.
 - `godot_ext`: `starter_blueprints_build_and_validate` generates all 20 starters and validates solid voxels, capacity/jobs, and structure bounds.
-- `core_city` total **214 tests**; bridge **50 tests**; workspace **458 tests + 2 doctests (460 passed)**.
+- `core_city` total **218 tests**; bridge **52 tests**; workspace **470 tests + 2 doctests (472 passed)**.
 
 ## 8. Limits
 

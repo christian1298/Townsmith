@@ -184,7 +184,7 @@ The palette shows `structure: timber frame (3/3 stories)`. Loading a package res
 - `godot_ext`: **49 tests**; blueprint info and placement payloads include the structure summary, with a bridge roundtrip test plus the world-scene and editor smoke coverage.
 - `smoke_world_scene.sh`: the acceptance house derives timber frame, two stories, and a three-story limit; the marker includes `structure=ok`.
 - The editor blueprint smoke checks the saved/loaded timber structure block.
-- Workspace: **458 tests + 2 doctests (460 passed)**.
+- Workspace: **470 tests + 2 doctests (472 passed)**.
 
 ## 9. Limits
 
