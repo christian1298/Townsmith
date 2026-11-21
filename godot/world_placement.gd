@@ -71,6 +71,9 @@ var construction_material: StandardMaterial3D
 var hud: Label
 var status_label: Label
 var modal_label: Label
+var dashboard_panel: PanelContainer
+var dashboard_text: RichTextLabel
+var dashboard_visible := false
 
 var blueprint_path := ""
 var save_path := ""
@@ -169,7 +172,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			_return_to_mayor()
 			return
 		if event.physical_keycode == KEY_ESCAPE:
-			if mode == "architect":
+			if dashboard_visible:
+				_toggle_dashboard()
+			elif mode == "architect":
 				_return_to_mayor()
 			elif lot_mode:
 				if lot_start.x != -999999:
@@ -204,6 +209,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					_cycle_industry()
 				KEY_U:
 					_cycle_utility()
+				KEY_D:
+					_toggle_dashboard()
 				KEY_T:
 					_cycle_tax_policy()
 				KEY_L:
@@ -373,6 +380,38 @@ func _setup_ui() -> void:
 	modal_label.add_theme_color_override("font_color", Color(1.0, 0.55, 0.35))
 	modal_label.visible = false
 	box.add_child(modal_label)
+
+	dashboard_panel = PanelContainer.new()
+	dashboard_panel.name = "Dashboard"
+	dashboard_panel.anchor_left = 1.0
+	dashboard_panel.anchor_right = 1.0
+	dashboard_panel.anchor_top = 0.0
+	dashboard_panel.anchor_bottom = 1.0
+	dashboard_panel.offset_left = -470.0
+	dashboard_panel.offset_right = -16.0
+	dashboard_panel.offset_top = 16.0
+	dashboard_panel.offset_bottom = -16.0
+	dashboard_panel.visible = false
+	layer.add_child(dashboard_panel)
+	var dashboard_box := VBoxContainer.new()
+	dashboard_box.add_theme_constant_override("separation", 6)
+	dashboard_panel.add_child(dashboard_box)
+	var dashboard_title := Label.new()
+	dashboard_title.text = "City Dashboard"
+	dashboard_title.add_theme_font_size_override("font_size", 20)
+	dashboard_box.add_child(dashboard_title)
+	dashboard_text = RichTextLabel.new()
+	dashboard_text.name = "DashboardText"
+	dashboard_text.bbcode_enabled = true
+	dashboard_text.fit_content = false
+	dashboard_text.scroll_active = true
+	dashboard_text.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	dashboard_text.custom_minimum_size = Vector2(0.0, 420.0)
+	dashboard_box.add_child(dashboard_text)
+	var dashboard_hint := Label.new()
+	dashboard_hint.text = "D or Esc to close"
+	dashboard_hint.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
+	dashboard_box.add_child(dashboard_hint)
 
 func _setup_ghost() -> void:
 	ghost = Node3D.new()
@@ -1145,7 +1184,7 @@ func _update_hud() -> void:
 			SEED, blueprint_name,
 		]
 	else:
-		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew on/off · I industry · U utility · T tax · L loan · V +10k materials · F5 save · F9 load" % [
+		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew on/off · I industry · U utility · T tax · L loan · D dashboard · V +10k materials · F5 save · F9 load" % [
 			SEED, blueprint_name, rooms, capacity,
 		]
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
@@ -1234,6 +1273,107 @@ func _update_hud() -> void:
 		int(construction.get("materials_stock", 0)),
 		save_path,
 	]
+	if dashboard_visible:
+		_update_dashboard()
+
+func _toggle_dashboard() -> bool:
+	dashboard_visible = not dashboard_visible
+	if dashboard_panel != null:
+		dashboard_panel.visible = dashboard_visible
+	if dashboard_visible:
+		_update_dashboard()
+	return dashboard_visible
+
+func _update_dashboard() -> void:
+	if dashboard_text == null:
+		return
+	var city: Dictionary = core.city_summary()
+	var economy: Dictionary = core.economy_state()
+	var industry: Dictionary = core.industry_state()
+	var utilities: Dictionary = core.utilities_state()
+	var construction: Dictionary = core.construction_summary()
+	var traffic: Dictionary = core.traffic_state(SEED)
+	var advice: Dictionary = core.city_advisor(SEED)
+	var population := int(city.get("population", 0))
+	var happiness := "—"
+	var needs := "—"
+	if population > 0:
+		happiness = "%.0f%%" % (float(city.get("happiness", 0.0)) * 100.0)
+		needs = "food %.0f%% · water %.0f%% · rest %.0f%%" % [
+			float(city.get("food", 0.0)) * 100.0,
+			float(city.get("water", 0.0)) * 100.0,
+			float(city.get("rest", 0.0)) * 100.0,
+		]
+	var treasury := "closed"
+	if bool(economy.get("open", false)):
+		treasury = "%.0f balance · %+.0f/day · debt %.0f" % [
+			float(economy.get("balance", 0.0)),
+			float(economy.get("daily_net", 0.0)),
+			float(economy.get("debt", 0.0)),
+		]
+		if bool(economy.get("bankrupt", false)):
+			treasury = "BANKRUPT · " + treasury
+	var services := "food — · water — · power —"
+	if bool(industry.get("open", false)) or bool(utilities.get("open", false)):
+		services = "food %.0f%% · water %.0f%% · power %.0f%%" % [
+			float(industry.get("food_supply", 0.0)) * 100.0,
+			float(utilities.get("water_supply", 0.0)) * 100.0,
+			float(utilities.get("power_supply", 0.0)) * 100.0,
+		]
+	var roads := "no road store"
+	if bool(traffic.get("open", false)):
+		roads = "%d nodes · %d edges · %.0f m · %d components" % [
+			int(traffic.get("nodes", 0)),
+			int(traffic.get("edges", 0)),
+			float(traffic.get("total_length_m", 0.0)),
+			int(traffic.get("components", 0)),
+		]
+	var text := "[b]Population[/b]\n%d residents · %d / %d housing · %d vacant\n" % [
+		population,
+		population,
+		int(city.get("housing_capacity", 0)),
+		int(city.get("vacancies", 0)),
+	]
+	text += "[b]Work[/b]\n%d / %d jobs filled · %d unemployed · commute %.0f m\n" % [
+		int(city.get("employed", 0)),
+		int(city.get("jobs", 0)),
+		int(city.get("unemployed", 0)),
+		float(city.get("average_commute_m", 0.0)),
+	]
+	text += "[b]Wellbeing[/b]\nhappiness %s\nneeds %s\n" % [happiness, needs]
+	text += "[b]Services[/b]\n%s\n[b]Treasury[/b]\n%s\n[b]Industry[/b]\nwood %.0f · food %.0f · hides %.0f\n" % [
+		services,
+		treasury,
+		float(industry.get("wood", 0.0)),
+		float(industry.get("food", 0.0)),
+		float(industry.get("hides", 0.0)),
+	]
+	text += "[b]Roads[/b]\n%s\n[b]Construction[/b]\n%d active · %d stalled · %d completed\n" % [
+		roads,
+		int(construction.get("active", 0)),
+		int(construction.get("stalled", 0)),
+		int(city.get("completed_buildings", 0)),
+	]
+	text += "\n[b]Advisor[/b]\n"
+	var messages: Array = advice.get("messages", [])
+	if messages.is_empty():
+		text += "No advice available."
+	else:
+		for message in messages:
+			var severity := str(message.get("severity", "info"))
+			var color := "#9fd3ff"
+			if severity == "critical":
+				color = "#ff6b6b"
+			elif severity == "warning":
+				color = "#ffb454"
+			elif severity == "info":
+				color = "#9fe6a0"
+			text += "[color=%s]■[/color] [b]%s[/b]\n%s\n" % [
+				color,
+				str(message.get("title", "Advisor")),
+				str(message.get("detail", "")),
+			]
+	dashboard_text.text = text
 
 func _info_for_path(path: String) -> Dictionary:
 	if path == "":
@@ -1359,6 +1499,8 @@ func _door_position(placement: Dictionary) -> Vector3:
 func _enter_architect() -> bool:
 	if mode != "mayor":
 		return false
+	if dashboard_visible:
+		_toggle_dashboard()
 	var placement := _selected_placement()
 	if placement.is_empty():
 		_set_modal("Select a building first (right-click)", true)
@@ -1811,6 +1953,7 @@ func _run_scene_smoke() -> void:
 	var industry_ok := false
 	var utility_ok := false
 	var economy_ok := false
+	var dashboard_ok := false
 	var save_ok := false
 	var clear_ok := false
 	var load_ok := false
@@ -2146,6 +2289,22 @@ func _run_scene_smoke() -> void:
 				occupancy_after_ok = occupancy_after_ok and float(economy_after.get("balance", 100000.0)) < 100000.0
 				occupancy_after_ok = occupancy_after_ok and float(economy_after.get("daily_net", 0.0)) < 0.0
 				occupancy_after_ok = occupancy_after_ok and not bool(economy_after.get("bankrupt", true))
+				var advice: Dictionary = core.city_advisor(SEED)
+				var advice_codes: Array = []
+				for advice_message in advice.get("messages", []):
+					advice_codes.append(str(advice_message.get("code", "")))
+				dashboard_ok = bool(advice.get("ok", false))
+				dashboard_ok = dashboard_ok and dashboard_panel != null and not dashboard_panel.visible
+				dashboard_ok = dashboard_ok and int(advice.get("warnings", 0)) >= 1
+				dashboard_ok = dashboard_ok and advice_codes.has("city.budget_deficit")
+				dashboard_ok = dashboard_ok and not bool(advice.get("healthy", true))
+				_toggle_dashboard()
+				dashboard_ok = dashboard_ok and dashboard_panel.visible
+				dashboard_ok = dashboard_ok and dashboard_text != null
+				dashboard_ok = dashboard_ok and dashboard_text.text.contains("Advisor")
+				dashboard_ok = dashboard_ok and dashboard_text.text.contains("deficit")
+				_toggle_dashboard()
+				dashboard_ok = dashboard_ok and not dashboard_panel.visible
 				var balance_before_loan := float(economy_after.get("balance", 0.0))
 				var loan_state: Dictionary = core.economy_borrow(SEED, LOAN_AMOUNT)
 				var tax_state: Dictionary = core.economy_set_taxes(SEED, 100.0, 8.0)
@@ -2221,6 +2380,8 @@ func _run_scene_smoke() -> void:
 					status = "industry_failed"
 				elif not utility_ok:
 					status = "utility_failed"
+				elif not dashboard_ok:
+					status = "dashboard_failed"
 			if not load_ok:
 				status = "load_failed"
 
@@ -2261,7 +2422,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s occupancy=%s industry=%s utilities=%s economy=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s occupancy=%s industry=%s utilities=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -2277,6 +2438,7 @@ func _run_scene_smoke() -> void:
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",
 		"ok" if economy_ok else "failed",
+		"ok" if dashboard_ok else "failed",
 		"ok" if traffic_ok else "failed",
 		"ok" if select_ok else "failed",
 		"ok" if enter_ok else "failed",

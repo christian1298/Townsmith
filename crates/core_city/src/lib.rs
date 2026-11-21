@@ -31,6 +31,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod advisor;
 pub mod construction;
 pub mod economy;
 pub mod industry;
@@ -46,6 +47,9 @@ pub mod utilities;
 use std::error::Error;
 use std::fmt;
 
+pub use advisor::{
+    advise, AdvisorInput, AdvisorMessage, AdvisorReport, Severity, MAX_ADVISOR_MESSAGES,
+};
 pub use construction::{
     total_seconds_for, ConstructionError, ConstructionPhase, ConstructionSite, ConstructionStore,
     ConstructionTick, CONSTRUCTION_FORMAT_VERSION, MAX_SITES as MAX_CONSTRUCTION_SITES,
