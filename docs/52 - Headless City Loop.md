@@ -152,7 +152,7 @@ This is a scripted recovery, not a balanced default. The standard 8/4 policy los
 - `city_loop` bin: scenario presets have the expected sizes.
 - `city_loop` bin: the early profile completes, fills, and reaches full service.
 - `scripts/bench_city_loop.sh` compares the early/mid/late checksums with `benchmarks/baselines/phase3_city_loop.json`.
-- Workspace: **387 tests + 2 doctests**.
+- Workspace: **388 tests + 2 doctests**.
 
 ## 7. Next
 

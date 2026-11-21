@@ -84,9 +84,9 @@ pub struct AgeState {
 ## 6. Tests
 
 - `core_city::progression`: 5 tests — thresholds, boundary populations, next threshold/progress, final age, stable names/materials, determinism.
-- `core_city` total: **156 tests**; `core_structure` **18 tests + 1 doctest**.
+- `core_city` total: **157 tests**; `core_structure` **18 tests + 1 doctest**.
 - `godot_ext`: **42 tests**; the scene smoke covers `progression_state` and structural limits.
-- Workspace: **387 tests + 2 doctests (389 passed)**.
+- Workspace: **388 tests + 2 doctests (390 passed)**.
 - Smoke marker includes `age=ok` and `render=ok`.
 
 ## 7. Limits

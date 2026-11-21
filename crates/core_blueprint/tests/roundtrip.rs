@@ -266,7 +266,8 @@ fn structure_survives_save_and_load() {
     let dir = temp_dir("structure");
     let path = dir.join("structure.tsbp");
     let mut blueprint = test_blueprint();
-    let structure = StructureSpec::new(StructuralSystem::TimberFrame, 2, 6.4, 0.0);
+    let height = blueprint.metadata.bounds_m[1];
+    let structure = StructureSpec::new(StructuralSystem::TimberFrame, 2, height, 0.0);
     blueprint.metadata.structure = Some(structure);
     save_tsbp(&path, &blueprint).expect("save");
 

@@ -471,6 +471,12 @@ fn validate_request(request: &PlacementRequest) -> Result<(), PlacementError> {
 
     if let Some(structure) = request.structure {
         structure.validate().map_err(PlacementError::Structure)?;
+        if (structure.height_m - request.bounds_m[1]).abs() > 1.0e-3 {
+            return Err(PlacementError::InvalidStats {
+                field: "structure.height_m",
+                value: f64::from(structure.height_m),
+            });
+        }
     }
 
     Ok(())
@@ -745,6 +751,12 @@ fn validate_record(placement: &Placement, next_id: u64) -> Result<(), PlacementE
     }
     if let Some(structure) = placement.structure {
         structure.validate().map_err(PlacementError::Structure)?;
+        if (structure.height_m - placement.bounds_m[1]).abs() > 1.0e-3 {
+            return Err(PlacementError::InvalidRecord {
+                id: placement.id,
+                reason: "structure height does not match bounds",
+            });
+        }
     }
     Ok(())
 }
@@ -1037,6 +1049,19 @@ mod tests {
                 .with_ground_system(core_structure::StructuralSystem::LoadBearingStone),
         );
         validate_placement(&composite, &[], flat).expect("stone base carries four stories");
+    }
+
+    #[test]
+    fn structure_height_must_match_the_blueprint_bounds() {
+        let mut mismatched = request(128.0, 128.0);
+        mismatched.structure = Some(StructureSpec::new(
+            core_structure::StructuralSystem::TimberFrame,
+            2,
+            3.0,
+            0.0,
+        ));
+        let error = validate_placement(&mismatched, &[], flat).expect_err("height mismatch");
+        assert_eq!(error.code(), "invalid_stats");
     }
 
     #[test]

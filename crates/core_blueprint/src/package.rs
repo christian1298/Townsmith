@@ -247,6 +247,11 @@ fn validate_metadata(metadata: &BlueprintMetadata) -> Result<(), BlueprintError>
         structure
             .validate()
             .map_err(|error| BlueprintError::Format(format!("structure: {error}")))?;
+        if (structure.height_m - metadata.bounds_m[1]).abs() > 1.0e-3 {
+            return Err(BlueprintError::Format(
+                "structure.height_m must match bounds_m[1]".to_string(),
+            ));
+        }
     }
     Ok(())
 }
