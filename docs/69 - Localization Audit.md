@@ -23,7 +23,7 @@ tags:
 | Surface | Runtime source | EN keys | DE keys | Parity | Gate |
 |---|---|---:|---:|---|---|
 | First-person volume editor | `godot/editor_i18n.gd` | 96 | 96 | complete | `check_locale.sh` + `smoke_locale.sh` |
-| World-placement HUD, status, help | `godot/world_placement.gd` | 15 dashboard-shell keys | 0 | `world_i18n.gd` | dashboard-shell partial; HUD body/modals raw |
+| World-placement HUD, status, help | `godot/world_placement.gd` | 54 world keys | 0 | `world_i18n.gd` | dashboard shell + main HUD body keyed; remaining status lines/modals/content raw |
 | Dashboard shell and body | `world_placement.gd` + Rust `core_city` payload | 0 | 0 | n/a | none |
 | Advisor titles and details | Rust `core_city::advisor` | 0 | 0 | n/a | none |
 | Tutorial titles and hints | Rust payload read by `world_placement.gd` | 0 | 0 | n/a | none |
@@ -223,7 +223,7 @@ The current German editor uses a neutral infinitive/imperative style (“Klicken
 
 | Phase | Scope | Approx. keys | Exit criterion |
 |---|---|---:|---|
-| 1. HUD + dashboard shell | `_update_hud`, `_setup_ui`, dashboard title/hint | **partial** — 15 dashboard-shell keys, 33 world keys total | Dashboard title/hint and section headings keyed; HUD body/modals remain |
+| 1. HUD + dashboard shell | `_update_hud`, `_setup_ui`, dashboard title/hint | **partial** — 54 world keys | Dashboard shell and main HUD body keyed; remaining status lines/modals/content remain |
 | 2. Tutorial + content names | Tutorial titles/hints, starter/industry/service/tax names, `capitalize()` removal, structure names | 60–90 | No `capitalize()` or raw content ID reaches a player label |
 | 3. Advisor + errors | Rust advisor title/detail keys, dashboard body labels, modal prefixes, error mapping | 40–60 | Advisor and dashboard render from keys+params; error codes are developer-only |
 
@@ -240,7 +240,7 @@ Acceptance checks:
 
 - `world_placement.gd` `_update_hud` and `_setup_ui` contain no literal player-facing strings; only format calls and key lookups remain.
 - EN/DE parity for every new key; placeholder sets match.
-- Toggle EN → DE → EN at runtime with no `!key!` in the dashboard shell. The world smoke now checks `hud_i18n=ok` for the title and the Population heading in both locales.
+- Toggle EN → DE → EN at runtime with no `!key!` in the dashboard shell. The world smoke checks `hud_i18n=ok` for the dashboard shell and `hud_body_i18n=ok` for the Mayor/Architect HUD title, blueprint, structure, selection, valid/invalid, and status body in both locales.
 - Dashboard shell fits at 100%, 125%, and 150% text scale in German; add it to the layout smoke.
 - The locale smoke count contract is updated in the same change (see §6).
 
@@ -283,11 +283,11 @@ Acceptance checks:
 
 ### Static gate
 
-`scripts/check_locale.sh` parses the `TABLES` const in both `godot/editor_i18n.gd` and `godot/world_i18n.gd` and checks key parity, per-file key floors, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. The floors ratchet independently: editor `96`, world `33`. Default mode prints one line per table plus a summary:
+`scripts/check_locale.sh` parses the `TABLES` const in both `godot/editor_i18n.gd` and `godot/world_i18n.gd` and checks key parity, per-file key floors, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. The floors ratchet independently: editor `96`, world `33` (currently 54 keys). Default mode prints one line per table plus a summary:
 
 ```text
 LOCALE_CHECK file=godot/editor_i18n.gd keys=96 min=96 status=ok
-LOCALE_CHECK file=godot/world_i18n.gd keys=33 min=33 status=ok
+LOCALE_CHECK file=godot/world_i18n.gd keys=54 min=33 status=ok
 LOCALE_CHECK editor=96 world=33 status=ok
 ```
 

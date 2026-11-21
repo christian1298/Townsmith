@@ -1507,40 +1507,40 @@ func _update_hud() -> void:
 	var rooms := int(blueprint_info.get("rooms", 0))
 	var capacity := int(blueprint_info.get("resident_capacity", 0))
 	var structure: Dictionary = blueprint_info.get("structure", {})
-	var structure_text := "—"
+	var structure_text: String = i18n.t("base.ui.hud.structure")
 	if not structure.is_empty() and bool(structure.get("present", false)):
 		if bool(structure.get("valid", false)):
-			structure_text = "%s  %d/%d stories · span %.1f/%.1f m · foundation %.1f/%.1f m" % [
-				str(structure.get("system_name", "?")),
-				int(structure.get("stories", 0)),
-				int(structure.get("effective_max_stories", 0)),
-				float(structure.get("max_span_m", 0.0)),
-				float(structure.get("effective_max_span_m", 0.0)),
-				float(structure.get("foundation_depth_m", 0.0)),
-				float(structure.get("required_foundation_m", 0.0)),
-			]
+			structure_text = i18n.t("base.ui.hud.structure_valid", {
+				"system": str(structure.get("system_name", "?")),
+				"stories": int(structure.get("stories", 0)),
+				"max_stories": int(structure.get("effective_max_stories", 0)),
+				"span": "%.1f" % float(structure.get("max_span_m", 0.0)),
+				"max_span": "%.1f" % float(structure.get("effective_max_span_m", 0.0)),
+				"foundation": "%.1f" % float(structure.get("foundation_depth_m", 0.0)),
+				"required": "%.1f" % float(structure.get("required_foundation_m", 0.0)),
+			})
 		else:
-			structure_text = "%s  INVALID: %s (%s)" % [
-				str(structure.get("system_name", "?")),
-				str(structure.get("error", "")),
-				str(structure.get("error_code", "")),
-			]
+			structure_text = i18n.t("base.ui.hud.structure_invalid", {
+				"system": str(structure.get("system_name", "?")),
+				"error": str(structure.get("error", "")),
+				"code": str(structure.get("error_code", "")),
+			})
 	var selected := _selected_placement()
-	var selected_line := "Selected: none"
+	var selected_line: String = i18n.t("base.ui.hud.selected_none")
 	if not selected.is_empty():
 		var selected_info := _info_for_path(str(selected.get("blueprint_path", "")))
 		var footprint: PackedFloat32Array = selected.get("footprint", PackedFloat32Array())
 		var footprint_text := "? × ? m"
 		if footprint.size() == 2:
 			footprint_text = "%.0f × %.0f m" % [footprint[0], footprint[1]]
-		selected_line = "Selected #%d: %s  ·  %d rooms  ·  capacity %d  ·  %d jobs  ·  %s" % [
-			selected_id,
-			str(selected.get("name", "?")),
-			int(selected_info.get("rooms", 0)),
-			int(selected.get("resident_capacity", 0)),
-			int(selected.get("job_slots", 0)),
-			footprint_text,
-		]
+		selected_line = i18n.t("base.ui.hud.selected", {
+			"id": selected_id,
+			"name": str(selected.get("name", "?")),
+			"rooms": int(selected_info.get("rooms", 0)),
+			"capacity": int(selected.get("resident_capacity", 0)),
+			"jobs": int(selected.get("job_slots", 0)),
+			"footprint": footprint_text,
+		})
 		var center: PackedFloat32Array = selected.get("center", PackedFloat32Array())
 		if center.size() == 3:
 			var owner_info: Dictionary = core.settlement_at(roundi(center[0]), roundi(center[2]))
@@ -1571,15 +1571,30 @@ func _update_hud() -> void:
 				names.append(str(citizen.get("name", "?")))
 			selected_line += "  ·  residents " + ", ".join(names)
 	if mode == "architect":
-		hud.text = "Townsmith — Architect View (read-only)  (seed %d)\nBlueprint: %s\nStructure: %s\nFirst-person view at the selected door · M / Esc returns to Mayor" % [
-			SEED, blueprint_name, structure_text,
+		hud.text = "%s\n%s\n%s\n%s" % [
+			i18n.t("base.ui.hud.architect.title", {"seed": SEED}),
+			i18n.t("base.ui.hud.blueprint", {"name": blueprint_name}),
+			structure_text,
+			i18n.t("base.ui.help.architect"),
 		]
 	else:
-		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nStructure: %s\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew · I industry · U utility · K services · B starter · T tax · L loan · Y research · F1 dashboard · F2 citizens · %s · F4 materialization · V +10k · F5 save · F9 load" % [
-			SEED, blueprint_name, rooms, capacity, structure_text,
-			i18n.t("base.ui.help.follow"),
+		hud.text = "%s\n%s\n%s\n%s\n%s\n%s" % [
+			i18n.t("base.ui.hud.mayor.title", {"seed": SEED}),
+			i18n.t("base.ui.hud.blueprint_mayor", {
+				"name": blueprint_name,
+				"rooms": rooms,
+				"capacity": capacity,
+			}),
+			structure_text,
+			i18n.t("base.ui.help.move"),
+			i18n.t("base.ui.help.edit"),
+			i18n.t("base.ui.help.tools", {"follow": i18n.t("base.ui.help.follow")}),
 		]
-	var state := "VALID" if preview_valid else "INVALID: " + preview_error
+	var state: String = (
+		i18n.t("base.ui.hud.valid")
+		if preview_valid
+		else i18n.t("base.ui.hud.invalid", {"error": preview_error})
+	)
 	var construction: Dictionary = core.construction_summary()
 	var city: Dictionary = core.city_summary()
 	var progression: Dictionary = core.progression_state(SEED)
@@ -1681,42 +1696,53 @@ func _update_hud() -> void:
 			float(city.get("water", 0.0)) * 100.0,
 			float(city.get("rest", 0.0)) * 100.0,
 		]
-	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nAge: %s\nResearch: %s\nTutorial: %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nIndustry: %s\nUtilities: %s\nCivic: %s\nTraffic: %s\nConstruction: %d active / %d stalled   Crew: %d/%d   Trades: %d   Materials: %d L   Save: %s" % [
+	var status_lines: Array[String] = [
 		selected_line,
-		int(target_x),
-		int(target_z),
-		rotation_deg,
-		state,
-		core.world_placement_count(),
-		core.road_count(),
-		core.lot_count(),
-		core.settlement_count(),
-		core.terrain_delta_count(),
-		int(city.get("population", 0)),
-		int(city.get("housing_capacity", 0)),
-		int(city.get("vacancies", 0)),
-		int(city.get("jobs", 0)),
-		int(city.get("employed", 0)),
-		happiness_text,
-		age_text,
-		research_text,
-		tutorial_text,
-		float(city.get("average_commute_m", 0.0)),
-		float(city.get("daily_wages", 0.0)),
-		needs_text,
-		treasury_text,
-		industry_text,
-		utilities_text,
-		service_text,
-		traffic_text,
-		int(construction.get("active", 0)),
-		int(construction.get("stalled", 0)),
-		int(construction.get("effective_crew", 0)),
-		int(construction.get("crew_capacity", 0)),
-		int(construction.get("trades", []).size()),
-		int(construction.get("materials_stock", 0)),
-		save_path,
+		i18n.t("base.ui.hud.target", {
+			"x": int(target_x),
+			"z": int(target_z),
+			"rotation": rotation_deg,
+			"state": state,
+		}),
+		i18n.t("base.ui.hud.placements", {
+			"placements": core.world_placement_count(),
+			"roads": core.road_count(),
+			"lots": core.lot_count(),
+			"settlements": core.settlement_count(),
+			"edits": core.terrain_delta_count(),
+		}),
+		i18n.t("base.ui.hud.city", {
+			"population": int(city.get("population", 0)),
+			"housing": int(city.get("housing_capacity", 0)),
+			"vacant": int(city.get("vacancies", 0)),
+			"jobs": int(city.get("jobs", 0)),
+			"employed": int(city.get("employed", 0)),
+			"happiness": happiness_text,
+		}),
+		"Age: %s" % age_text,
+		"Research: %s" % research_text,
+		"Tutorial: %s" % tutorial_text,
+		"Commute %.0f m · wages %.0f/day" % [
+			float(city.get("average_commute_m", 0.0)),
+			float(city.get("daily_wages", 0.0)),
+		],
+		i18n.t("base.ui.hud.needs", {"needs": needs_text}),
+		i18n.t("base.ui.hud.treasury", {"treasury": treasury_text}),
+		"Industry: %s" % industry_text,
+		"Utilities: %s" % utilities_text,
+		"Civic: %s" % service_text,
+		"Traffic: %s" % traffic_text,
+		i18n.t("base.ui.hud.construction", {
+			"active": int(construction.get("active", 0)),
+			"stalled": int(construction.get("stalled", 0)),
+			"crew": int(construction.get("effective_crew", 0)),
+			"capacity": int(construction.get("crew_capacity", 0)),
+			"trades": int(construction.get("trades", []).size()),
+			"materials": int(construction.get("materials_stock", 0)),
+			"save": save_path,
+		}),
 	]
+	status_label.text = "\n".join(status_lines)
 	if materialization_visible:
 		status_label.text += "\nCitizens near: %d active · %d detailed" % [
 			materialization_counts.x,
@@ -2667,6 +2693,7 @@ func _run_scene_smoke() -> void:
 	var economy_ok := false
 	var dashboard_ok := false
 	var hud_i18n_ok := false
+	var hud_body_i18n_ok := false
 	var save_ok := false
 	var clear_ok := false
 	var load_ok := false
@@ -3175,10 +3202,20 @@ func _run_scene_smoke() -> void:
 				dashboard_ok = dashboard_ok and not dashboard_panel.visible
 				i18n.set_locale("de")
 				_update_dashboard()
+				_update_hud()
 				hud_i18n_ok = dashboard_title.text.contains("Stadt") and dashboard_text.text.contains("Bevölkerung")
+				hud_body_i18n_ok = hud.text.contains("Bürgermeistermodus")
+				hud_body_i18n_ok = hud_body_i18n_ok and status_label.text.contains("Platzierungen:")
+				hud_body_i18n_ok = hud_body_i18n_ok and not hud.text.contains("!base.ui.")
+				hud_body_i18n_ok = hud_body_i18n_ok and not status_label.text.contains("!base.ui.")
 				i18n.set_locale("en")
 				_update_dashboard()
+				_update_hud()
 				hud_i18n_ok = hud_i18n_ok and dashboard_title.text.contains("City Dashboard") and dashboard_text.text.contains("Population")
+				hud_body_i18n_ok = hud_body_i18n_ok and hud.text.contains("Mayor Mode")
+				hud_body_i18n_ok = hud_body_i18n_ok and status_label.text.contains("Placements:")
+				hud_body_i18n_ok = hud_body_i18n_ok and not hud.text.contains("!base.ui.")
+				hud_body_i18n_ok = hud_body_i18n_ok and not status_label.text.contains("!base.ui.")
 				dashboard_ok = dashboard_ok and hud_i18n_ok
 				var balance_before_loan := float(economy_after.get("balance", 0.0))
 				var loan_state: Dictionary = core.economy_borrow(SEED, LOAN_AMOUNT)
@@ -3387,7 +3424,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s follow=%s citizen_i18n=%s materialization=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s follow=%s citizen_i18n=%s materialization=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -3418,6 +3455,7 @@ func _run_scene_smoke() -> void:
 		"ok" if economy_ok else "failed",
 		"ok" if dashboard_ok else "failed",
 		"ok" if hud_i18n_ok else "failed",
+		"ok" if hud_body_i18n_ok else "failed",
 		"ok" if traffic_ok else "failed",
 		"ok" if select_ok else "failed",
 		"ok" if enter_ok else "failed",
