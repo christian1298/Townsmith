@@ -246,6 +246,12 @@ cargo run --release -p townsmith-bench --bin traffic
 # Job-assignment index benchmark (1,000 x 1,000)
 cargo run --release -p townsmith-bench --bin jobs
 
+# 1M data-scale harness (not the render gate)
+cargo run --release -p townsmith-bench --bin metropolis -- --smoke
+
+# 150,000-resident Modern-age balance probe
+cargo run --release -p townsmith-bench --bin modern -- --smoke
+
 # 2,000 active-agent tick benchmark (sparse + dense)
 cargo run --release -p townsmith-bench --bin agents
 

@@ -101,10 +101,10 @@ A row is **sustainable** when the final balance is non-negative and the treasury
 ## 6. Tests
 
 - `core_city::progression`: 6 tests — thresholds, boundary populations, next threshold/progress, final age, stable names/materials, determinism, age-id aliases.
-- `core_city` total: **218 tests**; `core_structure` **19 tests + 1 doctest**.
+- `core_city` total: **232 tests**; `core_structure` **19 tests + 1 doctest**.
 - `godot_ext`: **52 tests**; the scene smoke covers `progression_state`, structural limits, research generation, the tutorial checklist, and the HUD; structural age rejection is covered by the bridge helper and core placement tests.
 - `city_loop` bin: 5 tests, including the deterministic balance report that maps the runner populations to Wood and Masonry.
-- Workspace: **470 tests + 2 doctests (472 passed)**.
+- Workspace: **493 tests + 2 doctests (495 passed)**.
 - Smoke marker includes `age=ok`, `research=ok`, `tutorial=ok`, `starter=ok`, and `trades=ok`.
 
 ## 7. Limits
