@@ -73,6 +73,8 @@ GODOT=/path/to/godot ./scripts/smoke_slice.sh
 # Headless MultiMesh setup harness for 10k/50k/250k boxes (not FPS)
 GODOT=/path/to/godot ./scripts/smoke_metropolis_render.sh
 GODOT=/path/to/godot ./scripts/bench_metropolis_gate.sh --setup-only
+GODOT=/path/to/godot ./scripts/smoke_metropolis_voxel_gate.sh
+GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only
 cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort

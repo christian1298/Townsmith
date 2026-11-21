@@ -1,0 +1,15 @@
+{
+  "id": "metropolis_voxel_gate_v1",
+  "description": "Deterministic 60 s voxel-proxy route over three MultiMesh tiers (1k / 5k / 20k greedy-meshed Phase 0 hut instances, 26k total) laid out along X. Outside-in approach, low pass over the tiers, climb-out. Setup/frame-budget evidence only; not the RTX 3060 metropolis gate (docs/68 §7.7).",
+  "duration_seconds": 60,
+  "warmup_seconds": 8,
+  "waypoints": [
+    { "t": 0.0, "position": [-3000, 850, 3200], "look_at": [0, 50, 0], "fov": 68 },
+    { "t": 0.15, "position": [-2500, 450, 2200], "look_at": [-1700, 40, 0], "fov": 68 },
+    { "t": 0.35, "position": [-1500, 220, 1100], "look_at": [-1100, 40, 0], "fov": 65 },
+    { "t": 0.55, "position": [-300, 140, 700], "look_at": [500, 45, 0], "fov": 70 },
+    { "t": 0.72, "position": [800, 110, 450], "look_at": [900, 50, 0], "fov": 72 },
+    { "t": 0.86, "position": [1900, 260, 1000], "look_at": [900, 50, 0], "fov": 70 },
+    { "t": 1.0, "position": [3000, 850, 2800], "look_at": [0, 50, 0], "fov": 68 }
+  ]
+}

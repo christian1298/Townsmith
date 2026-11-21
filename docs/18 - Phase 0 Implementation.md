@@ -210,6 +210,8 @@ GODOT=/path/to/godot ./scripts/smoke_city.sh
 # Headless MultiMesh setup harness for 10k/50k/250k boxes (not FPS evidence)
 GODOT=/path/to/godot ./scripts/smoke_metropolis_render.sh
 GODOT=/path/to/godot ./scripts/bench_metropolis_gate.sh --setup-only
+GODOT=/path/to/godot ./scripts/smoke_metropolis_voxel_gate.sh
+GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only
 VOXEL_INSTANCES=200 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_voxel_instances.json
 GODOT=/path/to/godot ./scripts/smoke_voxel.sh
 GODOT=/path/to/godot ./scripts/smoke_volume.sh
