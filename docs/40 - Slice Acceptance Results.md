@@ -13,13 +13,13 @@ tags:
 # 40 — Slice Acceptance Results
 
 > [!info] What this note is
-> The recorded result of the Phase 1 vertical-slice acceptance run on 2026-11-20. It closes the technical exit criteria in [[26 - Vertical Slice Spec]] §6 and links every check to a command or test. The manual 30-minute playtest remains open as Q-101.
+> The recorded result of the Phase 1 vertical-slice acceptance run on 2026-11-20. It closes the technical exit criteria in [[26 - Vertical Slice Spec]] §6 and links every check to a command or test. The manual 30-minute playtest remains open as Q-101; the route and recording template are in [[66 - Playtest Kit]].
 
 ## 1. Verdict
 
 **Technical acceptance: pass.** The shared two-story house builds, detects the required rooms, reports capacity and material cost, saves/reloads with an equal content hash, places a mesh copy, and survives a 500-edit undo/redo replay. EN/DE strings and layout budgets pass.
 
-**Open:** a human 30-minute playtest and the top-three usability issues (Q-101). The slice is not marked fully accepted until that is recorded.
+**Human acceptance: pending.** A human 30-minute playtest and the top-three usability issues (Q-101) are not recorded yet. The route, observer checklist, ratings, and result template are in [[66 - Playtest Kit]]. The slice is not marked fully accepted until that is recorded.
 
 ## 2. Acceptance matrix
 
@@ -111,6 +111,6 @@ They remain Phase 2 editor work. The engine-neutral data model already carries m
 
 ## 8. Next
 
-1. Run the 30-minute playtest and record the top three usability issues (Q-101).
+1. Run the 30-minute playtest from [[66 - Playtest Kit]] and record the top three usability issues (Q-101).
 2. Mark the vertical slice accepted once the playtest is recorded.
 3. Carry the technical baseline into Phase 2 planning: [[08 - Roadmap]].

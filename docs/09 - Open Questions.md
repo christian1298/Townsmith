@@ -2,7 +2,7 @@
 title: Open Questions
 project: Townsmith
 status: active
-updated: 2026-11-20
+updated: 2026-11-21
 tags:
   - townsmith
   - questions
@@ -256,7 +256,7 @@ These must be answered before or during Phase 0. They change the architecture, t
 | **Q-050** | Steam at launch? Workshop at launch? | Steam likely; Workshop after launch | High |
 | **Q-051** | Is a demo/vertical slice needed for funding or marketing? | Build the vertical slice regardless; use it as a demo if needed | Normal |
 | **Q-052** | Minimum hardware target? | Define in Phase 0; mid-range 2024–2026 desktop at 1080p/60 | High |
-| **Q-101** | What are the top three usability issues from the 30-minute vertical-slice playtest? | Run the playtest, build a house without reading docs, and record the issues before closing Phase 1 | High |
+| **Q-101** | What are the top three usability issues from the 30-minute vertical-slice playtest? | Run the route in [[66 - Playtest Kit]] with a fresh tester, build a house without reading docs, and record the issues before closing Phase 1 | High |
 
 ## Technical questions
 
