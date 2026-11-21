@@ -1163,9 +1163,10 @@ func _update_hud() -> void:
 				float(structure.get("required_foundation_m", 0.0)),
 			]
 		else:
-			structure_text = "%s  INVALID: %s" % [
+			structure_text = "%s  INVALID: %s (%s)" % [
 				str(structure.get("system_name", "?")),
 				str(structure.get("error", "")),
+				str(structure.get("error_code", "")),
 			]
 	var selected := _selected_placement()
 	var selected_line := "Selected: none"

@@ -97,7 +97,7 @@ This lets old packages and editor saves participate without a migration.
 
 Validation returns the first failure:
 
-1. stories >= 1, height finite > 0, span finite >= 0, foundation finite >= 0.
+1. stories >= 1, height finite > 0, span finite >= 0, foundation finite >= 0, and declared height matches the blueprint bounds height.
 2. Resolve effective limits:
    - no ground system: the selected system's limits;
    - same ground and upper system: the selected system's limits;
@@ -141,7 +141,7 @@ Composite v1 is intentionally narrow: a stone/brick ground floor carrying timber
 timber frame allows 3 stories; this blueprint has 4
 ```
 
-The world scene shows this as `INVALID: structure_stories` in the preview and the placement modal, while the blueprint HUD shows the system and limits.
+The world scene shows this as `INVALID: structure_stories` in the preview, the blueprint HUD, and the placement modal, with the readable message alongside it.
 
 ## 6. Blueprint and placement data
 
@@ -153,17 +153,18 @@ pub structure: Option<StructureSpec>,
 ```
 
 - Default metadata omits the field, so old packages and the golden blueprint hash are unchanged.
-- `load_tsbp` validates a declared structure and rejects impossible specs at load time.
+- `save_tsbp` and `load_tsbp` validate declared fields and the height/bounds match. Material-limit failures are allowed as drafts; placement revalidates them.
 - `PlacementRequest` and `Placement` carry the same optional spec; `Placement` skips it when absent so old world saves remain byte-compatible.
-- Old placements without structure metadata remain loadable. New placements derive a conservative timber frame when the package has no structure block.
+- Old placements without structure metadata remain loadable. A legacy package derives a conservative timber frame only when that derivation validates; otherwise it stays unchecked until re-authored.
 - `world_load` revalidates placement structure and, for new records, compares it with the package metadata.
 
 ## 7. Editor
 
-The editor stores a selected system (default timber frame). `H` cycles:
+The editor stores a selected system (default timber frame). `H` cycles all nine systems:
 
 ```text
-timber frame -> load-bearing stone -> load-bearing brick -> reinforced concrete -> steel frame
+timber frame -> timber shed -> tent -> load-bearing stone -> half-timber
+-> load-bearing brick -> reinforced concrete -> steel frame -> composite core
 ```
 
 Saving derives the spec from the volume and detected rooms:
@@ -173,17 +174,17 @@ Saving derives the spec from the volume and detected rooms:
 - foundation from the recommended table;
 - span left undeclared.
 
-The palette shows `structure: timber frame (3/3 stories)`. Loading a package restores its declared system. Saving rejects an invalid spec before writing, and in-memory placement requests run the same rules again.
+The palette shows `structure: timber frame (3/3 stories)`. Loading a package restores its declared system, ground system, span, and foundation so a composite package round-trips. Out-of-limit designs can be saved as drafts; placement rejects them with the first failing rule. In-memory placement requests run the same rules again.
 
 ## 8. Tests and smoke
 
 - `core_structure`: **18 tests + 1 doctest** for each limit, composite bonus/weak ground, span, foundation, aliases, and derivation.
 - `core_city::placement`: 6 tests — a four-story timber request fails with `structure_stories`; a four-story brick request and a stone-ground/timber request pass; legacy requests without metadata pass; loaded placements revalidate. Core city total **157**.
-- `core_blueprint`: **14 tests** — default metadata omits the field; a valid structure roundtrips; an invalid structure is rejected on save.
-- `godot_ext`: **42 tests**; blueprint info and placement payloads include the structure summary; world load keeps it; the editor reports it.
+- `core_blueprint`: **15 tests** — default metadata omits the field; a valid structure roundtrips; an over-limit structure saves as a draft; a height mismatch is rejected on save.
+- `godot_ext`: **43 tests**; blueprint info and placement payloads include the structure summary, with a bridge roundtrip test plus the world-scene and editor smoke coverage.
 - `smoke_world_scene.sh`: the acceptance house derives timber frame, two stories, and a three-story limit; the marker includes `structure=ok`.
-- The editor smoke checks the default timber state.
-- Workspace: **388 tests + 2 doctests (390 passed)**.
+- The editor blueprint smoke checks the saved/loaded timber structure block.
+- Workspace: **390 tests + 2 doctests (392 passed)**.
 
 ## 9. Limits
 
@@ -195,6 +196,8 @@ The palette shows `structure: timber frame (3/3 stories)`. Loading a package res
 - Structure selection changes metadata and rules, not the voxel palette; brick/concrete art arrives with the 4.4 content library.
 - Age-specific material costs, fire risk, and trades arrive in 4.3/4.4.
 - A very wide building can declare span 0 and pass; this is intentional until beam analysis exists.
+- Derived structure for a legacy package is persisted with the placement; changing the derivation heuristic in a future version needs a migration or a revalidation bypass.
+- The editor uses the full volume height, so a tall empty volume with a short house can overstate structural height; a tighter solid-height measure is future work.
 
 ## 10. Next
 

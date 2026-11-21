@@ -71,6 +71,7 @@ const TABLES := {
 
 		# Palette labels and content names.
 		"base.editor.palette.materials": "Materials  (keys 1-5)",
+		"base.editor.palette.structure": "H  structure: {0} ({1}/{2} stories)",
 		"base.editor.palette.props": "Props  (keys 6-9)",
 		"base.editor.material.timber": "timber",
 		"base.editor.material.stone": "stone",
@@ -92,7 +93,7 @@ const TABLES := {
 		# Help / controls.
 		"base.editor.help.move": "WASD move   Space/Ctrl up/down   Shift boost   Esc release mouse",
 		"base.editor.help.edit": "Left click remove   Right click place   Keys 1-5 choose material",
-		"base.editor.help.tools": "R room view   [ ] select room   L language   Ctrl+Z undo   Ctrl+Y redo   F5 save   F9 load",
+		"base.editor.help.tools": "R room view   H structure   [ ] select room   L language   Ctrl+Z undo   Ctrl+Y redo   F5 save   F9 load",
 
 		# Blueprint bar and dialogs.
 		"base.editor.blueprint.name_placeholder": "Blueprint name",
@@ -185,6 +186,7 @@ const TABLES := {
 
 		# Palette und Inhaltsnamen.
 		"base.editor.palette.materials": "Materialien  (Tasten 1–5)",
+		"base.editor.palette.structure": "H  Tragwerk: {0} ({1}/{2} Geschosse)",
 		"base.editor.palette.props": "Objekte  (Tasten 6–9)",
 		"base.editor.material.timber": "Holz",
 		"base.editor.material.stone": "Stein",
@@ -206,7 +208,7 @@ const TABLES := {
 		# Hilfe und Steuerung.
 		"base.editor.help.move": "WASD: bewegen   Leertaste/Strg: hoch/runter   Umschalt: schneller   Esc: Maus freigeben",
 		"base.editor.help.edit": "Linksklick entfernen   Rechtsklick platzieren   Tasten 1–5: Material wählen",
-		"base.editor.help.tools": "R Raumansicht   [ ] Raum wechseln   L Sprache   Strg+Z rückgängig   Strg+Y wiederholen   F5 speichern   F9 laden",
+		"base.editor.help.tools": "R Raumansicht   H Tragwerk   [ ] Raum wechseln   L Sprache   Strg+Z rückgängig   Strg+Y wiederholen   F5 speichern   F9 laden",
 
 		# Blaupausenleiste und Dialoge.
 		"base.editor.blueprint.name_placeholder": "Blaupausenname",

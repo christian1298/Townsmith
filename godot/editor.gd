@@ -40,10 +40,14 @@ const VOXEL_COLOR := Color(0.78, 0.73, 0.62)
 
 const STRUCTURES := [
 	"timber_frame",
+	"timber_shed",
+	"tent",
 	"load_bearing_stone",
+	"half_timber",
 	"load_bearing_brick",
 	"reinforced_concrete",
 	"steel_frame",
+	"composite_core",
 ]
 const MATERIALS := [
 	{"id": 1, "name": "timber"},
@@ -995,7 +999,7 @@ func _cycle_structure() -> void:
 	var next_index := (index + 1) % STRUCTURES.size()
 	var selected: Dictionary = _core.editor_set_structure(STRUCTURES[next_index])
 	if not bool(selected.get("ok", false)):
-		_status("base.editor.generic.unknown_error", [str(selected.get("error", "structure"))])
+		_set_status("Structure: " + str(selected.get("error", "unknown error")))
 		return
 	_update_palette_label()
 	_refresh_stats_label()
@@ -1012,11 +1016,14 @@ func _update_palette_label() -> void:
 	var structure: Dictionary = _core.editor_structure_state()
 	if bool(structure.get("ok", false)):
 		var limit := int(structure.get("effective_max_stories", 0))
-		lines.append("H  structure: %s (%d/%d stories)" % [
+		var structure_line: String = _i18n.t("base.editor.palette.structure", [
 			str(structure.get("system_name", "?")),
 			int(structure.get("stories", 0)),
 			limit,
 		])
+		if not bool(structure.get("valid", false)):
+			structure_line += " — " + str(structure.get("error", ""))
+		lines.append(structure_line)
 	lines.append(_i18n.t("base.editor.palette.props"))
 	for index in PROPS.size():
 		var entry: Dictionary = PROPS[index]
@@ -1036,6 +1043,7 @@ func _refresh_stats_label(build_ms: float = -1.0) -> void:
 	elif _remesh_pending:
 		text += "\n" + _i18n.t("base.editor.stats.remesh_pending")
 	_stats_label.text = text
+	_update_palette_label()
 
 func _format_stats(stats: Dictionary) -> String:
 	return _i18n.t("base.editor.stats.solid_quads", [
@@ -1339,6 +1347,13 @@ func _run_blueprint_smoke() -> void:
 			status = "save_hash"
 		elif int(saved.get("props", -1)) != 1:
 			status = "save_props"
+		var saved_structure: Dictionary = saved.get("structure", {})
+		if status == "ok" and (
+			not bool(saved_structure.get("present", false))
+			or not bool(saved_structure.get("valid", false))
+			or str(saved_structure.get("system", "")) != "timber_frame"
+		):
+			status = "save_structure"
 
 	if status == "ok":
 		if not _core.editor_clear():
@@ -1360,6 +1375,12 @@ func _run_blueprint_smoke() -> void:
 			status = "load_props"
 		elif int(_core.editor_props().get("props", []).size()) != 1:
 			status = "load_prop_state"
+		var loaded_structure: Dictionary = loaded.get("structure", {})
+		if status == "ok" and (
+			not bool(loaded_structure.get("present", false))
+			or str(loaded_structure.get("system", "")) != "timber_frame"
+		):
+			status = "load_structure"
 		var bounds: PackedFloat32Array = loaded.get("bounds", PackedFloat32Array())
 		if status == "ok" and bounds.size() != 3:
 			status = "load_bounds"

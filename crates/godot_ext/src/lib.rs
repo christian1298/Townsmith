@@ -177,12 +177,16 @@ fn editor_props_input(props: &[EditorProp]) -> Vec<PropInput> {
 }
 
 /// Build blueprint metadata from the editor volume, including detected rooms.
+#[allow(clippy::too_many_arguments)]
 fn blueprint_from_editor_volume(
     id: String,
     name: String,
     volume: VoxelVolume,
     props: &[EditorProp],
     structure: StructuralSystem,
+    ground_system: Option<StructuralSystem>,
+    max_span_m: f32,
+    foundation_depth_m: Option<f32>,
 ) -> Blueprint {
     let inputs = editor_props_input(props);
     let stats = detect_rooms(&volume, &editor_room_materials(), &inputs);
@@ -215,7 +219,12 @@ fn blueprint_from_editor_volume(
         .map(|room| u16::try_from(room.floor.saturating_add(1)).unwrap_or(u16::MAX))
         .max()
         .unwrap_or_else(|| (bounds_m[1] / 3.2).ceil().max(1.0) as u16);
-    metadata.structure = Some(StructureSpec::new(structure, stories, bounds_m[1], 0.0));
+    let mut spec = StructureSpec::new(structure, stories, bounds_m[1], max_span_m);
+    spec.ground_system = ground_system;
+    if let Some(depth) = foundation_depth_m {
+        spec.foundation_depth_m = depth;
+    }
+    metadata.structure = Some(spec);
     let mut ordered: Vec<&EditorProp> = props.iter().collect();
     ordered.sort_by_key(|prop| (prop.cell[1], prop.cell[2], prop.cell[0]));
     metadata.props = ordered
@@ -474,6 +483,9 @@ struct EditorState {
     volume: VoxelVolume,
     props: Vec<EditorProp>,
     structure: StructuralSystem,
+    ground_system: Option<StructuralSystem>,
+    structure_span_m: f32,
+    structure_foundation_m: Option<f32>,
     mesh_builds: u64,
     mesh_dirty: bool,
     last_mesh_quads: usize,
@@ -488,6 +500,9 @@ impl EditorState {
             volume,
             props: Vec::new(),
             structure: StructuralSystem::TimberFrame,
+            ground_system: None,
+            structure_span_m: 0.0,
+            structure_foundation_m: None,
             mesh_builds: 0,
             // A newly created volume has no mesh yet, so consumers that act on
             // the dirty flag must build the initial surface.
@@ -4317,7 +4332,16 @@ impl TownsmithCore {
             .map(|room| u16::try_from(room.floor.saturating_add(1)).unwrap_or(u16::MAX))
             .max()
             .unwrap_or_else(|| (bounds_m[1] / 3.2).ceil().max(1.0) as u16);
-        let spec = StructureSpec::new(state.structure, stories, bounds_m[1], 0.0);
+        let mut spec = StructureSpec::new(
+            state.structure,
+            stories,
+            bounds_m[1],
+            state.structure_span_m,
+        );
+        spec.ground_system = state.ground_system;
+        if let Some(depth) = state.structure_foundation_m {
+            spec.foundation_depth_m = depth;
+        }
         let mut result = structure_payload(&spec);
         result.set("ok", true);
         result.set("created", true);
@@ -4561,7 +4585,7 @@ impl TownsmithCore {
             return result;
         }
 
-        let (volume, props, structure) = {
+        let (volume, props, structure, ground_system, structure_span_m, structure_foundation_m) = {
             let guard = self
                 .editor
                 .lock()
@@ -4571,10 +4595,26 @@ impl TownsmithCore {
                 result.set("error", "no editor volume is open");
                 return result;
             };
-            (state.volume.clone(), state.props.clone(), state.structure)
+            (
+                state.volume.clone(),
+                state.props.clone(),
+                state.structure,
+                state.ground_system,
+                state.structure_span_m,
+                state.structure_foundation_m,
+            )
         };
 
-        let blueprint = blueprint_from_editor_volume(id, name, volume, &props, structure);
+        let blueprint = blueprint_from_editor_volume(
+            id,
+            name,
+            volume,
+            &props,
+            structure,
+            ground_system,
+            structure_span_m,
+            structure_foundation_m,
+        );
         let hash = match save_tsbp_with_hash(&path, &blueprint) {
             Ok(hash) => hash,
             Err(error) => {
@@ -4646,13 +4686,15 @@ impl TownsmithCore {
         let name = blueprint.metadata.name.clone();
         let id = blueprint.metadata.id.clone();
 
-        let loaded_structure = blueprint
-            .metadata
-            .structure
-            .map_or(StructuralSystem::TimberFrame, |structure| structure.system);
+        let loaded_spec = blueprint.metadata.structure;
+        let loaded_structure =
+            loaded_spec.map_or(StructuralSystem::TimberFrame, |structure| structure.system);
         let mut state = EditorState::new(blueprint.volume);
         state.structure = loaded_structure;
-        let structure_payload_value = blueprint.metadata.structure.as_ref().map(structure_payload);
+        state.ground_system = loaded_spec.and_then(|structure| structure.ground_system);
+        state.structure_span_m = loaded_spec.map_or(0.0, |structure| structure.max_span_m);
+        state.structure_foundation_m = loaded_spec.map(|structure| structure.foundation_depth_m);
+        let structure_payload_value = loaded_spec.as_ref().map(structure_payload);
         let dims = state.volume.config().voxels();
         state.props = blueprint
             .metadata
@@ -5055,12 +5097,15 @@ fn structure_spec_for_blueprint(blueprint: &Blueprint) -> Option<StructureSpec> 
         .map(|room| u16::try_from(room.floor.saturating_add(1)).unwrap_or(u16::MAX))
         .max()
         .unwrap_or(fallback.stories);
-    Some(StructureSpec::new(
+    let derived = StructureSpec::new(
         StructuralSystem::TimberFrame,
         stories,
         fallback.height_m,
         0.0,
-    ))
+    );
+    // Legacy packages stay placeable when the conservative derivation would
+    // reject them; re-authoring is required to opt into structural rules.
+    derived.validate().ok().map(|()| derived)
 }
 
 fn structure_payload(spec: &StructureSpec) -> VarDictionary {
@@ -6482,6 +6527,29 @@ mod tests {
     }
 
     #[test]
+    fn editor_blueprint_preserves_composite_structure_metadata() {
+        let blueprint = blueprint_from_editor_volume(
+            "local:composite".to_string(),
+            "Composite".to_string(),
+            room_demo::acceptance_house(),
+            &[],
+            StructuralSystem::TimberFrame,
+            Some(StructuralSystem::LoadBearingStone),
+            6.0,
+            Some(0.5),
+        );
+        let structure = blueprint.metadata.structure.expect("structure");
+        assert_eq!(
+            structure.ground_system,
+            Some(StructuralSystem::LoadBearingStone)
+        );
+        assert_eq!(structure.max_span_m, 6.0);
+        assert_eq!(structure.foundation_depth_m, 0.5);
+        assert_eq!(structure.stories, 2);
+        assert!(structure.summary().expect("valid").composite_bonus);
+    }
+
+    #[test]
     fn blueprint_metadata_includes_detected_rooms() {
         let mut volume =
             VoxelVolume::new(VolumeConfig::new(2, 1, 2).expect("config")).expect("volume");
@@ -6546,6 +6614,9 @@ mod tests {
             volume,
             &props,
             StructuralSystem::TimberFrame,
+            None,
+            0.0,
+            None,
         );
         assert_eq!(blueprint.metadata.rooms.len(), 1);
         let room = &blueprint.metadata.rooms[0];

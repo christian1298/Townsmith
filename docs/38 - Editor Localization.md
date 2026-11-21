@@ -2,7 +2,7 @@
 title: Editor Localization
 project: Townsmith
 status: active
-updated: 2026-11-20
+updated: 2026-11-21
 tags:
   - townsmith
   - vertical-slice
@@ -48,7 +48,7 @@ GODOT=/path/to/godot ./scripts/smoke_locale.sh
 
 Checks:
 
-- EN/DE key parity (currently **95 keys** each).
+- EN/DE key parity (currently **96 keys** each).
 - placeholder parity for every key.
 - required room/material/prop/status keys.
 - missing-key marker behavior.
@@ -61,7 +61,7 @@ Checks:
 Output:
 
 ```text
-LOCALE_SMOKE en=ok de=ok keys=95 status=ok
+LOCALE_SMOKE en=ok de=ok keys=96 status=ok
 LAYOUT_SMOKE en=ok de=ok checks=16 status=ok
 ```
 

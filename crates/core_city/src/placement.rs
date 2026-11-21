@@ -470,13 +470,9 @@ fn validate_request(request: &PlacementRequest) -> Result<(), PlacementError> {
     }
 
     if let Some(structure) = request.structure {
-        structure.validate().map_err(PlacementError::Structure)?;
-        if (structure.height_m - request.bounds_m[1]).abs() > 1.0e-3 {
-            return Err(PlacementError::InvalidStats {
-                field: "structure.height_m",
-                value: f64::from(structure.height_m),
-            });
-        }
+        structure
+            .validate_against_bounds(request.bounds_m)
+            .map_err(PlacementError::Structure)?;
     }
 
     Ok(())
@@ -750,13 +746,9 @@ fn validate_record(placement: &Placement, next_id: u64) -> Result<(), PlacementE
         });
     }
     if let Some(structure) = placement.structure {
-        structure.validate().map_err(PlacementError::Structure)?;
-        if (structure.height_m - placement.bounds_m[1]).abs() > 1.0e-3 {
-            return Err(PlacementError::InvalidRecord {
-                id: placement.id,
-                reason: "structure height does not match bounds",
-            });
-        }
+        structure
+            .validate_against_bounds(placement.bounds_m)
+            .map_err(PlacementError::Structure)?;
     }
     Ok(())
 }
@@ -1061,7 +1053,8 @@ mod tests {
             0.0,
         ));
         let error = validate_placement(&mismatched, &[], flat).expect_err("height mismatch");
-        assert_eq!(error.code(), "invalid_stats");
+        assert_eq!(error.code(), "invalid_structure");
+        assert!(error.to_string().contains("does not match"));
     }
 
     #[test]

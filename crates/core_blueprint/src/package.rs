@@ -244,14 +244,11 @@ fn validate_metadata(metadata: &BlueprintMetadata) -> Result<(), BlueprintError>
         ));
     }
     if let Some(structure) = &metadata.structure {
+        // Drafts may exceed material limits; placement and load revalidate
+        // the full structure. Fields and volume height must still be sane.
         structure
-            .validate()
+            .validate_declared_against_bounds(metadata.bounds_m)
             .map_err(|error| BlueprintError::Format(format!("structure: {error}")))?;
-        if (structure.height_m - metadata.bounds_m[1]).abs() > 1.0e-3 {
-            return Err(BlueprintError::Format(
-                "structure.height_m must match bounds_m[1]".to_string(),
-            ));
-        }
     }
     Ok(())
 }

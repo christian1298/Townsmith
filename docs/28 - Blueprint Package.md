@@ -48,8 +48,8 @@ Fields:
   "stats": { "resident_capacity": 4, "job_slots": 0, "class": "lower_middle", "material_cost": 1234.5 },
   "structure": {
     "system": "timber_frame",
-    "stories": 2,
-    "height_m": 6.4,
+    "stories": 3,
+    "height_m": 9.6,
     "foundation_depth_m": 0.5
   },
   "dependencies": { "game": ">=0.1.0", "mods": [], "resource_packs": [] },
@@ -62,7 +62,7 @@ Fields:
 - `rooms` is filled by editor save-time room detection; `props` is written from the editor prop list and restored on load.
 - `materials` is a provisional key → count map until the content registry lands.
 - `dependencies` is parsed; non-empty mod/resource-pack lists produce a readable `MissingDependency` error in v1 (no resolver yet). The game constraint is not enforced by the current semantic check.
-- `structure` is optional. When present it declares the structural system, stories, height, optional span, ground system, and foundation depth; see [[60 - Structural Limits]]. Default metadata omits it, so packages written before Phase 4.2 keep their content hash. Invalid specs are rejected on save/load.
+- `structure` is optional. When present it declares the structural system, stories, height, optional span, ground system, and foundation depth; see [[60 - Structural Limits]]. Default metadata omits it, so packages written before Phase 4.2 keep their content hash. Invalid material limits may be saved as drafts; placement and load-time revalidation reject them. The declared height must match `bounds_m[1]`.
 
 ## 3. `voxels.bin` v1
 
@@ -97,7 +97,7 @@ BLAKE3 over:
 2. Length-prefixed canonical metadata JSON with `content_hash` cleared.
 3. Length-prefixed `voxels.bin`.
 
-Stored as `blake3:<hex>` and verified on load. This is a **semantic** hash: unknown JSON fields are dropped on load and are not authenticated.
+Stored as `blake3:<hex>` and verified on load. This is a **semantic** hash: unknown JSON fields are dropped on load and are not authenticated. A pre-4.2 build opening a package with the new `structure` field will drop it before hashing and report `HashMismatch`; update the build rather than trusting the older reader.
 
 Golden test hash for the small two-floor test volume:
 

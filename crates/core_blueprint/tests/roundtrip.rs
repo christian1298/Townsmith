@@ -294,22 +294,41 @@ fn structure_survives_save_and_load() {
 }
 
 #[test]
-fn invalid_structure_is_rejected_on_save() {
-    let dir = temp_dir("structure-invalid");
+fn an_over_limit_structure_is_a_draft_not_a_package_error() {
+    let dir = temp_dir("structure-draft");
     let path = dir.join("structure.tsbp");
     let mut blueprint = test_blueprint();
+    let height = blueprint.metadata.bounds_m[1];
+    let structure = StructureSpec::new(StructuralSystem::TimberFrame, 4, height, 6.0);
+    assert!(structure.validate().is_err());
+    blueprint.metadata.structure = Some(structure);
+    save_tsbp(&path, &blueprint).expect("draft saves");
+    let loaded = load_tsbp(&path).expect("draft loads");
+    assert_eq!(loaded.metadata.structure, Some(structure));
+    assert!(loaded
+        .metadata
+        .structure
+        .expect("structure")
+        .validate()
+        .is_err());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_structure_height_mismatch_is_rejected_on_save() {
+    let dir = temp_dir("structure-height");
+    let path = dir.join("structure.tsbp");
+    let mut blueprint = test_blueprint();
+    let height = blueprint.metadata.bounds_m[1];
     blueprint.metadata.structure = Some(StructureSpec::new(
         StructuralSystem::TimberFrame,
-        4,
-        12.8,
-        6.0,
+        2,
+        height + 1.0,
+        0.0,
     ));
-    let error = save_tsbp(&path, &blueprint).expect_err("four timber stories");
+    let error = save_tsbp(&path, &blueprint).expect_err("height mismatch");
     assert!(matches!(error, BlueprintError::Format(_)));
-    assert!(
-        error.to_string().contains("structure:"),
-        "expected a structure-prefixed error, got {error}"
-    );
+    assert!(error.to_string().contains("does not match"));
     assert!(!path.exists());
     fs::remove_dir_all(dir).unwrap();
 }

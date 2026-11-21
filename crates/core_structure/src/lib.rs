@@ -315,14 +315,69 @@ impl StructureSpec {
         Ok(Self::new(system, stories, bounds_m[1], 0.0))
     }
 
-    /// Validate the declared values against the effective limits.
+    /// Validate declared fields without applying material limits.
+    ///
+    /// Saves use this so an invalid design can be kept as a draft; placement
+    /// and load validation use [`Self::validate`] or
+    /// [`Self::validate_against_bounds`] instead.
+    pub fn validate_declared(&self) -> Result<(), StructureError> {
+        if self.stories == 0 {
+            return Err(StructureError::InvalidStories {
+                stories: self.stories,
+            });
+        }
+        if !self.height_m.is_finite() || self.height_m <= 0.0 {
+            return Err(StructureError::InvalidHeight {
+                height_m: self.height_m,
+            });
+        }
+        if !self.max_span_m.is_finite() || self.max_span_m < 0.0 {
+            return Err(StructureError::InvalidSpan {
+                span_m: self.max_span_m,
+            });
+        }
+        if !self.foundation_depth_m.is_finite() || self.foundation_depth_m < 0.0 {
+            return Err(StructureError::InvalidFoundation {
+                depth_m: self.foundation_depth_m,
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate declared fields and require the height to match the volume.
+    pub fn validate_declared_against_bounds(
+        &self,
+        bounds_m: [f32; 3],
+    ) -> Result<(), StructureError> {
+        self.validate_declared()?;
+        self.check_bounds(bounds_m)
+    }
+
+    /// Validate fields, volume height, and every material limit.
     ///
     /// # Errors
     ///
     /// Returns the first failing rule in this order: invalid fields, weak
-    /// ground system, story limit, height limit, span limit, foundation depth.
+    /// ground system, story limit, height limit, span limit, foundation depth,
+    /// then a height/bounds mismatch.
     pub fn validate(&self) -> Result<(), StructureError> {
         self.checked_limits().map(|_| ())
+    }
+
+    /// Validate every material limit and the volume height.
+    pub fn validate_against_bounds(&self, bounds_m: [f32; 3]) -> Result<(), StructureError> {
+        self.validate()?;
+        self.check_bounds(bounds_m)
+    }
+
+    fn check_bounds(&self, bounds_m: [f32; 3]) -> Result<(), StructureError> {
+        if (self.height_m - bounds_m[1]).abs() > 0.001 {
+            return Err(StructureError::HeightMismatch {
+                height_m: self.height_m,
+                bounds_height_m: bounds_m[1],
+            });
+        }
+        Ok(())
     }
 
     /// Build a serializable summary of the declared values and effective
@@ -348,26 +403,7 @@ impl StructureSpec {
     }
 
     fn checked_limits(&self) -> Result<EffectiveLimits, StructureError> {
-        if self.stories == 0 {
-            return Err(StructureError::InvalidStories {
-                stories: self.stories,
-            });
-        }
-        if !self.height_m.is_finite() || self.height_m <= 0.0 {
-            return Err(StructureError::InvalidHeight {
-                height_m: self.height_m,
-            });
-        }
-        if !self.max_span_m.is_finite() || self.max_span_m < 0.0 {
-            return Err(StructureError::InvalidSpan {
-                span_m: self.max_span_m,
-            });
-        }
-        if !self.foundation_depth_m.is_finite() || self.foundation_depth_m < 0.0 {
-            return Err(StructureError::InvalidFoundation {
-                depth_m: self.foundation_depth_m,
-            });
-        }
+        self.validate_declared()?;
 
         let limits = self.effective_limits()?;
 
@@ -531,6 +567,13 @@ pub enum StructureError {
         /// Declared bounds `[width, height, depth]` in metres.
         bounds: [f32; 3],
     },
+    /// Declared structure height does not match the blueprint volume height.
+    HeightMismatch {
+        /// Declared structure height in metres.
+        height_m: f32,
+        /// Blueprint bounds height in metres.
+        bounds_height_m: f32,
+    },
     /// The declared story count exceeds the effective limit.
     StoriesExceeded {
         /// Structural system governing the limit.
@@ -583,7 +626,8 @@ impl StructureError {
             | Self::InvalidHeight { .. }
             | Self::InvalidSpan { .. }
             | Self::InvalidFoundation { .. }
-            | Self::InvalidBounds { .. } => "invalid_structure",
+            | Self::InvalidBounds { .. }
+            | Self::HeightMismatch { .. } => "invalid_structure",
             Self::StoriesExceeded { .. } => "structure_stories",
             Self::HeightExceeded { .. } => "structure_height",
             Self::SpanExceeded { .. } => "structure_span",
@@ -656,6 +700,13 @@ impl fmt::Display for StructureError {
                 "{} is too weak to carry {}; use a stronger ground system",
                 ground.name(),
                 system.name()
+            ),
+            Self::HeightMismatch {
+                height_m,
+                bounds_height_m,
+            } => write!(
+                formatter,
+                "structure height {height_m} m does not match the blueprint height {bounds_height_m} m"
             ),
         }
     }
