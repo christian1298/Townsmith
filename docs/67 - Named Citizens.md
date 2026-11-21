@@ -97,6 +97,9 @@ citizen_id   = first 63 bits of citizen_seed, with collision probe
 - Bands: child (<18), adult (18–64), elder (65+). v1 has no children (no births); named citizens are adults or elders.
 - `age_days` is persisted; the display is derived.
 
+> [!note] Current bridge placeholder
+> Until N4 persists lifecycle state, `named_citizens_for` derives a display age of 18–64 years from the identity id (`age_years`). It is deterministic and never saved; `age_days` persistence and aging remain N4.
+
 ## 4. Home, work, and service assignment
 
 ### Home
@@ -114,6 +117,9 @@ citizen_id   = first 63 bits of citizen_seed, with collision probe
 - If the household assignment changes, affected named workers emit `CitizenJobChanged` and update. The household `workers` count is unchanged by the named view.
 - Unemployed named adults keep `job: None`; they are not hidden.
 - No shifts, attendance, qualifications, or per-citizen wages in v1. The wage is the fixed household wage divided across workers for display, not a second economy.
+
+> [!note] Derived employment
+> Until per-slot jobs exist, `named_citizens_for` marks the first `household.workers` resident slots as employed (`slot_is_employed`). The aggregate count stays authoritative and the view is not saved.
 
 ### Services
 
@@ -368,7 +374,7 @@ The existing world JSON `population` object gets an optional sibling `named_citi
 | Slice | Deliverable | Acceptance |
 |---|---|---|
 | **N1 — Identity layer (derived)** | Deterministic ids, names, household slot sync, read-only bridge | **Done** — PR #98; 500-resident city produces stable names; `cargo test -p core_city named`; no save or checksum change; 4k identities generate in < 100 ms under the debug test guard |
-| **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | **Partial — PR #108; follow camera and EN/DE card done; per-citizen job/age rows remain** |
+| **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | **Partial — PR #108; follow camera, EN/DE card, and per-citizen age/employment data done; scene rows remain** |
 | **N3 — Materialization** | Active pool, hysteresis, route cache, fade, active cap | **Partial — PR #107; selection core, read-only bridge, and F4 overlay done ([[73 - Materialization Core]]); hysteresis/routes/fade remain** |
 | **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | **Partial — PR #103**; persistence landed ([[70 - Named Persistence]]), lifecycle/aging/death next |
 | **N5 — Cohort bridge (later)** | Sample from cohorts, district stories, 1M identity store | 1M cohort benchmark unchanged; materialization near camera; no per-citizen tick |
@@ -419,10 +425,20 @@ N2 follow/camera additions:
 - `world_i18n.gd` provides key-based EN/DE strings for the citizen panel and follow hint; names remain proper nouns.
 - The smoke starts follow, steps the camera, verifies arrival, verifies selection-change and Architect cancellation, and renders the card in both EN and DE. Markers: `follow=ok`, `citizen_i18n=ok`.
 
-Not yet implemented: per-citizen job/age rows and a full household list. The card is EN/DE but the wider HUD remains English-only until the localization phase.
+N2 exposes per-citizen **age and employment data** in the bridge:
+
+- `named_citizens_for` now returns `age_years` (deterministic 18–64 from the identity id via `mix64`) and `employed` (slots below `household.workers`) beside `id`, `name`, and `slot`.
+- Both are pure derived views: `age_years(id)` and `slot_is_employed(household, slot)` live in `core_city::named`, add no save fields, and do not change any checksum.
+- Employment is a placeholder mapping of the aggregate worker count onto the first slots until per-slot jobs exist.
+- Core tests cover the age range and determinism plus the employment boundaries (`0`, `workers - 1`, `workers`, `residents - 1`).
+
+Rendering the age/job rows in the scene panel is still pending.
+
+Not yet implemented: rendering per-citizen job/age rows, per-slot job titles, and a full household list. The card is EN/DE but the wider HUD remains English-only until the localization phase.
 
 ### N2 checks
 
+- `cargo test -p core_city named`
 - `smoke_world_scene.sh` markers `citizens=ok`, `follow=ok`, `citizen_i18n=ok`
 - `smoke_world_scene.sh` still reports `status=ok`
 - Select, open card, follow, and return; identity stable
