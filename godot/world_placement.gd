@@ -28,8 +28,11 @@ const DASHBOARD_REFRESH_SECONDS := 0.5
 # Materialization is a derived, read-only selection around the Mayor focus or
 # selected building. Rebuild on toggle/selection change and at the same 0.5 s
 # cadence as the dashboard so a panning camera follows without per-frame nodes.
+# The core keeps the previous selection and applies 80 m in / 120 m out
+# hysteresis, so the overlay is a stateful scheduler rather than a fresh query.
 const MATERIALIZATION_REFRESH_SECONDS := 0.5
-const MATERIALIZATION_ACTIVE_RADIUS_M := 250.0
+const MATERIALIZATION_INNER_RADIUS_M := 250.0
+const MATERIALIZATION_OUTER_RADIUS_M := 350.0
 const MATERIALIZATION_DETAILED_RADIUS_M := 120.0
 # Follow pulls the Mayor target toward the selected home with an exponential
 # ease. The epsilon is the arrival radius and also the pan detector: a larger
@@ -832,6 +835,11 @@ func _materialization_center() -> Vector3:
 		return mayor_camera.target
 	return Vector3(target_x, 0.0, target_z)
 
+func _materialization_pin() -> int:
+	# The bridge treats 0 as "no pin"; selected_id is -1 when nothing is
+	# selected and a negative id would be rejected.
+	return maxi(selected_id, 0)
+
 func _toggle_materialization() -> bool:
 	materialization_visible = not materialization_visible
 	materialization_refresh_accum = 0.0
@@ -853,9 +861,10 @@ func _rebuild_materialization() -> void:
 	if not materialization_visible or core == null:
 		return
 	var center := _materialization_center()
-	var state: Dictionary = core.materialization_state(
+	var state: Dictionary = core.materialization_step(
 		SEED, center.x, center.z,
-		MATERIALIZATION_ACTIVE_RADIUS_M, MATERIALIZATION_DETAILED_RADIUS_M
+		MATERIALIZATION_INNER_RADIUS_M, MATERIALIZATION_OUTER_RADIUS_M,
+		MATERIALIZATION_DETAILED_RADIUS_M, _materialization_pin()
 	)
 	if not bool(state.get("ok", false)):
 		return
@@ -2713,6 +2722,7 @@ func _run_scene_smoke() -> void:
 	var citizen_i18n_ok := false
 	var content_i18n_ok := false
 	var materialization_ok := false
+	var materialization_step_ok := false
 	var follow_ok := false
 	var render_ok := false
 	var structure_ok := false
@@ -3100,9 +3110,10 @@ func _run_scene_smoke() -> void:
 				_close_citizen_panel()
 				i18n.set_locale(smoke_locale)
 				var materialization_center := _materialization_center()
-				var materialization_query: Dictionary = core.materialization_state(
+				var materialization_query: Dictionary = core.materialization_step(
 					SEED, materialization_center.x, materialization_center.z,
-					MATERIALIZATION_ACTIVE_RADIUS_M, MATERIALIZATION_DETAILED_RADIUS_M
+					MATERIALIZATION_INNER_RADIUS_M, MATERIALIZATION_OUTER_RADIUS_M,
+					MATERIALIZATION_DETAILED_RADIUS_M, _materialization_pin()
 				)
 				var materialization_query_counts: Dictionary = materialization_query.get("counts", {})
 				var expected_active := int(materialization_query_counts.get("active", 0))
@@ -3110,6 +3121,17 @@ func _run_scene_smoke() -> void:
 				materialization_ok = bool(materialization_query.get("ok", false))
 				materialization_ok = materialization_ok and expected_active > 0
 				materialization_ok = materialization_ok and expected_detailed > 0
+				var step_diff: Dictionary = materialization_query.get("diff", {})
+				var step_changed: Array = materialization_query.get("changed", [])
+				materialization_step_ok = materialization_ok
+				materialization_step_ok = materialization_step_ok and str(materialization_query.get("checksum", "")).length() == 16
+				for key in ["added", "removed", "updated", "retained", "changed", "applied", "truncated"]:
+					materialization_step_ok = materialization_step_ok and step_diff.has(key)
+				materialization_step_ok = materialization_step_ok and step_changed.size() <= 64
+				materialization_step_ok = materialization_step_ok and step_changed.size() == int(step_diff.get("applied", -1))
+				materialization_step_ok = materialization_step_ok and int(step_diff.get("applied", 65)) <= 64
+				materialization_step_ok = materialization_step_ok and int(step_diff.get("changed", 0)) >= step_changed.size()
+				materialization_ok = materialization_ok and materialization_step_ok
 				materialization_ok = materialization_ok and _toggle_materialization()
 				materialization_ok = materialization_ok and materialization_root.get_child_count() > 0
 				materialization_ok = materialization_ok and materialization_root.get_child_count() <= expected_active
@@ -3120,6 +3142,23 @@ func _run_scene_smoke() -> void:
 				)
 				materialization_ok = materialization_ok and not _toggle_materialization()
 				materialization_ok = materialization_ok and materialization_root.get_child_count() == 0
+				# A small camera move must run through the stored selection and
+				# return a bounded diff with a checksum.
+				var moved_step: Dictionary = core.materialization_step(
+					SEED, materialization_center.x + 1.0, materialization_center.z + 1.0,
+					MATERIALIZATION_INNER_RADIUS_M, MATERIALIZATION_OUTER_RADIUS_M,
+					MATERIALIZATION_DETAILED_RADIUS_M, _materialization_pin()
+				)
+				var moved_diff: Dictionary = moved_step.get("diff", {})
+				var moved_changed: Array = moved_step.get("changed", [])
+				materialization_step_ok = materialization_step_ok and bool(moved_step.get("ok", false))
+				materialization_step_ok = materialization_step_ok and str(moved_step.get("checksum", "")).length() == 16
+				for moved_key in ["added", "removed", "updated", "retained", "changed", "applied", "truncated"]:
+					materialization_step_ok = materialization_step_ok and moved_diff.has(moved_key)
+				materialization_step_ok = materialization_step_ok and moved_changed.size() <= 64
+				materialization_step_ok = materialization_step_ok and moved_changed.size() == int(moved_diff.get("applied", -1))
+				materialization_step_ok = materialization_step_ok and int(moved_diff.get("truncated", 0)) <= 1
+				materialization_ok = materialization_ok and materialization_step_ok
 				var progression_after: Dictionary = core.progression_state(SEED)
 				age_ok = bool(progression_after.get("ok", false))
 				age_ok = age_ok and str(progression_after.get("age", "")) == "wood"
@@ -3471,7 +3510,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s dashboard_body_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s dashboard_body_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -3497,6 +3536,7 @@ func _run_scene_smoke() -> void:
 		"ok" if follow_ok else "failed",
 		"ok" if citizen_i18n_ok else "failed",
 		"ok" if materialization_ok else "failed",
+		"ok" if materialization_step_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",

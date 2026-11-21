@@ -29,7 +29,7 @@ In:
 Out:
 
 - bridge/UI candidate calls, fade-in/out, or world-space agents;
-- dwell time, a scheduler, anti-starvation, or a saved materialized set; the diff cap is modeled, not enforced by the scene yet;
+- applying the change diff incrementally, dwell time, anti-starvation, or a saved materialized set; the bridge computes the bounded diff, but the scene rebuilds markers from the selection;
 - route caching, pathfinding, traffic, schedules, or needs simulation;
 - per-client network filtering.
 
@@ -107,7 +107,7 @@ The call is read-only: it does not mutate the live named pool, population, save 
 - stores the new selection only on success and returns counts, diff counts, `changed` entries (`added`/`updated`/`removed`), and a named checksum;
 - `materialization_clear()` drops the stored selection.
 
-The call is read-only for the named pool and save. The scene still uses `materialization_state` and the F4 overlay; wiring the scheduler into the overlay and adding fade/route state is next.
+The call is read-only for the named pool and save. The world scene uses `materialization_step` for the F4 overlay, so hysteresis and one pinned placement are live there. Fade-in/out and route state are still pending.
 
 ## 6. Change budget
 
@@ -152,7 +152,9 @@ pub struct MaterializationDiff {
 ## 8. Limits
 
 - Home positions are an input map; there is no live spatial index yet.
-- Hysteresis needs the caller to pass the previous selection; the core stores no materialized set.
+- Hysteresis needs the caller to pass the previous selection; the bridge stores one in `TownsmithCore.materialization`, but `select_near_with_previous` itself is stateless.
+- The bridge stores a single previous selection, not a full scheduler history; no dwell time or anti-starvation yet.
+- The scene rebuilds markers from `active`/`detailed`; it does not yet apply `changed` incrementally.
 - One pinned id is supported; the full selection/story priority list and dwell time are later.
 - No route cache; N3 movement can use this selection but must add its own bounded route cache.
 - The world scene has debug markers only; there are no materialized agents, movement, or route visuals yet.
@@ -161,9 +163,11 @@ pub struct MaterializationDiff {
 
 ## 9. World-scene overlay
 
-`F4` toggles a read-only overlay at the selected home/camera target. It calls `materialization_state` with a 250 m active / 120 m detailed radius and renders one blue marker per active citizen plus larger amber markers for detailed citizens. The overlay rebuilds on selection change or every 0.5 s while visible and frees its nodes when hidden. It does not persist or move agents.
+`F4` toggles a read-only overlay at the selected home/camera target. It calls `materialization_step` with the default 250 m inner / 350 m outer / 120 m detailed radii, pins the selected placement when there is one, and renders one blue marker per active citizen plus larger amber markers for detailed citizens. The overlay rebuilds on selection change or every 0.5 s while visible and frees its nodes when hidden. The stored selection survives refreshes, so the overlay follows the 80 m in / 120 m out hysteresis instead of reselecting from scratch. It does not persist or move agents.
 
-Limits: the overlay still calls stateless `select_near`; no hysteresis, fade, pin, route cache, or movement; markers are debug geometry.
+The HUD and dashboard `Citizens near` lines read the step counts (`active`/`detailed`). The `--scene-smoke` route calls the step, moves the centre by 1 m, calls it again, and checks that `diff`, `checksum`, and bounded `changed`/`truncated` fields are present.
+
+Limits: the overlay discards the diff after checking its shape; it does not apply add/remove/update incrementally. No fade, route cache, or movement; markers are debug geometry and the selection is derived on demand.
 
 ## 10. Benchmark
 

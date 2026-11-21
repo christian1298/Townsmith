@@ -2662,6 +2662,16 @@ impl TownsmithCore {
         counts.set("active", next.active.len() as i64);
         counts.set("detailed", next.detailed.len() as i64);
         result.set("counts", &counts);
+        let mut active: Array<VarDictionary> = Array::new();
+        for citizen in &next.active {
+            active.push(&materialized_citizen_to_dictionary(citizen));
+        }
+        let mut detailed: Array<VarDictionary> = Array::new();
+        for citizen in &next.detailed {
+            detailed.push(&materialized_citizen_to_dictionary(citizen));
+        }
+        result.set("active", &active.to_variant());
+        result.set("detailed", &detailed.to_variant());
         let mut diff_counts = VarDictionary::new();
         diff_counts.set("added", diff.added.len() as i64);
         diff_counts.set("removed", diff.removed.len() as i64);
