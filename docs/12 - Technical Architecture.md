@@ -122,6 +122,9 @@ seed + generator version
 > [!tip] Start simpler
 > Begin with one `core` crate and split only when the boundaries are stable. Premature crate splitting adds friction. The table is the target, not the first commit.
 
+> [!note] Named citizens
+> The plan for identity, selection, and materialization is in [[67 - Named Citizens]]. Identity and lifecycle live in the core; the shell presents only selected or materialized citizens and never drives their state.
+
 ### Godot shell (`game/`)
 
 | Area | Responsibility |
