@@ -1936,102 +1936,114 @@ func _update_dashboard() -> void:
 	var needs := "—"
 	if population > 0:
 		happiness = "%.0f%%" % (float(city.get("happiness", 0.0)) * 100.0)
-		needs = "food %.0f%% · water %.0f%% · rest %.0f%%" % [
-			float(city.get("food", 0.0)) * 100.0,
-			float(city.get("water", 0.0)) * 100.0,
-			float(city.get("rest", 0.0)) * 100.0,
-		]
-	var treasury := "closed"
+		needs = i18n.t("base.ui.dashboard.body.needs_values", {
+			"food": "%.0f" % (float(city.get("food", 0.0)) * 100.0),
+			"water": "%.0f" % (float(city.get("water", 0.0)) * 100.0),
+			"rest": "%.0f" % (float(city.get("rest", 0.0)) * 100.0),
+		})
+	var treasury: String = i18n.t("base.ui.dashboard.body.treasury_closed")
 	if bool(economy.get("open", false)):
-		treasury = "%.0f balance · %+.0f/day · debt %.0f" % [
-			float(economy.get("balance", 0.0)),
-			float(economy.get("daily_net", 0.0)),
-			float(economy.get("debt", 0.0)),
-		]
+		treasury = i18n.t("base.ui.dashboard.body.treasury", {
+			"balance": "%.0f" % float(economy.get("balance", 0.0)),
+			"net": "%+.0f" % float(economy.get("daily_net", 0.0)),
+			"debt": "%.0f" % float(economy.get("debt", 0.0)),
+		})
 		if bool(economy.get("bankrupt", false)):
-			treasury = "BANKRUPT · " + treasury
-	var utilities_line := "food — · water — · power —"
+			treasury = i18n.t("base.ui.dashboard.body.treasury_bankrupt", {
+				"treasury": treasury,
+			})
+	var utilities_line: String = i18n.t("base.ui.dashboard.body.utilities_closed")
 	if bool(industry.get("open", false)) or bool(utilities.get("open", false)):
-		utilities_line = "food %.0f%% · water %.0f%% · power %.0f%%" % [
-			float(industry.get("food_supply", 0.0)) * 100.0,
-			float(utilities.get("water_supply", 0.0)) * 100.0,
-			float(utilities.get("power_supply", 0.0)) * 100.0,
-		]
-	var civic_line := "school — · clinic — · fire — · police —"
+		utilities_line = i18n.t("base.ui.dashboard.body.utilities", {
+			"food": "%.0f" % (float(industry.get("food_supply", 0.0)) * 100.0),
+			"water": "%.0f" % (float(utilities.get("water_supply", 0.0)) * 100.0),
+			"power": "%.0f" % (float(utilities.get("power_supply", 0.0)) * 100.0),
+		})
+	var civic_line: String = i18n.t("base.ui.dashboard.body.civic_closed")
 	if bool(services.get("open", false)):
-		civic_line = "school %.0f%% · clinic %.0f%% · fire %.0f%% · police %.0f%% · +%.1f research/day" % [
-			float(services.get("school_supply", 0.0)) * 100.0,
-			float(services.get("clinic_supply", 0.0)) * 100.0,
-			float(services.get("fire_supply", 0.0)) * 100.0,
-			float(services.get("police_supply", 0.0)) * 100.0,
-			float(services.get("research_per_day", 0.0)),
-		]
-	var roads := "no road store"
+		civic_line = i18n.t("base.ui.dashboard.body.civic", {
+			"school": "%.0f" % (float(services.get("school_supply", 0.0)) * 100.0),
+			"clinic": "%.0f" % (float(services.get("clinic_supply", 0.0)) * 100.0),
+			"fire": "%.0f" % (float(services.get("fire_supply", 0.0)) * 100.0),
+			"police": "%.0f" % (float(services.get("police_supply", 0.0)) * 100.0),
+			"research": "%.1f" % float(services.get("research_per_day", 0.0)),
+		})
+	var roads: String = i18n.t("base.ui.dashboard.body.roads_closed")
 	if bool(traffic.get("open", false)):
-		roads = "%d nodes · %d edges · %.0f m · %d components" % [
-			int(traffic.get("nodes", 0)),
-			int(traffic.get("edges", 0)),
-			float(traffic.get("total_length_m", 0.0)),
-			int(traffic.get("components", 0)),
-		]
-	var text := "[b]%s[/b]\n%d residents · %d / %d housing · %d vacant\n" % [
+		roads = i18n.t("base.ui.dashboard.body.roads", {
+			"nodes": int(traffic.get("nodes", 0)),
+			"edges": int(traffic.get("edges", 0)),
+			"length": "%.0f" % float(traffic.get("total_length_m", 0.0)),
+			"components": int(traffic.get("components", 0)),
+		})
+	var text := "[b]%s[/b]\n%s\n" % [
 		i18n.t("base.ui.dashboard.section.population"),
-		population,
-		population,
-		int(city.get("housing_capacity", 0)),
-		int(city.get("vacancies", 0)),
+		i18n.t("base.ui.dashboard.body.population", {
+			"residents": population,
+			"occupied": population,
+			"housing": int(city.get("housing_capacity", 0)),
+			"vacant": int(city.get("vacancies", 0)),
+		}),
 	]
 	if materialization_visible:
-		text += "Citizens near: %d active · %d detailed\n" % [
-			materialization_counts.x,
-			materialization_counts.y,
-		]
+		text += i18n.t("base.ui.dashboard.body.citizens_near", {
+			"active": materialization_counts.x,
+			"detailed": materialization_counts.y,
+		}) + "\n"
 	var age_line := "—"
 	if bool(progression.get("ok", false)):
 		var next_age := str(progression.get("next_age", ""))
 		if next_age == "":
-			age_line = "%s · final age" % str(progression.get("age", "?"))
+			age_line = i18n.t("base.ui.dashboard.body.age_final", {
+				"age": str(progression.get("age", "?")),
+			})
 		else:
-			age_line = "%s · next %s at %d (%d%%)" % [
-				str(progression.get("age", "?")),
-				next_age,
-				int(progression.get("next_threshold", 0)),
-				roundi(float(progression.get("progress", 0.0)) * 100.0),
-			]
+			age_line = i18n.t("base.ui.dashboard.body.age_next", {
+				"age": str(progression.get("age", "?")),
+				"next": next_age,
+				"threshold": int(progression.get("next_threshold", 0)),
+				"progress": roundi(float(progression.get("progress", 0.0)) * 100.0),
+			})
 	text += "[b]%s[/b]\n%s\n" % [i18n.t("base.ui.dashboard.section.age"), age_line]
 	var research_line := "—"
 	if bool(research.get("open", false)):
-		research_line = "%d points · +%.1f/day · %d / %d technologies" % [
-			roundi(float(research.get("points", 0.0))),
-			float(research.get("rate_per_day", 0.0)),
-			int(research.get("completed_count", 0)),
-			int(research.get("node_count", 0)),
-		]
+		research_line = i18n.t("base.ui.dashboard.body.research", {
+			"points": roundi(float(research.get("points", 0.0))),
+			"rate": "%.1f" % float(research.get("rate_per_day", 0.0)),
+			"completed": int(research.get("completed_count", 0)),
+			"total": int(research.get("node_count", 0)),
+		})
 	text += "[b]%s[/b]\n%s\n" % [i18n.t("base.ui.dashboard.section.research"), research_line]
 	var tutorial: Dictionary = core.tutorial_state(SEED)
 	var tutorial_line := "—"
 	if bool(tutorial.get("ok", false)):
 		if bool(tutorial.get("complete", false)):
-			tutorial_line = "%d / %d complete" % [
-				int(tutorial.get("completed", 0)),
-				int(tutorial.get("total", 0)),
-			]
+			tutorial_line = i18n.t("base.ui.dashboard.body.tutorial_complete", {
+				"completed": int(tutorial.get("completed", 0)),
+				"total": int(tutorial.get("total", 0)),
+			})
 		else:
-			tutorial_line = "%d / %d · next: %s" % [
-				int(tutorial.get("completed", 0)),
-				int(tutorial.get("total", 0)),
-				str(tutorial.get("current_title", "?")),
-			]
+			tutorial_line = i18n.t("base.ui.dashboard.body.tutorial_next", {
+				"completed": int(tutorial.get("completed", 0)),
+				"total": int(tutorial.get("total", 0)),
+				"title": str(tutorial.get("current_title", "?")),
+			})
 	text += "[b]%s[/b]\n%s\n" % [i18n.t("base.ui.dashboard.section.tutorial"), tutorial_line]
-	text += "[b]%s[/b]\n%d / %d jobs filled · %d unemployed · commute %.0f m\n" % [
+	text += "[b]%s[/b]\n%s\n" % [
 		i18n.t("base.ui.dashboard.section.work"),
-		int(city.get("employed", 0)),
-		int(city.get("jobs", 0)),
-		int(city.get("unemployed", 0)),
-		float(city.get("average_commute_m", 0.0)),
+		i18n.t("base.ui.dashboard.body.work", {
+			"filled": int(city.get("employed", 0)),
+			"jobs": int(city.get("jobs", 0)),
+			"unemployed": int(city.get("unemployed", 0)),
+			"commute": "%.0f" % float(city.get("average_commute_m", 0.0)),
+		}),
 	]
-	text += "[b]%s[/b]\nhappiness %s\nneeds %s\n" % [i18n.t("base.ui.dashboard.section.wellbeing"), happiness, needs]
-	text += "[b]%s[/b]\n%s\n[b]%s[/b]\n%s\n[b]%s[/b]\n%s\n[b]%s[/b]\nwood %.0f · food %.0f · hides %.0f\n" % [
+	text += "[b]%s[/b]\n%s\n%s\n" % [
+		i18n.t("base.ui.dashboard.section.wellbeing"),
+		i18n.t("base.ui.dashboard.body.happiness", {"value": happiness}),
+		i18n.t("base.ui.dashboard.body.needs", {"needs": needs}),
+	]
+	text += "[b]%s[/b]\n%s\n[b]%s[/b]\n%s\n[b]%s[/b]\n%s\n[b]%s[/b]\n%s\n" % [
 		i18n.t("base.ui.dashboard.section.utilities"),
 		utilities_line,
 		i18n.t("base.ui.dashboard.section.civic"),
@@ -2039,23 +2051,28 @@ func _update_dashboard() -> void:
 		i18n.t("base.ui.dashboard.section.treasury"),
 		treasury,
 		i18n.t("base.ui.dashboard.section.industry"),
-		float(industry.get("wood", 0.0)),
-		float(industry.get("food", 0.0)),
-		float(industry.get("hides", 0.0)),
+		i18n.t("base.ui.dashboard.body.industry", {
+			"wood": "%.0f" % float(industry.get("wood", 0.0)),
+			"food": "%.0f" % float(industry.get("food", 0.0)),
+			"hides": "%.0f" % float(industry.get("hides", 0.0)),
+		}),
 	]
-	text += "[b]%s[/b]\n%s\n[b]%s[/b]\n%d active · %d stalled · %d completed\n" % [
+	text += "[b]%s[/b]\n%s\n[b]%s[/b]\n%s\n" % [
 		i18n.t("base.ui.dashboard.section.roads"),
-		i18n.t("base.ui.dashboard.section.construction"),
 		roads,
-		int(construction.get("active", 0)),
-		int(construction.get("stalled", 0)),
-		int(city.get("completed_buildings", 0)),
+		i18n.t("base.ui.dashboard.section.construction"),
+		i18n.t("base.ui.dashboard.body.construction", {
+			"active": int(construction.get("active", 0)),
+			"stalled": int(construction.get("stalled", 0)),
+			"completed": int(city.get("completed_buildings", 0)),
+		}),
 	]
 	text += "\n[b]%s[/b]\n" % i18n.t("base.ui.dashboard.section.advisor")
 	var messages: Array = advice.get("messages", [])
 	if messages.is_empty():
-		text += "No advice available."
+		text += i18n.t("base.ui.dashboard.body.no_advice") + "\n"
 	else:
+		var advisor_fallback: String = i18n.t("base.ui.dashboard.body.advisor_fallback")
 		for message in messages:
 			var severity := str(message.get("severity", "info"))
 			var color := "#9fd3ff"
@@ -2067,7 +2084,7 @@ func _update_dashboard() -> void:
 				color = "#9fe6a0"
 			text += "[color=%s]■[/color] [b]%s[/b]\n%s\n" % [
 				color,
-				str(message.get("title", "Advisor")),
+				str(message.get("title", advisor_fallback)),
 				str(message.get("detail", "")),
 			]
 	dashboard_text.text = text
@@ -2712,6 +2729,7 @@ func _run_scene_smoke() -> void:
 	var dashboard_ok := false
 	var hud_i18n_ok := false
 	var hud_body_i18n_ok := false
+	var dashboard_body_i18n_ok := false
 	var save_ok := false
 	var clear_ok := false
 	var load_ok := false
@@ -3225,6 +3243,10 @@ func _run_scene_smoke() -> void:
 				_update_dashboard()
 				_update_hud()
 				hud_i18n_ok = dashboard_title.text.contains("Stadt") and dashboard_text.text.contains("Bevölkerung")
+				dashboard_body_i18n_ok = dashboard_text.text.contains("Bewohner")
+				dashboard_body_i18n_ok = dashboard_body_i18n_ok and dashboard_text.text.contains("Arbeitsplätze")
+				dashboard_body_i18n_ok = dashboard_body_i18n_ok and dashboard_text.text.contains("Zufriedenheit")
+				dashboard_body_i18n_ok = dashboard_body_i18n_ok and not dashboard_text.text.contains("!base.ui.")
 				hud_body_i18n_ok = hud.text.contains("Bürgermeistermodus")
 				hud_body_i18n_ok = hud_body_i18n_ok and status_label.text.contains("Platzierungen:")
 				hud_body_i18n_ok = hud_body_i18n_ok and not hud.text.contains("!base.ui.")
@@ -3233,6 +3255,10 @@ func _run_scene_smoke() -> void:
 				_update_dashboard()
 				_update_hud()
 				hud_i18n_ok = hud_i18n_ok and dashboard_title.text.contains("City Dashboard") and dashboard_text.text.contains("Population")
+				dashboard_body_i18n_ok = dashboard_body_i18n_ok and dashboard_text.text.contains("residents")
+				dashboard_body_i18n_ok = dashboard_body_i18n_ok and dashboard_text.text.contains("jobs filled")
+				dashboard_body_i18n_ok = dashboard_body_i18n_ok and dashboard_text.text.contains("happiness")
+				dashboard_body_i18n_ok = dashboard_body_i18n_ok and not dashboard_text.text.contains("!base.ui.")
 				hud_body_i18n_ok = hud_body_i18n_ok and hud.text.contains("Mayor Mode")
 				hud_body_i18n_ok = hud_body_i18n_ok and status_label.text.contains("Placements:")
 				hud_body_i18n_ok = hud_body_i18n_ok and not hud.text.contains("!base.ui.")
@@ -3445,7 +3471,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s dashboard_body_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -3479,6 +3505,7 @@ func _run_scene_smoke() -> void:
 		"ok" if dashboard_ok else "failed",
 		"ok" if hud_i18n_ok else "failed",
 		"ok" if hud_body_i18n_ok else "failed",
+		"ok" if dashboard_body_i18n_ok else "failed",
 		"ok" if traffic_ok else "failed",
 		"ok" if select_ok else "failed",
 		"ok" if enter_ok else "failed",

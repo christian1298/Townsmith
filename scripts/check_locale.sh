@@ -34,7 +34,7 @@ EDITOR_FILE="$ROOT/godot/editor_i18n.gd"
 WORLD_FILE="$ROOT/godot/world_i18n.gd"
 CONTENT_FILE="$ROOT/godot/content_i18n.gd"
 EDITOR_MIN_KEYS=96
-WORLD_MIN_KEYS=33
+WORLD_MIN_KEYS=80
 CONTENT_MIN_KEYS=32
 LOCALES=(en de)
 

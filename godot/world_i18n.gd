@@ -2,11 +2,11 @@ extends RefCounted
 
 ## Slice-local world UI string table and runtime lookup.
 ##
-## The citizen panel and the follow hint are the first world-scene strings to
-## move behind keys. The plan in `docs/16 - Localization.md` compiles content
-## tables into this format; this file is the single-table slice stand-in until
-## the shared `base.ui.*` pipeline lands. Citizen names stay proper nouns and
-## never pass through here.
+## The citizen panel, the Mayor/Architect HUD, and the dashboard shell plus
+## body are behind keys. The plan in `docs/16 - Localization.md` compiles
+## content tables into this format; this file is the single-table slice
+## stand-in until the shared `base.ui.*` pipeline lands. Citizen names stay
+## proper nouns and never pass through here.
 ##
 ## Lookup rules:
 ## - the locale comes from `OS.get_locale()` unless one is passed explicitly;
@@ -77,6 +77,32 @@ const TABLES := {
 		"base.ui.dashboard.section.construction": "Construction",
 		"base.ui.dashboard.section.advisor": "Advisor",
 
+		# Dashboard body.
+		"base.ui.dashboard.body.population": "{residents} residents · {occupied} / {housing} housing · {vacant} vacant",
+		"base.ui.dashboard.body.citizens_near": "Citizens near: {active} active · {detailed} detailed",
+		"base.ui.dashboard.body.age_final": "{age} · final age",
+		"base.ui.dashboard.body.age_next": "{age} · next {next} at {threshold} ({progress}%)",
+		"base.ui.dashboard.body.research": "{points} points · +{rate}/day · {completed} / {total} technologies",
+		"base.ui.dashboard.body.tutorial_complete": "{completed} / {total} complete",
+		"base.ui.dashboard.body.tutorial_next": "{completed} / {total} · next: {title}",
+		"base.ui.dashboard.body.work": "{filled} / {jobs} jobs filled · {unemployed} unemployed · commute {commute} m",
+		"base.ui.dashboard.body.happiness": "happiness {value}",
+		"base.ui.dashboard.body.needs": "needs {needs}",
+		"base.ui.dashboard.body.needs_values": "food {food}% · water {water}% · rest {rest}%",
+		"base.ui.dashboard.body.utilities_closed": "food — · water — · power —",
+		"base.ui.dashboard.body.utilities": "food {food}% · water {water}% · power {power}%",
+		"base.ui.dashboard.body.civic_closed": "school — · clinic — · fire — · police —",
+		"base.ui.dashboard.body.civic": "school {school}% · clinic {clinic}% · fire {fire}% · police {police}% · +{research} research/day",
+		"base.ui.dashboard.body.treasury_closed": "closed",
+		"base.ui.dashboard.body.treasury": "{balance} balance · {net}/day · debt {debt}",
+		"base.ui.dashboard.body.treasury_bankrupt": "BANKRUPT · {treasury}",
+		"base.ui.dashboard.body.industry": "wood {wood} · food {food} · hides {hides}",
+		"base.ui.dashboard.body.roads_closed": "no road store",
+		"base.ui.dashboard.body.roads": "{nodes} nodes · {edges} edges · {length} m · {components} components",
+		"base.ui.dashboard.body.construction": "{active} active · {stalled} stalled · {completed} completed",
+		"base.ui.dashboard.body.no_advice": "No advice available.",
+		"base.ui.dashboard.body.advisor_fallback": "Advisor",
+
 		# Follow camera.
 		"base.ui.citizen.follow_hint": "F3 follows the selected home · Esc stops",
 		"base.ui.citizen.following": "Following home #{id} · Esc stops",
@@ -141,6 +167,32 @@ const TABLES := {
 		"base.ui.dashboard.section.roads": "Straßen",
 		"base.ui.dashboard.section.construction": "Bau",
 		"base.ui.dashboard.section.advisor": "Berater",
+
+		# Dashboard-Körper.
+		"base.ui.dashboard.body.population": "{residents} Bewohner · {occupied} / {housing} Wohnraum · {vacant} frei",
+		"base.ui.dashboard.body.citizens_near": "Bürger in der Nähe: {active} aktiv · {detailed} detailliert",
+		"base.ui.dashboard.body.age_final": "{age} · letztes Zeitalter",
+		"base.ui.dashboard.body.age_next": "{age} · als Nächstes {next} bei {threshold} ({progress} %)",
+		"base.ui.dashboard.body.research": "{points} Punkte · +{rate}/Tag · {completed} / {total} Technologien",
+		"base.ui.dashboard.body.tutorial_complete": "{completed} / {total} abgeschlossen",
+		"base.ui.dashboard.body.tutorial_next": "{completed} / {total} · als Nächstes: {title}",
+		"base.ui.dashboard.body.work": "{filled} / {jobs} Arbeitsplätze besetzt · {unemployed} arbeitslos · Arbeitsweg {commute} m",
+		"base.ui.dashboard.body.happiness": "Zufriedenheit {value}",
+		"base.ui.dashboard.body.needs": "Bedarf {needs}",
+		"base.ui.dashboard.body.needs_values": "Essen {food}% · Wasser {water}% · Ruhe {rest}%",
+		"base.ui.dashboard.body.utilities_closed": "Nahrung — · Wasser — · Strom —",
+		"base.ui.dashboard.body.utilities": "Nahrung {food}% · Wasser {water}% · Strom {power}%",
+		"base.ui.dashboard.body.civic_closed": "Schule — · Klinik — · Feuerwehr — · Polizei —",
+		"base.ui.dashboard.body.civic": "Schule {school}% · Klinik {clinic}% · Feuerwehr {fire}% · Polizei {police}% · +{research} Forschung/Tag",
+		"base.ui.dashboard.body.treasury_closed": "geschlossen",
+		"base.ui.dashboard.body.treasury": "{balance} Saldo · {net}/Tag · Schulden {debt}",
+		"base.ui.dashboard.body.treasury_bankrupt": "BANKROTT · {treasury}",
+		"base.ui.dashboard.body.industry": "Holz {wood} · Nahrung {food} · Felle {hides}",
+		"base.ui.dashboard.body.roads_closed": "kein Straßenspeicher",
+		"base.ui.dashboard.body.roads": "{nodes} Knoten · {edges} Kanten · {length} m · {components} Komponenten",
+		"base.ui.dashboard.body.construction": "{active} aktiv · {stalled} stockend · {completed} fertiggestellt",
+		"base.ui.dashboard.body.no_advice": "Keine Ratschläge verfügbar.",
+		"base.ui.dashboard.body.advisor_fallback": "Berater",
 
 		# Folgekamera.
 		"base.ui.citizen.follow_hint": "F3 folgt dem ausgewählten Zuhause · Esc beendet",
