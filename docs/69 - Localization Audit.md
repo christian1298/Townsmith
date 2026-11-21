@@ -28,6 +28,7 @@ tags:
 | Advisor titles and details | Rust `core_city::advisor` | 0 | 0 | n/a | none |
 | Tutorial titles and hints | Rust payload read by `world_placement.gd` | 0 | 0 | n/a | none |
 | Starter, industry, service, tax names | Rust payload + `kind.capitalize()` | 0 | 0 | n/a | none |
+| Content display names (table only) | `godot/content_i18n.gd` | 32 | 32 | complete | not wired; no gate |
 | Player-visible error modals | GDScript literals + `error_code` | 0 | 0 | n/a | none |
 
 Facts about the current table:
@@ -131,6 +132,16 @@ The protocol should send the code plus parameters; each client resolves the titl
 | Tax policy names (`low`, `standard`, `high`) | `TAX_POLICIES` in `world_placement.gd` | English literals |
 
 These are content names, so the durable fix is a content registry with `name_key` / `description_key`, not a larger GDScript table.
+
+### 2.7 Content display-name table (not wired)
+
+`godot/content_i18n.gd` adds a data-only EN/DE lookup for the Phase 2 content names: 20 starter buildings, 3 industry kinds, 4 civic service kinds, and 5 tutorial step IDs, for **32 keys per locale** with full parity. It exposes `display(key, locale)`, plus `starters(locale)`, `industries(locale)`, `services(locale)`, and `tutorials(locale)` flatteners keyed by stable content ID/kind.
+
+- Key layout is `base.content.starter.<slug>` (the `base:` prefix is stripped), `base.content.industry.<kind>`, `base.content.service.<kind>`, and `base.content.tutorial.<step>`.
+- Missing keys fall back to English, then to the raw key; unsupported locales resolve to English. Values are display names only, with no placeholders or sentences.
+- **This is not wired into `world_placement.gd`.** The HUD, dashboard, labels, and tutorial still read the Rust payload or call `kind.capitalize()`, so players keep seeing raw/English labels until the UI slice consumes this table.
+- `scripts/check_locale.sh` does not parse this file yet; the counts above are a static audit, not a CI gate.
+- The durable fix remains a Rust-side `name_key` content registry; this table is the slice bridge until that protocol lands.
 
 ## 3. Player-facing versus developer-only
 
