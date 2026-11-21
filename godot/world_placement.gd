@@ -112,7 +112,6 @@ func _ready() -> void:
 	else:
 		_set_modal("Blueprint failed: " + blueprint_path, true)
 	_update_hud()
-
 	if OS.get_cmdline_user_args().has("--scene-smoke"):
 		_run_scene_smoke()
 		return
@@ -441,7 +440,8 @@ func _setup_ghost() -> void:
 	ghost.add_child(ghost_foundation)
 
 	placed_material = StandardMaterial3D.new()
-	placed_material.albedo_color = Color(0.72, 0.62, 0.48)
+	placed_material.albedo_color = Color(1.0, 1.0, 1.0)
+	placed_material.vertex_color_use_as_albedo = true
 	placed_material.roughness = 1.0
 	placed_material.metallic = 0.0
 	foundation_material = StandardMaterial3D.new()
@@ -1755,11 +1755,16 @@ func _create_placement_pivot(
 	pivot.add_child(mesh_node)
 	var foundation := float(placement.get("foundation_m", 0.0))
 	if foundation > 0.001:
+		# Keep the foundation top above the sampled terrain plane. A top that
+		# is exactly coplanar with the terrain z-fights across the whole lot;
+		# the 2 cm plinth is hidden at the building edge and removes the fight.
+		var foundation_height := foundation + 0.02
 		var box := BoxMesh.new()
-		box.size = Vector3(bounds[0], foundation, bounds[2])
+		box.size = Vector3(bounds[0], foundation_height, bounds[2])
 		var foundation_node := MeshInstance3D.new()
+		foundation_node.name = "Foundation"
 		foundation_node.mesh = box
-		foundation_node.position = Vector3(0.0, -foundation * 0.5, 0.0)
+		foundation_node.position = Vector3(0.0, 0.01 - foundation * 0.5, 0.0)
 		foundation_node.material_override = foundation_material
 		pivot.add_child(foundation_node)
 	return pivot
@@ -1930,7 +1935,10 @@ func _foundation_matches_bounds(node: Node) -> bool:
 	var bounds: PackedFloat32Array = blueprint_info.get("bounds", PackedFloat32Array())
 	if bounds.size() != 3:
 		return false
-	return absf(box.size.x - bounds[0]) < 0.001 and absf(box.size.z - bounds[2]) < 0.001
+	# The foundation top must sit above the placement base; a coplanar top
+	# z-fights with the terrain across the whole footprint.
+	var foundation_top := foundation_node.position.y + box.size.y * 0.5
+	return absf(box.size.x - bounds[0]) < 0.001 and absf(box.size.z - bounds[2]) < 0.001 and foundation_top > 0.001
 
 func _run_scene_smoke() -> void:
 	var status := "ok"
@@ -1948,6 +1956,7 @@ func _run_scene_smoke() -> void:
 	var return_ok := false
 	var build_ok := false
 	var build_done_ok := false
+	var render_ok := false
 	var occupancy_before_ok := false
 	var occupancy_after_ok := false
 	var industry_ok := false
@@ -2206,6 +2215,12 @@ func _run_scene_smoke() -> void:
 				var finished_mesh := placed_root.get_child(0).get_child(0) as MeshInstance3D
 				build_done_ok = build_done_ok and finished_mesh != null and finished_mesh.material_override == placed_material
 				build_done_ok = build_done_ok and absf(finished_mesh.scale.y - 1.0) < 0.001
+				if finished_mesh != null and finished_mesh.mesh != null:
+					var arrays: Array = finished_mesh.mesh.surface_get_arrays(0)
+					render_ok = placed_material.vertex_color_use_as_albedo
+					render_ok = render_ok and arrays.size() > Mesh.ARRAY_COLOR
+					if render_ok:
+						render_ok = (arrays[Mesh.ARRAY_COLOR] as PackedColorArray).size() > 0
 				var pacing_ok: bool = core.population_set_rate(1.0)
 				core.population_clear()
 				_advance_construction(0.25)
@@ -2374,6 +2389,8 @@ func _run_scene_smoke() -> void:
 					utility_ok = utility_ok and utility_persisted_ok
 				if not build_done_ok:
 					status = "construction_complete_failed"
+				elif not render_ok:
+					status = "render_failed"
 				elif not (occupancy_before_ok and occupancy_after_ok):
 					status = "occupancy_failed"
 				elif not industry_ok:
@@ -2422,7 +2439,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s occupancy=%s industry=%s utilities=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s render=%s occupancy=%s industry=%s utilities=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -2434,6 +2451,7 @@ func _run_scene_smoke() -> void:
 		"ok" if settlement_ok else "failed",
 		"ok" if build_ok else "failed",
 		"ok" if build_done_ok else "failed",
+		"ok" if render_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",

@@ -82,7 +82,7 @@ The ray stops at 20 m. There is no AABB pre-pass, no shape cast, and no physics 
 | `4` | 4 | glass |
 | `5` | 5 | door |
 
-The selected material is shown in the on-screen palette and printed when it changes. Materials are written as numeric ids into the volume; a mapping table to the namespaced content registry (`base:timber`, …) is still needed. The current bridge mesh exposes **one neutral surface with no per-vertex material ids**, so every material renders with the same override color for now. The visuals arrive with multi-material surfaces.
+The selected material is shown in the on-screen palette and printed when it changes. Materials are written as numeric ids into the volume; a mapping table to the namespaced content registry (`base:timber`, …) is still needed. The editor deliberately overrides the volume with one neutral material. The underlying mesh now carries per-material vertex colors, so placed blueprints in [[42 - World Placement Bridge]] show timber, stone, roof, glass, and door surfaces; the editor will adopt the same palette when its material UI is finished.
 
 ## 6. Debounced remesh
 

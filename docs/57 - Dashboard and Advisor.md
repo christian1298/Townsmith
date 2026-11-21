@@ -153,8 +153,8 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 
 - `core_city::advisor`: 9 tests — healthy, service shortages, missing stores, budget/debt, bankruptcy ordering, vacancies/unemployment, disconnected roads/long commutes, empty city, cap/determinism.
 - `core_city` total: **146 tests**.
-- Bridge: **41 tests** (advisor is covered by the scene smoke; a bridge unit test would need a live Godot engine for `VarDictionary`).
-- Workspace: **355 tests + 1 doctest**.
+- Bridge: **42 tests** (advisor is covered by the scene smoke; a bridge unit test would need a live Godot engine for `VarDictionary`).
+- Workspace: **356 tests + 1 doctest**.
 - `cargo run --release -p townsmith-bench --bin city_loop -- --scenario mid` — checksum `623f39c61b71b68a`; the 3.9 matrix is in [[58 - Runner Matrix]].
 
 ## 8. Limits

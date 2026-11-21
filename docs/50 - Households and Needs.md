@@ -135,7 +135,7 @@ Needs: food 60% · water 40% · rest 80%
 - `core_city::population`: 15 tests after 3.4 (move-in, jobs, needs, sync, JSON, validation, remove/clear, commute/wages, staffing, food supply).
 - `core_city::metrics`: completed, vacant, unfinished, no-site, jobs-only, shortage.
 - `godot_ext`: population JSON roundtrip and old-save/unsupported-version cases.
-- Workspace: **355 tests + 1 doctest**.
+- Workspace: **356 tests + 1 doctest**.
 
 ## 8. Limits
 
