@@ -81,6 +81,9 @@ cargo run --release -p townsmith-bench --bin traffic
 # Job-assignment index benchmark (1,000 x 1,000)
 cargo run --release -p townsmith-bench --bin jobs
 
+# Core save/load stress harness (120 placements, 60 cycles)
+cargo run --release -p townsmith-bench --bin save_stress -- --smoke
+
 # 1M data-scale harness (not the render gate)
 cargo run --release -p townsmith-bench --bin metropolis -- --smoke
 
