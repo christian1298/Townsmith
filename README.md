@@ -75,6 +75,7 @@ cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort
 cargo run --release -p townsmith-bench --bin city_loop
 ./scripts/bench_city_loop.sh
+./scripts/bench_industrial.sh
 cargo run --release -p townsmith-bench --bin traffic
 
 # Job-assignment index benchmark (1,000 x 1,000)
