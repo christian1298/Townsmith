@@ -1421,6 +1421,20 @@ func _update_hud() -> void:
 			int(research.get("node_count", 0)),
 			float(research.get("rate_per_day", 0.0)),
 		]
+	var tutorial: Dictionary = core.tutorial_state(SEED)
+	var tutorial_text := "—"
+	if bool(tutorial.get("ok", false)):
+		if bool(tutorial.get("complete", false)):
+			tutorial_text = "%d/%d · complete" % [
+				int(tutorial.get("completed", 0)),
+				int(tutorial.get("total", 0)),
+			]
+		else:
+			tutorial_text = "%d/%d · %s" % [
+				int(tutorial.get("completed", 0)),
+				int(tutorial.get("total", 0)),
+				str(tutorial.get("current_title", "?")),
+			]
 	var economy: Dictionary = core.economy_state()
 	var treasury_text := "—"
 	if bool(economy.get("open", false)):
@@ -1484,7 +1498,7 @@ func _update_hud() -> void:
 			float(city.get("water", 0.0)) * 100.0,
 			float(city.get("rest", 0.0)) * 100.0,
 		]
-	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nAge: %s\nResearch: %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nIndustry: %s\nUtilities: %s\nCivic: %s\nTraffic: %s\nConstruction: %d active / %d stalled   Crew: %d/%d   Trades: %d   Materials: %d L   Save: %s" % [
+	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nAge: %s\nResearch: %s\nTutorial: %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nIndustry: %s\nUtilities: %s\nCivic: %s\nTraffic: %s\nConstruction: %d active / %d stalled   Crew: %d/%d   Trades: %d   Materials: %d L   Save: %s" % [
 		selected_line,
 		int(target_x),
 		int(target_z),
@@ -1503,6 +1517,7 @@ func _update_hud() -> void:
 		happiness_text,
 		age_text,
 		research_text,
+		tutorial_text,
 		float(city.get("average_commute_m", 0.0)),
 		float(city.get("daily_wages", 0.0)),
 		needs_text,
@@ -1614,6 +1629,21 @@ func _update_dashboard() -> void:
 			int(research.get("node_count", 0)),
 		]
 	text += "[b]Research[/b]\n%s\n" % research_line
+	var tutorial: Dictionary = core.tutorial_state(SEED)
+	var tutorial_line := "—"
+	if bool(tutorial.get("ok", false)):
+		if bool(tutorial.get("complete", false)):
+			tutorial_line = "%d / %d complete" % [
+				int(tutorial.get("completed", 0)),
+				int(tutorial.get("total", 0)),
+			]
+		else:
+			tutorial_line = "%d / %d · next: %s" % [
+				int(tutorial.get("completed", 0)),
+				int(tutorial.get("total", 0)),
+				str(tutorial.get("current_title", "?")),
+			]
+	text += "[b]Tutorial[/b]\n%s\n" % tutorial_line
 	text += "[b]Work[/b]\n%d / %d jobs filled · %d unemployed · commute %.0f m\n" % [
 		int(city.get("employed", 0)),
 		int(city.get("jobs", 0)),
@@ -2273,6 +2303,7 @@ func _run_scene_smoke() -> void:
 	var industry_ok := false
 	var utility_ok := false
 	var service_ok := false
+	var tutorial_ok := false
 	var starter_ok := false
 	var economy_ok := false
 	var dashboard_ok := false
@@ -2675,6 +2706,13 @@ func _run_scene_smoke() -> void:
 				service_ok = service_ok and float(final_service.get("research_per_day", 0.0)) > 7.9
 				service_ok = service_ok and float(core.research_state(SEED).get("rate_per_day", 0.0)) > 8.0
 				occupancy_after_ok = occupancy_after_ok and service_ok
+				var tutorial: Dictionary = core.tutorial_state(SEED)
+				tutorial_ok = bool(tutorial.get("ok", false))
+				tutorial_ok = tutorial_ok and int(tutorial.get("total", 0)) == 5
+				tutorial_ok = tutorial_ok and int(tutorial.get("completed", 0)) >= 4
+				tutorial_ok = tutorial_ok and str(tutorial.get("current", "")) == "lumber_camp"
+				tutorial_ok = tutorial_ok and tutorial.get("steps", []).size() == 5
+				occupancy_after_ok = occupancy_after_ok and tutorial_ok
 				var economy_after: Dictionary = core.economy_state()
 				occupancy_after_ok = occupancy_after_ok and bool(economy_after.get("open", false))
 				occupancy_after_ok = occupancy_after_ok and float(economy_after.get("balance", 100000.0)) < 100000.0
@@ -2846,6 +2884,8 @@ func _run_scene_smoke() -> void:
 					status = "utility_failed"
 				elif not service_ok:
 					status = "service_failed"
+				elif not tutorial_ok:
+					status = "tutorial_failed"
 				elif not dashboard_ok:
 					status = "dashboard_failed"
 			if not load_ok:
@@ -2891,7 +2931,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s starter=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -2908,6 +2948,7 @@ func _run_scene_smoke() -> void:
 		"ok" if structure_ok else "failed",
 		"ok" if age_ok else "failed",
 		"ok" if research_ok else "failed",
+		"ok" if tutorial_ok else "failed",
 		"ok" if starter_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",

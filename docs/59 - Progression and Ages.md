@@ -23,7 +23,7 @@ tags:
 | **4.2** | Material tiers and structural limits: stories, spans, foundations, composite construction | **Done** — PR #78, see [[60 - Structural Limits]] |
 | **4.3** | Research pool and data-driven tech tree | **Done** — PR #80, see [[61 - Research]] |
 | **4.4** | Starter content library, service tiers, age-specific construction trades | **Done** — services #84, starter library #86, trades #87, see [[64 - Construction Trades]] |
-| **4.5** | Tutorial scenario and the wood-to-industrial balance pass | Next |
+| **4.5** | Tutorial scenario and the wood-to-industrial balance pass | **Partial** — tutorial #88; balance next |
 
 ## 2. Ages
 
@@ -84,26 +84,24 @@ pub struct AgeState {
 ## 6. Tests
 
 - `core_city::progression`: 6 tests — thresholds, boundary populations, next threshold/progress, final age, stable names/materials, determinism, age-id aliases.
-- `core_city` total: **195 tests**; `core_structure` **19 tests + 1 doctest**.
-- `godot_ext`: **49 tests**; the scene smoke covers `progression_state`, structural limits, research generation, and the HUD; structural age rejection is covered by the bridge helper and core placement tests.
-- Workspace: **436 tests + 2 doctests (438 passed)**.
-- Smoke marker includes `age=ok`, `research=ok`, `starter=ok`, and `trades=ok`.
+- `core_city` total: **200 tests**; `core_structure` **19 tests + 1 doctest**.
+- `godot_ext`: **50 tests**; the scene smoke covers `progression_state`, structural limits, research generation, the tutorial checklist, and the HUD; structural age rejection is covered by the bridge helper and core placement tests.
+- Workspace: **441 tests + 2 doctests (443 passed)**.
+- Smoke marker includes `age=ok`, `research=ok`, `tutorial=ok`, `starter=ok`, and `trades=ok`.
 
 ## 7. Limits
 
 - Population alone sets the age; research does not change the age threshold.
 - The population-derived age gates structural systems; research nodes record unlocks but do not gate placement yet. Materials, props, and blueprint libraries are not gated.
 - A Wood-age city can still author a concrete blueprint; placement rejects it with `age_locked`. Legacy blueprints without structural metadata bypass this gate.
-- No age-specific art, roofs, lights, vehicles, or construction trades.
+- Trade rosters affect the aggregate construction crew; there are no per-trade queues, wages, training, or trade offices. No age-specific art, roofs, lights, or vehicles.
 - The 1,000-resident late scenario is still Masonry; Industrial is a 20,000-resident target.
 - Research generation is a bridge tick in this slice, not yet part of the authoritative server loop.
 - The age table is draft balance, not a tuned campaign curve.
 
 ## 8. Next
 
-1. 4.5: tutorial scenario and the wood-to-industrial balance pass.
+1. 4.5b: the wood-to-industrial balance pass.
 2. Add a starter-library panel with thumbnails and filters.
 3. Move structural limits and the tech tree into content data for mods.
-2. Move structural limits and the tech tree into content data for mods.
-3. Add age-aware blueprint metadata and library filters.
-4. Add a starter library that can sustain a town without player-authored blueprints.
+4. Add age-aware blueprint metadata and library filters.

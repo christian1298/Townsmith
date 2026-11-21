@@ -47,6 +47,7 @@ pub mod services;
 pub mod settlement;
 pub mod trades;
 pub mod traffic;
+pub mod tutorial;
 pub mod utilities;
 
 use std::error::Error;
@@ -118,6 +119,9 @@ pub use trades::{Trade, TradeError, TradePool};
 pub use traffic::{
     FlowField, RoadGraph, RoadNode, TrafficError, TrafficStats, MAX_TRAFFIC_NODES,
     MAX_TRAFFIC_ROADS,
+};
+pub use tutorial::{
+    evaluate as evaluate_tutorial, TutorialInput, TutorialReport, TutorialStep, TutorialStepState,
 };
 pub use utilities::{
     UtilityConsumer, UtilityError, UtilityKind, UtilityReport, UtilitySite, UtilityStore,
