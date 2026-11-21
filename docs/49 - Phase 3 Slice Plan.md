@@ -367,4 +367,4 @@ See [[58 - Runner Matrix]] for the scenario table, exact results, and checksums.
 3. Add a spatial index and incremental traffic graph updates before the 1M gate.
 4. Keep the 500-citizen/50-building 60 FPS gate visible from the first slice.
 5. Record the Q-101 30-minute human playtest.
-6. Phase 4.1 ages and 4.2 structural limits are implemented; see [[59 - Progression and Ages]] and [[60 - Structural Limits]]. Phase 4.3 research is next.
+6. Phase 4.1 ages and 4.2 structural limits are done ([[59 - Progression and Ages]], [[60 - Structural Limits]]); Phase 4.3 research is next.
