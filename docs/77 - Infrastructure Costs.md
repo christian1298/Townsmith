@@ -35,7 +35,7 @@ tags:
 | Fire/police construction | 2,500 | 4,000 | 6,000 |
 | Fire/police upkeep | 1.5 | 3 | 5 |
 
-`UtilityStore` and `ServiceStore` expose per-kind and total construction/upkeep methods. Values are data-only; the current bridge still charges placement material cost and site operating upkeep separately.
+`UtilityStore` and `ServiceStore` expose per-kind and total construction/upkeep methods. Utility/civic construction is now charged when a site is added through the bridge; operating upkeep is still charged by the aggregate economy tick.
 
 ## 2. Fixture results
 
@@ -67,13 +67,16 @@ Output is deterministic; smoke checksum `a920cf0c4eb9a4f1`.
 
 ## 5. Limits
 
-- Not wired into `world_place_blueprint`, utility/service placement, or the economy tick yet.
+- Site construction is charged on add; re-adding/replacing a site charges again. Removing a site does not refund.
+- Operating upkeep still uses the aggregate utility/service site counts, not per-kind tables.
+- No construction schedule or phased payment; the full site cost is charged immediately.
+- If no treasury is open, the site is added with `charged=false` (legacy/dev path).
 - Site counts are fixed probe fixtures; real cities may have different coverage/site mixes.
 - No land, road, maintenance, staffing, or replacement cost.
 - Values are draft balance numbers, not tuned campaign costs.
 
 ## 6. Next
 
-1. Charge utility/service construction cost when a site is added.
+1. Wire per-kind operating upkeep into `economy_tick` (counts are already available).
 2. Feed the site upkeep into the bridge economy tick instead of the legacy count path.
 3. Add site replacement/refund rules and service-quality funding.

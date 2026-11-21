@@ -95,6 +95,8 @@ The acceptance house costs **38,028.80**; placing it leaves **61,971.20** before
 
 A removed building does not refund construction spending. Clearing all placements keeps the treasury and debt, because the city's money is independent of its buildings.
 
+Utility and civic sites also charge their catalog construction cost when added through `utility_add_site`/`service_add_site`. The charge happens before the site is committed; an unaffordable or bankrupt treasury returns `insufficient_funds` and leaves no site. With no open treasury the site is added with `charged=false` for legacy/dev use. Re-adding a site charges again; removal does not refund.
+
 ## 5. Loans
 
 `Economy::take_loan(amount, rate_per_day, term_days)`:
