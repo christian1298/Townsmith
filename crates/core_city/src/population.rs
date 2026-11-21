@@ -12,7 +12,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::traffic::{FlowField, RoadGraph};
+use crate::traffic::{travel_time_seconds, FlowField, RoadGraph, DEFAULT_TRAVEL_SPEED_MPS};
 
 /// Current household save format.
 pub const POPULATION_FORMAT_VERSION: u16 = 1;
@@ -50,6 +50,11 @@ pub const REST_REPLENISH_PER_S: f32 = 0.0018;
 
 /// Largest per-workplace staffing value accepted from a save.
 const MAX_STAFFING_PER_WORKPLACE: u32 = 1_000_000;
+
+/// Whether a derived float is still at its old-save default.
+fn is_zero_f32(value: &f32) -> bool {
+    *value == 0.0
+}
 
 /// Below this many household/workplace pairs, the plain global scan is
 /// cheaper than building a spatial index.
@@ -117,6 +122,14 @@ pub struct Household {
     /// Average commute to assigned workplaces in metres.
     #[serde(default)]
     pub commute_m: f32,
+    /// Average commute time in seconds at [`DEFAULT_TRAVEL_SPEED_MPS`].
+    ///
+    /// Derived from `commute_m` after each job assignment; it is never an
+    /// allocation input. Older saves default to zero and are refreshed on the
+    /// next tick. It is omitted from JSON while zero so pre-travel-time saves
+    /// round-trip byte-for-byte.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub commute_time_s: f32,
     /// Gross wage income per game day.
     #[serde(default)]
     pub income_per_day: f64,
@@ -135,6 +148,7 @@ impl Household {
             water: 1.0,
             rest: 1.0,
             commute_m: 0.0,
+            commute_time_s: 0.0,
             income_per_day: 0.0,
             home: [0.0, 0.0],
         }
@@ -416,6 +430,8 @@ impl CityRuntime {
             } else {
                 0.0
             };
+            household.commute_time_s =
+                travel_time_seconds(household.commute_m, DEFAULT_TRAVEL_SPEED_MPS).unwrap_or(0.0);
             household.income_per_day = f64::from(workers) * WAGE_PER_WORKER_PER_DAY;
         }
 
@@ -492,6 +508,20 @@ impl CityRuntime {
         self.households
             .values()
             .map(|household| household.commute_m * household.residents as f32)
+            .sum::<f32>()
+            / population as f32
+    }
+
+    /// Resident-weighted average commute time in seconds.
+    #[must_use]
+    pub fn average_commute_time_s(&self) -> f32 {
+        let population = self.population();
+        if population == 0 {
+            return 0.0;
+        }
+        self.households
+            .values()
+            .map(|household| household.commute_time_s * household.residents as f32)
             .sum::<f32>()
             / population as f32
     }
@@ -595,6 +625,11 @@ impl CityRuntime {
                     "household commute is out of range",
                 ));
             }
+            if !household.commute_time_s.is_finite() || household.commute_time_s < 0.0 {
+                return Err(PopulationError::InvalidRuntime(
+                    "household commute time is out of range",
+                ));
+            }
             if !household.income_per_day.is_finite() || household.income_per_day < 0.0 {
                 return Err(PopulationError::InvalidRuntime(
                     "household income is out of range",
@@ -617,11 +652,19 @@ impl CityRuntime {
     }
 
     /// FNV-1a checksum over the compact JSON.
+    ///
+    /// `commute_time_s` is a derived display value; it is zeroed before
+    /// serialization so adding travel time does not change the pinned
+    /// population checksum.
     #[must_use]
     pub fn checksum(&self) -> u64 {
         const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
         const PRIME: u64 = 0x0000_0100_0000_01b3;
-        let json = serde_json::to_vec(self).expect("CityRuntime always serializes");
+        let mut snapshot = self.clone();
+        for household in snapshot.households.values_mut() {
+            household.commute_time_s = 0.0;
+        }
+        let json = serde_json::to_vec(&snapshot).expect("CityRuntime always serializes");
         let mut hash = OFFSET;
         for byte in json {
             hash ^= u64::from(byte);
@@ -1452,6 +1495,8 @@ mod tests {
         assert!((runtime.households[&2].commute_m - 10.0).abs() < 0.001);
         assert!((runtime.daily_wages() - 40.0).abs() < 0.001);
         assert!((runtime.average_commute_m() - 10.0).abs() < 0.001);
+        assert!((runtime.households[&1].commute_time_s - 1.25).abs() < 0.001);
+        assert!((runtime.average_commute_time_s() - 1.25).abs() < 0.001);
     }
 
     #[test]
@@ -1570,6 +1615,34 @@ mod tests {
         let decoded = CityRuntime::from_json(&value.to_string()).expect("decode");
         assert_eq!(decoded.households[&1].commute_m, 0.0);
         assert_eq!(decoded.households[&1].income_per_day, 0.0);
+    }
+
+    #[test]
+    fn commute_time_is_derived_and_old_saves_refresh() {
+        let homes = [Home {
+            id: 1,
+            capacity: 1,
+            center: [0.0, 0.0],
+        }];
+        let workplaces = [Workplace {
+            id: 10,
+            slots: 1,
+            center: [80.0, 0.0],
+        }];
+        let mut runtime = CityRuntime::new(2026);
+        runtime.set_move_in_per_second(2.0);
+        runtime.tick_with_workplaces(1.0, &homes, &workplaces);
+        assert!((runtime.households[&1].commute_time_s - 10.0).abs() < 0.001);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&runtime.to_json_pretty().expect("json")).expect("value");
+        value["households"]["1"]
+            .as_object_mut()
+            .expect("household")
+            .remove("commute_time_s");
+        let mut decoded = CityRuntime::from_json(&value.to_string()).expect("decode");
+        assert_eq!(decoded.households[&1].commute_time_s, 0.0);
+        decoded.tick_with_workplaces(1.0, &homes, &workplaces);
+        assert!((decoded.households[&1].commute_time_s - 10.0).abs() < 0.001);
     }
 
     #[test]
@@ -1793,6 +1866,7 @@ mod tests {
                 water: 1.0,
                 rest: 1.0,
                 commute_m: 0.0,
+                commute_time_s: 0.0,
                 income_per_day: 0.0,
                 home: [0.0, 0.0],
             },
