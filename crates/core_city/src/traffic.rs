@@ -11,7 +11,7 @@
 //! hundred-thousand-building scale.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 
 use crate::road::RoadSegment;
 
@@ -20,6 +20,17 @@ pub const MAX_TRAFFIC_ROADS: usize = 10_000;
 
 /// Maximum graph nodes accepted by one traffic graph.
 pub const MAX_TRAFFIC_NODES: usize = 20_000;
+
+/// FNV-1a 64-bit offset basis used by graph and field checksums.
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// FNV-1a 64-bit prime.
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn fnv1a_feed(hash: &mut u64, value: u64) {
+    *hash ^= value;
+    *hash = hash.wrapping_mul(FNV_PRIME);
+}
 
 /// One planar graph node on the 1 m road grid.
 pub type RoadNode = [i32; 2];
@@ -116,6 +127,149 @@ impl FlowField {
     pub fn reachable_nodes(&self) -> usize {
         self.distances.len()
     }
+
+    /// FNV-1a checksum over the goal and every reachable distance.
+    ///
+    /// Two fields built for the same goal on the same graph have the same
+    /// checksum. The benchmark uses this to prove that cached reuse returns
+    /// exactly the field the graph would have built.
+    #[must_use]
+    pub fn checksum(&self) -> u64 {
+        let mut hash = FNV_OFFSET_BASIS;
+        fnv1a_feed(&mut hash, u64::from(self.goal_point[0].to_bits()));
+        fnv1a_feed(&mut hash, u64::from(self.goal_point[1].to_bits()));
+        fnv1a_feed(&mut hash, self.goal_node[0] as u32 as u64);
+        fnv1a_feed(&mut hash, self.goal_node[1] as u32 as u64);
+        fnv1a_feed(&mut hash, u64::from(self.goal_access_m.to_bits()));
+        fnv1a_feed(&mut hash, self.distances.len() as u64);
+        for (&node, &distance) in &self.distances {
+            fnv1a_feed(&mut hash, node[0] as u32 as u64);
+            fnv1a_feed(&mut hash, node[1] as u32 as u64);
+            fnv1a_feed(&mut hash, u64::from(distance));
+        }
+        hash
+    }
+}
+
+/// Bounded reuse cache for flow fields keyed by exact goal point.
+///
+/// The commute tick builds one field per workplace. When callers revisit a
+/// goal, or several destinations snap to the same point, this helper returns
+/// the existing field instead of running Dijkstra again. Eviction is FIFO and
+/// deterministic: insertion order decides, never hashing or wall time.
+///
+/// The cache holds no road-edit version. A road edit rebuilds the graph, so
+/// callers must drop the cache (or call [`Self::clear`]) when the roads change.
+/// [`RoadGraph`] itself remains immutable, and its public behavior is
+/// unchanged.
+#[derive(Debug, Clone)]
+pub struct FlowFieldCache {
+    fields: BTreeMap<[u32; 2], FlowField>,
+    order: VecDeque<[u32; 2]>,
+    capacity: usize,
+    hits: u64,
+    misses: u64,
+}
+
+impl Default for FlowFieldCache {
+    fn default() -> Self {
+        Self::new(64)
+    }
+}
+
+impl FlowFieldCache {
+    /// Create a cache holding at most `capacity` fields.
+    ///
+    /// A capacity of zero is clamped to one so every successful build can be
+    /// returned by reference.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            fields: BTreeMap::new(),
+            order: VecDeque::new(),
+            capacity: capacity.max(1),
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    /// Return a cached field for an exact goal point, if present.
+    #[must_use]
+    pub fn get(&self, goal: [f32; 2]) -> Option<&FlowField> {
+        self.fields.get(&cache_key(goal))
+    }
+
+    /// Return the field for `goal`, building and caching it on a miss.
+    ///
+    /// Returns `None` when the goal is not finite or the graph has no node for
+    /// it; the miss is still counted. When the cache is full, the oldest
+    /// inserted field is evicted first.
+    pub fn get_or_build(&mut self, graph: &RoadGraph, goal: [f32; 2]) -> Option<&FlowField> {
+        let key = cache_key(goal);
+        if self.fields.contains_key(&key) {
+            self.hits += 1;
+            return self.fields.get(&key);
+        }
+        self.misses += 1;
+        let field = graph.flow_to(goal)?;
+        if self.fields.len() >= self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.fields.remove(&oldest);
+            }
+        }
+        self.order.push_back(key);
+        self.fields.insert(key, field);
+        self.fields.get(&key)
+    }
+
+    /// Number of cached fields.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.fields.len()
+    }
+
+    /// Whether the cache holds no field.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+
+    /// Maximum number of cached fields.
+    #[must_use]
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Lookup hits since creation.
+    #[must_use]
+    pub const fn hits(&self) -> u64 {
+        self.hits
+    }
+
+    /// Lookups that built a field, including invalid goals.
+    #[must_use]
+    pub const fn misses(&self) -> u64 {
+        self.misses
+    }
+
+    /// Drop every cached field. Hit and miss counters are cumulative for the
+    /// lifetime of the cache.
+    pub fn clear(&mut self) {
+        self.fields.clear();
+        self.order.clear();
+    }
+}
+
+fn cache_key(goal: [f32; 2]) -> [u32; 2] {
+    // Canonicalize ±0.0 so equal coordinates share one entry.
+    let bits = |value: f32| {
+        if value == 0.0 {
+            0.0_f32.to_bits()
+        } else {
+            value.to_bits()
+        }
+    };
+    [bits(goal[0]), bits(goal[1])]
 }
 
 impl RoadGraph {
@@ -383,19 +537,15 @@ impl RoadGraph {
     /// FNV-1a checksum over the derived graph.
     #[must_use]
     pub fn checksum(&self) -> u64 {
-        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-        let mut feed = |value: u64| {
-            hash ^= value;
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        };
+        let mut hash = FNV_OFFSET_BASIS;
         for &node in &self.nodes {
-            feed(node[0] as u32 as u64);
-            feed(node[1] as u32 as u64);
+            fnv1a_feed(&mut hash, node[0] as u32 as u64);
+            fnv1a_feed(&mut hash, node[1] as u32 as u64);
             if let Some(neighbors) = self.adjacency.get(&node) {
                 for &(next, length) in neighbors {
-                    feed(next[0] as u32 as u64);
-                    feed(next[1] as u32 as u64);
-                    feed(u64::from(length));
+                    fnv1a_feed(&mut hash, next[0] as u32 as u64);
+                    fnv1a_feed(&mut hash, next[1] as u32 as u64);
+                    fnv1a_feed(&mut hash, u64::from(length));
                 }
             }
         }
@@ -585,6 +735,88 @@ mod tests {
 
         assert_eq!(graph.flow_distance_m([50.0, 50.0], &field), None);
         assert!(graph.flow_to([50.0, 50.0]).is_some());
+    }
+
+    #[test]
+    fn a_flow_field_cache_reuses_repeated_goals() {
+        let graph = RoadGraph::build(&[road(1, [0, 0], [10, 0]), road(2, [10, 0], [10, 10])])
+            .expect("build");
+        let goal = [10.0, 10.0];
+        let direct = graph.flow_to(goal).expect("field");
+
+        let mut cache = FlowFieldCache::new(4);
+        let first = cache
+            .get_or_build(&graph, goal)
+            .expect("cached field")
+            .checksum();
+        let second = cache
+            .get_or_build(&graph, goal)
+            .expect("cached field")
+            .checksum();
+        assert_eq!(first, direct.checksum());
+        assert_eq!(second, first);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.capacity(), 4);
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.misses(), 1);
+        assert!(cache.get(goal).is_some());
+
+        cache.clear();
+        assert!(cache.is_empty());
+        assert!(cache.get(goal).is_none());
+        assert_eq!(cache.hits(), 1);
+    }
+
+    #[test]
+    fn a_full_flow_field_cache_evicts_the_oldest_goal() {
+        let graph = RoadGraph::build(&[
+            road(1, [0, 0], [10, 0]),
+            road(2, [10, 0], [10, 10]),
+            road(3, [10, 10], [0, 10]),
+        ])
+        .expect("build");
+        let goals = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]];
+        let mut cache = FlowFieldCache::new(2);
+        for goal in goals {
+            assert!(cache.get_or_build(&graph, goal).is_some());
+        }
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.misses(), 3);
+        assert_eq!(cache.hits(), 0);
+        assert!(cache.get(goals[0]).is_none());
+        assert!(cache.get(goals[1]).is_some());
+        assert!(cache.get(goals[2]).is_some());
+
+        assert!(cache.get_or_build(&graph, goals[0]).is_some());
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.misses(), 4);
+        assert!(cache.get(goals[0]).is_some());
+        assert!(cache.get(goals[1]).is_none());
+        assert!(cache.get(goals[2]).is_some());
+    }
+
+    #[test]
+    fn a_flow_field_cache_does_not_store_invalid_goals() {
+        let graph = RoadGraph::build(&[road(1, [0, 0], [10, 0])]).expect("build");
+        let mut cache = FlowFieldCache::new(2);
+        assert!(cache.get_or_build(&graph, [f32::NAN, 0.0]).is_none());
+        assert!(cache.get_or_build(&graph, [0.0, f32::INFINITY]).is_none());
+        assert!(cache.is_empty());
+        assert_eq!(cache.misses(), 2);
+        assert_eq!(cache.hits(), 0);
+        assert!(cache.get([f32::NAN, 0.0]).is_none());
+    }
+
+    #[test]
+    fn flow_field_checksums_are_stable_and_goal_specific() {
+        let roads = [road(1, [0, 0], [10, 0]), road(2, [10, 0], [10, 10])];
+        let first = RoadGraph::build(&roads).expect("build");
+        let second = RoadGraph::build(&roads).expect("build");
+        let from_corner = first.flow_to([10.0, 10.0]).expect("field");
+        let rebuilt = second.flow_to([10.0, 10.0]).expect("field");
+        let from_origin = first.flow_to([0.0, 0.0]).expect("field");
+        assert_eq!(from_corner.checksum(), rebuilt.checksum());
+        assert_ne!(from_corner.checksum(), from_origin.checksum());
     }
 
     #[test]

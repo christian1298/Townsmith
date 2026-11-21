@@ -2,7 +2,7 @@
 title: Benchmarks
 project: Townsmith
 status: proposed
-updated: 2026-11-20
+updated: 2026-11-21
 tags:
   - townsmith
   - performance
@@ -33,6 +33,9 @@ A benchmark run is not a synthetic fly-through of an empty map. It is a represen
 > `./scripts/bench_core.sh` runs the core microbenchmarks three times and writes `benchmarks/results/phase0_core_summary.json`: chunk meshing, worldgen/streaming/edit deltas, terrain meshing, and the 1M-cohort tick.
 >
 > `GODOT=/path/to/godot ./scripts/bench_godot.sh` runs the deterministic `phase0_flyover_v1` route three times and writes `benchmarks/results/godot_phase0_summary.json`. For city scenes, set `CITY_TIER=early|mid|late` and pass a `phase0_city_*.json` route; see [[23 - City Rendering Benchmark]]. Pass a third argument to use another route, e.g. `benchmarks/routes/phase0_streaming_flyover.json` for the multi-chunk streaming route; its summary is written to `benchmarks/results/godot_phase0_streaming_flyover_summary.json`. The summary includes `chunks_loaded_min/median/max`. It builds the terrain scene, moves the camera by elapsed time, records frame times, hitches, and 1% lows. It currently runs headless when no display is available; those frame times validate the route/JSON path but are **not** representative of rendering performance. Use a display and the target machine for real numbers. Async terrain streaming also makes chunk completion order scheduling-dependent; camera/settings/route stay fixed, but frame-exact chunk population is not guaranteed yet. Record the streaming counters with the result.
+
+> [!info] Phase 3 traffic microbenchmark
+> `cargo run --release -p townsmith-bench --bin traffic` builds a deterministic 64 × 64 road grid (128 roads, 4,096 nodes, 8,064 edges, 129,024 m). On the current developer machine: graph build ~1.9 ms, 1,000 pair queries ~449 ms, 1,000 flow queries ~4.8 ms, and 64 goal fields ~60 ms. This is a microbenchmark, not the 1M/60 FPS gate.
 
 For a full Phase 0 target run on a desktop:
 
