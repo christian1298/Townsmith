@@ -368,7 +368,7 @@ The existing world JSON `population` object gets an optional sibling `named_citi
 | Slice | Deliverable | Acceptance |
 |---|---|---|
 | **N1 — Identity layer (derived)** | Deterministic ids, names, household slot sync, read-only bridge | **Done** — PR #98; 500-resident city produces stable names; `cargo test -p core_city named`; no save or checksum change; 4k identities generate in < 100 ms under the debug test guard |
-| **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | **Partial — PR #101**; selected HUD line and F2 citizen panel show stable names and household stats; follow camera and EN/DE card are next |
+| **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | **Partial — follow camera and EN/DE card landed in PR #108; per-citizen job/age rows remain** |
 | **N3 — Materialization** | Active pool, hysteresis, route cache, fade, active cap | 2k active + 200 detailed in the benchmark route; ≤ 1 ms decision; no pop in the smoke; no route per citizen |
 | **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | **Partial — PR #103**; persistence landed ([[70 - Named Persistence]]), lifecycle/aging/death next |
 | **N5 — Cohort bridge (later)** | Sample from cohorts, district stories, 1M identity store | 1M cohort benchmark unchanged; materialization near camera; no per-citizen tick |
@@ -412,11 +412,18 @@ N2 also adds a **Citizen** panel (`F2`, bottom-left):
 
 The smoke opens the panel with no selection, checks the empty state, selects the occupied house, verifies a known name plus `2 / 2 residents` and `40/day`, then closes it. Marker: `citizens=ok`.
 
-Not yet implemented: follow camera, a full household list, job/age rows, and the EN/DE card. Panel text is English-only developer text until the localization phase.
+N2 follow/camera additions:
+
+- `F3` smoothly focuses the Mayor camera on the selected home; `Esc`, a selection change, or entering Architect stops the follow.
+- The camera hands control back if the player pans during a follow step.
+- `world_i18n.gd` provides key-based EN/DE strings for the citizen panel and follow hint; names remain proper nouns.
+- The smoke starts follow, steps the camera, verifies arrival, verifies selection-change and Architect cancellation, and renders the card in both EN and DE. Markers: `follow=ok`, `citizen_i18n=ok`.
+
+Not yet implemented: per-citizen job/age rows and a full household list. The card is EN/DE but the wider HUD remains English-only until the localization phase.
 
 ### N2 checks
 
-- `smoke_world_scene.sh` marker `citizens=ok`
+- `smoke_world_scene.sh` markers `citizens=ok`, `follow=ok`, `citizen_i18n=ok`
 - `smoke_world_scene.sh` still reports `status=ok`
 - Select, open card, follow, and return; identity stable
 - Screenshot and EN/DE width check

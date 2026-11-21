@@ -10,6 +10,7 @@ extends Node3D
 const TerrainStreamer = preload("res://terrain_streamer.gd")
 const EditorCamera = preload("res://editor_camera.gd")
 const MayorCamera = preload("res://mayor_camera.gd")
+const WorldI18n = preload("res://world_i18n.gd")
 
 const SEED := 2026
 const FIXTURE_X := 169.0
@@ -23,6 +24,11 @@ const LOAN_AMOUNT := 50000.0
 # research summaries; traffic_state rebuilds the road graph. That is too much
 # work per HUD update, so the visible panel is refreshed on this cadence.
 const DASHBOARD_REFRESH_SECONDS := 0.5
+# Follow pulls the Mayor target toward the selected home with an exponential
+# ease. The epsilon is the arrival radius and also the pan detector: a larger
+# target move between follow steps means the player panned and takes over.
+const FOLLOW_SHARPNESS := 6.0
+const FOLLOW_ARRIVE_EPS_M := 0.05
 const TAX_POLICIES := [
 	{"name": "low", "resident": 4.0, "business": 2.0},
 	{"name": "standard", "resident": 8.0, "business": 4.0},
@@ -30,6 +36,7 @@ const TAX_POLICIES := [
 ]
 
 var core
+var i18n
 var streamer
 var camera: Camera3D
 var mayor_camera
@@ -68,6 +75,9 @@ var service_time := 0.0
 var lot_zone := "residential"
 var selection_box: MeshInstance3D
 var selected_id := -1
+var follow_active := false
+var follow_target := Vector3.ZERO
+var follow_prev_target := Vector3.ZERO
 
 var ghost: Node3D
 var ghost_mesh: MeshInstance3D
@@ -111,6 +121,7 @@ var preview_valid := false
 var preview_error := ""
 
 func _ready() -> void:
+	i18n = WorldI18n.new()
 	core = TownsmithCore.new()
 	_resolve_paths()
 	_setup_world()
@@ -182,6 +193,7 @@ func _process(delta: float) -> void:
 			node.position.y = base_y + sin(service_time * 1.4) * 0.06
 	_update_traffic(delta)
 	if mode == "mayor" and mayor_camera != null:
+		_update_follow(delta)
 		var ground: float = core.world_height_at(
 			SEED, mayor_camera.target.x, mayor_camera.target.z
 		)
@@ -207,7 +219,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			_return_to_mayor()
 			return
 		if event.physical_keycode == KEY_ESCAPE:
-			if citizen_visible:
+			if follow_active:
+				_stop_follow(i18n.t("base.ui.citizen.follow_stopped"))
+			elif citizen_visible:
 				_close_citizen_panel()
 			elif dashboard_visible:
 				_toggle_dashboard()
@@ -254,6 +268,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					_toggle_dashboard()
 				KEY_F2:
 					_toggle_citizen_panel()
+				KEY_F3:
+					_toggle_follow()
 				KEY_T:
 					_cycle_tax_policy()
 				KEY_L:
@@ -1448,8 +1464,9 @@ func _update_hud() -> void:
 			SEED, blueprint_name, structure_text,
 		]
 	else:
-		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nStructure: %s\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew · I industry · U utility · K services · B starter · T tax · L loan · Y research · F1 dashboard · F2 citizens · V +10k · F5 save · F9 load" % [
+		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nStructure: %s\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew · I industry · U utility · K services · B starter · T tax · L loan · Y research · F1 dashboard · F2 citizens · %s · V +10k · F5 save · F9 load" % [
 			SEED, blueprint_name, rooms, capacity, structure_text,
+			i18n.t("base.ui.help.follow"),
 		]
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
 	var construction: Dictionary = core.construction_summary()
@@ -1605,6 +1622,66 @@ func _close_citizen_panel() -> void:
 		citizen_panel.visible = false
 	citizen_refresh_accum = 0.0
 
+func _toggle_follow() -> bool:
+	if follow_active:
+		_stop_follow(i18n.t("base.ui.citizen.follow_stopped"))
+		return false
+	return _start_follow()
+
+func _start_follow() -> bool:
+	if mode != "mayor" or mayor_camera == null:
+		return false
+	var selected := _selected_placement()
+	if selected.is_empty():
+		_set_modal(i18n.t("base.ui.citizen.follow_select_first"), true)
+		return false
+	var center: PackedFloat32Array = selected.get("center", PackedFloat32Array())
+	if center.size() != 3:
+		_set_modal(i18n.t("base.ui.citizen.follow_select_first"), true)
+		return false
+	follow_target = Vector3(center[0], center[1], center[2])
+	follow_prev_target = mayor_camera.target
+	follow_active = true
+	_set_modal(i18n.t("base.ui.citizen.follow_started", {"id": selected_id}), false)
+	_update_hud()
+	if citizen_visible:
+		_update_citizen_panel()
+	return true
+
+func _stop_follow(message: String = "") -> void:
+	if not follow_active:
+		return
+	follow_active = false
+	if message != "":
+		_set_modal(message, false)
+	_update_hud()
+	if citizen_visible:
+		_update_citizen_panel()
+
+func _update_follow(delta: float) -> void:
+	if not follow_active or mayor_camera == null:
+		return
+	if mode != "mayor" or selected_id < 0:
+		_stop_follow()
+		return
+	var current: Vector3 = mayor_camera.target
+	var drift := Vector2(
+		current.x - follow_prev_target.x, current.z - follow_prev_target.z
+	).length()
+	if drift > FOLLOW_ARRIVE_EPS_M:
+		# The camera target moved outside the follow step: the player panned,
+		# so hand control back instead of fighting the existing controls.
+		_stop_follow()
+		return
+	var weight := 1.0 - exp(-FOLLOW_SHARPNESS * maxf(delta, 0.0))
+	var next: Vector3 = current.lerp(follow_target, weight)
+	if Vector2(
+		next.x - follow_target.x, next.z - follow_target.z
+	).length() <= FOLLOW_ARRIVE_EPS_M:
+		next = follow_target
+	mayor_camera.target = next
+	follow_prev_target = next
+
 func _household_for(placement_id: int) -> Dictionary:
 	var state: Dictionary = core.population_state()
 	for household in state.get("households", []):
@@ -1616,52 +1693,58 @@ func _update_citizen_panel() -> void:
 	if citizen_text == null:
 		return
 	var lines: Array[String] = []
-	lines.append("[b]Citizens[/b]  (F2 or Esc to close)")
+	lines.append("[b]%s[/b]  (%s)" % [
+		i18n.t("base.ui.citizen.title"),
+		i18n.t("base.ui.citizen.close_hint"),
+	])
 	if selected_id < 0:
 		lines.append("")
-		lines.append("No home selected.")
-		lines.append("Right-click a completed home to inspect its residents.")
+		lines.append(i18n.t("base.ui.citizen.no_selection"))
+		lines.append(i18n.t("base.ui.citizen.no_selection_hint"))
 		citizen_text.text = "\n".join(lines)
 		return
 	var selected := _selected_placement()
 	if selected.is_empty():
 		lines.append("")
-		lines.append("The selected placement is no longer available.")
+		lines.append(i18n.t("base.ui.citizen.selection_unavailable"))
 		citizen_text.text = "\n".join(lines)
 		return
 	lines.append("")
 	lines.append("[b]#%d  %s[/b]" % [selected_id, str(selected.get("name", "?"))])
+	lines.append(i18n.t("base.ui.citizen.follow_hint"))
+	if follow_active:
+		lines.append(i18n.t("base.ui.citizen.following", {"id": selected_id}))
 	var named: Dictionary = core.named_citizens_for(SEED, selected_id)
 	var citizens: Array = named.get("citizens", [])
 	if citizens.is_empty():
-		lines.append("No named residents (vacant home or not yet synced).")
+		lines.append(i18n.t("base.ui.citizen.no_named"))
 	else:
 		for citizen in citizens:
-			lines.append("· %s  (resident slot %d)" % [
-				str(citizen.get("name", "?")),
-				int(citizen.get("slot", 0)) + 1,
-			])
+			lines.append(i18n.t("base.ui.citizen.resident_line", {
+				"name": str(citizen.get("name", "?")),
+				"slot": int(citizen.get("slot", 0)) + 1,
+			}))
 	var household := _household_for(selected_id)
 	if household.is_empty():
 		lines.append("")
-		lines.append("Household runtime is not available yet.")
+		lines.append(i18n.t("base.ui.citizen.household_unavailable"))
 	else:
 		lines.append("")
-		lines.append("[b]Household[/b]")
-		lines.append("%d / %d residents · %d employed" % [
-			int(household.get("residents", 0)),
-			int(household.get("capacity", 0)),
-			int(household.get("workers", 0)),
-		])
-		lines.append("Commute %.0f m · income %.0f/day" % [
-			float(household.get("commute_m", 0.0)),
-			float(household.get("income_per_day", 0.0)),
-		])
-		lines.append("Food %.0f%% · water %.0f%% · rest %.0f%%" % [
-			float(household.get("food", 0.0)) * 100.0,
-			float(household.get("water", 0.0)) * 100.0,
-			float(household.get("rest", 0.0)) * 100.0,
-		])
+		lines.append("[b]%s[/b]" % i18n.t("base.ui.citizen.household"))
+		lines.append(i18n.t("base.ui.citizen.household_line", {
+			"residents": int(household.get("residents", 0)),
+			"capacity": int(household.get("capacity", 0)),
+			"employed": int(household.get("workers", 0)),
+		}))
+		lines.append(i18n.t("base.ui.citizen.commute_income", {
+			"commute": "%.0f" % float(household.get("commute_m", 0.0)),
+			"income": "%.0f" % float(household.get("income_per_day", 0.0)),
+		}))
+		lines.append(i18n.t("base.ui.citizen.needs", {
+			"food": "%.0f" % (float(household.get("food", 0.0)) * 100.0),
+			"water": "%.0f" % (float(household.get("water", 0.0)) * 100.0),
+			"rest": "%.0f" % (float(household.get("rest", 0.0)) * 100.0),
+		}))
 	citizen_text.text = "\n".join(lines)
 
 func _toggle_dashboard() -> bool:
@@ -1840,6 +1923,8 @@ func _select_at_screen(screen: Vector2) -> bool:
 	return _select_placement(id)
 
 func _select_placement(id: int) -> bool:
+	if id != selected_id:
+		_stop_follow()
 	selected_id = id
 	var placement := _selected_placement()
 	if placement.is_empty():
@@ -1864,6 +1949,7 @@ func _select_placement(id: int) -> bool:
 	return true
 
 func _clear_selection() -> void:
+	_stop_follow()
 	selected_id = -1
 	if selection_box != null:
 		selection_box.visible = false
@@ -1942,6 +2028,7 @@ func _door_position(placement: Dictionary) -> Vector3:
 func _enter_architect() -> bool:
 	if mode != "mayor":
 		return false
+	_stop_follow()
 	if citizen_visible:
 		_close_citizen_panel()
 	if dashboard_visible:
@@ -2430,6 +2517,8 @@ func _run_scene_smoke() -> void:
 	var trades_ok := false
 	var named_ok := false
 	var citizens_ok := false
+	var citizen_i18n_ok := false
+	var follow_ok := false
 	var render_ok := false
 	var structure_ok := false
 	var age_ok := false
@@ -2447,6 +2536,10 @@ func _run_scene_smoke() -> void:
 	var clear_ok := false
 	var load_ok := false
 	var rooms := int(blueprint_info.get("rooms", -1))
+	var smoke_locale: String = i18n.locale()
+	# Keep the English assertions below deterministic on a German desktop;
+	# the citizen check switches to `de` explicitly and restores this locale.
+	i18n.set_locale("en")
 
 	target_x = FIXTURE_X
 	target_z = FIXTURE_Z
@@ -2590,6 +2683,21 @@ func _run_scene_smoke() -> void:
 			var selected := _selected_placement()
 			var selected_info := _info_for_path(str(selected.get("blueprint_path", "")))
 			select_ok = int(selected_info.get("rooms", -1)) == 4
+		if select_ok:
+			var selected := _selected_placement()
+			var home_center: PackedFloat32Array = selected.get("center", PackedFloat32Array())
+			follow_ok = home_center.size() == 3 and _start_follow()
+			for _step in 40:
+				_update_follow(0.05)
+			follow_ok = follow_ok and mayor_camera.target.distance_to(Vector3(home_center[0], home_center[1], home_center[2])) < 0.5
+			# Selection changes and Architect entry cancel the follow.
+			_clear_selection()
+			follow_ok = follow_ok and not follow_active
+			follow_ok = follow_ok and _select_placement(1)
+			follow_ok = follow_ok and _start_follow()
+			follow_ok = follow_ok and _enter_architect()
+			follow_ok = follow_ok and not follow_active
+			follow_ok = follow_ok and _return_to_mayor()
 		if select_ok:
 			var mayor_target: Vector3 = mayor_camera.target
 			enter_ok = _enter_architect() and mode == "architect" and camera == architect_camera
@@ -2779,6 +2887,17 @@ func _run_scene_smoke() -> void:
 				citizens_ok = citizens_ok and citizen_text.text.contains("40/day")
 				_close_citizen_panel()
 				citizens_ok = citizens_ok and not citizen_panel.visible
+				# The same card must render in German and English.
+				_select_placement(1)
+				i18n.set_locale("de")
+				_toggle_citizen_panel()
+				citizen_i18n_ok = citizen_text.text.contains("Bürger")
+				citizen_i18n_ok = citizen_i18n_ok and known_name != "" and citizen_text.text.contains(known_name)
+				i18n.set_locale("en")
+				_update_citizen_panel()
+				citizen_i18n_ok = citizen_i18n_ok and citizen_text.text.contains("Citizens")
+				_close_citizen_panel()
+				i18n.set_locale(smoke_locale)
 				var progression_after: Dictionary = core.progression_state(SEED)
 				age_ok = bool(progression_after.get("ok", false))
 				age_ok = age_ok and str(progression_after.get("age", "")) == "wood"
@@ -3046,6 +3165,10 @@ func _run_scene_smoke() -> void:
 					status = "named_failed"
 				elif not citizens_ok:
 					status = "citizens_failed"
+				elif not follow_ok:
+					status = "follow_failed"
+				elif not citizen_i18n_ok:
+					status = "citizen_i18n_failed"
 				elif not industry_ok:
 					status = "industry_failed"
 				elif not utility_ok:
@@ -3099,7 +3222,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s follow=%s citizen_i18n=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -3120,6 +3243,8 @@ func _run_scene_smoke() -> void:
 		"ok" if starter_ok else "failed",
 		"ok" if named_ok else "failed",
 		"ok" if citizens_ok else "failed",
+		"ok" if follow_ok else "failed",
+		"ok" if citizen_i18n_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",
