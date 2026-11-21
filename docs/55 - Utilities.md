@@ -207,7 +207,7 @@ The city now stays healthy at full service and the 30-day run is financially rec
 - `core_city::population`: 2 new tests — water/rest replenishment and supply clamping.
 - `core_city::industry`: 2 new tests — power scaling and outage with eating.
 - `godot_ext`: 2 new tests — utility JSON roundtrip/old save closed, invalid site rejection.
-- `core_city`: **251 tests**; `core_structure`: **19 tests** + 1 doctest; bridge: **57 tests**; workspace: **526 tests + 2 doctests (528 passed)**.
+- `core_city`: **254 tests**; `core_structure`: **19 tests** + 1 doctest; bridge: **58 tests**; workspace: **531 tests + 2 doctests (533 passed)**.
 - `city_loop` asserts full service, healthy needs, a non-zero road commute, and a stable checksum.
 - World-scene smoke adds water and power, verifies shortage recovery, production, save/clear/load, and beacons; marker `utilities=ok` is checked by the script.
 
