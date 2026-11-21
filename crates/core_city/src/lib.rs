@@ -39,6 +39,7 @@ pub mod lot;
 pub mod metrics;
 pub mod placement;
 pub mod population;
+pub mod progression;
 pub mod road;
 pub mod settlement;
 pub mod traffic;
@@ -84,6 +85,7 @@ pub use population::{
     MAX_TICK_SECONDS as MAX_POPULATION_TICK_SECONDS, POPULATION_FORMAT_VERSION,
     WAGE_PER_WORKER_PER_DAY,
 };
+pub use progression::{Age, AgeState};
 pub use road::{
     RoadError, RoadRequest, RoadSegment, RoadStore, MAX_ROADS, MAX_ROAD_LENGTH_M, MAX_ROAD_SLOPE_M,
     MAX_ROAD_WIDTH_M, MIN_ROAD_WIDTH_M, ROAD_FORMAT_VERSION,

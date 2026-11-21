@@ -22,7 +22,7 @@ tags:
 | `crates/core_voxel` | 32³ chunk, palette/RLE, greedy mesher, chunked volume + cross-chunk meshing | Working, 52 tests |
 | `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming, terrain mesh + LOD + seam skirts | Working, 62 tests |
 | `crates/core_sim` | 1M-scale cohort simulation plus deterministic 2,000 active agents | Working, 26 tests |
-| `crates/core_city` | Deterministic synthetic city layouts, placement, construction, roads, lots, settlements, households, treasury/loans, primary industries, water/power utilities, traffic, and the city advisor | Working, 146 tests |
+| `crates/core_city` | Deterministic synthetic city layouts, placement, construction, roads, lots, settlements, households, treasury/loans, primary industries, water/power utilities, traffic, the city advisor, and population-driven ages | Working, 151 tests |
 | `crates/core_blueprint` | `.tsbp` v1 package: zip, metadata, RLE voxel stream, BLAKE3 hash | Working, 11 tests |
 | `crates/core_rooms` | Room detection, props, capacity/jobs, material stats, shared acceptance fixture, room bounds | Working, 12 tests + 1 doctest |
 | `crates/server` | Headless cohort tick harness (no GPU, no socket yet) | Working |
@@ -163,7 +163,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
 | Traffic graph, 32 × 32 grid | 64 roads | 1,024 nodes | 1,984 edges | ~0.44 ms build; 1.3 ms / 1,000 flow queries |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, agent, and traffic paths and a baseline for regressions. The workspace has **356 tests + 1 doctest**: 52 voxel, 62 world, 26 simulation, 146 city, 11 blueprint, 12 rooms, 42 bridge, 4 city-loop tests, and 1 traffic-grid test.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, agent, and traffic paths and a baseline for regressions. The workspace has **361 tests + 1 doctest**: 52 voxel, 62 world, 26 simulation, 151 city, 11 blueprint, 12 rooms, 42 bridge, 4 city-loop tests, and 1 traffic-grid test.
 
 ### Vertical slice acceptance
 

@@ -23,6 +23,7 @@ tags:
 | Method | Returns | Purpose |
 |---|---|---|
 | `world_validate_placement(seed, path, x, z, rotation)` | `Dictionary` | Load and validate a `.tsbp` site without mutating; `ok`, `center`, `foundation_m`, `footprint`, `rotation_deg`, `bounds`, `blueprint_hash` |
+| `progression_state(seed)` | `Dictionary` | Derived population age: `age`, `next_age`, `next_threshold`, `progress`, `materials` |
 | `world_blueprint_info(path)` | `Dictionary` | Metadata for the ghost/HUD: id, name, hash, bounds, rooms, capacity, jobs, cost |
 | `world_place_blueprint(seed, path, x, z, rotation)` | `Dictionary` | Validate and append; `ok`, `seed`, `count`, `checksum`, `placement` |
 | `world_placements()` | `Dictionary` | `open`, `seed`, `next_id`, `count`, `checksum`, `placements[]` |
@@ -186,9 +187,9 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 
 ## 7. Tests
 
-- `core_city`: placement persistence, construction, roads, lots, settlements, households, treasury/loans, industry, utilities, traffic, and the advisor; **146 tests**.
+- `core_city`: placement persistence, construction, roads, lots, settlements, households, treasury/loans, industry, utilities, traffic, and the advisor; **151 tests**.
 - `godot_ext`: **42 tests** total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
-- Workspace: **356 tests + 1 doctest**.
+- Workspace: **361 tests + 1 doctest**.
 - Godot headless: `WORLD_PLACEMENT ... status=ok` and `WORLD_SCENE ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 
