@@ -2,7 +2,7 @@
 title: Simulation and AI
 project: Townsmith
 status: proposed
-updated: 2026-11-19
+updated: 2026-11-21
 tags:
   - townsmith
   - simulation
@@ -179,6 +179,9 @@ The game samples a citizen from the relevant cohort and gives them:
 - A consistent personal history while they are active.
 
 While materialized, the citizen updates at 10 Hz like an individual agent. When they are **dematerialized**, their state is folded back into the cohort aggregates. The player never sees a citizen "pop"; the transition is hidden by distance or UI.
+
+> [!note] First named-citizen slice
+> The implementation plan for persistent names, selection, and the 2,000-agent materialization budget is in [[67 - Named Citizens]]. It is additive: named citizens are identities over the aggregate household runtime, not a second population simulation.
 
 #### Keeping the cohort count under control
 
