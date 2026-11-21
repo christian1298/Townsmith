@@ -180,9 +180,9 @@ These are microbenchmarks on one machine, not the 1M/60 FPS gate.
 
 - `core_city::traffic`: 15 tests — empty graph, single segment, L shape, crossing split, T-junction, disconnected components, walking legs, duplicate edges, invalid points, flow fields, checksum stability, cache reuse/FIFO, invalid goals, flow-field checksums.
 - `core_city::population`: road commute and disconnected fallback.
-- `townsmith-bench`: 4 city-loop tests (small city and a multi-row commute) and 1 traffic-grid test.
+- `townsmith-bench`: 5 city-loop tests (small city and a multi-row commute) and 3 traffic-grid tests.
 - World scene smoke: `traffic=ok`, graph stats, one car, movement, save/load rebuild.
-- Workspace after the balance report merges: **448 tests + 2 doctests (450 passed)**; core_city **204**, core_structure **19**, bridge **50**.
+- Workspace: **448 tests + 2 doctests (450 passed)**; core_city **204**, core_structure **19**, bridge **50**.
 
 ## 8. Limits
 
