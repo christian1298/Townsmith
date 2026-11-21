@@ -670,3 +670,82 @@ fn seeded_layers_detect_a_foreign_seed() {
         "seed_mismatch",
     );
 }
+
+/// Parse every layer without requiring a particular outcome.
+fn parse_all_layers(json: &str) {
+    let _ = PlacementStore::from_json(json);
+    let _ = terrain_deltas_from_world_json(json);
+    let _ = construction_from_world_json(json);
+    let _ = population_from_world_json(json);
+    let _ = named_from_world_json(json, SEED);
+    let _ = roads_from_world_json(json);
+    let _ = lots_from_world_json(json);
+    let _ = settlements_from_world_json(json);
+    let _ = economy_from_world_json(json);
+    let _ = utilities_from_world_json(json);
+    let _ = services_from_world_json(json);
+    let _ = industry_from_world_json(json);
+    let _ = research_from_world_json(json);
+}
+
+fn next_u64(state: &mut u64) -> u64 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    *state
+}
+
+#[test]
+fn bounded_envelope_mutations_never_panic() {
+    const CASES: usize = 200;
+    let layers = Layers::new();
+    let base: serde_json::Value = serde_json::from_str(&layers.compose()).expect("base json");
+    let keys: Vec<String> = base.as_object().expect("object").keys().cloned().collect();
+    let mut state = 0x5eed_2026_u64;
+    for case in 0..CASES {
+        let mut value = base.clone();
+        let key = &keys[(next_u64(&mut state) as usize) % keys.len()];
+        match next_u64(&mut state) % 6 {
+            0 => {
+                value.as_object_mut().expect("object").remove(key);
+            }
+            1 => {
+                if let Some(layer) = value.get_mut(key).and_then(|value| value.as_object_mut()) {
+                    layer.insert("format_version".to_string(), serde_json::json!(99));
+                }
+            }
+            2 => {
+                if let Some(layer) = value.get_mut(key).and_then(|value| value.as_object_mut()) {
+                    layer.insert("seed".to_string(), serde_json::json!(FOREIGN_SEED));
+                }
+            }
+            3 => {
+                if let Some(layer) = value.get_mut(key).and_then(|value| value.as_object_mut()) {
+                    if let Some(field) = layer.keys().next().cloned() {
+                        layer.insert(field, serde_json::Value::Null);
+                    }
+                }
+            }
+            4 => {
+                let text = value.to_string();
+                let cut = (next_u64(&mut state) as usize) % text.len().max(1);
+                let truncated = &text[..cut.min(text.len())];
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    parse_all_layers(truncated);
+                }));
+                assert!(outcome.is_ok(), "case {case} panicked on truncated JSON");
+                continue;
+            }
+            _ => {
+                if let Some(layer) = value.get_mut(key).and_then(|value| value.as_array_mut()) {
+                    layer.clear();
+                }
+            }
+        }
+        let text = value.to_string();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parse_all_layers(&text);
+        }));
+        assert!(outcome.is_ok(), "case {case} panicked on {key}");
+    }
+}
