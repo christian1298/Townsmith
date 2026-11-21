@@ -105,8 +105,14 @@ The call is read-only: it does not mutate the live named pool, population, save 
 - No save field: the selected set is derived on demand.
 - Selection is city-wide in N3; per-client interest filtering is later.
 
-## 6. Next
+## 6. World-scene overlay
+
+`F4` toggles a read-only overlay at the selected home/camera target. It calls `materialization_state` with a 250 m active / 120 m detailed radius and renders one blue marker per active citizen plus larger amber markers for detailed citizens. The overlay rebuilds on selection change or every 0.5 s while visible and frees its nodes when hidden. It does not persist or move agents.
+
+Limits: no hysteresis, fade, pinned selection, route cache, or movement; markers are debug geometry.
+
+## 7. Next
 
 1. Add hysteresis, pinned/selected priority, fade/pop handling, and a bounded route cache.
-2. Wire the active/detailed sets into the world scene and benchmark route.
+2. Add hysteresis/pinned selection and a bounded route cache; then move markers into a materialized-agent route.
 3. Add a materialization decision benchmark and a 2k-active/200-detailed route.
