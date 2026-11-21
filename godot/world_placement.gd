@@ -24,6 +24,12 @@ const LOAN_AMOUNT := 50000.0
 # research summaries; traffic_state rebuilds the road graph. That is too much
 # work per HUD update, so the visible panel is refreshed on this cadence.
 const DASHBOARD_REFRESH_SECONDS := 0.5
+# Materialization is a derived, read-only selection around the Mayor focus or
+# selected building. Rebuild on toggle/selection change and at the same 0.5 s
+# cadence as the dashboard so a panning camera follows without per-frame nodes.
+const MATERIALIZATION_REFRESH_SECONDS := 0.5
+const MATERIALIZATION_ACTIVE_RADIUS_M := 250.0
+const MATERIALIZATION_DETAILED_RADIUS_M := 120.0
 # Follow pulls the Mayor target toward the selected home with an exponential
 # ease. The epsilon is the arrival radius and also the pan detector: a larger
 # target move between follow steps means the player panned and takes over.
@@ -60,6 +66,15 @@ var lot_start := Vector2i(-999999, -999999)
 var settlement_root: Node3D
 var settlement_nodes: Dictionary = {}
 var settlement_material: StandardMaterial3D
+var materialization_root: Node3D
+var materialization_active_mesh: BoxMesh
+var materialization_detailed_mesh: BoxMesh
+var materialization_active_material: StandardMaterial3D
+var materialization_detailed_material: StandardMaterial3D
+var materialization_visible := false
+var materialization_refresh_accum := 0.0
+var materialization_selected_key := -1
+var materialization_counts := Vector2i.ZERO
 var industry_root: Node3D
 var industry_nodes: Dictionary = {}
 var industry_kinds: Dictionary = {}
@@ -137,6 +152,7 @@ func _ready() -> void:
 	_setup_industry()
 	_setup_utilities()
 	_setup_services()
+	_setup_materialization()
 	if _ensure_blueprint():
 		_refresh_preview(true)
 	else:
@@ -157,6 +173,15 @@ func _process(delta: float) -> void:
 			_update_dashboard()
 	else:
 		dashboard_refresh_accum = 0.0
+	if materialization_visible:
+		if selected_id != materialization_selected_key:
+			_rebuild_materialization()
+		materialization_refresh_accum += delta
+		if materialization_refresh_accum >= MATERIALIZATION_REFRESH_SECONDS:
+			materialization_refresh_accum = 0.0
+			_rebuild_materialization()
+	else:
+		materialization_refresh_accum = 0.0
 	if citizen_visible:
 		citizen_refresh_accum += delta
 		if citizen_refresh_accum >= DASHBOARD_REFRESH_SECONDS:
@@ -272,6 +297,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					_toggle_citizen_panel()
 				KEY_F3:
 					_toggle_follow()
+				KEY_F4:
+					_toggle_materialization()
 				KEY_T:
 					_cycle_tax_policy()
 				KEY_L:
@@ -778,6 +805,88 @@ func _setup_industry() -> void:
 	industry_root = Node3D.new()
 	industry_root.name = "Industry"
 	add_child(industry_root)
+
+func _setup_materialization() -> void:
+	materialization_root = Node3D.new()
+	materialization_root.name = "Materialization"
+	add_child(materialization_root)
+	materialization_active_mesh = BoxMesh.new()
+	materialization_active_mesh.size = Vector3(0.45, 2.2, 0.45)
+	materialization_detailed_mesh = BoxMesh.new()
+	materialization_detailed_mesh.size = Vector3(0.9, 3.0, 0.9)
+	materialization_active_material = StandardMaterial3D.new()
+	materialization_active_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	materialization_active_material.albedo_color = Color(0.25, 0.55, 1.0)
+	materialization_detailed_material = StandardMaterial3D.new()
+	materialization_detailed_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	materialization_detailed_material.albedo_color = Color(1.0, 0.64, 0.18)
+
+func _materialization_center() -> Vector3:
+	if selected_id >= 0:
+		var selected := _selected_placement()
+		var center: PackedFloat32Array = selected.get("center", PackedFloat32Array())
+		if center.size() == 3:
+			return Vector3(center[0], center[1], center[2])
+	if mayor_camera != null:
+		return mayor_camera.target
+	return Vector3(target_x, 0.0, target_z)
+
+func _toggle_materialization() -> bool:
+	materialization_visible = not materialization_visible
+	materialization_refresh_accum = 0.0
+	_rebuild_materialization()
+	_update_hud()
+	return materialization_visible
+
+func _clear_materialization_nodes() -> void:
+	if materialization_root == null:
+		return
+	for node in materialization_root.get_children():
+		node.free()
+	materialization_counts = Vector2i.ZERO
+
+func _rebuild_materialization() -> void:
+	var previous_counts := materialization_counts
+	_clear_materialization_nodes()
+	materialization_selected_key = selected_id
+	if not materialization_visible or core == null:
+		return
+	var center := _materialization_center()
+	var state: Dictionary = core.materialization_state(
+		SEED, center.x, center.z,
+		MATERIALIZATION_ACTIVE_RADIUS_M, MATERIALIZATION_DETAILED_RADIUS_M
+	)
+	if not bool(state.get("ok", false)):
+		return
+	var counts: Dictionary = state.get("counts", {})
+	var active_count := int(counts.get("active", 0))
+	var detailed_count := int(counts.get("detailed", 0))
+	var active: Array = state.get("active", [])
+	var detailed: Array = state.get("detailed", [])
+	var detailed_ids := {}
+	for index in mini(detailed_count, detailed.size()):
+		detailed_ids[int(detailed[index].get("id", -1))] = true
+	var created := 0
+	for index in mini(active_count, active.size()):
+		var citizen: Dictionary = active[index]
+		var home: PackedFloat32Array = citizen.get("home", PackedFloat32Array())
+		if home.size() != 2:
+			continue
+		var ground: float = core.world_height_at(SEED, home[0], home[1])
+		if ground < 0.0:
+			continue
+		var detailed_here := detailed_ids.has(int(citizen.get("id", -1)))
+		var mesh := materialization_detailed_mesh if detailed_here else materialization_active_mesh
+		var node := MeshInstance3D.new()
+		node.mesh = mesh
+		node.material_override = materialization_detailed_material if detailed_here else materialization_active_material
+		node.position = Vector3(home[0], ground + mesh.size.y * 0.5, home[1])
+		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		materialization_root.add_child(node)
+		created += 1
+	materialization_counts = Vector2i(active_count, detailed_count)
+	if materialization_counts != previous_counts:
+		_update_hud()
 
 func _industry_color(kind: String) -> Color:
 	match kind:
@@ -1466,7 +1575,7 @@ func _update_hud() -> void:
 			SEED, blueprint_name, structure_text,
 		]
 	else:
-		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nStructure: %s\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew · I industry · U utility · K services · B starter · T tax · L loan · Y research · F1 dashboard · F2 citizens · %s · V +10k · F5 save · F9 load" % [
+		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nStructure: %s\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew · I industry · U utility · K services · B starter · T tax · L loan · Y research · F1 dashboard · F2 citizens · %s · F4 materialization · V +10k · F5 save · F9 load" % [
 			SEED, blueprint_name, rooms, capacity, structure_text,
 			i18n.t("base.ui.help.follow"),
 		]
@@ -1608,6 +1717,11 @@ func _update_hud() -> void:
 		int(construction.get("materials_stock", 0)),
 		save_path,
 	]
+	if materialization_visible:
+		status_label.text += "\nCitizens near: %d active · %d detailed" % [
+			materialization_counts.x,
+			materialization_counts.y,
+		]
 
 func _toggle_citizen_panel() -> bool:
 	citizen_visible = not citizen_visible
@@ -1825,6 +1939,11 @@ func _update_dashboard() -> void:
 		int(city.get("housing_capacity", 0)),
 		int(city.get("vacancies", 0)),
 	]
+	if materialization_visible:
+		text += "Citizens near: %d active · %d detailed\n" % [
+			materialization_counts.x,
+			materialization_counts.y,
+		]
 	var age_line := "—"
 	if bool(progression.get("ok", false)):
 		var next_age := str(progression.get("next_age", ""))
@@ -2532,6 +2651,7 @@ func _run_scene_smoke() -> void:
 	var named_ok := false
 	var citizens_ok := false
 	var citizen_i18n_ok := false
+	var materialization_ok := false
 	var follow_ok := false
 	var render_ok := false
 	var structure_ok := false
@@ -2913,6 +3033,27 @@ func _run_scene_smoke() -> void:
 				citizen_i18n_ok = citizen_i18n_ok and citizen_text.text.contains("Citizens")
 				_close_citizen_panel()
 				i18n.set_locale(smoke_locale)
+				var materialization_center := _materialization_center()
+				var materialization_query: Dictionary = core.materialization_state(
+					SEED, materialization_center.x, materialization_center.z,
+					MATERIALIZATION_ACTIVE_RADIUS_M, MATERIALIZATION_DETAILED_RADIUS_M
+				)
+				var materialization_query_counts: Dictionary = materialization_query.get("counts", {})
+				var expected_active := int(materialization_query_counts.get("active", 0))
+				var expected_detailed := int(materialization_query_counts.get("detailed", 0))
+				materialization_ok = bool(materialization_query.get("ok", false))
+				materialization_ok = materialization_ok and expected_active > 0
+				materialization_ok = materialization_ok and expected_detailed > 0
+				materialization_ok = materialization_ok and _toggle_materialization()
+				materialization_ok = materialization_ok and materialization_root.get_child_count() > 0
+				materialization_ok = materialization_ok and materialization_root.get_child_count() <= expected_active
+				materialization_ok = materialization_ok and materialization_counts == Vector2i(expected_active, expected_detailed)
+				materialization_ok = materialization_ok and hud.text.contains("F4 materialization")
+				materialization_ok = materialization_ok and status_label.text.contains(
+					"Citizens near: %d active · %d detailed" % [expected_active, expected_detailed]
+				)
+				materialization_ok = materialization_ok and not _toggle_materialization()
+				materialization_ok = materialization_ok and materialization_root.get_child_count() == 0
 				var progression_after: Dictionary = core.progression_state(SEED)
 				age_ok = bool(progression_after.get("ok", false))
 				age_ok = age_ok and str(progression_after.get("age", "")) == "wood"
@@ -3191,6 +3332,8 @@ func _run_scene_smoke() -> void:
 					status = "follow_failed"
 				elif not citizen_i18n_ok:
 					status = "citizen_i18n_failed"
+				elif not materialization_ok:
+					status = "materialization_failed"
 				elif not industry_ok:
 					status = "industry_failed"
 				elif not utility_ok:
@@ -3244,7 +3387,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s follow=%s citizen_i18n=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s follow=%s citizen_i18n=%s materialization=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -3267,6 +3410,7 @@ func _run_scene_smoke() -> void:
 		"ok" if citizens_ok else "failed",
 		"ok" if follow_ok else "failed",
 		"ok" if citizen_i18n_ok else "failed",
+		"ok" if materialization_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",
