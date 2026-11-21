@@ -2,7 +2,7 @@
 title: Road Network
 project: Townsmith
 status: active
-updated: 2026-11-20
+updated: 2026-11-21
 tags:
   - townsmith
   - phase-2
@@ -33,10 +33,16 @@ Out:
 - curved roads, lanes, sidewalks, medians, intersections, bridges, tunnels;
 - lot generation/frontage, zoning, settlement boundaries;
 - lots, zoning, and settlement boundaries;
-- utilities, traffic, vehicles, pathfinding, pedestrians;
+- utilities, vehicles, pathfinding, pedestrians;
 - road overlap or junction rules.
 
+Traffic routing and the derived graph are in [[56 - Traffic]].
+
 The core is deliberately independent of Godot and `core_world`; terrain heights arrive through a sampler closure.
+
+## 1b. Traffic graph
+
+Road segments feed a derived graph in [[56 - Traffic]]. Endpoints, T-junctions, and crossings become nodes; `traffic_state(seed)` reports nodes, edges, components, total length, and a checksum. Graph state is rebuilt on demand and is not part of the road save.
 
 ## 2. Data model
 
@@ -165,7 +171,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 - Roads are flat boxes, not terrain-conforming strips; slopes show gaps/overhangs at the ends.
 - The draw tool is fixed at 8 m wide; width/lane selection is later.
 - Slope limit is total rise, not grade per metre; long mountain roads will be rejected.
-- No utilities, sidewalks, lanes, traffic, or vehicles.
+- No utilities, sidewalks, lanes, lane-level traffic, congestion, or simulated vehicles. [[56 - Traffic]] adds a derived graph and decorative cars.
 - The 200,000-segment cap is a save guard, not a measured performance limit.
 
 ## 10. Next

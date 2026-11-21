@@ -18,6 +18,10 @@ path = "src/bin/city_layout.rs"
 name = "rooms"
 path = "src/bin/rooms.rs"
 
+[[bin]]
+name = "traffic"
+path = "src/bin/traffic.rs"
+
 [dependencies]
 core_voxel.workspace = true
 core_world.workspace = true

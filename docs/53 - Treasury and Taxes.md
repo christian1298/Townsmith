@@ -2,7 +2,7 @@
 title: Treasury, Loans, and Construction
 project: Townsmith
 status: active
-updated: 2026-11-20
+updated: 2026-11-21
 tags:
   - townsmith
   - phase-3
@@ -117,24 +117,24 @@ The acceptance house at standard taxes runs at **−21/day** before debt service
 
 ## 7. 30-day result
 
-The runner now charges **3,000 per house** (150,000 total), takes a **100,000** construction loan, starts at standard taxes, and switches to **20/4** at day 15.
+The runner now charges **3,000 per building** (165,000 total for 50 houses and 5 workshops), takes a **115,000** construction loan, starts at standard taxes, and switches to **20/4** at day 15.
 
 | Metric | Value |
 |---|---:|
 | Population / jobs | 500 / 500 |
-| Construction cost | 150,000 |
-| Loan | 100,000 |
-| Minimum balance | **−18,610** at day 15 |
-| Balance after 30 days | **2,822** |
-| Debt after 30 days | 91,781 |
-| Daily net after recovery | **+1,430** |
+| Construction cost | 165,000 |
+| Loan | 115,000 |
+| Minimum balance | **−19,712** at day 15 |
+| Balance after 30 days | **623** |
+| Debt after 30 days | 105,548 |
+| Daily net after recovery | **+1,357** |
 | Bankrupt | no |
-| Happiness | 1.00 |
+| Happiness | 0.896 |
 | Food / water / rest | 1.00 / 1.00 / 1.00 |
 
-The city dips below zero but stays above the bankruptcy threshold, then returns positive after the tax change. This is the first version of “near-bankruptcy is recoverable” rather than a proof that the default tax rate is balanced.
+The city dips below zero but stays above the bankruptcy threshold, then returns positive after the tax change. The average commute is 136.4 m and is covered in [[56 - Traffic]]. This is the first version of “near-bankruptcy is recoverable” rather than a proof that the default tax rate is balanced.
 
-City checksum: `1d78a3cac4fb0f22`. Economy checksum: `f57d4378435f03ee`.
+City checksum: `9578bd64586b2240`. Economy checksum: `1c213cc40278a13b`.
 
 ## 8. Bridge
 
@@ -187,9 +187,9 @@ The world-scene smoke checks:
 
 - `core_city::economy`: 14 tests — starting balance, income/expenses, clamped rates, bankruptcy, construction affordability, loan cash/interest/repayment, payoff, bankruptcy borrowing block, payment underflow, debt limit, daily net, JSON/checksum, old-save debt default, invalid balance.
 - `godot_ext`: 41 tests, including economy JSON/loan roundtrip, old-save loans default, and invalid balance.
-- `core_city` total **125**; bridge **41**; workspace **330 tests + 1 doctest**.
+- `core_city` total **137**; bridge **41**; workspace **344 tests + 1 doctest**; 30-day runner 2 tests.
 - `city_loop` bin test asserts construction spending, debt, positive final balance, and no bankruptcy.
-- 30-day city-loop checksum: `1d78a3cac4fb0f22`.
+- 30-day city-loop checksum: `9578bd64586b2240`.
 
 ## 12. Limits
 

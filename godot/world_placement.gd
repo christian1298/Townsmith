@@ -36,6 +36,10 @@ var road_nodes: Dictionary = {}
 var road_material: StandardMaterial3D
 var road_mode := false
 var road_start := Vector2i(-999999, -999999)
+var traffic_root: Node3D
+var traffic_cars: Dictionary = {}
+var traffic_materials: Array[StandardMaterial3D] = []
+var traffic_stats: Dictionary = {}
 var lot_root: Node3D
 var lot_nodes: Dictionary = {}
 var lot_materials: Dictionary = {}
@@ -95,6 +99,7 @@ func _ready() -> void:
 	_setup_ghost()
 	_setup_selection()
 	_setup_roads()
+	_setup_traffic()
 	_setup_lots()
 	_setup_settlements()
 	_setup_industry()
@@ -137,6 +142,7 @@ func _process(delta: float) -> void:
 		if is_instance_valid(node):
 			var base_y := float(node.get_meta("base_y", 0.0))
 			node.position.y = base_y + sin(utility_time * 1.6) * 0.08
+	_update_traffic(delta)
 	if mode == "mayor" and mayor_camera != null:
 		var ground: float = core.world_height_at(
 			SEED, mayor_camera.target.x, mayor_camera.target.z
@@ -430,6 +436,91 @@ func _setup_roads() -> void:
 	road_material.albedo_color = Color(0.22, 0.23, 0.24)
 	road_material.roughness = 1.0
 	road_material.metallic = 0.0
+
+func _setup_traffic() -> void:
+	traffic_root = Node3D.new()
+	traffic_root.name = "Traffic"
+	add_child(traffic_root)
+	for color in [Color(0.85, 0.2, 0.2), Color(0.2, 0.5, 0.85), Color(0.95, 0.8, 0.2), Color(0.9, 0.9, 0.9)]:
+		var material := StandardMaterial3D.new()
+		material.albedo_color = color
+		material.roughness = 0.6
+		material.metallic = 0.1
+		traffic_materials.append(material)
+
+func _rebuild_traffic() -> void:
+	for node in traffic_cars.values():
+		if is_instance_valid(node):
+			node.free()
+	traffic_cars.clear()
+	traffic_stats = core.traffic_state(SEED)
+	var roads: Dictionary = core.roads()
+	for road in roads.get("roads", []):
+		_add_traffic_car(road)
+
+func _add_traffic_car(road: Dictionary) -> void:
+	var id := int(road.get("id", -1))
+	if id < 0 or traffic_cars.has(id):
+		return
+	var start: PackedInt32Array = road.get("start", PackedInt32Array())
+	var end: PackedInt32Array = road.get("end", PackedInt32Array())
+	var center: PackedFloat32Array = road.get("center", PackedFloat32Array())
+	var length := float(road.get("length_m", 0))
+	var width := float(road.get("width_m", 8))
+	if start.size() != 2 or end.size() != 2 or center.size() != 2 or length <= 0.0:
+		return
+	var ground: float = core.world_height_at(SEED, center[0], center[1])
+	if ground < 0.0:
+		return
+	var along_x := bool(road.get("runs_along_x", false))
+	var body := BoxMesh.new()
+	body.size = Vector3(1.5, 0.55, 0.8)
+	var car := MeshInstance3D.new()
+	car.mesh = body
+	car.material_override = traffic_materials[id % traffic_materials.size()]
+	car.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var lane := float((id % 3) - 1) * minf(width * 0.25, 2.0)
+	car.set_meta("start", Vector2(float(start[0]), float(start[1])))
+	car.set_meta("end", Vector2(float(end[0]), float(end[1])))
+	car.set_meta("length", length)
+	car.set_meta("speed", 6.0 + float(id % 5) * 1.3)
+	car.set_meta("phase", float((id * 37) % 100) / 100.0)
+	car.set_meta("reverse", id % 2 == 1)
+	car.set_meta("lane", lane)
+	car.set_meta("along_x", along_x)
+	car.set_meta("ground", ground)
+	car.set_meta("t", float(car.get_meta("phase")))
+	car.rotation.y = 0.0 if along_x else PI * 0.5
+	traffic_root.add_child(car)
+	traffic_cars[id] = car
+	_place_car(car)
+
+func _place_car(car: MeshInstance3D) -> void:
+	var start: Vector2 = car.get_meta("start")
+	var end: Vector2 = car.get_meta("end")
+	var t := float(car.get_meta("t"))
+	var along := 1.0 - t if bool(car.get_meta("reverse")) else t
+	var lane := float(car.get_meta("lane"))
+	var point := start.lerp(end, along)
+	if bool(car.get_meta("along_x")):
+		point.y += lane
+	else:
+		point.x += lane
+	car.position = Vector3(point.x, float(car.get_meta("ground")) + 0.5, point.y)
+
+func _update_traffic(delta: float) -> void:
+	if delta <= 0.0:
+		return
+	for car in traffic_cars.values():
+		if not is_instance_valid(car):
+			continue
+		var length := float(car.get_meta("length", 1.0))
+		if length <= 0.0:
+			continue
+		var speed := float(car.get_meta("speed", 6.0))
+		var t := fmod(float(car.get_meta("t", 0.0)) + speed * delta / length, 1.0)
+		car.set_meta("t", t)
+		_place_car(car)
 
 func _setup_lots() -> void:
 	lot_root = Node3D.new()
@@ -1093,6 +1184,17 @@ func _update_hud() -> void:
 			float(utilities.get("power_supply", 0.0)) * 100.0,
 			int(utilities.get("power_sites", 0)),
 		]
+	var traffic: Dictionary = traffic_stats
+	if traffic.is_empty():
+		traffic = core.traffic_state(SEED)
+	var traffic_text := "—"
+	if bool(traffic.get("open", false)):
+		traffic_text = "%d nodes · %d edges · %.0f m · %d cars" % [
+			int(traffic.get("nodes", 0)),
+			int(traffic.get("edges", 0)),
+			float(traffic.get("total_length_m", 0.0)),
+			traffic_cars.size(),
+		]
 	var happiness_text := "—"
 	var needs_text := "—"
 	if int(city.get("population", 0)) > 0:
@@ -1102,7 +1204,7 @@ func _update_hud() -> void:
 			float(city.get("water", 0.0)) * 100.0,
 			float(city.get("rest", 0.0)) * 100.0,
 		]
-	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nIndustry: %s\nUtilities: %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
+	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nIndustry: %s\nUtilities: %s\nTraffic: %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
 		selected_line,
 		int(target_x),
 		int(target_z),
@@ -1125,6 +1227,7 @@ func _update_hud() -> void:
 		treasury_text,
 		industry_text,
 		utilities_text,
+		traffic_text,
 		int(construction.get("active", 0)),
 		int(construction.get("stalled", 0)),
 		int(construction.get("crew_capacity", 0)),
@@ -1389,6 +1492,7 @@ func _rebuild_roads() -> void:
 	var state: Dictionary = core.roads()
 	for road in state.get("roads", []):
 		_add_road_node(road)
+	_rebuild_traffic()
 
 func _add_road_node(road: Dictionary) -> void:
 	var id := int(road.get("id", -1))
@@ -1694,6 +1798,7 @@ func _run_scene_smoke() -> void:
 	var edit_ok := false
 	var place_ok := false
 	var road_ok := false
+	var traffic_ok := false
 	var lot_ok := false
 	var settlement_ok := false
 	var select_ok := false
@@ -1752,6 +1857,22 @@ func _run_scene_smoke() -> void:
 		road_ok = road_ok and core.world_placement_count() == 0
 		if not road_ok:
 			status = "road_failed:" + str(bad_road.get("error_code", ""))
+
+		var traffic: Dictionary = core.traffic_state(SEED)
+		traffic_ok = bool(traffic.get("open", false))
+		traffic_ok = traffic_ok and int(traffic.get("nodes", -1)) == 2
+		traffic_ok = traffic_ok and int(traffic.get("edges", -1)) == 1
+		traffic_ok = traffic_ok and int(traffic.get("components", -1)) == 1
+		traffic_ok = traffic_ok and bool(traffic.get("connected", false))
+		traffic_ok = traffic_ok and absf(float(traffic.get("total_length_m", 0.0)) - 20.0) < 0.01
+		traffic_ok = traffic_ok and traffic_cars.size() == 1
+		if traffic_cars.size() == 1:
+			var car: MeshInstance3D = traffic_cars.values()[0]
+			var before_car := car.position
+			_update_traffic(1.0)
+			traffic_ok = traffic_ok and car.position.distance_to(before_car) > 0.5
+		if not traffic_ok:
+			status = "traffic_failed"
 
 		var bad_lot: Dictionary = core.lot_add(SEED, 120, 128, 136, 140, "residential")
 		var lot_added := _add_lot(184, 128, 198, 140, "residential")
@@ -1862,11 +1983,13 @@ func _run_scene_smoke() -> void:
 			status = "save_failed"
 
 	var road_checksum := ""
+	var traffic_checksum := ""
 	var lot_checksum := ""
 	var settlement_checksum := ""
 	if status == "ok":
 		var edit_checksum := str(core.terrain_delta_checksum())
 		road_checksum = str(core.road_checksum())
+		traffic_checksum = str(core.traffic_state(SEED).get("checksum", ""))
 		lot_checksum = str(core.lot_checksum())
 		settlement_checksum = str(core.settlement_checksum())
 		_clear_placements()
@@ -1898,6 +2021,8 @@ func _run_scene_smoke() -> void:
 				load_ok = load_ok and core.road_count() == 1
 				load_ok = load_ok and str(core.road_checksum()) == road_checksum
 				load_ok = load_ok and road_nodes.size() == 1
+				load_ok = load_ok and traffic_cars.size() == 1
+				load_ok = load_ok and str(core.traffic_state(SEED).get("checksum", "")) == traffic_checksum
 				load_ok = load_ok and core.lot_count() == 1
 				load_ok = load_ok and str(core.lot_checksum()) == lot_checksum
 				load_ok = load_ok and lot_nodes.size() == 1
@@ -2136,7 +2261,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s occupancy=%s industry=%s utilities=%s economy=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s occupancy=%s industry=%s utilities=%s economy=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -2152,6 +2277,7 @@ func _run_scene_smoke() -> void:
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",
 		"ok" if economy_ok else "failed",
+		"ok" if traffic_ok else "failed",
 		"ok" if select_ok else "failed",
 		"ok" if enter_ok else "failed",
 		"ok" if return_ok else "failed",

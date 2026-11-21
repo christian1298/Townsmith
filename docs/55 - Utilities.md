@@ -2,7 +2,7 @@
 title: Utilities
 project: Townsmith
 status: active
-updated: 2026-11-20
+updated: 2026-11-21
 tags:
   - townsmith
   - phase-3
@@ -181,24 +181,25 @@ Utility sites are added only when their building completes. Final result:
 | Power demand / capacity | 625 / 900 |
 | Water / power supply | 100% / 100% |
 | Food / water / rest | 1.0 / 1.0 / 1.0 |
-| Happiness | 1.00 |
-| Construction cost | 150,000 |
-| Loan | 100,000 |
-| Minimum balance | −18,610 at day 15 |
-| Balance after 30 days | 2,822 |
-| Debt after 30 days | 91,781 |
-| Daily net | +1,430 |
+| Happiness | 0.896 |
+| Average commute | 136.4 m |
+| Construction cost | 165,000 |
+| Loan | 115,000 |
+| Minimum balance | −19,712 at day 15 |
+| Balance after 30 days | 623 |
+| Debt after 30 days | 105,548 |
+| Daily net | +1,357 |
 
 Checksums:
 
-- city **`1d78a3cac4fb0f22`**
-- population `c0d28b58ce38145a`
-- construction `aa3e36ad3cc1e717`
-- economy `f57d4378435f03ee`
+- city **`9578bd64586b2240`**
+- population `696784824ff74555`
+- construction `5ce06d0d9af1739e`
+- economy `1c213cc40278a13b`
 - industry `1b536bce524f0c76`
 - utilities `44e47a38faeb0edb`
 
-The city now stays healthy at full service and the 30-day run is financially recoverable: a construction loan and a day-15 tax change carry it from a −18,610 dip back to 2,822, with 91,781 of debt remaining. [[53 - Treasury and Taxes]] covers the ledger, draw-down, and loan model.
+The city now stays healthy at full service and the 30-day run is financially recoverable: a construction loan and a day-15 tax change carry it from a −19,712 dip back to 623, with 105,548 of debt remaining. [[53 - Treasury and Taxes]] covers the ledger, draw-down, and loan model.
 
 ## 9. Tests
 
@@ -206,8 +207,8 @@ The city now stays healthy at full service and the 30-day run is financially rec
 - `core_city::population`: 2 new tests — water/rest replenishment and supply clamping.
 - `core_city::industry`: 2 new tests — power scaling and outage with eating.
 - `godot_ext`: 2 new tests — utility JSON roundtrip/old save closed, invalid site rejection.
-- `core_city`: **125 tests**; bridge: **41 tests**; workspace: **330 tests + 1 doctest (331 passed)**.
-- `city_loop` asserts full service, healthy needs, and a stable checksum.
+- `core_city`: **137 tests**; bridge: **41 tests**; workspace: **344 tests + 1 doctest (345 passed)**.
+- `city_loop` asserts full service, healthy needs, a non-zero road commute, and a stable checksum.
 - World-scene smoke adds water and power, verifies shortage recovery, production, save/clear/load, and beacons; marker `utilities=ok` is checked by the script.
 
 ## 10. Limits

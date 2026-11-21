@@ -2,16 +2,17 @@
 
 //! Deterministic 30-day city-loop benchmark.
 //!
-//! Builds a fixed 50-house / 500-resident city from placement records, runs
-//! phased construction, move-in, job assignment, needs, and wages at a fixed
-//! step, then prints a stable JSON summary and checksum.
+//! Builds a fixed 50-house / 500-resident city plus five workplaces and a road
+//! grid, runs phased construction, move-in, road-distance job assignment,
+//! needs, and wages at a fixed step, then prints a stable JSON summary and
+//! checksum.
 
 use std::collections::BTreeSet;
 
 use core_city::{
     summarize, CityRuntime, ConstructionStore, Economy, Home, IndustryKind, IndustryStore,
-    Placement, PlacementPlan, PlacementRequest, PlacementStore, UtilityConsumer, UtilityKind,
-    UtilityReport, UtilityStore, Workplace, MAX_LOAN,
+    Placement, PlacementPlan, PlacementRequest, PlacementStore, RoadGraph, RoadSegment, RoadStore,
+    UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, MAX_LOAN,
 };
 
 const DEFAULT_DAYS: u64 = 30;
@@ -19,11 +20,13 @@ const DEFAULT_HOUSES: u64 = 50;
 const DEFAULT_STEP_SECONDS: f64 = 300.0;
 const CAPACITY_PER_HOUSE: u32 = 10;
 const JOBS_PER_HOUSE: u32 = 10;
+const WORKPLACES: u64 = 5;
+const JOBS_PER_WORKPLACE: u32 = 80;
 const SOLID_VOXELS: u64 = 10_000;
 const CREW_CAPACITY: u16 = 8;
 const MATERIALS_STOCK: u64 = 10_000_000;
-const CONSTRUCTION_COST_PER_HOUSE: f64 = 3_000.0;
-const MAX_FINANCED_HOUSES: u64 = 116;
+const CONSTRUCTION_COST_PER_BUILDING: f64 = 3_000.0;
+const MAX_FINANCED_BUILDINGS: u64 = 116;
 const RECOVERY_TAX_PER_RESIDENT: f64 = 20.0;
 const RECOVERY_TAX_PER_JOB: f64 = 4.0;
 
@@ -41,9 +44,9 @@ fn main() {
         eprintln!("usage: city_loop [--days N] [--houses N] [--step SECONDS]");
         std::process::exit(2);
     }
-    if houses > MAX_FINANCED_HOUSES {
+    if houses + WORKPLACES > MAX_FINANCED_BUILDINGS {
         eprintln!(
-            "city_loop: at most {MAX_FINANCED_HOUSES} houses are supported by the starting balance and loan limit"
+            "city_loop: at most {MAX_FINANCED_BUILDINGS} buildings (including {WORKPLACES} workplaces) are supported by the starting balance and loan limit"
         );
         std::process::exit(2);
     }
@@ -72,9 +75,9 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
             center_x: x,
             center_z: z,
             rotation_deg: 0,
-            material_cost: CONSTRUCTION_COST_PER_HOUSE,
+            material_cost: CONSTRUCTION_COST_PER_BUILDING,
             resident_capacity: CAPACITY_PER_HOUSE,
-            job_slots: JOBS_PER_HOUSE,
+            job_slots: if index < 10 { JOBS_PER_HOUSE } else { 0 },
             solid_voxels: SOLID_VOXELS,
         };
         let plan = PlacementPlan {
@@ -88,7 +91,55 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
             .push(Placement::from_request(id, &request, plan));
         construction.add_site(id, SOLID_VOXELS).expect("site");
     }
-    placements.next_id = houses + 1;
+    for index in 0..WORKPLACES {
+        let id = houses + index + 1;
+        let x = 116.0;
+        let z = 128.0 + index as f32 * 20.0;
+        let request = PlacementRequest {
+            blueprint_id: "local:city_loop_workshop".to_string(),
+            blueprint_hash: "blake3:city-loop".to_string(),
+            blueprint_path: "/city_loop/workshop.tsbp".to_string(),
+            name: "City Loop Workshop".to_string(),
+            bounds_m: [12.0, 8.0, 12.0],
+            center_x: x,
+            center_z: z,
+            rotation_deg: 0,
+            material_cost: CONSTRUCTION_COST_PER_BUILDING,
+            resident_capacity: 0,
+            job_slots: JOBS_PER_WORKPLACE,
+            solid_voxels: SOLID_VOXELS,
+        };
+        let plan = PlacementPlan {
+            center: [x, 40.0, z],
+            rotation_deg: 0,
+            footprint_m: [12.0, 12.0],
+            foundation_m: 0.0,
+        };
+        placements
+            .placements
+            .push(Placement::from_request(id, &request, plan));
+        construction.add_site(id, SOLID_VOXELS).expect("site");
+    }
+    placements.next_id = houses + WORKPLACES + 1;
+
+    let rows = houses.div_ceil(10);
+    let mut road_store = RoadStore::new(seed);
+    road_store.roads.push(RoadSegment {
+        id: 1,
+        start: [120, 118],
+        end: [120, 128 + (rows as i32 - 1) * 20 + 10],
+        width_m: 8,
+    });
+    for index in 0..rows {
+        road_store.roads.push(RoadSegment {
+            id: index + 2,
+            start: [120, 118 + index as i32 * 20],
+            end: [318, 118 + index as i32 * 20],
+            width_m: 8,
+        });
+    }
+    road_store.next_id = rows + 2;
+    let traffic = RoadGraph::build(&road_store.roads).expect("traffic graph");
 
     let mut industry = IndustryStore::new(seed);
     for index in 0..houses.min(10) {
@@ -110,7 +161,7 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
     let mut runtime = CityRuntime::new(seed);
     runtime.set_move_in_per_second(5.0);
     let mut economy = Economy::new(seed);
-    let construction_cost = houses as f64 * CONSTRUCTION_COST_PER_HOUSE;
+    let construction_cost = (houses + WORKPLACES) as f64 * CONSTRUCTION_COST_PER_BUILDING;
     let loan_amount = (construction_cost - 50_000.0).clamp(50_000.0, MAX_LOAN);
     economy
         .take_loan(
@@ -156,9 +207,10 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
             .placements
             .iter()
             .filter(|placement| {
-                construction
-                    .site(placement.id)
-                    .is_some_and(|site| site.is_complete())
+                placement.resident_capacity > 0
+                    && construction
+                        .site(placement.id)
+                        .is_some_and(|site| site.is_complete())
             })
             .map(|placement| Home {
                 id: placement.id,
@@ -170,9 +222,10 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
             .placements
             .iter()
             .filter(|placement| {
-                construction
-                    .site(placement.id)
-                    .is_some_and(|site| site.is_complete())
+                placement.job_slots > 0
+                    && construction
+                        .site(placement.id)
+                        .is_some_and(|site| site.is_complete())
             })
             .map(|placement| Workplace {
                 id: placement.id,
@@ -205,13 +258,14 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
             runtime.population(),
             utilities.power_supply,
         );
-        runtime.tick_with_supplies(
+        runtime.tick_with_supplies_and_roads(
             step,
             &homes,
             &workplaces,
             industry.food_supply,
             utilities.water_supply,
             utilities.power_supply,
+            Some(&traffic),
         );
         let completed = construction
             .sites
@@ -240,6 +294,7 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
         "seed": seed,
         "days": days,
         "houses": houses,
+        "workplaces": WORKPLACES,
         "step_seconds": step,
         "steps": step_count,
         "population": summary.population,
@@ -256,6 +311,12 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
         "daily_wages": summary.daily_wages,
         "completed_buildings": summary.completed_buildings,
         "construction_sites": summary.construction_sites,
+        "road_segments": road_store.roads.len(),
+        "traffic_nodes": traffic.stats().nodes,
+        "traffic_edges": traffic.stats().edges,
+        "traffic_components": traffic.stats().components,
+        "road_length_m": traffic.stats().total_length_m,
+        "traffic_checksum": format!("{:016x}", traffic.checksum()),
         "population_checksum": format!("{:016x}", runtime.checksum()),
         "construction_checksum": format!("{:016x}", construction.checksum()),
         "industry_sites": industry.site_count(),
@@ -329,9 +390,12 @@ mod tests {
     fn a_five_house_city_completes_and_fills() {
         let result = simulate(1, 5, 60.0);
         assert_eq!(result["population"], 50);
-        assert_eq!(result["jobs"], 50);
+        assert_eq!(
+            result["jobs"],
+            5 * JOBS_PER_HOUSE as u64 + WORKPLACES * JOBS_PER_WORKPLACE as u64
+        );
         assert_eq!(result["employed"], 50);
-        assert_eq!(result["completed_buildings"], 5);
+        assert_eq!(result["completed_buildings"], 5 + WORKPLACES);
         assert_eq!(result["construction_sites"], 0);
         assert!(result["construction_spent"].as_f64().expect("spent") > 0.0);
         assert!(result["debt"].as_f64().expect("debt") > 0.0);
@@ -351,6 +415,18 @@ mod tests {
         assert!(result["produced_wood"].as_f64().expect("wood") > 0.0);
         assert!(result["food_supply"].as_f64().expect("supply") > 0.99);
         assert!(result["happiness"].as_f64().expect("happiness") > 0.6);
+        assert!(result["average_commute_m"].as_f64().expect("commute") >= 0.0);
+        assert!(result["traffic_nodes"].as_u64().expect("nodes") >= 2);
+        assert!(result["traffic_edges"].as_u64().expect("edges") >= 1);
         assert_eq!(result["checksum"], simulate(1, 5, 60.0)["checksum"]);
+    }
+
+    #[test]
+    fn houses_beyond_the_first_row_use_road_commutes() {
+        let result = simulate(1, 15, 60.0);
+        assert_eq!(result["population"], 150);
+        assert_eq!(result["jobs"], 500);
+        assert!(result["average_commute_m"].as_f64().expect("commute") > 10.0);
+        assert!(result["traffic_nodes"].as_u64().expect("nodes") > 2);
     }
 }

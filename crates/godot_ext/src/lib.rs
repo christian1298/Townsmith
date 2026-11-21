@@ -30,7 +30,7 @@ use core_city::{
     normalize_rotation, summarize, CityLayout, CityRuntime, CitySummary, CityTier,
     ConstructionSite, ConstructionStore, Economy, Home, IndustryKind, IndustryStore, Lot, LotError,
     LotRequest, LotStore, Placement, PlacementError, PlacementRequest, PlacementStore, RoadError,
-    RoadRequest, RoadSegment, RoadStore, Settlement, SettlementError, SettlementRequest,
+    RoadGraph, RoadRequest, RoadSegment, RoadStore, Settlement, SettlementError, SettlementRequest,
     SettlementStore, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
     DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT,
     MAX_WORLD_COORD_M, STARTING_BALANCE,
@@ -1110,6 +1110,37 @@ impl TownsmithCore {
         GString::from(&format!("{checksum:016x}"))
     }
 
+    /// Derived traffic graph statistics for the current road network.
+    #[func]
+    fn traffic_state(&self, seed: i64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "traffic seed must be non-negative");
+        };
+        let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = world.as_ref() {
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the world belongs to a different seed",
+                );
+            }
+        }
+        let roads = self.roads.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(store) = roads.as_ref() else {
+            return traffic_payload(&RoadGraph::default(), false);
+        };
+        if store.seed != seed {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the road store belongs to a different seed",
+            );
+        }
+        match RoadGraph::build(&store.roads) {
+            Ok(graph) => traffic_payload(&graph, true),
+            Err(error) => placement_simple_error("traffic_failed", error.to_string()),
+        }
+    }
+
     /// Validate a straight road without mutating the world.
     #[func]
     fn road_validate(
@@ -2008,6 +2039,13 @@ impl TownsmithCore {
             ),
             None => (Vec::new(), Vec::new()),
         };
+        let traffic = self
+            .roads
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .filter(|store| store.seed == seed)
+            .and_then(|store| RoadGraph::build(&store.roads).ok());
         let mut population = self
             .population
             .lock()
@@ -2047,13 +2085,14 @@ impl TownsmithCore {
                 .filter(|industry| industry.seed == seed)
                 .map_or(0.0, |industry| industry.food_supply)
         };
-        let report = runtime.tick_with_supplies(
+        let report = runtime.tick_with_supplies_and_roads(
             seconds,
             &homes,
             &workplaces,
             food_supply,
             water_supply as f32,
             power_supply as f32,
+            traffic.as_ref(),
         );
         let mut result = VarDictionary::new();
         result.set("ok", true);
@@ -4792,6 +4831,24 @@ fn sanitize_staffing(
         remaining = remaining.saturating_sub(u64::from(keep));
         keep > 0
     });
+}
+
+fn traffic_payload(graph: &RoadGraph, open: bool) -> VarDictionary {
+    let stats = graph.stats();
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set("open", open);
+    result.set("roads", stats.roads as i64);
+    result.set("nodes", stats.nodes as i64);
+    result.set("edges", stats.edges as i64);
+    result.set("components", stats.components as i64);
+    result.set("connected", stats.connected());
+    result.set("total_length_m", f64::from(stats.total_length_m));
+    result.set(
+        "checksum",
+        &GString::from(&format!("{:016x}", graph.checksum())),
+    );
+    result
 }
 
 fn completed_slots(

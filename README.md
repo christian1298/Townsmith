@@ -74,6 +74,7 @@ cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort
 cargo run --release -p townsmith-bench --bin city_loop
+cargo run --release -p townsmith-bench --bin traffic
 cargo run --release -p townsmith-bench --bin terrain
 cargo run --release -p townsmith-bench --bin city_layout
 ./scripts/bench_core.sh                    # 3-run core benchmark summary

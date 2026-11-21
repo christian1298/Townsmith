@@ -2,7 +2,7 @@
 title: Lots and Zoning
 project: Townsmith
 status: active
-updated: 2026-11-20
+updated: 2026-11-21
 tags:
   - townsmith
   - phase-2
@@ -123,9 +123,9 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 
 ## 7. Tests
 
-- `core_city`: 7 lot tests + 1 road-frontage test; core_city **125 tests**.
+- `core_city`: 7 lot tests + 1 road-frontage test; core_city **137 tests**.
 - `godot_ext`: 2 lot JSON tests; bridge **41 tests**.
-- Workspace: **330 tests + 1 doctest**.
+- Workspace: **344 tests + 1 doctest**.
 
 ## 8. Limits
 
