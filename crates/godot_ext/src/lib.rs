@@ -30,11 +30,11 @@ use core_city::{
     advise, evaluate_tutorial, normalize_rotation, starter, summarize, AdvisorInput, AdvisorReport,
     Age, AgeState, CityLayout, CityRuntime, CitySummary, CityTier, ConstructionSite,
     ConstructionStore, Economy, Home, IndustryKind, IndustryStore, Lot, LotError, LotRequest,
-    LotStore, Placement, PlacementError, PlacementRequest, PlacementStore, ResearchStore,
-    RoadError, RoadGraph, RoadRequest, RoadSegment, RoadStore, ServiceConsumer, ServiceKind,
-    ServiceReport, ServiceStore, ServiceTier, Settlement, SettlementError, SettlementRequest,
-    SettlementStore, TechTree, Trade, TradePool, TutorialInput, UtilityConsumer, UtilityKind,
-    UtilityReport, UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY,
+    LotStore, NamedCitizens, Placement, PlacementError, PlacementRequest, PlacementStore,
+    ResearchStore, RoadError, RoadGraph, RoadRequest, RoadSegment, RoadStore, ServiceConsumer,
+    ServiceKind, ServiceReport, ServiceStore, ServiceTier, Settlement, SettlementError,
+    SettlementRequest, SettlementStore, TechTree, Trade, TradePool, TutorialInput, UtilityConsumer,
+    UtilityKind, UtilityReport, UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY,
     DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M,
     RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
@@ -539,6 +539,7 @@ struct TownsmithCore {
     lots: Mutex<Option<LotStore>>,
     settlements: Mutex<Option<SettlementStore>>,
     population: Mutex<Option<CityRuntime>>,
+    named: Mutex<Option<NamedCitizens>>,
     economy: Mutex<Option<Economy>>,
     industry: Mutex<Option<IndustryStore>>,
     utilities: Mutex<Option<UtilityStore>>,
@@ -559,6 +560,7 @@ impl Default for TownsmithCore {
             lots: Mutex::new(None),
             settlements: Mutex::new(None),
             population: Mutex::new(None),
+            named: Mutex::new(None),
             economy: Mutex::new(None),
             industry: Mutex::new(None),
             utilities: Mutex::new(None),
@@ -2316,6 +2318,85 @@ impl TownsmithCore {
         };
         runtime.set_move_in_per_second(rate as f32);
         true
+    }
+
+    /// Derived named-citizen counts and checksum.
+    #[func]
+    fn named_citizens_state(&self, seed: i64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(store) = world.as_ref() {
+                if store.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the placement store belongs to a different seed",
+                    );
+                }
+            }
+        }
+        let population = self
+            .population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut named = self.named.lock().unwrap_or_else(|error| error.into_inner());
+        if named.as_ref().is_some_and(|named| named.seed != seed) {
+            *named = None;
+        }
+        let pool = named.get_or_insert_with(|| NamedCitizens::new(seed));
+        match population.as_ref().filter(|runtime| runtime.seed == seed) {
+            Some(runtime) => pool.sync(&runtime.households),
+            None => pool.clear(),
+        }
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("open", true);
+        result.set("seed", seed as i64);
+        result.set("count", pool.len() as i64);
+        result.set("max", pool.max as i64);
+        result.set(
+            "checksum",
+            &GString::from(&format!("{:016x}", pool.checksum())),
+        );
+        result
+    }
+
+    /// Named residents of one home, sorted by slot.
+    #[func]
+    fn named_citizens_for(&self, seed: i64, placement_id: i64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        let Ok(placement_id) = u64::try_from(placement_id) else {
+            return placement_simple_error(
+                "invalid_placement",
+                "placement id must be non-negative",
+            );
+        };
+        let state = self.named_citizens_state(seed as i64);
+        if !variant_bool(&state, "ok") {
+            return state;
+        }
+        let named = self.named.lock().unwrap_or_else(|error| error.into_inner());
+        let mut citizens: Array<VarDictionary> = Array::new();
+        if let Some(pool) = named.as_ref() {
+            for citizen in pool.citizens_of(placement_id) {
+                let mut item = VarDictionary::new();
+                item.set("id", citizen.id as i64);
+                item.set("name", &GString::from(citizen.name.as_str()));
+                item.set("slot", i64::from(citizen.slot));
+                citizens.push(&item);
+            }
+        }
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("seed", seed as i64);
+        result.set("placement_id", placement_id as i64);
+        result.set("count", citizens.len() as i64);
+        result.set("citizens", &citizens.to_variant());
+        result
     }
 
     /// Remove every household.
