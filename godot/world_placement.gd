@@ -1401,6 +1401,12 @@ func _update_hud() -> void:
 				str(selected_structure.get("system_name", "?")),
 				int(selected_structure.get("stories", 0)),
 			]
+		var named: Dictionary = core.named_citizens_for(SEED, selected_id)
+		if int(named.get("count", 0)) > 0:
+			var names: Array = []
+			for citizen in named.get("citizens", []):
+				names.append(str(citizen.get("name", "?")))
+			selected_line += "  ·  residents " + ", ".join(names)
 	if mode == "architect":
 		hud.text = "Townsmith — Architect View (read-only)  (seed %d)\nBlueprint: %s\nStructure: %s\nFirst-person view at the selected door · M / Esc returns to Mayor" % [
 			SEED, blueprint_name, structure_text,
@@ -2306,6 +2312,7 @@ func _run_scene_smoke() -> void:
 	var build_ok := false
 	var build_done_ok := false
 	var trades_ok := false
+	var named_ok := false
 	var render_ok := false
 	var structure_ok := false
 	var age_ok := false
@@ -2627,6 +2634,17 @@ func _run_scene_smoke() -> void:
 				occupancy_after_ok = occupancy_after_ok and float(city_after.get("food", 0.0)) > 0.0
 				occupancy_after_ok = occupancy_after_ok and float(city_after.get("water", 0.0)) > 0.0
 				occupancy_after_ok = occupancy_after_ok and float(city_after.get("rest", 0.0)) > 0.0
+				var named_home: Dictionary = core.named_citizens_for(SEED, 1)
+				named_ok = int(named_home.get("count", 0)) == 2
+				var named_ids: Array = []
+				for citizen in named_home.get("citizens", []):
+					named_ids.append(int(citizen.get("id", 0)))
+					named_ok = named_ok and str(citizen.get("name", "")) != ""
+				var named_again: Dictionary = core.named_citizens_for(SEED, 1)
+				var again_ids: Array = []
+				for citizen in named_again.get("citizens", []):
+					again_ids.append(int(citizen.get("id", 0)))
+				named_ok = named_ok and named_ids == again_ids
 				var progression_after: Dictionary = core.progression_state(SEED)
 				age_ok = bool(progression_after.get("ok", false))
 				age_ok = age_ok and str(progression_after.get("age", "")) == "wood"
@@ -2890,6 +2908,8 @@ func _run_scene_smoke() -> void:
 					status = "research_failed"
 				elif not (occupancy_before_ok and occupancy_after_ok):
 					status = "occupancy_failed"
+				elif not named_ok:
+					status = "named_failed"
 				elif not industry_ok:
 					status = "industry_failed"
 				elif not utility_ok:
@@ -2943,7 +2963,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -2962,6 +2982,7 @@ func _run_scene_smoke() -> void:
 		"ok" if research_ok else "failed",
 		"ok" if tutorial_ok else "failed",
 		"ok" if starter_ok else "failed",
+		"ok" if named_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",
