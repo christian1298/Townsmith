@@ -27,15 +27,15 @@ use core_blueprint::{
     PropRecord, RoomRecord,
 };
 use core_city::{
-    advise, normalize_rotation, summarize, AdvisorInput, AdvisorReport, Age, AgeState, CityLayout,
-    CityRuntime, CitySummary, CityTier, ConstructionSite, ConstructionStore, Economy, Home,
-    IndustryKind, IndustryStore, Lot, LotError, LotRequest, LotStore, Placement, PlacementError,
-    PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph, RoadRequest,
-    RoadSegment, RoadStore, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore, ServiceTier,
-    Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree, UtilityConsumer,
-    UtilityKind, UtilityReport, UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY,
-    DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M,
-    RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    advise, normalize_rotation, starter, summarize, AdvisorInput, AdvisorReport, Age, AgeState,
+    CityLayout, CityRuntime, CitySummary, CityTier, ConstructionSite, ConstructionStore, Economy,
+    Home, IndustryKind, IndustryStore, Lot, LotError, LotRequest, LotStore, Placement,
+    PlacementError, PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph,
+    RoadRequest, RoadSegment, RoadStore, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore,
+    ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree,
+    UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
+    DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT,
+    MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -3518,6 +3518,104 @@ impl TownsmithCore {
         result
     }
 
+    /// Return the starter content catalog for the current age.
+    #[func]
+    fn starter_library(&self, seed: i64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        if seed > i64::MAX as u64 {
+            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
+        }
+        if let Some(error) = self.world_seed_error(seed) {
+            return error;
+        }
+        let age = AgeState::from_population(variant_u64(&self.city_summary(), "population")).age;
+        let mut items: Array<VarDictionary> = Array::new();
+        for building in core_city::starters() {
+            let mut item = VarDictionary::new();
+            item.set("id", &GString::from(building.id));
+            item.set("name", &GString::from(building.name));
+            item.set("category", &GString::from(building.category_str()));
+            item.set("age", &GString::from(building.age.name()));
+            item.set(
+                "system",
+                &GString::from(building.system.map_or("unchecked", StructuralSystem::id)),
+            );
+            item.set("stories", i64::from(building.stories));
+            item.set(
+                "footprint",
+                &PackedFloat32Array::from(building.footprint_m.to_vec()).to_variant(),
+            );
+            item.set("resident_capacity", i64::from(building.resident_capacity));
+            item.set("job_slots", i64::from(building.job_slots));
+            item.set("material_cost", building.material_cost);
+            item.set("available", building.available_at(age));
+            items.push(&item);
+        }
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("seed", seed as i64);
+        result.set("age", &GString::from(age.name()));
+        result.set("count", items.len() as i64);
+        result.set("items", &items.to_variant());
+        result
+    }
+
+    /// Generate (or reuse) a starter `.tsbp` and return its path.
+    #[func]
+    fn starter_blueprint(&self, seed: i64, id: GString) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        if seed > i64::MAX as u64 {
+            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
+        }
+        if let Some(error) = self.world_seed_error(seed) {
+            return error;
+        }
+        let id = id.to_string();
+        let Some(building) = starter(&id) else {
+            return placement_simple_error("unknown_starter", format!("unknown starter {id}"));
+        };
+        let age = AgeState::from_population(variant_u64(&self.city_summary(), "population")).age;
+        if !building.available_at(age) {
+            return placement_simple_error(
+                "age_locked",
+                format!(
+                    "{} requires the {} age; the city is {}",
+                    building.name,
+                    building.age.name(),
+                    age.name()
+                ),
+            );
+        }
+        let path = match starter_package_path(building) {
+            Ok(path) => path,
+            Err(error) => return placement_simple_error("starter_failed", error),
+        };
+        if !path.exists() {
+            let blueprint = match build_starter_blueprint(building) {
+                Ok(blueprint) => blueprint,
+                Err(error) => return placement_simple_error("starter_failed", error),
+            };
+            if let Err(error) = save_tsbp_with_hash(&path, &blueprint) {
+                return placement_simple_error("starter_failed", error.to_string());
+            }
+        }
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("path", &GString::from(path.to_string_lossy().as_ref()));
+        result.set("id", &GString::from(building.id));
+        result.set("name", &GString::from(building.name));
+        result.set("age", &GString::from(building.age.name()));
+        result.set("stories", i64::from(building.stories));
+        result.set("resident_capacity", i64::from(building.resident_capacity));
+        result.set("job_slots", i64::from(building.job_slots));
+        result.set("material_cost", building.material_cost);
+        result
+    }
+
     /// Set the shared crew pool. Values above 64 are rejected.
     #[func]
     fn construction_set_crew(&self, crew_capacity: i64) -> bool {
@@ -6456,6 +6554,95 @@ fn economy_from_world_json(json: &str) -> Result<Option<Economy>, (&'static str,
     Ok(Some(economy))
 }
 
+fn starter_package_path(building: &core_city::StarterBuilding) -> Result<PathBuf, String> {
+    let safe = building.id.replace(':', "_");
+    let dir = std::env::temp_dir().join("townsmith_starter");
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    Ok(dir.join(format!("v1_{safe}.tsbp")))
+}
+
+fn build_starter_blueprint(building: &core_city::StarterBuilding) -> Result<Blueprint, String> {
+    let chunks_x = (building.footprint_m[0] / 3.2).ceil().max(1.0) as u32;
+    let chunks_z = (building.footprint_m[1] / 3.2).ceil().max(1.0) as u32;
+    let config = VolumeConfig::new(chunks_x, building.stories.max(1) as u32, chunks_z)
+        .map_err(|error| error.to_string())?;
+    let mut volume = VoxelVolume::new(config).map_err(|error| error.to_string())?;
+    let [width, height, depth] = config.voxels();
+    let (width, height, depth) = (width as u32, height as u32, depth as u32);
+    let pos = VolumePos::new;
+    volume
+        .fill_box(pos(0, 0, 0), pos(width, 2, depth), EDITOR_FLOOR)
+        .map_err(|error| error.to_string())?;
+    volume
+        .fill_box(pos(0, 2, 0), pos(width, height - 2, depth), EDITOR_WALL)
+        .map_err(|error| error.to_string())?;
+    volume
+        .fill_box(pos(2, 2, 2), pos(width - 2, height - 2, depth - 2), AIR)
+        .map_err(|error| error.to_string())?;
+    for story in 1..building.stories.max(1) {
+        let floor_y = u32::from(story) * 32;
+        if floor_y + 2 < height {
+            volume
+                .fill_box(
+                    pos(2, floor_y, 2),
+                    pos(width - 2, floor_y + 2, depth - 2),
+                    EDITOR_CEILING,
+                )
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    volume
+        .fill_box(
+            pos(0, height - 2, 0),
+            pos(width, height, depth),
+            EDITOR_CEILING,
+        )
+        .map_err(|error| error.to_string())?;
+    let door_x = width / 2;
+    volume
+        .fill_box(
+            pos(door_x.saturating_sub(4), 2, 0),
+            pos((door_x + 4).min(width), 22, 2),
+            EDITOR_DOOR,
+        )
+        .map_err(|error| error.to_string())?;
+    for (y, z) in [(10, 0), (10, depth - 2)] {
+        let x0 = width / 4;
+        volume
+            .fill_box(
+                pos(x0, y, z),
+                pos((x0 + 8).min(width), y + 10, z + 2),
+                EDITOR_WINDOW,
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    for (x, y, z0, z1) in [
+        (0, 10, depth / 4, depth / 4 + 8),
+        (width - 2, 10, depth / 4, depth / 4 + 8),
+    ] {
+        volume
+            .fill_box(
+                pos(x, y, z0),
+                pos(x + 2, y + 10, z1.min(depth)),
+                EDITOR_WINDOW,
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    let (materials, _) = count_materials(&volume);
+    let mut metadata = BlueprintMetadata::new(building.id, building.name);
+    metadata.author = "Townsmith".to_string();
+    metadata.tags = vec!["starter".to_string(), building.category_str().to_string()];
+    metadata.materials = materials;
+    metadata.stats.resident_capacity = building.resident_capacity;
+    metadata.stats.job_slots = building.job_slots;
+    metadata.stats.material_cost = building.material_cost;
+    let height_m = config.bounds_m()[1];
+    metadata.structure = building
+        .system
+        .map(|system| StructureSpec::new(system, building.stories, height_m, 0.0));
+    Ok(Blueprint::new(metadata, volume))
+}
+
 fn attach_industry(json: &str, store: &IndustryStore) -> Result<String, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(json).map_err(|error| error.to_string())?;
@@ -7762,6 +7949,24 @@ mod tests {
         }
         assert!(door[0] < wall[0]);
         assert!(window[2] > wall[2]);
+    }
+
+    #[test]
+    fn starter_blueprints_build_and_validate() {
+        for building in core_city::starters() {
+            let blueprint = build_starter_blueprint(building).expect("starter volume");
+            assert!(blueprint.metadata.solid_voxels > 0);
+            assert_eq!(
+                blueprint.metadata.stats.resident_capacity,
+                building.resident_capacity
+            );
+            assert_eq!(blueprint.metadata.stats.job_slots, building.job_slots);
+            if let Some(structure) = blueprint.metadata.structure {
+                structure
+                    .validate_against_bounds(blueprint.metadata.bounds_m)
+                    .expect("starter structure");
+            }
+        }
     }
 
     #[test]

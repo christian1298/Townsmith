@@ -81,6 +81,8 @@ var dashboard_visible := false
 
 var blueprint_path := ""
 var save_path := ""
+var starter_index := -1
+var starter_ids: Array = []
 var blueprint_mesh: ArrayMesh
 var blueprint_info: Dictionary = {}
 var blueprint_info_cache: Dictionary = {}
@@ -208,6 +210,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				KEY_R:
 					rotation_deg = (rotation_deg + 90) % 360
 					_refresh_preview(true)
+				KEY_B:
+					_cycle_starter()
 				KEY_X:
 					_edit_target(1)
 				KEY_Z:
@@ -776,6 +780,42 @@ func _refresh_industry_visuals() -> void:
 		pivot.add_child(label)
 		industry_root.add_child(pivot)
 		industry_nodes[id] = pivot
+
+func _cycle_starter() -> void:
+	var catalog: Dictionary = core.starter_library(SEED)
+	if not bool(catalog.get("ok", false)):
+		_set_modal("Starter catalog failed: " + str(catalog.get("error_code", "unknown")), true)
+		return
+	starter_ids.clear()
+	for item in catalog.get("items", []):
+		if bool(item.get("available", false)):
+			starter_ids.append(str(item.get("id", "")))
+	if starter_ids.is_empty():
+		_set_modal("No starter buildings at this age", true)
+		return
+	starter_index = (starter_index + 1) % starter_ids.size()
+	var selected_id := str(starter_ids[starter_index])
+	var result: Dictionary = core.starter_blueprint(SEED, selected_id)
+	if not bool(result.get("ok", false)):
+		_set_modal(
+			"Starter failed: " + str(result.get("error_code", result.get("error", ""))),
+			true
+		)
+		return
+	var path := str(result.get("path", ""))
+	if path == "":
+		_set_modal("Starter has no package path", true)
+		return
+	blueprint_path = path
+	if not _ensure_blueprint():
+		_set_modal("Starter package rejected", true)
+		return
+	_refresh_preview(true)
+	_set_modal(
+		"Starter: %s (%d/%d)" % [str(result.get("name", selected_id)), starter_index + 1, starter_ids.size()],
+		false
+	)
+	_update_hud()
 
 func _cycle_industry() -> void:
 	if selected_id < 0:
@@ -1353,7 +1393,7 @@ func _update_hud() -> void:
 			SEED, blueprint_name, structure_text,
 		]
 	else:
-		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nStructure: %s\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew · I industry · U utility · K services · T tax · L loan · Y research · F1 dashboard · V +10k · F5 save · F9 load" % [
+		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nStructure: %s\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew · I industry · U utility · K services · B starter · T tax · L loan · Y research · F1 dashboard · V +10k · F5 save · F9 load" % [
 			SEED, blueprint_name, rooms, capacity, structure_text,
 		]
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
@@ -2227,6 +2267,7 @@ func _run_scene_smoke() -> void:
 	var industry_ok := false
 	var utility_ok := false
 	var service_ok := false
+	var starter_ok := false
 	var economy_ok := false
 	var dashboard_ok := false
 	var save_ok := false
@@ -2679,6 +2720,28 @@ func _run_scene_smoke() -> void:
 				research_checksum = str(core.research_checksum())
 				var research_points_after := float(core.research_state(SEED).get("points", 0.0))
 				occupancy_after_ok = occupancy_after_ok and research_ok
+				var starter_catalog: Dictionary = core.starter_library(SEED)
+				starter_ok = bool(starter_catalog.get("ok", false))
+				starter_ok = starter_ok and str(starter_catalog.get("age", "")) == "wood"
+				var starter_items: Array = starter_catalog.get("items", [])
+				starter_ok = starter_ok and starter_items.size() >= 7
+				var starter_available := 0
+				for item in starter_items:
+					if bool(item.get("available", false)):
+						starter_available += 1
+				starter_ok = starter_ok and starter_available >= 7
+				var starter_bundle: Dictionary = core.starter_blueprint(SEED, "base:cottage")
+				starter_ok = starter_ok and bool(starter_bundle.get("ok", false))
+				var starter_path := str(starter_bundle.get("path", ""))
+				starter_ok = starter_ok and starter_path != "" and FileAccess.file_exists(starter_path)
+				var starter_info: Dictionary = core.world_blueprint_info(starter_path)
+				starter_ok = starter_ok and bool(starter_info.get("ok", false))
+				starter_ok = starter_ok and str(starter_info.get("id", "")) == "base:cottage"
+				starter_ok = starter_ok and int(starter_info.get("resident_capacity", 0)) == 4
+				var starter_structure: Dictionary = starter_info.get("structure", {})
+				starter_ok = starter_ok and bool(starter_structure.get("present", false))
+				var starter_mesh: ArrayMesh = core.build_blueprint_mesh(starter_path)
+				starter_ok = starter_ok and starter_mesh.get_surface_count() > 0
 				if occupancy_after_ok:
 					var population_checksum: String = str(core.population_checksum())
 					var economy_checksum: String = str(core.economy_checksum())
@@ -2815,7 +2878,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s render=%s structure=%s age=%s research=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s render=%s structure=%s age=%s research=%s starter=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -2831,6 +2894,7 @@ func _run_scene_smoke() -> void:
 		"ok" if structure_ok else "failed",
 		"ok" if age_ok else "failed",
 		"ok" if research_ok else "failed",
+		"ok" if starter_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",
