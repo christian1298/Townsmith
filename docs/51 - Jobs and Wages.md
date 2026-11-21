@@ -119,7 +119,7 @@ The non-zero commute and split-assignment cases are covered by the core tests, b
 
 ## 6. Tests
 
-- `core_city`: 7 assignment tests — global nearest-slot order, id-order independence, split assignment, shortage, commute happiness, JSON roundtrip, old-save defaults — plus 5 index exactness/fallback tests.
+- `core_city`: 7 assignment tests — global nearest-slot order, id-order independence, split assignment, shortage, commute happiness, JSON roundtrip, old-save defaults — plus 5 index exactness/fallback tests. The exactness tests assert the grid path actually ran, and the non-finite fixture asserts the fallback ran.
 - `core_city` total: **214 tests**.
 - `godot_ext`: **50 tests** total; the scene smoke covers the bridge path.
 - Workspace: **458 tests + 2 doctests (460 passed)**.
@@ -128,11 +128,12 @@ The non-zero commute and split-assignment cases are covered by the core tests, b
 
 The original full scan materialized every household/workplace pair and sorted them. `assign_with_grid` now uses a uniform CSR-like workplace grid plus a lazy best-first merge:
 
-- Small inputs (fewer than 4,096 possible pairs, or fewer than 8 homes/workplaces) keep the original full scan.
+- Small inputs (at most 4,096 possible pairs, or fewer than 8 homes/workplaces) keep the original full scan.
 - Each household grows a straight-line annulus around its home and collects the workplaces inside it, sorted by `(actual road distance, workplace index)`.
 - A binary heap orders the next ready pair globally by `(distance, household id, workplace index)`. A frontier marker per household is a lower bound on its undiscovered pairs; it is only expanded when it reaches the heap minimum.
-- Road distance is never below straight-line distance, so a pair is safe to consume when its actual distance is within the collected radius. The frontier marker keeps the proof intact while a household still has undiscovered pairs.
+- Road distance is never below straight-line distance in exact arithmetic, so a pair is safe to consume when its actual distance is within the collected radius. A float rounding inversion of ~1e-5 m is possible; it does not change the tested fixtures.
 - Non-finite centres and pathological layouts fall back to the exact full scan. Public APIs and save format are unchanged.
+- Consumed candidate prefixes are compacted once they exceed 1,024 entries, so a long-running home does not retain its full explored list.
 
 Benchmark (`cargo run --release -p townsmith-bench --bin jobs`), 1,000 homes × 1,000 workplaces, 2,000 residents, 1,000,000 possible pairs:
 
@@ -142,17 +143,13 @@ Benchmark (`cargo run --release -p townsmith-bench --bin jobs`), 1,000 homes × 
 | Speedup | **26.6×** | 1× |
 | Exact match | **yes** | — |
 
-This is a single-machine measurement, not the 1M-city gate. The balanced benchmark is the hard case: all 1M pairs are candidates in principle, but the heap examines only the needed prefixes.
+This is a single-machine measurement, not the 1M-city gate. The balanced benchmark is the hard case: all 1M pairs are candidates in principle. Each home still grows its stream toward the cover radius, so the indexed path is not O(H log W); it avoids materializing the full pair vector and stops as soon as demand or slots are exhausted.
 
 ## 8. Limits
 
-- The indexed path is exact and its output is byte-identical to the full scan on the tested fixtures, but a pathological layout can still fall back to O(H × W) memory/time for the fallback scan.
+- The indexed path produces the same assignment, staffing, commute, and income as the full scan on the exactness fixtures; a pathological layout can still retain O(H × W) candidate memory or fall back to the O(H × W) full scan.
+- Commute uses f32 accumulation in the same pair order as the full scan. Reordering equal-distance pairs with `take > 1` would change the last bits, so the order is part of the deterministic contract.
 - The grid is rebuilt per assignment tick; there is no incremental update when a workplace or household moves.
-- A household can split workers across workplaces, but only the weighted average commute is stored.
-- Wages are fixed and gross; no trade/skill differences.
-- Commute was straight-line metres in 3.3; [[56 - Traffic]] now uses road distance when the graph is connected, with a straight-line fallback.
-- No named workers, shifts, attendance, or unemployment benefits.
-- The runtime is still one aggregate household per completed residential building.
 - A household can split workers across workplaces, but only the weighted average commute is stored.
 - Wages are fixed and gross; no trade/skill differences.
 - Commute was straight-line metres in 3.3; [[56 - Traffic]] now uses road distance when the graph is connected, with a straight-line fallback.
@@ -165,4 +162,3 @@ This is a single-machine measurement, not the 1M-city gate. The balanced benchma
 2. Add travel time and congestion when the traffic graph matures.
 3. Incremental grid updates when households or workplaces change.
 4. Industrial-scale balance and the 1M gate ([[68 - Metropolis Gate]]).
-4. Add wages to the budget/treasury in 3.6.
