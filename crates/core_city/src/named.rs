@@ -4,7 +4,9 @@
 //! slot gets a stable 63-bit id and a generated name from the world seed,
 //! placement id, slot, and identity version. N4 adds an optional save object so
 //! a committed identity survives a roundtrip; absent saves still rebuild the
-//! pool from the households.
+//! pool from the households. N4 also persists a whole-day age per identity and
+//! provides a deterministic, day-based lifecycle tick that ages citizens and
+//! retires them at 100 years.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -25,6 +27,14 @@ pub const MAX_NAMED_CITIZENS: usize = 4_096;
 
 /// Maximum display-name length in bytes.
 pub const MAX_NAMED_NAME_BYTES: usize = 64;
+
+/// Maximum persisted age in whole days (100 years).
+///
+/// [`NamedCitizens::tick_lifecycle`] removes a citizen when the advanced age
+/// reaches this value. Validation accepts ages up to and including this cap so
+/// a save written at the boundary still loads; that record dies on the next
+/// positive lifecycle tick.
+pub const MAX_AGE_DAYS: u32 = 36_500;
 
 /// Hard cap for the city-wide active materialization set.
 pub const MAX_ACTIVE_CITIZENS: usize = 2_000;
@@ -80,13 +90,18 @@ pub fn name_for(id: u64) -> String {
 /// Derived display age in whole years for an identity.
 ///
 /// Ages are deterministic in the 63-bit identity id and span `18..=64`. This
-/// is a derived placeholder, not persisted state: the household layer stores
-/// aggregate counts only, so there is no `age_days` field to read yet. The
-/// result is stable for a given id, and changing this function changes the
-/// displayed age of every identity.
+/// is the initial age band, not the persisted state: [`NamedCitizens::sync`]
+/// seeds [`NamedCitizen::age_days`] from this function when the persisted age
+/// is zero. The result is stable for a given id, and changing this function
+/// changes the starting age of every identity that has not aged yet.
 #[must_use]
 pub fn age_years(id: u64) -> u8 {
     18 + (mix64(id ^ 0x4528_21e6_38d0_1377) % 47) as u8
+}
+
+/// Initial persisted age for an identity, in whole days.
+fn initial_age_days(id: u64) -> u32 {
+    u32::from(age_years(id)) * 365
 }
 
 /// Whether a resident slot is employed according to the household aggregate.
@@ -112,6 +127,14 @@ pub struct NamedCitizen {
     pub slot: u32,
     /// Generated display name.
     pub name: String,
+    /// Persisted age in whole days.
+    ///
+    /// `0` means "not initialized": old saves without this field load as zero
+    /// and [`NamedCitizens::sync`] replaces it with the deterministic starting
+    /// age. v1 has no births, so a legitimate zero-day-old named citizen does
+    /// not exist yet.
+    #[serde(default)]
+    pub age_days: u32,
 }
 
 /// Caps for one materialization selection pass.
@@ -363,6 +386,18 @@ fn same_materialization(left: &MaterializedCitizen, right: &MaterializedCitizen)
         && left.home[1].to_bits() == right.home[1].to_bits()
 }
 
+/// Result of one named-citizen lifecycle tick.
+///
+/// See [`NamedCitizens::tick_lifecycle`] for the exact counting rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LifecycleTick {
+    /// Citizens that received the age advance, including those that died in
+    /// this same tick.
+    pub aged: usize,
+    /// Citizens removed because their age reached [`MAX_AGE_DAYS`].
+    pub died: usize,
+}
+
 /// Derived named-citizen pool for one city.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamedCitizens {
@@ -377,7 +412,9 @@ pub struct NamedCitizens {
 /// Persisted named-citizen pool.
 ///
 /// The world save stores this object beside `population`. Records are sorted
-/// by id, then home and slot, so the JSON is deterministic. Absent objects are
+/// by id, then home and slot, so the JSON is deterministic. Each record carries
+/// its persisted `age_days`; older records without that field load as zero and
+/// [`NamedCitizens::sync`] seeds them from the identity. Absent objects are
 /// valid old saves; an unknown [`format_version`](Self::format_version) is
 /// rejected as corrupt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -417,6 +454,9 @@ impl NamedSave {
             }
             if !slots.insert((citizen.placement_id, citizen.slot)) {
                 return Err(NamedError::Invalid("duplicate identity slot"));
+            }
+            if citizen.age_days > MAX_AGE_DAYS {
+                return Err(NamedError::Invalid("identity age"));
             }
             validate_name(&citizen.name)?;
         }
@@ -475,7 +515,7 @@ impl NamedCitizens {
         }
         self.citizens.retain(|key, _| wanted.contains(key));
         for key in wanted {
-            self.citizens.entry(key).or_insert_with(|| {
+            let citizen = self.citizens.entry(key).or_insert_with(|| {
                 let (placement_id, slot) = key;
                 let id = citizen_id(self.seed, placement_id, slot);
                 NamedCitizen {
@@ -483,9 +523,87 @@ impl NamedCitizens {
                     placement_id,
                     slot,
                     name: name_for(id),
+                    age_days: initial_age_days(id),
                 }
             });
+            if citizen.age_days == 0 {
+                citizen.age_days = initial_age_days(citizen.id);
+            }
         }
+    }
+
+    /// Advance every named citizen by whole simulated days and remove the dead.
+    ///
+    /// The tick is deterministic and uses integer arithmetic only:
+    ///
+    /// - `days` is truncated toward zero to whole days. A non-positive or
+    ///   non-finite value is a no-op, and a fractional part is discarded rather
+    ///   than accumulated. Callers should pass whole simulation days, because
+    ///   the lifecycle is day-based.
+    /// - A persisted age of zero is treated as uninitialized and seeded from
+    ///   the identity (the same rule as [`Self::sync`]), so ticking a pool
+    ///   loaded from an old save is safe even before a sync.
+    /// - Every citizen then receives the day advance, saturating at
+    ///   [`MAX_AGE_DAYS`].
+    /// - Citizens whose advanced age is at least [`MAX_AGE_DAYS`] (100 years)
+    ///   are removed in `(placement_id, slot)` key order.
+    ///
+    /// `aged` counts citizens that received the advance, including citizens
+    /// removed in the same tick; `died` counts the removals. The named layer
+    /// does not change household `residents`, `workers`, or needs: applying
+    /// population consequences is a caller concern.
+    pub fn tick_lifecycle(&mut self, days: f64) -> LifecycleTick {
+        if !days.is_finite() || days <= 0.0 {
+            return LifecycleTick::default();
+        }
+        // Float-to-int casts saturate, so an absurd `days` becomes `u32::MAX`.
+        let whole_days = days.floor() as u32;
+        if whole_days == 0 {
+            return LifecycleTick::default();
+        }
+
+        let mut tick = LifecycleTick::default();
+        let mut dead: Vec<(u64, u32)> = Vec::new();
+        for (key, citizen) in &mut self.citizens {
+            if citizen.age_days == 0 {
+                citizen.age_days = initial_age_days(citizen.id);
+            }
+            citizen.age_days = citizen
+                .age_days
+                .saturating_add(whole_days)
+                .min(MAX_AGE_DAYS);
+            tick.aged += 1;
+            if citizen.age_days >= MAX_AGE_DAYS {
+                dead.push(*key);
+            }
+        }
+        for key in dead {
+            if self.citizens.remove(&key).is_some() {
+                tick.died += 1;
+            }
+        }
+        tick
+    }
+
+    /// Oldest persisted age in whole days, or `None` for an empty pool.
+    #[must_use]
+    pub fn oldest_age_days(&self) -> Option<u32> {
+        self.citizens.values().map(|citizen| citizen.age_days).max()
+    }
+
+    /// Mean persisted age in whole days, truncated; zero for an empty pool.
+    #[must_use]
+    pub fn average_age_days(&self) -> u32 {
+        let count = u64::try_from(self.citizens.len()).unwrap_or(u64::MAX);
+        if count == 0 {
+            return 0;
+        }
+        let total: u64 = self
+            .citizens
+            .values()
+            .map(|citizen| u64::from(citizen.age_days))
+            .sum();
+        u32::try_from(total / count).unwrap_or(MAX_AGE_DAYS)
     }
 
     /// Remove every identity.
@@ -512,6 +630,15 @@ impl NamedCitizens {
             .range((placement_id, 0)..=(placement_id, u32::MAX))
             .map(|(_, citizen)| citizen)
             .collect()
+    }
+
+    #[cfg(test)]
+    fn get_mut_for_test(&mut self, id: u64) -> &mut NamedCitizen {
+        self.citizens
+            .iter_mut()
+            .find(|(_, citizen)| citizen.id == id)
+            .map(|(_, citizen)| citizen)
+            .expect("citizen")
     }
 
     /// One resident by home and slot.
@@ -772,7 +899,10 @@ impl NamedCitizens {
         Self::from_save(NamedSave::from_json(json)?)
     }
 
-    /// Stable FNV-1a checksum over identities and names.
+    /// Stable FNV-1a checksum over identities, names, and persisted ages.
+    ///
+    /// This checksum is separate from the city and population checksums, so a
+    /// lifecycle change updates only the named checksum.
     #[must_use]
     pub fn checksum(&self) -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -783,6 +913,7 @@ impl NamedCitizens {
                 .chain(slot.to_le_bytes().iter())
                 .chain(citizen.id.to_le_bytes().iter())
                 .chain(citizen.name.as_bytes())
+                .chain(citizen.age_days.to_le_bytes().iter())
             {
                 hash ^= u64::from(*byte);
                 hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
@@ -809,6 +940,9 @@ impl NamedCitizens {
             }
             if !ids.insert(citizen.id) {
                 return Err(NamedError::Invalid("duplicate identity id"));
+            }
+            if citizen.age_days > MAX_AGE_DAYS {
+                return Err(NamedError::Invalid("identity age"));
             }
             validate_name(&citizen.name)?;
         }
@@ -1092,6 +1226,7 @@ mod tests {
             placement_id,
             slot,
             name: name_for(id),
+            age_days: initial_age_days(id),
         }
     }
 
@@ -1676,6 +1811,78 @@ mod tests {
         assert!(diff.truncated);
         assert_eq!(diff, diff_selection(Some(&previous), &next, 2));
         assert_eq!(diff, diff_selection(Some(&previous), &reversed, 2));
+    }
+
+    #[test]
+    fn sync_initializes_age_days_from_identity() {
+        let mut households = BTreeMap::new();
+        households.insert(1, household(2));
+        let mut named = NamedCitizens::new(2026);
+        named.sync(&households);
+        for citizen in named.citizens.values() {
+            assert_eq!(citizen.age_days, initial_age_days(citizen.id));
+            assert!(citizen.age_days >= 18 * 365);
+            assert!(citizen.age_days < 65 * 365);
+        }
+        let before = named.citizens.clone();
+        named.sync(&households);
+        assert_eq!(named.citizens, before);
+    }
+
+    #[test]
+    fn lifecycle_ages_and_removes_at_one_hundred_years() {
+        let mut named = NamedCitizens::new(2026);
+        let mut households = BTreeMap::new();
+        households.insert(1, household(2));
+        named.sync(&households);
+        let first_id = named.get(1, 0).expect("first").id;
+        let start = named.get(1, 0).expect("first").age_days;
+        let tick = named.tick_lifecycle(10.0);
+        assert_eq!(tick.aged, 2);
+        assert_eq!(tick.died, 0);
+        assert_eq!(named.get(1, 0).expect("first").age_days, start + 10);
+        assert_eq!(named.oldest_age_days(), Some(start + 10));
+        assert!(named.average_age_days() > 0);
+        assert!(named.average_age_days() <= named.oldest_age_days().expect("oldest"));
+        named.get_mut_for_test(first_id).age_days = MAX_AGE_DAYS - 1;
+        let tick = named.tick_lifecycle(1.0);
+        assert_eq!(tick.died, 1);
+        assert_eq!(named.len(), 1);
+        assert!(named.get(1, 0).is_none());
+        assert_eq!(named.tick_lifecycle(f64::NAN).aged, 0);
+    }
+
+    #[test]
+    fn old_save_without_age_days_defaults_and_resyncs() {
+        let mut named = NamedCitizens::new(2026);
+        let mut households = BTreeMap::new();
+        households.insert(1, household(1));
+        named.sync(&households);
+        let mut save = named.to_save();
+        save.citizens[0].age_days = 0;
+        let json = serde_json::to_string(&save).expect("json");
+        let decoded = NamedCitizens::from_json(&json).expect("decode");
+        assert_eq!(
+            decoded.citizens.values().next().expect("citizen").age_days,
+            0
+        );
+        let mut decoded = decoded;
+        decoded.sync(&households);
+        assert!(decoded.citizens.values().next().expect("citizen").age_days >= 18 * 365);
+    }
+
+    #[test]
+    fn age_days_round_trip_and_reject_over_cap() {
+        let mut named = NamedCitizens::new(2026);
+        let mut households = BTreeMap::new();
+        households.insert(1, household(1));
+        named.sync(&households);
+        let json = named.to_json_pretty().expect("json");
+        let decoded = NamedCitizens::from_json(&json).expect("decode");
+        assert_eq!(decoded, named);
+        let mut save = named.to_save();
+        save.citizens[0].age_days = MAX_AGE_DAYS + 1;
+        assert!(save.validate().is_err());
     }
 
     #[test]

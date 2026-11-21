@@ -13,7 +13,7 @@ tags:
 # 70 — Named Persistence
 
 > [!info] What this note is
-> N4 persistence for the derived named-citizen layer. It saves the N1 identity records additively; lifecycle, aging, and death remain later work.
+> N4 persistence for the derived named-citizen layer. It saves identity records plus `age_days`; the core lifecycle tick ages and removes citizens at 100 years. Bridge/scene application remains.
 
 ## 1. Scope
 
@@ -28,8 +28,8 @@ In:
 
 Out:
 
-- lifecycle, aging, death, births, migration;
-- jobs/age fields inside the named record;
+- bridge/scene lifecycle application, births, migration;
+- event emission for aging/death;
 - materialization or route caches;
 - per-citizen simulation or network replication;
 - migration of older identity versions.
@@ -49,6 +49,8 @@ pub struct NamedCitizen {
     pub placement_id: u64,
     pub slot: u32,
     pub name: String,
+    #[serde(default)]
+    pub age_days: u32, // 0 = old save; sync seeds it
 }
 ```
 
@@ -77,17 +79,18 @@ A missing object creates an empty pool for the loaded world; `named_citizens_sta
 
 ## 4. Checksums
 
-`NamedCitizens::checksum` is separate from the population and city checksums: it covers placement id, slot, citizen id, and name. Existing city-loop baselines are unaffected while the named layer is off in the runner.
+`NamedCitizens::checksum` is separate from the population and city checksums: it covers placement id, slot, citizen id, name, and age_days. Existing city-loop baselines are unaffected while the named layer is off in the runner.
 
 ## 5. Tests
 
-- core: JSON roundtrip, bad version/id, old/absent behavior, sync-after-load orphan drop, empty save.
+- core: JSON roundtrip, bad version/id, old/absent behavior, sync-after-load orphan drop, empty save, age initialization, aging, death at 100 years, old-save zero-age seeding, age cap.
 - bridge: `named_citizens` roundtrip/old save, seed mismatch, unsupported version.
 - The scene smoke still requires `named=ok` and `citizens=ok`.
 
 ## 6. Limits
 
-- Identity records only; no lifecycle fields.
+- No bridge/scene lifecycle hook yet; deaths do not reduce household residents.
+- Records are identities plus `age_days`; no births, migration, jobs, or events.
 - A crafted save can contain any valid name/id set; server provenance is a networking task.
 - The pool cap is 4,096; orphaned records are dropped on load.
 - No migration: changing `NAMED_FORMAT_VERSION` rejects old named objects.

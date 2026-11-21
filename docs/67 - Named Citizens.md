@@ -98,7 +98,7 @@ citizen_id   = first 63 bits of citizen_seed, with collision probe
 - `age_days` is persisted; the display is derived.
 
 > [!note] Current bridge placeholder
-> Until N4 persists lifecycle state, `named_citizens_for` derives a display age of 18–64 years from the identity id (`age_years`). It is deterministic and never saved; `age_days` persistence and aging remain N4.
+> N4 now persists `age_days`; `named_citizens_for` still derives its display age from the identity id (`age_years`) until the bridge applies the persisted age. The core `tick_lifecycle` ages and removes citizens at 100 years; the bridge/scene lifecycle hook remains.
 
 ## 4. Home, work, and service assignment
 
@@ -376,7 +376,7 @@ The existing world JSON `population` object gets an optional sibling `named_citi
 | **N1 — Identity layer (derived)** | Deterministic ids, names, household slot sync, read-only bridge | **Done** — PR #98; 500-resident city produces stable names; `cargo test -p core_city named`; no save or checksum change; 4k identities generate in < 100 ms under the debug test guard |
 | **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | **Done — PR #108/#126/#135; follow camera, EN/DE card, age/employment rows, and content display names** |
 | **N3 — Materialization** | Active pool, hysteresis, route cache, fade, active cap | **Partial — PR #107/#123/#125/#134; selection core, bridge, F4 overlay, hysteresis/pinning, and change budget done ([[73 - Materialization Core]]); routes/fade/dwell remain** |
-| **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | **Partial — PR #103**; persistence landed ([[70 - Named Persistence]]), lifecycle/aging/death next |
+| **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | **Partial** — persistence #103; core `age_days`/`tick_lifecycle` aging/death landed; bridge/scene application next |
 | **N5 — Cohort bridge (later)** | Sample from cohorts, district stories, 1M identity store | 1M cohort benchmark unchanged; materialization near camera; no per-citizen tick |
 
 ### N1 checks
@@ -463,7 +463,7 @@ Not yet implemented: rendering per-citizen job/age rows, per-slot job titles, an
 
 `NamedSave` v1 stores `format_version`, `seed`, `max`, and sorted identity records (`id`, `placement_id`, `slot`, `name`). The bridge writes an optional `named_citizens` object after `population`, checks the seed, syncs with the loaded households, drops orphans, and commits atomically with the other stores. Old saves load an empty pool that fills on demand. Save/load results expose `named`, `named_max`, and `named_checksum`; population/city checksums are unchanged. See [[70 - Named Persistence]].
 
-Lifecycle fields (age, job, death), migration, and a lifecycle-on baseline remain open.
+Core aging/death now persist `age_days`; the bridge/scene lifecycle hook, death-to-household application, events, and a lifecycle-on baseline remain open.
 
 ### N4 checks
 

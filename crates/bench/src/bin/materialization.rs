@@ -19,8 +19,9 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use core_city::{
-    citizen_id, name_for, MaterializationBudget, MaterializationSelection, MaterializedCitizen,
-    NamedCitizen, NamedCitizens, MAX_ACTIVE_CITIZENS, MAX_DETAILED_CITIZENS, MAX_NAMED_CITIZENS,
+    age_years, citizen_id, name_for, MaterializationBudget, MaterializationSelection,
+    MaterializedCitizen, NamedCitizen, NamedCitizens, MAX_ACTIVE_CITIZENS, MAX_DETAILED_CITIZENS,
+    MAX_NAMED_CITIZENS,
 };
 
 /// Fixed seed for every fixture.
@@ -290,6 +291,7 @@ fn build_scene(fixture: Fixture) -> Scene {
                     placement_id,
                     slot,
                     name: name_for(id),
+                    age_days: u32::from(age_years(id)) * 365,
                 },
             );
         }
