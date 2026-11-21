@@ -35,7 +35,7 @@ tags:
 | **Modern** | 150,000 | reinforced concrete, steel, glass, aluminum | apartment block, office tower, hospital, subway |
 | **Information** | 750,000 | composites, electronics, solar, glass | data center, solar farm, university, supertall |
 
-These thresholds are draft values from [[02 - Game Design]] and [[17 - Materials and Structure]]. They gate the *content* and *structural rules* later; they do not yet block placement.
+These thresholds are draft values from [[02 - Game Design]] and [[17 - Materials and Structure]]. Structural systems are gated by age (4.3); materials, props, and the content library are not gated yet.
 
 ## 3. Model
 
