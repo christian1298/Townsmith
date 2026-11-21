@@ -45,7 +45,9 @@ Out:
 | Starting balance | 100,000 |
 | Resident tax | 8 / resident / day |
 | Business tax | 4 / employed job / day |
-| Upkeep | 5 / completed building / day |
+| Building upkeep | 5 / completed building / day |
+| Utility upkeep | 2 / utility site / day |
+| Service upkeep | 5 / civic-service site / day |
 | Wage | 20 / worker / day (from [[51 - Jobs and Wages]]) |
 | Bankruptcy threshold | −50,000 |
 | Loan rate | 0.05% / day |
@@ -63,7 +65,8 @@ For `dt` seconds:
 ```text
 days = dt / 86,400
 income = (population × resident_tax + employed × business_tax) × days
-operating = (employed × 20 + completed_buildings × upkeep) × days
+operating = (employed × 20 + completed_buildings × upkeep
+             + utility_sites × 2 + service_sites × 5) × days
 loan_interest = Σ(outstanding_balance × rate_per_day) × days
 loan_principal = Σ(min(payment_per_day, outstanding_balance) × days)
 expenses = operating + loan_interest + loan_principal
@@ -73,6 +76,8 @@ bankrupt = balance <= −50,000
 ```
 
 Each loan's balance falls by its principal payment; interest is paid from the treasury and does not capitalize. A paid-off loan is removed.
+
+`tick()` keeps the legacy zero-infrastructure path so pinned city-loop checksums stay unchanged. The Industrial and Modern probes call `tick_with_infrastructure(...)`, which includes utility/service site upkeep and reports it as `infrastructure` in `EconomyTick`. `daily_net_with_infrastructure` includes the same cost. The bridge and world scene still use the legacy tick; wiring site counts into `economy_tick` is next.
 
 ## 4. Construction
 
@@ -141,7 +146,7 @@ City checksum: `623f39c61b71b68a`. Economy checksum: `1c213cc40278a13b`.
 | Method | Purpose |
 |---|---|
 | `economy_state()` | `open`, seed, balance, rates, construction spent, days, debt, loan count, interest/payment per day, daily net, bankrupt, can borrow, checksum |
-| `economy_tick(seed, seconds)` | Advance taxes, wages, upkeep, and loan service |
+| `economy_tick(seed, seconds)` | Advance taxes, wages, building upkeep, and loan service (legacy path; no infrastructure counts yet) |
 | `economy_set_taxes(seed, resident, business)` | Set rates; creates the ledger if needed |
 | `economy_borrow(seed, amount)` | Borrow with the default rate and term |
 | `economy_checksum()` | Stable FNV checksum |
@@ -185,9 +190,9 @@ The world-scene smoke checks:
 
 ## 11. Tests
 
-- `core_city::economy`: 14 tests — starting balance, income/expenses, clamped rates, bankruptcy, construction affordability, loan cash/interest/repayment, payoff, bankruptcy borrowing block, payment underflow, debt limit, daily net, JSON/checksum, old-save debt default, invalid balance.
+- `core_city::economy`: 18 tests — starting balance, income/expenses, clamped rates, bankruptcy, construction affordability, loan cash/interest/repayment, payoff, bankruptcy borrowing block, payment underflow, debt limit, daily net, JSON/checksum, old-save debt default, invalid balance, infrastructure defaults/cost/legacy equivalence/roundtrip.
 - `godot_ext`: 49 tests, including economy JSON/loan roundtrip, old-save loans default, and invalid balance.
-- `core_city` total **232**; `core_structure` **19**; bridge **52**; workspace **493 tests + 2 doctests**; 30-day runner 7 tests.
+- `core_city` total **236**; `core_structure` **19**; bridge **52**; workspace **497 tests + 2 doctests**; 30-day runner 7 tests.
 - `city_loop` bin test asserts construction spending, debt, positive final balance, and no bankruptcy.
 - 30-day city-loop checksum: `623f39c61b71b68a`.
 

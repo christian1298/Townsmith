@@ -249,6 +249,8 @@ fn simulate(policy: TaxPolicy, days: u64, step: f64) -> serde_json::Value {
     let (resident_tax, job_tax) = policy.rates();
     economy.set_taxes(resident_tax, job_tax);
 
+    let utility_sites = utilities.site_count() as u64;
+    let service_sites = services.site_count() as u64;
     let mut utility_report = utilities.refresh(&utility_consumers(&placements, &runtime));
     let mut service_report = services.refresh(&service_consumers(&placements, &runtime));
     let mut min_balance = economy.balance;
@@ -304,6 +306,7 @@ fn simulate(policy: TaxPolicy, days: u64, step: f64) -> serde_json::Value {
             - wages_per_day
             - upkeep_per_day
             - loan_service_per_day
+            - economy.infrastructure_upkeep_per_day(utility_sites, service_sites)
     };
 
     let notional_cost =
@@ -347,7 +350,19 @@ fn simulate(policy: TaxPolicy, days: u64, step: f64) -> serde_json::Value {
         "wages_per_day": wages_per_day,
         "upkeep_per_day": upkeep_per_day,
         "loan_service_per_day": loan_service_per_day,
-        "daily_net": economy.daily_net(population, employed, completed_buildings),
+        "daily_net": economy.daily_net_with_infrastructure(
+            population,
+            employed,
+            completed_buildings,
+            utility_sites,
+            service_sites,
+        ),
+        "infrastructure_per_day": economy.infrastructure_upkeep_per_day(
+            utility_sites,
+            service_sites,
+        ),
+        "utility_upkeep_per_site_per_day": economy.utility_upkeep_per_site_per_day,
+        "service_upkeep_per_site_per_day": economy.service_upkeep_per_site_per_day,
         "daily_net_at_default_taxes": daily_net_at(8.0, 4.0),
         "daily_net_at_industrial_taxes": daily_net_at(
             INDUSTRIAL_TAX_PER_RESIDENT,
