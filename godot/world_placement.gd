@@ -1005,11 +1005,11 @@ func _cycle_starter() -> void:
 
 func _cycle_industry() -> void:
 	if selected_id < 0:
-		_set_modal("Select a building first (RMB)", true)
+		_set_modal(i18n.t("base.ui.modal.select_building"), true)
 		return
 	var selected := _selected_placement()
 	if int(selected.get("job_slots", 0)) <= 0:
-		_set_modal("This building has no job slots", true)
+		_set_modal(i18n.t("base.ui.modal.no_job_slots"), true)
 		return
 	var current := str(industry_kinds.get(selected_id, ""))
 	var next := ""
@@ -1135,11 +1135,11 @@ func _refresh_service_visuals() -> void:
 
 func _cycle_service() -> void:
 	if selected_id < 0:
-		_set_modal("Select a building first (RMB)", true)
+		_set_modal(i18n.t("base.ui.modal.select_building"), true)
 		return
 	var selected := _selected_placement()
 	if int(selected.get("job_slots", 0)) <= 0:
-		_set_modal("This building has no job slots", true)
+		_set_modal(i18n.t("base.ui.modal.no_job_slots"), true)
 		return
 	var current := str(service_kinds.get(selected_id, ""))
 	var next := ""
@@ -1238,11 +1238,11 @@ func _refresh_utility_visuals() -> void:
 
 func _cycle_utility() -> void:
 	if selected_id < 0:
-		_set_modal("Select a building first (RMB)", true)
+		_set_modal(i18n.t("base.ui.modal.select_building"), true)
 		return
 	var selected := _selected_placement()
 	if int(selected.get("job_slots", 0)) <= 0:
-		_set_modal("This building has no job slots", true)
+		_set_modal(i18n.t("base.ui.modal.no_job_slots"), true)
 		return
 	var kinds: Array = utility_kinds.get(selected_id, [])
 	var has_water := kinds.has("water")
@@ -1567,32 +1567,40 @@ func _update_hud() -> void:
 		var center: PackedFloat32Array = selected.get("center", PackedFloat32Array())
 		if center.size() == 3:
 			var owner_info: Dictionary = core.settlement_at(roundi(center[0]), roundi(center[2]))
-			var owner_name := "wilderness"
+			var owner_name: String = i18n.t("base.ui.hud.wilderness")
 			if bool(owner_info.get("found", false)):
 				var settlement: Dictionary = owner_info.get("settlement", {})
 				owner_name = str(settlement.get("name", owner_name))
-			selected_line += "  ·  owner " + owner_name
+			selected_line += i18n.t("base.ui.hud.selected_owner", {"owner": owner_name})
 		var industry_kind := str(industry_kinds.get(selected_id, ""))
 		if industry_kind != "":
-			selected_line += "  ·  industry " + _content_display("base.content.industry.%s" % industry_kind, industry_kind)
+			selected_line += i18n.t("base.ui.hud.selected_industry", {
+				"kind": _content_display("base.content.industry.%s" % industry_kind, industry_kind),
+			})
 		var utility_kinds_here: Array = utility_kinds.get(selected_id, [])
 		if utility_kinds_here.size() > 0:
-			selected_line += "  ·  utility " + ", ".join(utility_kinds_here)
+			selected_line += i18n.t("base.ui.hud.selected_utility", {
+				"kinds": ", ".join(utility_kinds_here),
+			})
 		var service_kind := str(service_kinds.get(selected_id, ""))
 		if service_kind != "":
-			selected_line += "  ·  service " + _content_display("base.content.service.%s" % service_kind, service_kind)
+			selected_line += i18n.t("base.ui.hud.selected_service", {
+				"kind": _content_display("base.content.service.%s" % service_kind, service_kind),
+			})
 		var selected_structure: Dictionary = selected.get("structure", {})
 		if bool(selected_structure.get("present", false)):
-			selected_line += "  ·  %s %d stories" % [
-				str(selected_structure.get("system_name", "?")),
-				int(selected_structure.get("stories", 0)),
-			]
+			selected_line += i18n.t("base.ui.hud.selected_stories", {
+				"system": str(selected_structure.get("system_name", "?")),
+				"stories": int(selected_structure.get("stories", 0)),
+			})
 		var named: Dictionary = core.named_citizens_for(SEED, selected_id)
 		if int(named.get("count", 0)) > 0:
 			var names: Array = []
 			for citizen in named.get("citizens", []):
 				names.append(str(citizen.get("name", "?")))
-			selected_line += "  ·  residents " + ", ".join(names)
+			selected_line += i18n.t("base.ui.hud.selected_residents", {
+				"names": ", ".join(names),
+			})
 	if mode == "architect":
 		hud.text = "%s\n%s\n%s\n%s" % [
 			i18n.t("base.ui.hud.architect.title", {"seed": SEED}),
@@ -1625,100 +1633,105 @@ func _update_hud() -> void:
 	if bool(progression.get("ok", false)):
 		var next_age := str(progression.get("next_age", ""))
 		if next_age == "":
-			age_text = "%s · final age" % str(progression.get("age", "?"))
+			age_text = i18n.t("base.ui.hud.age_final", {
+				"age": str(progression.get("age", "?")),
+			})
 		else:
-			age_text = "%s · next %s at %d (%d%%)" % [
-				str(progression.get("age", "?")),
-				next_age,
-				int(progression.get("next_threshold", 0)),
-				roundi(float(progression.get("progress", 0.0)) * 100.0),
-			]
+			age_text = i18n.t("base.ui.hud.age_next", {
+				"age": str(progression.get("age", "?")),
+				"next": next_age,
+				"threshold": int(progression.get("next_threshold", 0)),
+				"progress": roundi(float(progression.get("progress", 0.0)) * 100.0),
+			})
 	var research: Dictionary = core.research_state(SEED)
 	var research_text := "—"
 	if bool(research.get("open", false)):
-		research_text = "%d pts · %d/%d techs · +%.1f/day" % [
-			roundi(float(research.get("points", 0.0))),
-			int(research.get("completed_count", 0)),
-			int(research.get("node_count", 0)),
-			float(research.get("rate_per_day", 0.0)),
-		]
+		research_text = i18n.t("base.ui.hud.research", {
+			"points": roundi(float(research.get("points", 0.0))),
+			"completed": int(research.get("completed_count", 0)),
+			"total": int(research.get("node_count", 0)),
+			"rate": "%.1f" % float(research.get("rate_per_day", 0.0)),
+		})
 	var tutorial: Dictionary = core.tutorial_state(SEED)
 	var tutorial_text := "—"
 	if bool(tutorial.get("ok", false)):
 		if bool(tutorial.get("complete", false)):
-			tutorial_text = "%d/%d · complete" % [
-				int(tutorial.get("completed", 0)),
-				int(tutorial.get("total", 0)),
-			]
+			tutorial_text = i18n.t("base.ui.hud.tutorial_complete", {
+				"completed": int(tutorial.get("completed", 0)),
+				"total": int(tutorial.get("total", 0)),
+			})
 		else:
-			tutorial_text = "%d/%d · %s" % [
-				int(tutorial.get("completed", 0)),
-				int(tutorial.get("total", 0)),
-				str(tutorial.get("current_title", "?")),
-			]
+			tutorial_text = i18n.t("base.ui.hud.tutorial_next", {
+				"completed": int(tutorial.get("completed", 0)),
+				"total": int(tutorial.get("total", 0)),
+				"title": str(tutorial.get("current_title", "?")),
+			})
 	var economy: Dictionary = core.economy_state()
 	var treasury_text := "—"
 	if bool(economy.get("open", false)):
 		var net := float(economy.get("daily_net", 0.0))
 		var net_text := ("+" if net >= 0.0 else "") + "%.0f" % net
-		treasury_text = "%.0f balance · %s/day · tax %.0f/%.0f" % [
-			float(economy.get("balance", 0.0)),
-			net_text,
-			float(economy.get("tax_per_resident_per_day", 0.0)),
-			float(economy.get("business_tax_per_job_per_day", 0.0)),
-		]
+		treasury_text = i18n.t("base.ui.hud.treasury_value", {
+			"balance": "%.0f" % float(economy.get("balance", 0.0)),
+			"net": net_text,
+			"tax": "%.0f" % float(economy.get("tax_per_resident_per_day", 0.0)),
+			"business": "%.0f" % float(economy.get("business_tax_per_job_per_day", 0.0)),
+		})
 		if float(economy.get("debt", 0.0)) > 0.001:
-			treasury_text += " · debt %.0f" % float(economy.get("debt", 0.0))
+			treasury_text = i18n.t("base.ui.hud.treasury_debt", {
+				"value": treasury_text,
+				"debt": "%.0f" % float(economy.get("debt", 0.0)),
+			})
 		if bool(economy.get("bankrupt", false)):
-			treasury_text = "BANKRUPT · " + treasury_text
+			treasury_text = i18n.t("base.ui.hud.treasury_bankrupt", {"value": treasury_text})
 	var industry: Dictionary = core.industry_state()
 	var industry_text := "—"
 	if bool(industry.get("open", false)):
-		industry_text = "wood %.0f · food %.0f · hides %.0f · supply %.0f%%" % [
-			float(industry.get("wood", 0.0)),
-			float(industry.get("food", 0.0)),
-			float(industry.get("hides", 0.0)),
-			float(industry.get("food_supply", 0.0)) * 100.0,
-		]
+		industry_text = i18n.t("base.ui.hud.industry_value", {
+			"wood": "%.0f" % float(industry.get("wood", 0.0)),
+			"food": "%.0f" % float(industry.get("food", 0.0)),
+			"hides": "%.0f" % float(industry.get("hides", 0.0)),
+			"supply": "%.0f" % (float(industry.get("food_supply", 0.0)) * 100.0),
+		})
 	var utilities: Dictionary = core.utilities_state()
 	var utilities_text := "—"
 	if bool(utilities.get("open", false)):
-		utilities_text = "water %.0f%% (%d sites) · power %.0f%% (%d sites)" % [
-			float(utilities.get("water_supply", 0.0)) * 100.0,
-			int(utilities.get("water_sites", 0)),
-			float(utilities.get("power_supply", 0.0)) * 100.0,
-			int(utilities.get("power_sites", 0)),
-		]
+		utilities_text = i18n.t("base.ui.hud.utilities_value", {
+			"water": "%.0f" % (float(utilities.get("water_supply", 0.0)) * 100.0),
+			"water_sites": int(utilities.get("water_sites", 0)),
+			"power": "%.0f" % (float(utilities.get("power_supply", 0.0)) * 100.0),
+			"power_sites": int(utilities.get("power_sites", 0)),
+		})
 	var services: Dictionary = core.services_state()
 	var service_text := "—"
 	if bool(services.get("open", false)):
-		service_text = "school %.0f%% · clinic %.0f%% · fire %.0f%% · police %.0f%% · +%.1f research/day" % [
-			float(services.get("school_supply", 0.0)) * 100.0,
-			float(services.get("clinic_supply", 0.0)) * 100.0,
-			float(services.get("fire_supply", 0.0)) * 100.0,
-			float(services.get("police_supply", 0.0)) * 100.0,
-			float(services.get("research_per_day", 0.0)),
-		]
+		service_text = i18n.t("base.ui.hud.civic_value", {
+			"school": "%.0f" % (float(services.get("school_supply", 0.0)) * 100.0),
+			"clinic": "%.0f" % (float(services.get("clinic_supply", 0.0)) * 100.0),
+			"fire": "%.0f" % (float(services.get("fire_supply", 0.0)) * 100.0),
+			"police": "%.0f" % (float(services.get("police_supply", 0.0)) * 100.0),
+			"research": "%.1f" % float(services.get("research_per_day", 0.0)),
+		})
 	var traffic: Dictionary = traffic_stats
 	if traffic.is_empty():
 		traffic = core.traffic_state(SEED)
 	var traffic_text := "—"
 	if bool(traffic.get("open", false)):
-		traffic_text = "%d nodes · %d edges · %.0f m · %d cars" % [
-			int(traffic.get("nodes", 0)),
-			int(traffic.get("edges", 0)),
-			float(traffic.get("total_length_m", 0.0)),
-			traffic_cars.size(),
-		]
+		traffic_text = i18n.t("base.ui.hud.traffic_value", {
+			"nodes": int(traffic.get("nodes", 0)),
+			"edges": int(traffic.get("edges", 0)),
+			"length": "%.0f" % float(traffic.get("total_length_m", 0.0)),
+			"cars": traffic_cars.size(),
+		})
 	var happiness_text := "—"
 	var needs_text := "—"
 	if int(city.get("population", 0)) > 0:
 		happiness_text = "%.0f%%" % (float(city.get("happiness", 0.0)) * 100.0)
-		needs_text = "food %.0f%% · water %.0f%% · rest %.0f%%" % [
-			float(city.get("food", 0.0)) * 100.0,
-			float(city.get("water", 0.0)) * 100.0,
-			float(city.get("rest", 0.0)) * 100.0,
-		]
+		needs_text = i18n.t("base.ui.hud.needs_value", {
+			"food": "%.0f" % (float(city.get("food", 0.0)) * 100.0),
+			"water": "%.0f" % (float(city.get("water", 0.0)) * 100.0),
+			"rest": "%.0f" % (float(city.get("rest", 0.0)) * 100.0),
+		})
 	var status_lines: Array[String] = [
 		selected_line,
 		i18n.t("base.ui.hud.target", {
@@ -1742,19 +1755,19 @@ func _update_hud() -> void:
 			"employed": int(city.get("employed", 0)),
 			"happiness": happiness_text,
 		}),
-		"Age: %s" % age_text,
-		"Research: %s" % research_text,
-		"Tutorial: %s" % tutorial_text,
-		"Commute %.0f m · wages %.0f/day" % [
-			float(city.get("average_commute_m", 0.0)),
-			float(city.get("daily_wages", 0.0)),
-		],
+		i18n.t("base.ui.hud.age", {"value": age_text}),
+		i18n.t("base.ui.hud.research_line", {"value": research_text}),
+		i18n.t("base.ui.hud.tutorial_line", {"value": tutorial_text}),
+		i18n.t("base.ui.hud.commute", {
+			"commute": "%.0f" % float(city.get("average_commute_m", 0.0)),
+			"wages": "%.0f" % float(city.get("daily_wages", 0.0)),
+		}),
 		i18n.t("base.ui.hud.needs", {"needs": needs_text}),
 		i18n.t("base.ui.hud.treasury", {"treasury": treasury_text}),
-		"Industry: %s" % industry_text,
-		"Utilities: %s" % utilities_text,
-		"Civic: %s" % service_text,
-		"Traffic: %s" % traffic_text,
+		i18n.t("base.ui.hud.industry", {"value": industry_text}),
+		i18n.t("base.ui.hud.utilities", {"value": utilities_text}),
+		i18n.t("base.ui.hud.civic", {"value": service_text}),
+		i18n.t("base.ui.hud.traffic", {"value": traffic_text}),
 		i18n.t("base.ui.hud.construction", {
 			"active": int(construction.get("active", 0)),
 			"stalled": int(construction.get("stalled", 0)),
@@ -1767,10 +1780,10 @@ func _update_hud() -> void:
 	]
 	status_label.text = "\n".join(status_lines)
 	if materialization_visible:
-		status_label.text += "\nCitizens near: %d active · %d detailed" % [
-			materialization_counts.x,
-			materialization_counts.y,
-		]
+		status_label.text += "\n" + i18n.t("base.ui.hud.citizens_near", {
+			"active": materialization_counts.x,
+			"detailed": materialization_counts.y,
+		})
 
 func _toggle_citizen_panel() -> bool:
 	citizen_visible = not citizen_visible
@@ -2236,7 +2249,7 @@ func _enter_architect() -> bool:
 		_toggle_dashboard()
 	var placement := _selected_placement()
 	if placement.is_empty():
-		_set_modal("Select a building first (right-click)", true)
+		_set_modal(i18n.t("base.ui.modal.select_building_full"), true)
 		return false
 	var door := _door_position(placement)
 	var center: PackedFloat32Array = placement.get("center", PackedFloat32Array())
@@ -2420,18 +2433,18 @@ func _road_node_matches(road: Dictionary) -> bool:
 
 func _place_at_target() -> bool:
 	if not preview_valid or blueprint_mesh == null:
-		_set_modal("Cannot place: " + preview_error, true)
+		_set_modal(i18n.t("base.ui.modal.cannot_place", {"error": preview_error}), true)
 		return false
 	var result: Dictionary = core.world_place_blueprint(
 		SEED, blueprint_path, target_x, target_z, rotation_deg
 	)
 	if not bool(result.get("ok", false)):
 		preview_error = str(result.get("error_code", result.get("error", "place_failed")))
-		_set_modal("Placement failed: " + preview_error, true)
+		_set_modal(i18n.t("base.ui.modal.placement_failed", {"error": preview_error}), true)
 		_update_hud()
 		return false
 	_add_placement_visual(result.get("placement", {}))
-	_set_modal("Construction site created", false)
+	_set_modal(i18n.t("base.ui.modal.construction_site"), false)
 	_refresh_preview(true)
 	return true
 
@@ -2606,7 +2619,7 @@ func _toggle_crew() -> void:
 	var capacity := int(summary.get("crew_capacity", 4))
 	var next := 0 if capacity > 0 else 4
 	if core.construction_set_crew(next):
-		_set_modal("Construction crew: %d" % next, false)
+		_set_modal(i18n.t("base.ui.modal.crew", {"count": next}), false)
 	_update_hud()
 
 func _clear_placed_nodes() -> void:
@@ -2631,20 +2644,28 @@ func _save_world() -> bool:
 	var result: Dictionary = core.world_save(save_path)
 	var ok := bool(result.get("ok", false))
 	if ok:
-		_set_modal("Saved %d placement(s), %d edit(s), %d site(s), %d road(s), %d lot(s), %d settlement(s) to %s" % [
-			core.world_placement_count(), core.terrain_delta_count(),
-			int(result.get("construction_sites", 0)), core.road_count(),
-			core.lot_count(), core.settlement_count(), save_path
-		], false)
+		_set_modal(i18n.t("base.ui.modal.saved", {
+			"placements": core.world_placement_count(),
+			"edits": core.terrain_delta_count(),
+			"sites": int(result.get("construction_sites", 0)),
+			"roads": core.road_count(),
+			"lots": core.lot_count(),
+			"settlements": core.settlement_count(),
+			"path": save_path,
+		}), false)
 	else:
-		_set_modal("Save failed: " + str(result.get("error_code", result.get("error", ""))), true)
+		_set_modal(i18n.t("base.ui.modal.save_failed", {
+			"error": str(result.get("error_code", result.get("error", ""))),
+		}), true)
 	_update_hud()
 	return ok
 
 func _load_world() -> bool:
 	var result: Dictionary = core.world_load(save_path, SEED)
 	if not bool(result.get("ok", false)):
-		_set_modal("Load failed: " + str(result.get("error_code", result.get("error", ""))), true)
+		_set_modal(i18n.t("base.ui.modal.load_failed", {
+			"error": str(result.get("error_code", result.get("error", ""))),
+		}), true)
 		_update_hud()
 		return false
 	_clear_selection()
@@ -2664,14 +2685,18 @@ func _load_world() -> bool:
 		)
 	if placed_nodes.size() != int(state.get("count", -1)):
 		_set_modal(
-			"Loaded %d placement(s) but rebuilt %d" % [
-				core.world_placement_count(), placed_nodes.size()
-			],
+			i18n.t("base.ui.modal.loaded_mismatch", {
+				"placements": core.world_placement_count(),
+				"rebuilt": placed_nodes.size(),
+			}),
 			true
 		)
 		_update_hud()
 		return false
-	_set_modal("Loaded %d placement(s) from %s" % [core.world_placement_count(), save_path], false)
+	_set_modal(i18n.t("base.ui.modal.loaded", {
+		"placements": core.world_placement_count(),
+		"path": save_path,
+	}), false)
 	_refresh_preview(true)
 	return true
 
@@ -2739,6 +2764,7 @@ func _run_scene_smoke() -> void:
 	var dashboard_ok := false
 	var hud_i18n_ok := false
 	var hud_body_i18n_ok := false
+	var hud_status_i18n_ok := false
 	var dashboard_body_i18n_ok := false
 	var save_ok := false
 	var clear_ok := false
@@ -3290,6 +3316,11 @@ func _run_scene_smoke() -> void:
 				hud_body_i18n_ok = hud_body_i18n_ok and status_label.text.contains("Platzierungen:")
 				hud_body_i18n_ok = hud_body_i18n_ok and not hud.text.contains("!base.ui.")
 				hud_body_i18n_ok = hud_body_i18n_ok and not status_label.text.contains("!base.ui.")
+				hud_status_i18n_ok = status_label.text.contains("Zeitalter:")
+				hud_status_i18n_ok = hud_status_i18n_ok and status_label.text.contains("Forschung:")
+				hud_status_i18n_ok = hud_status_i18n_ok and status_label.text.contains("Industrie:")
+				_set_modal(i18n.t("base.ui.modal.crew", {"count": 4}), false)
+				hud_status_i18n_ok = hud_status_i18n_ok and modal_label != null and modal_label.text.contains("Bautrupp")
 				i18n.set_locale("en")
 				_update_dashboard()
 				_update_hud()
@@ -3302,6 +3333,12 @@ func _run_scene_smoke() -> void:
 				hud_body_i18n_ok = hud_body_i18n_ok and status_label.text.contains("Placements:")
 				hud_body_i18n_ok = hud_body_i18n_ok and not hud.text.contains("!base.ui.")
 				hud_body_i18n_ok = hud_body_i18n_ok and not status_label.text.contains("!base.ui.")
+				hud_status_i18n_ok = hud_status_i18n_ok and status_label.text.contains("Age:")
+				hud_status_i18n_ok = hud_status_i18n_ok and status_label.text.contains("Research:")
+				hud_status_i18n_ok = hud_status_i18n_ok and status_label.text.contains("Industry:")
+				_set_modal(i18n.t("base.ui.modal.crew", {"count": 4}), false)
+				hud_status_i18n_ok = hud_status_i18n_ok and modal_label != null and modal_label.text.contains("Construction crew")
+				_set_modal("", false)
 				dashboard_ok = dashboard_ok and hud_i18n_ok
 				var balance_before_loan := float(economy_after.get("balance", 0.0))
 				var loan_state: Dictionary = core.economy_borrow(SEED, LOAN_AMOUNT)
@@ -3510,7 +3547,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s dashboard_body_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -3545,6 +3582,7 @@ func _run_scene_smoke() -> void:
 		"ok" if dashboard_ok else "failed",
 		"ok" if hud_i18n_ok else "failed",
 		"ok" if hud_body_i18n_ok else "failed",
+		"ok" if hud_status_i18n_ok else "failed",
 		"ok" if dashboard_body_i18n_ok else "failed",
 		"ok" if traffic_ok else "failed",
 		"ok" if select_ok else "failed",
