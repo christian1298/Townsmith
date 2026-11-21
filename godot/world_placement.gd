@@ -18,6 +18,11 @@ const DEFAULT_BLUEPRINT := "acceptance_house.tsbp"
 const DEFAULT_SAVE := "world.json"
 const STARTING_TREASURY := 100000.0
 const LOAN_AMOUNT := 50000.0
+# Each dashboard rebuild asks the bridge for the advisor plus city, economy,
+# industry, utilities, services, construction, traffic, progression, and
+# research summaries; traffic_state rebuilds the road graph. That is too much
+# work per HUD update, so the visible panel is refreshed on this cadence.
+const DASHBOARD_REFRESH_SECONDS := 0.5
 const TAX_POLICIES := [
 	{"name": "low", "resident": 4.0, "business": 2.0},
 	{"name": "standard", "resident": 8.0, "business": 4.0},
@@ -78,6 +83,7 @@ var modal_label: Label
 var dashboard_panel: PanelContainer
 var dashboard_text: RichTextLabel
 var dashboard_visible := false
+var dashboard_refresh_accum := 0.0
 
 var blueprint_path := ""
 var save_path := ""
@@ -127,6 +133,13 @@ func _ready() -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 func _process(delta: float) -> void:
+	if dashboard_visible:
+		dashboard_refresh_accum += delta
+		if dashboard_refresh_accum >= DASHBOARD_REFRESH_SECONDS:
+			dashboard_refresh_accum = 0.0
+			_update_dashboard()
+	else:
+		dashboard_refresh_accum = 0.0
 	construction_tick_accum += delta
 	var steps := 0
 	while construction_tick_accum >= 0.25 and steps < 8:
@@ -1534,13 +1547,12 @@ func _update_hud() -> void:
 		int(construction.get("materials_stock", 0)),
 		save_path,
 	]
-	if dashboard_visible:
-		_update_dashboard()
 
 func _toggle_dashboard() -> bool:
 	dashboard_visible = not dashboard_visible
 	if dashboard_panel != null:
 		dashboard_panel.visible = dashboard_visible
+	dashboard_refresh_accum = 0.0
 	if dashboard_visible:
 		_update_dashboard()
 	return dashboard_visible

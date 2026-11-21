@@ -132,7 +132,7 @@ Advisor
 ▲ The city is running a deficit — Raise taxes, borrow deliberately, or wait...
 ```
 
-Colors: critical red, warning amber, info green. `Esc` closes the panel before other modes; entering Architect Mode closes it. The panel refreshes with the HUD tick only while it is visible, so a closed dashboard does not add another snapshot per frame.
+Colors: critical red, warning amber, info green. `Esc` closes the panel before other modes; entering Architect Mode closes it. While the panel is visible, `_process` drives a refresh accumulator and rebuilds the panel at most every `0.5` s (2 Hz); opening still refreshes immediately, and closing resets the accumulator so a reopen is never stale. This keeps a world HUD update from triggering the full snapshot plus advisor while the panel is visible. A closed dashboard adds no snapshot cost. The advisor is still computed on demand by `city_advisor` on each refresh and is not cached, so dashboard advice can trail the HUD by up to about `0.5` s.
 
 ## 6. Smoke
 
@@ -164,7 +164,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 - Thresholds are fixed; no difficulty, policy, or player preference.
 - Advice is not persisted, acknowledged, or suppressed.
 - No click-to-select, camera focus, or one-click policy action.
-- The dashboard rebuilds the full snapshot when visible; no incremental caching yet.
+- The dashboard rebuilds the full snapshot plus advisor while visible, throttled to 2 Hz rather than on every HUD update; no incremental caching yet.
 - English-only developer UI.
 - `city.food_shortage`, `city.water_shortage`, `city.power_shortage`, and `city.unhappy` use one code for both critical and warning levels; the severity field distinguishes them.
 - The advisor reports debt as information even when the daily net is positive.
