@@ -135,6 +135,10 @@ The comparison checks the checksum and structural counters exactly, and the econ
 - 300-second steps are for balance passes, not frame-level behavior.
 - The baseline is a mechanics regression, not a performance target.
 
+## 7b. Degraded matrix
+
+[[71 - Degraded City Matrix]] runs the mid profile with one outage at a time and pins the expected shortages. It does not change the healthy matrix baseline.
+
 ## 8. Next
 
 1. Record the Q-101 human playtest and its top three usability issues.

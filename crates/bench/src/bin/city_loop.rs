@@ -70,6 +70,66 @@ const SCENARIOS: [Scenario; 3] = [
     },
 ];
 
+/// One deliberately broken service in the mid-city degraded matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Degraded {
+    Water,
+    Power,
+    Industry,
+    Roads,
+    Utilities,
+}
+
+impl Degraded {
+    /// Every degraded variant, in matrix order.
+    const ALL: [Self; 5] = [
+        Self::Water,
+        Self::Power,
+        Self::Industry,
+        Self::Roads,
+        Self::Utilities,
+    ];
+
+    /// Stable lowercase identifier.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Water => "no_water",
+            Self::Power => "no_power",
+            Self::Industry => "no_industry",
+            Self::Roads => "no_roads",
+            Self::Utilities => "no_utilities",
+        }
+    }
+
+    /// Parse a stable identifier, accepting a few short aliases.
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "no_water" | "water" => Some(Self::Water),
+            "no_power" | "power" => Some(Self::Power),
+            "no_industry" | "industry" => Some(Self::Industry),
+            "no_roads" | "roads" => Some(Self::Roads),
+            "no_utilities" | "utilities" => Some(Self::Utilities),
+            _ => None,
+        }
+    }
+
+    fn skips_water(self) -> bool {
+        matches!(self, Self::Water | Self::Utilities)
+    }
+
+    fn skips_power(self) -> bool {
+        matches!(self, Self::Power | Self::Utilities)
+    }
+
+    fn skips_industry(self) -> bool {
+        matches!(self, Self::Industry)
+    }
+
+    fn skips_roads(self) -> bool {
+        matches!(self, Self::Roads)
+    }
+}
+
 fn main() {
     let days = arg_value("--days")
         .and_then(|value| value.parse::<u64>().ok())
@@ -79,11 +139,46 @@ fn main() {
         .unwrap_or(DEFAULT_STEP_SECONDS);
     let matrix = std::env::args().any(|arg| arg == "--matrix");
     let balance = std::env::args().any(|arg| arg == "--balance");
+    let degraded_matrix = std::env::args().any(|arg| arg == "--degraded-matrix");
+    let degraded_name = arg_value("--degraded");
     if days == 0 || !step.is_finite() || step <= 0.0 {
         eprintln!(
-            "usage: city_loop [--scenario early|mid|late] [--days N] [--houses N] [--workplaces N] [--step SECONDS] [--matrix] [--balance]"
+            "usage: city_loop [--scenario early|mid|late] [--days N] [--houses N] [--workplaces N] [--step SECONDS] [--matrix] [--balance] [--degraded no_water|no_power|no_industry|no_roads|no_utilities] [--degraded-matrix]"
         );
         std::process::exit(2);
+    }
+    let modes = [matrix, balance, degraded_matrix, degraded_name.is_some()]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count();
+    if modes > 1 {
+        eprintln!(
+            "city_loop: choose only one of --matrix, --balance, --degraded, or --degraded-matrix"
+        );
+        std::process::exit(2);
+    }
+
+    if degraded_matrix {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&degraded_matrix_report(days, step)).expect("pretty json")
+        );
+        return;
+    }
+
+    if let Some(name) = degraded_name {
+        let Some(degraded) = Degraded::parse(&name) else {
+            eprintln!(
+                "city_loop: unknown degraded variant '{name}' (expected no_water, no_power, no_industry, no_roads, or no_utilities)"
+            );
+            std::process::exit(2);
+        };
+        let output = simulate_with(&SCENARIOS[1], days, step, Some(degraded));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).expect("pretty json")
+        );
+        return;
     }
 
     if matrix {
@@ -150,10 +245,28 @@ fn main() {
 }
 
 fn simulate(scenario: &Scenario, days: u64, step: f64) -> serde_json::Value {
+    simulate_with(scenario, days, step, None)
+}
+
+fn simulate_with(
+    scenario: &Scenario,
+    days: u64,
+    step: f64,
+    degraded: Option<Degraded>,
+) -> serde_json::Value {
     let houses = scenario.houses;
     let workplaces_count = scenario.workplaces;
-    let industry_count =
+    let skips_water = degraded.is_some_and(Degraded::skips_water);
+    let skips_power = degraded.is_some_and(Degraded::skips_power);
+    let skips_industry = degraded.is_some_and(Degraded::skips_industry);
+    let skips_roads = degraded.is_some_and(Degraded::skips_roads);
+    let planned_industry_count =
         usize::try_from(scenario.industry_count.min(houses)).expect("industry count fits usize");
+    let industry_count = if skips_industry {
+        0
+    } else {
+        planned_industry_count
+    };
     let seed = 2026;
     let mut placements = PlacementStore::new(seed);
     let mut construction = ConstructionStore::new(CREW_CAPACITY, MATERIALS_STOCK);
@@ -225,21 +338,23 @@ fn simulate(scenario: &Scenario, days: u64, step: f64) -> serde_json::Value {
 
     let rows = houses.div_ceil(10);
     let mut road_store = RoadStore::new(seed);
-    road_store.roads.push(RoadSegment {
-        id: 1,
-        start: [120, 118],
-        end: [120, 128 + (rows as i32 - 1) * 20 + 10],
-        width_m: 8,
-    });
-    for index in 0..rows {
+    if !skips_roads {
         road_store.roads.push(RoadSegment {
-            id: index + 2,
-            start: [120, 118 + index as i32 * 20],
-            end: [318, 118 + index as i32 * 20],
+            id: 1,
+            start: [120, 118],
+            end: [120, 128 + (rows as i32 - 1) * 20 + 10],
             width_m: 8,
         });
+        for index in 0..rows {
+            road_store.roads.push(RoadSegment {
+                id: index + 2,
+                start: [120, 118 + index as i32 * 20],
+                end: [318, 118 + index as i32 * 20],
+                width_m: 8,
+            });
+        }
+        road_store.next_id = rows + 2;
     }
-    road_store.next_id = rows + 2;
     let traffic = RoadGraph::build(&road_store.roads).expect("traffic graph");
 
     let mut industry = IndustryStore::new(seed);
@@ -256,8 +371,16 @@ fn simulate(scenario: &Scenario, days: u64, step: f64) -> serde_json::Value {
     let utility_span = houses;
     let water_count = (houses / 25).max(2);
     let power_count = (houses / 20).max(3);
-    let water_ids = even_ids(utility_span, water_count);
-    let power_ids = even_ids(utility_span, power_count);
+    let water_ids = if skips_water {
+        BTreeSet::new()
+    } else {
+        even_ids(utility_span, water_count)
+    };
+    let power_ids = if skips_power {
+        BTreeSet::new()
+    } else {
+        even_ids(utility_span, power_count)
+    };
     let mut utilities = UtilityStore::new(seed);
     let mut added_utilities: BTreeSet<(u64, UtilityKind)> = BTreeSet::new();
     let mut utility_report = UtilityReport::default();
@@ -369,7 +492,7 @@ fn simulate(scenario: &Scenario, days: u64, step: f64) -> serde_json::Value {
             industry.food_supply,
             utilities.water_supply,
             utilities.power_supply,
-            Some(&traffic),
+            if skips_roads { None } else { Some(&traffic) },
         );
         let completed = construction
             .sites
@@ -401,7 +524,7 @@ fn simulate(scenario: &Scenario, days: u64, step: f64) -> serde_json::Value {
         "houses": houses,
         "workplaces": workplaces_count,
         "house_jobs": industry_count * usize::try_from(JOBS_PER_HOUSE).expect("jobs"),
-        "industry_sites_planned": industry_count,
+        "industry_sites_planned": planned_industry_count,
         "step_seconds": step,
         "steps": step_count,
         "population": summary.population,
@@ -461,9 +584,31 @@ fn simulate(scenario: &Scenario, days: u64, step: f64) -> serde_json::Value {
         "bankrupt": economy.bankrupt,
         "economy_checksum": format!("{:016x}", economy.checksum()),
     });
+    if let Some(degraded) = degraded {
+        result["scene"] = serde_json::Value::String("city_loop_degraded".to_string());
+        result["degraded"] = serde_json::Value::String(degraded.name().to_string());
+        result["age"] =
+            serde_json::Value::String(Age::from_population(summary.population).name().to_string());
+    }
     let checksum = checksum_json(&result);
     result["checksum"] = serde_json::Value::String(format!("{checksum:016x}"));
     result
+}
+
+fn degraded_matrix_report(days: u64, step: f64) -> serde_json::Value {
+    let control = simulate(&SCENARIOS[1], days, step);
+    let variants: Vec<serde_json::Value> = Degraded::ALL
+        .iter()
+        .map(|degraded| simulate_with(&SCENARIOS[1], days, step, Some(*degraded)))
+        .collect();
+    serde_json::json!({
+        "scene": "city_loop_degraded_matrix",
+        "scenario": "mid",
+        "days": days,
+        "step_seconds": step,
+        "control": control,
+        "variants": variants,
+    })
 }
 
 fn balance_report(scenarios: &[Scenario], days: u64, step: f64) -> serde_json::Value {
@@ -597,6 +742,41 @@ mod tests {
         assert_eq!(result["jobs"], 500);
         assert!(result["average_commute_m"].as_f64().expect("commute") > 10.0);
         assert!(result["traffic_nodes"].as_u64().expect("nodes") > 2);
+    }
+
+    #[test]
+    fn degraded_variants_are_deterministic_and_short() {
+        let no_water = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Water));
+        let no_water_again = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Water));
+        assert_eq!(no_water["checksum"], no_water_again["checksum"]);
+        assert_eq!(no_water["degraded"], "no_water");
+        assert!(no_water["water_supply"].as_f64().expect("water") < 0.01);
+
+        let no_power = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Power));
+        assert!(no_power["power_supply"].as_f64().expect("power") < 0.01);
+        assert!(no_power["food_supply"].as_f64().expect("food") < 0.01);
+
+        let no_industry = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Industry));
+        assert_eq!(no_industry["industry_sites"], 0);
+        assert!(no_industry["food_supply"].as_f64().expect("food") < 0.01);
+
+        let no_roads = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Roads));
+        assert_eq!(no_roads["traffic_nodes"], 0);
+        assert_eq!(no_roads["road_segments"], 0);
+        assert!(no_roads["average_commute_m"].as_f64().expect("commute") > 0.0);
+
+        let no_utilities = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Utilities));
+        assert!(no_utilities["water_supply"].as_f64().expect("water") < 0.01);
+        assert!(no_utilities["power_supply"].as_f64().expect("power") < 0.01);
+    }
+
+    #[test]
+    fn degraded_matrix_has_one_entry_per_variant() {
+        let matrix = degraded_matrix_report(2, 3_600.0);
+        assert_eq!(matrix["scene"], "city_loop_degraded_matrix");
+        assert_eq!(matrix["variants"].as_array().expect("variants").len(), 5);
+        let again = degraded_matrix_report(2, 3_600.0);
+        assert_eq!(matrix, again);
     }
 
     #[test]

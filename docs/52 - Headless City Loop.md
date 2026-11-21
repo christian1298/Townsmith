@@ -178,6 +178,10 @@ This is a scripted recovery, not a balanced default. The standard 8/4 policy los
 - `scripts/bench_city_loop.sh` compares the early/mid/late checksums with `benchmarks/baselines/phase3_city_loop.json`.
 - Workspace: **458 tests + 2 doctests (460 passed)**.
 
+## 6b. Degraded matrix
+
+[[71 - Degraded City Matrix]] adds `--degraded <name>` and `--degraded-matrix` for no water/power/industry/roads/utilities, pinned in `benchmarks/baselines/phase3_city_loop_degraded.json`. The healthy early/mid/late checksums are unchanged.
+
 ## 7. Next
 
 1. Add utility-outage, road-disconnection, and food-shortage scenarios to the matrix.
