@@ -71,6 +71,30 @@ pub fn name_for(id: u64) -> String {
     format!("{first} {last}")
 }
 
+/// Derived display age in whole years for an identity.
+///
+/// Ages are deterministic in the 63-bit identity id and span `18..=64`. This
+/// is a derived placeholder, not persisted state: the household layer stores
+/// aggregate counts only, so there is no `age_days` field to read yet. The
+/// result is stable for a given id, and changing this function changes the
+/// displayed age of every identity.
+#[must_use]
+pub fn age_years(id: u64) -> u8 {
+    18 + (mix64(id ^ 0x4528_21e6_38d0_1377) % 47) as u8
+}
+
+/// Whether a resident slot is employed according to the household aggregate.
+///
+/// The household stores a worker count, not per-slot jobs, so employment is
+/// derived in ascending slot order: slots `0..household.workers` are employed
+/// and the remaining resident slots are not. This is a placeholder until
+/// per-slot jobs exist; it is read-only and never mutates or saves the
+/// household.
+#[must_use]
+pub fn slot_is_employed(household: &Household, slot: u32) -> bool {
+    slot < household.workers
+}
+
 /// One named resident.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamedCitizen {
@@ -548,6 +572,13 @@ mod tests {
         }
     }
 
+    fn household_with_workers(residents: u32, workers: u32) -> Household {
+        Household {
+            workers,
+            ..household(residents)
+        }
+    }
+
     #[test]
     fn ids_and_names_are_deterministic() {
         let id = citizen_id(2026, 7, 3);
@@ -558,6 +589,35 @@ mod tests {
         assert_eq!(name_for(id), name_for(id));
         assert!(!name_for(id).is_empty());
         assert!(id <= i64::MAX as u64);
+    }
+
+    #[test]
+    fn age_years_is_deterministic_and_in_the_adult_band() {
+        let mut seen = BTreeSet::new();
+        for id in 1..=10_000 {
+            let age = age_years(id);
+            assert!((18..=64).contains(&age), "id {id} produced age {age}");
+            assert_eq!(age_years(id), age, "id {id} must be deterministic");
+            seen.insert(age);
+        }
+        assert!(seen.len() > 1, "ages should cover more than one year");
+    }
+
+    #[test]
+    fn slot_is_employed_marks_only_leading_worker_slots() {
+        let household = household_with_workers(4, 2);
+        assert!(slot_is_employed(&household, 0));
+        assert!(slot_is_employed(&household, household.workers - 1));
+        assert!(!slot_is_employed(&household, household.workers));
+        assert!(!slot_is_employed(&household, household.residents - 1));
+        assert!(!slot_is_employed(&household, household.residents));
+
+        let no_workers = household_with_workers(3, 0);
+        assert!(!slot_is_employed(&no_workers, 0));
+        let all_workers = household_with_workers(3, 3);
+        assert!(slot_is_employed(&all_workers, 0));
+        assert!(slot_is_employed(&all_workers, 2));
+        assert!(!slot_is_employed(&all_workers, 3));
     }
 
     #[test]

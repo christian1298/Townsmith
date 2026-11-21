@@ -26,6 +26,7 @@ use core_blueprint::{
     load_tsbp, save_tsbp_with_hash, Blueprint, BlueprintError, BlueprintMetadata, BlueprintStats,
     PropRecord, RoomRecord,
 };
+use core_city::named::{age_years, slot_is_employed};
 use core_city::{
     advise, evaluate_tutorial, normalize_rotation, starter, summarize, AdvisorInput, AdvisorReport,
     Age, AgeState, CityLayout, CityRuntime, CitySummary, CityTier, ConstructionSite,
@@ -2381,6 +2382,12 @@ impl TownsmithCore {
     }
 
     /// Named residents of one home, sorted by slot.
+    ///
+    /// Each citizen carries `id`, `name`, `slot`, derived `age_years`
+    /// (deterministic 18–64 from the identity id), and `employed` (the first
+    /// `household.workers` slots). The household lookup is read-only; both
+    /// values are derived placeholders and are not saved. A missing household
+    /// reports `employed = false`.
     #[func]
     fn named_citizens_for(&self, seed: i64, placement_id: i64) -> VarDictionary {
         let Ok(seed) = u64::try_from(seed) else {
@@ -2396,6 +2403,14 @@ impl TownsmithCore {
         if !variant_bool(&state, "ok") {
             return state;
         }
+        let population = self
+            .population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let household = population
+            .as_ref()
+            .filter(|runtime| runtime.seed == seed)
+            .and_then(|runtime| runtime.households.get(&placement_id));
         let named = self.named.lock().unwrap_or_else(|error| error.into_inner());
         let mut citizens: Array<VarDictionary> = Array::new();
         if let Some(pool) = named.as_ref() {
@@ -2404,6 +2419,11 @@ impl TownsmithCore {
                 item.set("id", citizen.id as i64);
                 item.set("name", &GString::from(citizen.name.as_str()));
                 item.set("slot", i64::from(citizen.slot));
+                item.set("age_years", i64::from(age_years(citizen.id)));
+                item.set(
+                    "employed",
+                    household.is_some_and(|household| slot_is_employed(household, citizen.slot)),
+                );
                 citizens.push(&item);
             }
         }
