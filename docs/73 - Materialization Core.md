@@ -110,3 +110,50 @@ The call is read-only: it does not mutate the live named pool, population, save 
 1. Add hysteresis, pinned/selected priority, fade/pop handling, and a bounded route cache.
 2. Wire the active/detailed sets into the world scene and benchmark route.
 3. Add a materialization decision benchmark and a 2k-active/200-detailed route.
+   The selection half is done (section 7); the render route is still open.
+
+## 7. Benchmark
+
+```bash
+cargo run --release -p townsmith-bench --bin materialization
+cargo run --release -p townsmith-bench --bin materialization -- --smoke
+```
+
+The default fixture builds 100,000 identities (20,000 homes × 5 slots) on a
+15 m home grid and calls `select_near` 20 times at 150 m, 300 m, and 600 m with
+the default 2,000/200 budget. It prints one JSON object with the selected
+counts, median/p95 selection time, and an FNV-1a checksum of the selected ids
+and distance bits for each radius. The run is deterministic: the checksum is
+stable across repeats and rebuilds.
+
+The fixture deliberately exceeds `MAX_NAMED_CITIZENS` (4,096) as a scan-stress
+probe for a future cap increase. It never enters the save path; a real city
+pool is capped at 4,096 identities, so production selection is cheaper than
+these numbers.
+
+First run, 2026-11-21, Ryzen 9 7950X, `--release`, 20 timed runs (single
+machine, descriptive only):
+
+| Active radius | Detailed radius | Active | Detailed | Median | p95 | Checksum |
+|---:|---:|---:|---:|---:|---:|---|
+| 150 m | 45 m | 1,580 | 160 | 2.39 ms | 3.49 ms | `079796f0aa5c31e7` |
+| 300 m | 90 m | 2,000 | 200 | 3.17 ms | 3.60 ms | `686836f18c95e809` |
+| 600 m | 180 m | 2,000 | 200 | 6.55 ms | 7.22 ms | `686836f18c95e809` |
+
+At 300 m and above both caps bind: the nearest 2,000 citizens already lie
+inside 300 m, so widening the radius changes the scan cost (6.55 ms vs
+3.17 ms) without changing the capped selection or its checksum. The 150 m
+pass stays under the active cap (1,580), so the detailed prefix is 160
+rather than 200.
+
+`--smoke` uses a 6,000-identity, 40 × 30 grid at 20 m spacing, runs three
+radii twice, verifies caps, ordering, prefix, and duplicate-free ids, and
+compares against the pinned checksum `20f4ac0cbb20ff83`. Any mismatch exits
+non-zero. Two unit tests (`selection_is_deterministic_and_capped`,
+`ids_and_checksums_are_stable_across_rebuilds`) cover determinism, rebuild
+stability, cap enforcement, and the detailed prefix in-process.
+
+Limits: the benchmark times the current city-wide scan, not a spatial index;
+it reports selection only (no routes, agents, or rendering), and the timing is
+not a CI gate.
+
