@@ -192,12 +192,12 @@ Utility sites are added only when their building completes. Final result:
 
 Checksums:
 
-- city **`9578bd64586b2240`**
+- city **`623f39c61b71b68a`**
 - population `696784824ff74555`
 - construction `5ce06d0d9af1739e`
 - economy `1c213cc40278a13b`
 - industry `1b536bce524f0c76`
-- utilities `44e47a38faeb0edb`
+- utilities `06dc29a9ae3c15c5`
 
 The city now stays healthy at full service and the 30-day run is financially recoverable: a construction loan and a day-15 tax change carry it from a −19,712 dip back to 623, with 105,548 of debt remaining. [[53 - Treasury and Taxes]] covers the ledger, draw-down, and loan model.
 
@@ -207,7 +207,7 @@ The city now stays healthy at full service and the 30-day run is financially rec
 - `core_city::population`: 2 new tests — water/rest replenishment and supply clamping.
 - `core_city::industry`: 2 new tests — power scaling and outage with eating.
 - `godot_ext`: 2 new tests — utility JSON roundtrip/old save closed, invalid site rejection.
-- `core_city`: **146 tests**; bridge: **41 tests**; workspace: **353 tests + 1 doctest (354 passed)**.
+- `core_city`: **146 tests**; bridge: **41 tests**; workspace: **355 tests + 1 doctest (356 passed)**.
 - `city_loop` asserts full service, healthy needs, a non-zero road commute, and a stable checksum.
 - World-scene smoke adds water and power, verifies shortage recovery, production, save/clear/load, and beacons; marker `utilities=ok` is checked by the script.
 

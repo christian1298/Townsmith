@@ -138,12 +138,12 @@ Default result after 30 days:
 
 Checksums:
 
-- city: `9578bd64586b2240`
+- city: `623f39c61b71b68a`
 - population: `696784824ff74555`
 - construction: `5ce06d0d9af1739e`
 - economy: `1c213cc40278a13b`
 - industry: `1b536bce524f0c76`
-- utilities: `44e47a38faeb0edb`
+- utilities: `06dc29a9ae3c15c5`
 - traffic: `275387e1d7ae9bd3`
 
 ## 6. Microbenchmark
@@ -174,9 +174,9 @@ The pair-query path runs Dijkstra per call. The flow field is roughly **75× fas
 
 - `core_city::traffic`: 11 tests — empty graph, single segment, L shape, crossing split, T-junction, disconnected components, walking legs, duplicate edges, invalid points, flow fields, checksum stability.
 - `core_city::population`: road commute and disconnected fallback.
-- `townsmith-bench`: 2 city-loop tests (small city and a multi-row commute) and 1 traffic-grid test.
+- `townsmith-bench`: 4 city-loop tests (small city and a multi-row commute) and 1 traffic-grid test.
 - World scene smoke: `traffic=ok`, graph stats, one car, movement, save/load rebuild.
-- Workspace: **353 tests + 1 doctest**; core_city **146**, bridge **41**.
+- Workspace: **355 tests + 1 doctest**; core_city **146**, bridge **41**.
 
 ## 8. Limits
 
