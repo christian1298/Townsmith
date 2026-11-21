@@ -127,7 +127,7 @@ The world-scene smoke checks:
 
 - `core_city::library`: 3 tests — unique ids/lookup, non-empty catalogs per age, age/structure agreement.
 - `godot_ext`: `starter_blueprints_build_and_validate` generates all 20 starters and validates solid voxels, capacity/jobs, and structure bounds.
-- `core_city` total **188 tests**; bridge **50 tests**; workspace **429 tests + 2 doctests (431 passed)**.
+- `core_city` total **195 tests**; bridge **50 tests**; workspace **436 tests + 2 doctests (438 passed)**.
 
 ## 8. Limits
 
@@ -136,11 +136,11 @@ The world-scene smoke checks:
 - Catalog metadata is manual; changing a building's shape does not update capacity/jobs/cost.
 - Starter packages are cached by a versioned filename. Changing shell generation requires a version bump or cache clear.
 - No content-pack override, search, preview thumbnail, or library panel yet.
-- Age-specific construction trades are still 4.4c.
+- Age-specific construction trades are implemented in [[64 - Construction Trades]]; the generated shells do not yet select a trade-specific construction crew.
 
 ## 9. Next
 
-1. 4.4c: age-specific construction trades and crew requirements.
+1. 4.5: tutorial scenario and the wood-to-industrial balance pass.
 2. Add a starter-library panel with thumbnails and filters.
 3. Add room/prop templates and per-starter art.
 4. Move the catalog and shell recipes into data for mods.

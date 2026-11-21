@@ -150,7 +150,7 @@ Civic: school 100% · clinic 100% · fire 100% · police 100% · +8.0 research/d
 Marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok render=ok structure=ok age=ok research=ok occupancy=ok industry=ok utilities=ok services=ok economy=ok dashboard=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok trades=ok render=ok structure=ok age=ok research=ok starter=ok occupancy=ok industry=ok utilities=ok services=ok economy=ok dashboard=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 ## 9. Tests
@@ -158,9 +158,9 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 See [[63 - Starter Library]] for the age-gated building catalog and generated packages.
 
 - `core_city::services`: 13 tests — empty, school coverage/research, clinic/fire/police, capacity shortage, out-of-range, overlapping research, tier-stat validation, zero demand, tiers/aliases, remove/clear, JSON/checksum, invalid ranges.
-- `core_city`: **188 tests**.
+- `core_city`: **195 tests**.
 - `godot_ext`: 3 new tests — service JSON roundtrip/old save, invalid sites, civic research rate; **49 tests**.
-- Workspace: **429 tests + 2 doctests (431 passed)**.
+- Workspace: **436 tests + 2 doctests (438 passed)**.
 
 ## 10. Limits
 

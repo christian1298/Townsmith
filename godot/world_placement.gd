@@ -1484,7 +1484,7 @@ func _update_hud() -> void:
 			float(city.get("water", 0.0)) * 100.0,
 			float(city.get("rest", 0.0)) * 100.0,
 		]
-	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nAge: %s\nResearch: %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nIndustry: %s\nUtilities: %s\nCivic: %s\nTraffic: %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
+	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nAge: %s\nResearch: %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nIndustry: %s\nUtilities: %s\nCivic: %s\nTraffic: %s\nConstruction: %d active / %d stalled   Crew: %d/%d   Trades: %d   Materials: %d L   Save: %s" % [
 		selected_line,
 		int(target_x),
 		int(target_z),
@@ -1513,7 +1513,9 @@ func _update_hud() -> void:
 		traffic_text,
 		int(construction.get("active", 0)),
 		int(construction.get("stalled", 0)),
+		int(construction.get("effective_crew", 0)),
 		int(construction.get("crew_capacity", 0)),
+		int(construction.get("trades", []).size()),
 		int(construction.get("materials_stock", 0)),
 		save_path,
 	]
@@ -2080,11 +2082,13 @@ func _add_construction_node(placement: Dictionary, site: Dictionary) -> void:
 
 func _construction_label(site: Dictionary) -> String:
 	var phase := str(site.get("phase_label", site.get("phase", "Construction")))
+	var trade := str(site.get("trade_name", ""))
 	var percent := roundi(float(site.get("progress", 0.0)) * 100.0)
 	var stall := str(site.get("stall_reason", ""))
+	var trade_text := "" if trade == "" else " · " + trade
 	if stall != "":
-		return "%s %d%% · stalled: %s" % [phase, percent, stall]
-	return "%s %d%%" % [phase, percent]
+		return "%s%s %d%% · stalled: %s" % [phase, trade_text, percent, stall]
+	return "%s%s %d%%" % [phase, trade_text, percent]
 
 func _refresh_construction_visuals() -> void:
 	if construction_nodes.is_empty():
@@ -2133,6 +2137,7 @@ func _research_next() -> void:
 func _advance_construction(seconds: float) -> Dictionary:
 	if seconds <= 0.0:
 		return {}
+	core.construction_set_trades(SEED)
 	var report: Dictionary = core.construction_tick(seconds)
 	core.utilities_refresh(SEED)
 	core.services_refresh(SEED)
@@ -2258,6 +2263,7 @@ func _run_scene_smoke() -> void:
 	var return_ok := false
 	var build_ok := false
 	var build_done_ok := false
+	var trades_ok := false
 	var render_ok := false
 	var structure_ok := false
 	var age_ok := false
@@ -2389,6 +2395,11 @@ func _run_scene_smoke() -> void:
 		_advance_construction(2.0)
 		var after_site := _construction_site_for(1)
 		build_ok = build_ok and float(after_site.get("progress", 0.0)) > before_progress
+		var trade_summary: Dictionary = core.construction_summary()
+		trades_ok = int(trade_summary.get("trades", []).size()) > 0
+		trades_ok = trades_ok and int(trade_summary.get("effective_crew", 0)) >= 1
+		var trade_site := _construction_site_for(1)
+		trades_ok = trades_ok and str(trade_site.get("trade", "")) != ""
 		var city_before: Dictionary = core.city_summary()
 		occupancy_before_ok = int(city_before.get("population", -1)) == 0
 		occupancy_before_ok = occupancy_before_ok and int(city_before.get("housing_capacity", -1)) == 0
@@ -2397,6 +2408,8 @@ func _run_scene_smoke() -> void:
 		occupancy_before_ok = occupancy_before_ok and int(city_before.get("construction_sites", -1)) == 1
 		if not build_ok:
 			status = "construction_failed"
+		elif not trades_ok:
+			status = "trades_failed"
 
 	if status == "ok":
 		mayor_camera.focus(Vector3(FIXTURE_X, 42.0, FIXTURE_Z), 60.0)
@@ -2878,7 +2891,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s render=%s structure=%s age=%s research=%s starter=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s starter=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -2890,6 +2903,7 @@ func _run_scene_smoke() -> void:
 		"ok" if settlement_ok else "failed",
 		"ok" if build_ok else "failed",
 		"ok" if build_done_ok else "failed",
+		"ok" if trades_ok else "failed",
 		"ok" if render_ok else "failed",
 		"ok" if structure_ok else "failed",
 		"ok" if age_ok else "failed",
