@@ -16,11 +16,9 @@ use core_city::{
 };
 
 const DEFAULT_DAYS: u64 = 30;
-const DEFAULT_HOUSES: u64 = 50;
 const DEFAULT_STEP_SECONDS: f64 = 300.0;
 const CAPACITY_PER_HOUSE: u32 = 10;
 const JOBS_PER_HOUSE: u32 = 10;
-const WORKPLACES: u64 = 5;
 const JOBS_PER_WORKPLACE: u32 = 80;
 const SOLID_VOXELS: u64 = 10_000;
 const CREW_CAPACITY: u16 = 8;
@@ -30,35 +28,122 @@ const MAX_FINANCED_BUILDINGS: u64 = 116;
 const RECOVERY_TAX_PER_RESIDENT: f64 = 20.0;
 const RECOVERY_TAX_PER_JOB: f64 = 4.0;
 
+/// One named city-loop scenario.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Scenario {
+    name: &'static str,
+    houses: u64,
+    workplaces: u64,
+    industry_count: u64,
+    recovery_day: f64,
+    water_ids: &'static [u64],
+    power_ids: &'static [u64],
+}
+
+const SCENARIOS: [Scenario; 3] = [
+    Scenario {
+        name: "early",
+        houses: 10,
+        workplaces: 1,
+        industry_count: 3,
+        recovery_day: 15.0,
+        water_ids: &[1, 10],
+        power_ids: &[1, 5, 10],
+    },
+    Scenario {
+        name: "mid",
+        houses: 50,
+        workplaces: 5,
+        industry_count: 10,
+        recovery_day: 15.0,
+        water_ids: &[1, 10],
+        power_ids: &[1, 5, 10],
+    },
+    Scenario {
+        name: "late",
+        houses: 100,
+        workplaces: 10,
+        industry_count: 20,
+        recovery_day: 5.0,
+        water_ids: &[1, 10, 91, 100],
+        power_ids: &[1, 10, 46, 55, 91, 100],
+    },
+];
+
 fn main() {
     let days = arg_value("--days")
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(DEFAULT_DAYS);
-    let houses = arg_value("--houses")
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_HOUSES);
     let step = arg_value("--step")
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(DEFAULT_STEP_SECONDS);
-    if days == 0 || houses == 0 || !step.is_finite() || step <= 0.0 {
-        eprintln!("usage: city_loop [--days N] [--houses N] [--step SECONDS]");
-        std::process::exit(2);
-    }
-    if houses + WORKPLACES > MAX_FINANCED_BUILDINGS {
+    let matrix = std::env::args().any(|arg| arg == "--matrix");
+    if days == 0 || !step.is_finite() || step <= 0.0 {
         eprintln!(
-            "city_loop: at most {MAX_FINANCED_BUILDINGS} buildings (including {WORKPLACES} workplaces) are supported by the starting balance and loan limit"
+            "usage: city_loop [--scenario early|mid|late] [--days N] [--houses N] [--workplaces N] [--step SECONDS] [--matrix]"
         );
         std::process::exit(2);
     }
 
-    let output = simulate(days, houses, step);
+    if matrix {
+        let scenarios: Vec<serde_json::Value> = SCENARIOS
+            .iter()
+            .map(|scenario| simulate(scenario, days, step))
+            .collect();
+        let output = serde_json::json!({
+            "scene": "city_loop_matrix",
+            "days": days,
+            "step_seconds": step,
+            "scenarios": scenarios,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).expect("pretty json")
+        );
+        return;
+    }
+
+    let mut scenario = match arg_value("--scenario") {
+        Some(name) => match SCENARIOS.iter().find(|scenario| scenario.name == name) {
+            Some(scenario) => *scenario,
+            None => {
+                eprintln!("city_loop: unknown scenario '{name}' (expected early, mid, or late)");
+                std::process::exit(2);
+            }
+        },
+        None => SCENARIOS[1],
+    };
+    if let Some(houses) = arg_value("--houses").and_then(|value| value.parse::<u64>().ok()) {
+        scenario.houses = houses;
+    }
+    if let Some(workplaces) = arg_value("--workplaces").and_then(|value| value.parse::<u64>().ok())
+    {
+        scenario.workplaces = workplaces;
+    }
+    if scenario.houses == 0 || scenario.workplaces == 0 {
+        eprintln!("city_loop: houses and workplaces must be greater than zero");
+        std::process::exit(2);
+    }
+    if scenario.houses + scenario.workplaces > MAX_FINANCED_BUILDINGS {
+        eprintln!(
+            "city_loop: at most {MAX_FINANCED_BUILDINGS} buildings (including {} workplaces) are supported by the starting balance and loan limit",
+            scenario.workplaces
+        );
+        std::process::exit(2);
+    }
+
+    let output = simulate(&scenario, days, step);
     println!(
         "{}",
         serde_json::to_string_pretty(&output).expect("pretty json")
     );
 }
 
-fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
+fn simulate(scenario: &Scenario, days: u64, step: f64) -> serde_json::Value {
+    let houses = scenario.houses;
+    let workplaces_count = scenario.workplaces;
+    let industry_count =
+        usize::try_from(scenario.industry_count.min(houses)).expect("industry count fits usize");
     let seed = 2026;
     let mut placements = PlacementStore::new(seed);
     let mut construction = ConstructionStore::new(CREW_CAPACITY, MATERIALS_STOCK);
@@ -77,7 +162,11 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
             rotation_deg: 0,
             material_cost: CONSTRUCTION_COST_PER_BUILDING,
             resident_capacity: CAPACITY_PER_HOUSE,
-            job_slots: if index < 10 { JOBS_PER_HOUSE } else { 0 },
+            job_slots: if (index as usize) < industry_count {
+                JOBS_PER_HOUSE
+            } else {
+                0
+            },
             solid_voxels: SOLID_VOXELS,
         };
         let plan = PlacementPlan {
@@ -91,7 +180,7 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
             .push(Placement::from_request(id, &request, plan));
         construction.add_site(id, SOLID_VOXELS).expect("site");
     }
-    for index in 0..WORKPLACES {
+    for index in 0..workplaces_count {
         let id = houses + index + 1;
         let x = 116.0;
         let z = 128.0 + index as f32 * 20.0;
@@ -120,7 +209,7 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
             .push(Placement::from_request(id, &request, plan));
         construction.add_site(id, SOLID_VOXELS).expect("site");
     }
-    placements.next_id = houses + WORKPLACES + 1;
+    placements.next_id = houses + workplaces_count + 1;
 
     let rows = houses.div_ceil(10);
     let mut road_store = RoadStore::new(seed);
@@ -142,18 +231,21 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
     let traffic = RoadGraph::build(&road_store.roads).expect("traffic graph");
 
     let mut industry = IndustryStore::new(seed);
-    for index in 0..houses.min(10) {
-        let kind = match index {
+    for index in 0..industry_count {
+        let kind = match index % 10 {
             0..=3 => IndustryKind::Farm,
             4..=6 => IndustryKind::Lumberjack,
             _ => IndustryKind::Hunt,
         };
-        industry.add_site(index + 1, kind).expect("industry site");
+        let id = u64::try_from(index).expect("industry id") + 1;
+        industry.add_site(id, kind).expect("industry site");
     }
 
-    let utility_span = houses.min(10);
-    let water_ids: BTreeSet<u64> = [1, utility_span].into_iter().collect();
-    let power_ids: BTreeSet<u64> = [1, 5.min(utility_span), utility_span].into_iter().collect();
+    let utility_span = houses;
+    let water_count = (houses / 25).max(2);
+    let power_count = (houses / 20).max(3);
+    let water_ids = even_ids(utility_span, water_count);
+    let power_ids = even_ids(utility_span, power_count);
     let mut utilities = UtilityStore::new(seed);
     let mut added_utilities: BTreeSet<(u64, UtilityKind)> = BTreeSet::new();
     let mut utility_report = UtilityReport::default();
@@ -161,7 +253,7 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
     let mut runtime = CityRuntime::new(seed);
     runtime.set_move_in_per_second(5.0);
     let mut economy = Economy::new(seed);
-    let construction_cost = (houses + WORKPLACES) as f64 * CONSTRUCTION_COST_PER_BUILDING;
+    let construction_cost = (houses + workplaces_count) as f64 * CONSTRUCTION_COST_PER_BUILDING;
     let loan_amount = (construction_cost - 50_000.0).clamp(50_000.0, MAX_LOAN);
     economy
         .take_loan(
@@ -171,7 +263,7 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
         )
         .expect("construction loan");
     economy.charge_construction(construction_cost);
-    let recovery_day = days as f64 / 2.0;
+    let recovery_day = scenario.recovery_day.min(days as f64);
     let mut recovered = false;
     let mut min_balance = economy.balance;
     let mut min_balance_day = 0.0;
@@ -291,10 +383,13 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
     let summary = summarize(&placements, &construction, &runtime, 0);
     let mut result = serde_json::json!({
         "scene": "city_loop",
+        "scenario": scenario.name,
         "seed": seed,
         "days": days,
         "houses": houses,
-        "workplaces": WORKPLACES,
+        "workplaces": workplaces_count,
+        "house_jobs": industry_count * usize::try_from(JOBS_PER_HOUSE).expect("jobs"),
+        "industry_sites_planned": industry_count,
         "step_seconds": step,
         "steps": step_count,
         "population": summary.population,
@@ -359,6 +454,18 @@ fn simulate(days: u64, houses: u64, step: f64) -> serde_json::Value {
     result
 }
 
+fn even_ids(span: u64, count: u64) -> BTreeSet<u64> {
+    if span == 0 || count == 0 {
+        return BTreeSet::new();
+    }
+    if count == 1 {
+        return [1].into_iter().collect();
+    }
+    (0..count)
+        .map(|index| 1 + index * (span - 1) / (count - 1))
+        .collect()
+}
+
 fn checksum_json(value: &serde_json::Value) -> u64 {
     let mut checksum = 0xcbf2_9ce4_8422_2325_u64;
     for byte in serde_json::to_vec(value).expect("json") {
@@ -386,16 +493,28 @@ fn arg_value(name: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn test_scenario(houses: u64, workplaces: u64) -> Scenario {
+        Scenario {
+            name: "test",
+            houses,
+            workplaces,
+            industry_count: houses.min(10),
+            recovery_day: 15.0,
+            water_ids: &[],
+            power_ids: &[],
+        }
+    }
+
     #[test]
     fn a_five_house_city_completes_and_fills() {
-        let result = simulate(1, 5, 60.0);
+        let result = simulate(&test_scenario(5, 5), 1, 60.0);
         assert_eq!(result["population"], 50);
         assert_eq!(
             result["jobs"],
-            5 * JOBS_PER_HOUSE as u64 + WORKPLACES * JOBS_PER_WORKPLACE as u64
+            5 * JOBS_PER_HOUSE as u64 + 5 * JOBS_PER_WORKPLACE as u64
         );
         assert_eq!(result["employed"], 50);
-        assert_eq!(result["completed_buildings"], 5 + WORKPLACES);
+        assert_eq!(result["completed_buildings"], 5 + 5);
         assert_eq!(result["construction_sites"], 0);
         assert!(result["construction_spent"].as_f64().expect("spent") > 0.0);
         assert!(result["debt"].as_f64().expect("debt") > 0.0);
@@ -418,15 +537,47 @@ mod tests {
         assert!(result["average_commute_m"].as_f64().expect("commute") >= 0.0);
         assert!(result["traffic_nodes"].as_u64().expect("nodes") >= 2);
         assert!(result["traffic_edges"].as_u64().expect("edges") >= 1);
-        assert_eq!(result["checksum"], simulate(1, 5, 60.0)["checksum"]);
+        assert_eq!(
+            result["checksum"],
+            simulate(&test_scenario(5, 5), 1, 60.0)["checksum"]
+        );
     }
 
     #[test]
     fn houses_beyond_the_first_row_use_road_commutes() {
-        let result = simulate(1, 15, 60.0);
+        let result = simulate(&test_scenario(15, 5), 1, 60.0);
         assert_eq!(result["population"], 150);
         assert_eq!(result["jobs"], 500);
         assert!(result["average_commute_m"].as_f64().expect("commute") > 10.0);
         assert!(result["traffic_nodes"].as_u64().expect("nodes") > 2);
+    }
+
+    #[test]
+    fn scenario_presets_have_expected_sizes() {
+        let early = SCENARIOS[0];
+        let mid = SCENARIOS[1];
+        let late = SCENARIOS[2];
+        assert_eq!((early.houses, early.workplaces), (10, 1));
+        assert_eq!((mid.houses, mid.workplaces), (50, 5));
+        assert_eq!((late.houses, late.workplaces), (100, 10));
+        assert!(early.recovery_day >= late.recovery_day);
+    }
+
+    #[test]
+    fn early_scenario_completes_and_fills() {
+        let early = SCENARIOS[0];
+        let result = simulate(&early, 30, 300.0);
+        assert_eq!(result["scenario"], "early");
+        assert_eq!(result["population"], 100);
+        assert_eq!(result["jobs"], 110);
+        assert_eq!(result["employed"], 100);
+        assert_eq!(result["completed_buildings"], 11);
+        assert_eq!(result["construction_sites"], 0);
+        assert_eq!(result["bankrupt"], false);
+        assert!(result["balance"].as_f64().expect("balance") > 0.0);
+        assert!(result["water_supply"].as_f64().expect("water") > 0.99);
+        assert!(result["power_supply"].as_f64().expect("power") > 0.99);
+        assert!(result["food_supply"].as_f64().expect("food") > 0.99);
+        assert_eq!(result["checksum"], simulate(&early, 30, 300.0)["checksum"]);
     }
 }

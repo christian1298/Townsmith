@@ -234,6 +234,9 @@ cargo run --release -p townsmith-bench --bin cohort
 # 30-day headless city loop (construction, move-in, jobs, needs, wages)
 cargo run --release -p townsmith-bench --bin city_loop
 
+# Early/mid/late runner matrix against the committed baseline
+./scripts/bench_city_loop.sh
+
 # Road graph and flow-field microbenchmark
 cargo run --release -p townsmith-bench --bin traffic
 

@@ -74,6 +74,7 @@ cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort
 cargo run --release -p townsmith-bench --bin city_loop
+./scripts/bench_city_loop.sh
 cargo run --release -p townsmith-bench --bin traffic
 cargo run --release -p townsmith-bench --bin terrain
 cargo run --release -p townsmith-bench --bin city_layout

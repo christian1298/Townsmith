@@ -40,7 +40,7 @@ The full feature list is in [[08 - Roadmap]]. This plan cuts it into reviewable 
 | **3.6** | Economy: taxes, upkeep, construction draw-down, loans, bankruptcy | **Done** — PR #67, see [[53 - Treasury and Taxes]] |
 | **3.7** | Traffic: road graph, flow fields, visual vehicles | **Done** — PR #69, see [[56 - Traffic]] |
 | **3.8** | Dashboard and advisor: city metrics, district panel, notifications | **Done** — PR #71, see [[57 - Dashboard and Advisor]] |
-| **3.9** | Headless 30-day runner and regression metrics | Next — city-loop runner exists (PR #61); see [[52 - Headless City Loop]] |
+| **3.9** | Headless 30-day runner and regression metrics | **This PR** — early/mid/late matrix, see [[58 - Runner Matrix]] |
 
 Each stage is a separate branch, worktree, and PR. Keep simulation deterministic and headless-testable.
 
@@ -202,7 +202,7 @@ See [[54 - Primary Industries]] for rates, structs, tick order, persistence, HUD
 - `cargo test -p core_city` — industry, staffing, and food-replenishment tests.
 - `cargo test --workspace`.
 - `smoke_world_scene.sh` — industry site, production, supply, beacon, save/clear/load; marker `industry=ok` (checked by the script).
-- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `9578bd64586b2240`.
+- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `623f39c61b71b68a`.
 - clippy and fmt.
 
 ## 6e. Stage 3.5 scope
@@ -232,9 +232,9 @@ See [[55 - Utilities]] for rates, formulas, tick order, persistence, HUD, tests,
 ### Verification
 
 - `cargo test -p core_city` — utilities, population service, industry power tests.
-- `cargo test --workspace` — **353 tests + 1 doctest (354 passed)**.
+- `cargo test --workspace` — **355 tests + 1 doctest (356 passed)**.
 - `smoke_world_scene.sh` — water/power service, needs recovery, production, persistence, beacons; marker `utilities=ok` (checked by the script).
-- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `9578bd64586b2240`.
+- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `623f39c61b71b68a`.
 - clippy and fmt.
 
 ## 6f. Stage 3.6 scope
@@ -248,7 +248,7 @@ See [[55 - Utilities]] for rates, formulas, tick order, persistence, HUD, tests,
 - HUD balance, daily net, tax, debt, and bankruptcy state.
 - World save/load with loans; old saves load debt-free.
 - World-scene smoke coverage for spending, borrowing, tax recovery, and persistence; marker `economy=ok`.
-- 30-day runner with construction spend, a 100,000 loan, and a day-15 tax recovery.
+- 30-day runner with construction spend, a 115,000 mid-profile loan, and a day-15 tax recovery.
 
 ### Out
 
@@ -265,9 +265,9 @@ See [[53 - Treasury and Taxes]] for the ledger, loan model, formulas, controls, 
 ### Verification
 
 - `cargo test -p core_city` — economy construction, loan, bankruptcy, and old-save tests.
-- `cargo test --workspace` — **353 tests + 1 doctest (354 passed)**.
+- `cargo test --workspace` — **355 tests + 1 doctest (356 passed)**.
 - `smoke_world_scene.sh` — placement charge, loan, tax recovery, save/load; marker `economy=ok` (checked by the script).
-- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `9578bd64586b2240`.
+- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `623f39c61b71b68a`.
 - clippy and fmt.
 
 ## 6g. Stage 3.7 scope
@@ -297,9 +297,9 @@ See [[56 - Traffic]] for the graph model, flow fields, commute integration, 30-d
 ### Verification
 
 - `cargo test -p core_city` — traffic graph, flow field, and road-commute tests.
-- `cargo test --workspace` — **353 tests + 1 doctest (354 passed)**.
+- `cargo test --workspace` — **355 tests + 1 doctest (356 passed)**.
 - `smoke_world_scene.sh` — graph stats, cars, movement, save/load; marker `traffic=ok` (checked by the script).
-- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `9578bd64586b2240`.
+- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `623f39c61b71b68a`.
 - `cargo run --release -p townsmith-bench --bin traffic` — graph and flow-field benchmark.
 - clippy and fmt.
 
@@ -311,7 +311,7 @@ See [[56 - Traffic]] for the graph model, flow fields, commute integration, 30-d
 - Stable message codes and deterministic sort/limit.
 - Rules for bankruptcy, food/water/power, unemployment, vacancies, happiness, commute, budget, debt, roads, and construction.
 - Bridge `city_advisor(seed)` with counts and message records.
-- Right-side dashboard panel; `D` toggles, `Esc` closes.
+- Right-side dashboard panel; `F1` toggles, `Esc` closes.
 - Dashboard sections for population, jobs, wellbeing, services, treasury, roads, and construction.
 - World-scene smoke for the deficit warning and panel toggle; marker `dashboard=ok`.
 - `docs/57` for the dashboard, rules, bridge, and limits.
@@ -326,14 +326,44 @@ See [[56 - Traffic]] for the graph model, flow fields, commute integration, 30-d
 ### Verification
 
 - `cargo test -p core_city` — 9 advisor tests.
-- `cargo test --workspace` — **353 tests + 1 doctest (354 passed)**.
+- `cargo test --workspace` — **355 tests + 1 doctest (356 passed)**.
 - `smoke_world_scene.sh` — budget-deficit advice, panel toggle, text; marker `dashboard=ok` (checked by the script).
-- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `9578bd64586b2240`.
+- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `623f39c61b71b68a`.
+- clippy and fmt.
+
+## 6i. Stage 3.9 scope
+
+### In
+
+- `--scenario early|mid|late` profiles in `townsmith-bench --bin city_loop`.
+- `--matrix` output for all three scenarios in one JSON document.
+- `scripts/bench_city_loop.sh` for a one-command regression run.
+- Committed baseline `benchmarks/baselines/phase3_city_loop.json` with full results and checksums.
+- Docs 58 for the profiles, commands, results, baseline, and limits.
+- Unit coverage for scenario presets and the early profile.
+
+### Out
+
+- Degraded scenarios (utility outage, disconnected roads, food shortage).
+- Rendering/FPS scenarios; the 60 FPS gate stays separate.
+- Player saves or terrain-validated layouts.
+- Automatic CI scheduling; the script is the gate entry point.
+
+### Data
+
+See [[58 - Runner Matrix]] for the scenario table, exact results, and checksums.
+
+### Verification
+
+- `cargo test --workspace` — **355 tests + 1 doctest (356 passed)**.
+- `./scripts/bench_city_loop.sh` — three scenario checksums match the baseline.
+- `cargo run --release -p townsmith-bench --bin city_loop -- --matrix` — same values.
 - clippy and fmt.
 
 ## 7. Next
 
-1. 3.9: runner matrix (early town, mid city, late city) and committed baselines.
+1. Add degraded matrix scenarios: utility outage, disconnected roads, food shortage.
 2. Materialize a few named citizens for selection and stories.
 3. Add a spatial index and incremental traffic graph updates before the 1M gate.
 4. Keep the 500-citizen/50-building 60 FPS gate visible from the first slice.
+5. Record the Q-101 30-minute human playtest.

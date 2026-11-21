@@ -11,6 +11,9 @@ Phase 0 benchmark fixtures and results.
 ## Phase 0 commands
 
 ```bash
+# Phase 3 city-loop matrix (early/mid/late) against the committed baseline
+./scripts/bench_city_loop.sh
+
 # Core CPU microbenchmarks (3 runs, aggregated JSON)
 ./scripts/bench_core.sh
 

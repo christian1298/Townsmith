@@ -134,7 +134,7 @@ The runner now charges **3,000 per building** (165,000 total for 50 houses and 5
 
 The city dips below zero but stays above the bankruptcy threshold, then returns positive after the tax change. The average commute is 136.4 m and is covered in [[56 - Traffic]]. This is the first version of “near-bankruptcy is recoverable” rather than a proof that the default tax rate is balanced.
 
-City checksum: `9578bd64586b2240`. Economy checksum: `1c213cc40278a13b`.
+City checksum: `623f39c61b71b68a`. Economy checksum: `1c213cc40278a13b`.
 
 ## 8. Bridge
 
@@ -187,9 +187,9 @@ The world-scene smoke checks:
 
 - `core_city::economy`: 14 tests — starting balance, income/expenses, clamped rates, bankruptcy, construction affordability, loan cash/interest/repayment, payoff, bankruptcy borrowing block, payment underflow, debt limit, daily net, JSON/checksum, old-save debt default, invalid balance.
 - `godot_ext`: 41 tests, including economy JSON/loan roundtrip, old-save loans default, and invalid balance.
-- `core_city` total **146**; bridge **41**; workspace **353 tests + 1 doctest**; 30-day runner 2 tests.
+- `core_city` total **146**; bridge **41**; workspace **355 tests + 1 doctest**; 30-day runner 4 tests.
 - `city_loop` bin test asserts construction spending, debt, positive final balance, and no bankruptcy.
-- 30-day city-loop checksum: `9578bd64586b2240`.
+- 30-day city-loop checksum: `623f39c61b71b68a`.
 
 ## 12. Limits
 

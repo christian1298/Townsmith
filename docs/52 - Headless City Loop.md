@@ -19,7 +19,9 @@ tags:
 
 ```bash
 cargo run --release -p townsmith-bench --bin city_loop
-cargo run --release -p townsmith-bench --bin city_loop -- --days 10 --houses 100 --step 60
+cargo run --release -p townsmith-bench --bin city_loop -- --scenario late
+cargo run --release -p townsmith-bench --bin city_loop -- --matrix
+cargo run --release -p townsmith-bench --bin city_loop -- --scenario late --days 10 --step 60
 ```
 
 Arguments:
@@ -27,10 +29,13 @@ Arguments:
 | Flag | Default | Meaning |
 |---|---:|---|
 | `--days` | 30 | Simulated game days |
-| `--houses` | 50 | Houses in the fixed 10 × 5 grid |
 | `--step` | 300 | Simulation step in seconds |
+| `--scenario` | mid | `early`, `mid`, or `late` preset |
+| `--houses` | 50 | Custom houses; ignored with a scenario unless overridden |
+| `--workplaces` | 5 | Custom workshops; ignored with a scenario unless overridden |
+| `--matrix` | off | Run all three scenarios in one JSON document |
 
-The runner builds **50 houses + 5 workshops = 55 buildings**. Houses start at `(128, 128)`, 20 m apart; workshops sit at `x = 116` on the five house rows. The cap is 111 houses (116 buildings total) so the starting balance plus the maximum loan can cover the flat 3,000-per-building cost.
+The default profile is **mid: 50 houses + 5 workshops = 55 buildings**. The early and late profiles are **10 + 1** and **100 + 10**; see [[58 - Runner Matrix]] for the full table. Houses start at `(128, 128)`, 20 m apart; workshops sit at `x = 116` on the five house rows. The cap is 111 houses (116 buildings total) so the starting balance plus the maximum loan can cover the flat 3,000-per-building cost.
 
 Each house has:
 
@@ -81,7 +86,7 @@ stock                 wood 7,199 · food 4,799 · hides 1,800
 food supply           100%
 ```
 
-Recorded checksum: `9578bd64586b2240` (FNV-1a over the compact JSON without the checksum field).
+Recorded checksum: `623f39c61b71b68a` (FNV-1a over the compact JSON without the checksum field).
 
 Secondary values are pinned:
 
@@ -89,8 +94,20 @@ Secondary values are pinned:
 - construction store: `5ce06d0d9af1739e`
 - treasury: `1c213cc40278a13b`
 - industry: `1b536bce524f0c76`
-- utilities: `44e47a38faeb0edb`
+- utilities: `06dc29a9ae3c15c5`
 - traffic: `275387e1d7ae9bd3`
+
+## 2b. Scenario matrix
+
+`--matrix` runs the three Phase 3.9 profiles:
+
+| Scenario | Houses | Workshops | Industry | Population | Jobs | Completed | Balance | Checksum |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| early | 10 | 1 | 3 | 100 | 110 | 11 | 104,517 | `2c3f7f5addabcce4` |
+| mid | 50 | 5 | 10 | 500 | 500 | 55 | 623 | `623f39c61b71b68a` |
+| late | 100 | 10 | 20 | 1,000 | 1,000 | 110 | 39,356 | `f8ca4399dfed44b0` |
+
+All three complete construction, reach full water/power/food supply, and stay above bankruptcy. The late profile switches to the 20/4 recovery tax on day 5; early and mid switch on day 15. Full results, baseline details, and the regression command are in [[58 - Runner Matrix]].
 
 ## 3. What it proves
 
@@ -132,10 +149,13 @@ This is a scripted recovery, not a balanced default. The standard 8/4 policy los
 
 - `city_loop` bin: five houses complete, fill 50 residents, staff their sites, produce food/wood, and record construction spending and debt in one simulated day.
 - `city_loop` bin: 15 houses produce a non-zero road commute.
-- Workspace: **353 tests + 1 doctest**.
+- `city_loop` bin: scenario presets have the expected sizes.
+- `city_loop` bin: the early profile completes, fills, and reaches full service.
+- `scripts/bench_city_loop.sh` compares the early/mid/late checksums with `benchmarks/baselines/phase3_city_loop.json`.
+- Workspace: **355 tests + 1 doctest**.
 
 ## 7. Next
 
-1. 3.9: runner matrix (early town, mid city, late city) and committed baselines under `benchmarks/results/`.
-3. Tune industry rates against the treasury and the headless baseline.
-4. Add utility-outage and road-disconnection scenarios and pin the degraded results.
+1. Add utility-outage, road-disconnection, and food-shortage scenarios to the matrix.
+2. Tune industry rates against the treasury and the headless baseline.
+3. Record the Q-101 human playtest before Phase 3 exit.

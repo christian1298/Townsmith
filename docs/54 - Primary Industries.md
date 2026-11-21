@@ -204,12 +204,12 @@ All fifty buildings have ten residents and ten job slots. Each household fills i
 
 Checksums:
 
-- city loop: `9578bd64586b2240`
+- city loop: `623f39c61b71b68a`
 - population runtime: `696784824ff74555`
 - construction: `5ce06d0d9af1739e`
 - treasury: `1c213cc40278a13b`
 - industry: `1b536bce524f0c76`
-- utilities: `44e47a38faeb0edb`
+- utilities: `06dc29a9ae3c15c5`
 
 Food now reaches the city and stays at 100%; [[55 - Utilities]] keeps water and rest at 100% and full power keeps production at the full rate. The first industry step uses the previous staff assignment, so lifetime production is still a fraction below the ideal 30-day rate.
 
@@ -219,7 +219,7 @@ Food now reaches the city and stays at 100%; [[55 - Utilities]] keeps water and 
 - `core_city::population`: 3 new tests — per-workplace staffing, food replenishment, old saves without staffing.
 - `godot_ext`: 4 new tests — industry JSON roundtrip/old save, unknown kind/invalid stock, staffing roundtrip, stale-staffing sanitize.
 - `city_loop`: the five-house test asserts sites, food stock, wood production, full supply, and happiness > 0.6; the 15-house test covers a road commute.
-- Workspace: **353 tests + 1 doctest** (52 voxel, 62 world, 26 simulation, 146 city, 11 blueprint, 12 rooms, 41 bridge, 2 city-loop tests, and 1 traffic-grid test).
+- Workspace: **355 tests + 1 doctest** (52 voxel, 62 world, 26 simulation, 146 city, 11 blueprint, 12 rooms, 41 bridge, 4 city-loop tests, and 1 traffic-grid test).
 
 ## 8. Limits
 
