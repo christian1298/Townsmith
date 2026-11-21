@@ -429,6 +429,35 @@ One local developer run (Ryzen 9 7950X, Linux, Godot 4.7.2 headless; timings are
 > [!warning] This is setup evidence, not FPS evidence
 > It runs with a dummy renderer. It does **not** measure FPS, GPU time, draw calls, fill rate, LOD or impostors, streaming, culling, shadows, GI, real voxel buildings, or a 1M population. It does not close G-01, G-03, G-08, or any check in §8. The full pass only proves the CPU-side instance setup and memory shape at the gate's building count.
 
+### 7.6 250k frame-budget route — PR #136
+
+`godot/metropolis_gate.gd` builds a deterministic 250k-box city (500 × 500 at 10 m spacing, 1–15 stories) and runs a fixed 120 s camera route after a 15 s warm-up. `scripts/bench_metropolis_gate.sh` runs headless setup twice, then a display-backed frame capture, and writes `benchmarks/results/metropolis_gate.json`.
+
+```bash
+DISPLAY=:0 XAUTHORITY=/run/user/1000/xauth_gVAeqM XDG_RUNTIME_DIR=/run/user/1000 \
+  ./scripts/bench_metropolis_gate.sh --godot /home/chris/.local/bin/godot
+```
+
+Local development run (Ryzen 9 7950X, **RTX 4080**, 1920×1080, Godot 4.7.2, GL Compatibility, one run):
+
+| Metric | Value |
+|---|---:|
+| Buildings / instances | 250,000 |
+| Layout checksum | `69388f60` |
+| Setup | 144.95 ms, 11.44 MB |
+| Average FPS | **525.40** |
+| 1% low | **212.77** |
+| 0.1% low | 195.96 |
+| p99 frame time | **4.70 ms** |
+| Hitches >50 ms / stalls >250 ms | 0 / 0 |
+| Frames | 63,047 |
+| Gate verdict | `fps_targets_met`, `scope=frame_budget_only`, `reference_rig=false` |
+
+The route is `benchmarks/routes/metropolis_gate_v1.json`; setup is deterministic across two headless runs (`69388f60`).
+
+> [!warning] This still is not gate evidence
+> It is **synthetic boxes**, not real voxel buildings; no LOD/impostors, streaming, shadows, GI/SSAO, simulation, or save/load; GL Compatibility rather than Forward+; an RTX 4080 rather than the RTX 3060 reference rig; and a single run. It measures frame budget for a 250k-instance static city, not M5. It does not close G-01, G-02, G-03, G-04, G-07, or G-08.
+
 ## 8. Pass/fail decision rules
 
 ### 8.1 Validity first
