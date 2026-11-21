@@ -24,6 +24,7 @@ In:
 - Shortest-path distance in integer metres.
 - Flow fields: one Dijkstra per destination, reused by many homes.
 - Road-distance commute in household job assignment, with straight-line fallback for disconnected points.
+- Fixed-speed travel time derived from road distance, shown per household and city-wide.
 - Bridge `traffic_state(seed)` for graph statistics and a checksum.
 - HUD traffic line and visible cars moving along road segments.
 - World-scene smoke coverage, marker `traffic=ok`.
@@ -33,7 +34,7 @@ In:
 Out:
 
 - Lanes, turning restrictions, one-way roads, signals, or intersection capacity.
-- Congestion, road speed, travel time, or traffic assignment.
+- Variable road speed, congestion, time-dependent travel, or traffic assignment.
 - Transit, parking, accidents, or construction traffic.
 - Sidewalk and pedestrian graphs.
 - Per-agent pathfinding or visible citizens.
@@ -88,6 +89,17 @@ happiness = 0.5 × needs + 0.3 × employment + 0.2 × commute
 ```
 
 A 136 m average commute lowers the commute term to about 0.32, so a fully employed, fully served city settles near 0.90 happiness instead of 1.00.
+
+### Travel time
+
+```text
+DEFAULT_TRAVEL_SPEED_MPS = 8.0 (28.8 km/h)
+commute_time_s = commute_m / 8.0
+```
+
+`travel_time_seconds(distance_m, speed_mps)` validates both inputs and returns `None` for negative/zero/non-finite values. The household field is derived after assignment, is skipped from JSON while zero, and old saves refresh on the next tick. `CityRuntime::average_commute_time_s` and `CitySummary::average_commute_time_s` are resident-weighted. `population_state` exposes `commute_time_s` per household and `average_commute_time_s` city-wide.
+
+Travel time is a **measurement layer**: it does not enter the happiness formula or the job allocation. The runtime checksum zeroes the derived field before hashing, so the pinned city-loop checksums stay unchanged.
 
 ## 4. Bridge and scene
 
@@ -188,7 +200,7 @@ These are microbenchmarks on one machine, not the 1M/60 FPS gate.
 
 - Graph build scans each segment's integer span; a 512 m segment is 512 lookups. The cap is 10,000 roads / 20,000 nodes.
 - Nearest-node lookup is linear. A spatial index is required before the 1M gate.
-- Width, lanes, speed, and direction are ignored for routing. Distance is metres, not time.
+- Width, lanes, direction, and variable speed are ignored for routing. Travel time uses one flat 8 m/s speed and is display-only.
 - The graph is rebuilt on demand; there is no change-driven cache or worker-thread time slicing.
 - Visual cars are decorative and not tied to actual commute flows.
 - The runner's road grid is a benchmark fixture, not a terrain-validated player layout.
@@ -196,6 +208,6 @@ These are microbenchmarks on one machine, not the 1M/60 FPS gate.
 
 ## 9. Next
 
-1. 3.9: runner matrix (early town, mid city, late city) and committed baselines.
-2. Add a spatial index and incremental graph updates before the 1M gate.
-3. Feed actual commute flows into visual car density and congestion later.
+1. Add a spatial index and incremental graph updates before the 1M gate.
+2. Feed actual commute flows into visual car density and variable-speed congestion.
+3. Consider time-based happiness once congestion exists; distance remains the allocation input.

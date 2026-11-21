@@ -542,6 +542,7 @@ mod tests {
             water: 1.0,
             rest: 1.0,
             commute_m: 0.0,
+            commute_time_s: 0.0,
             income_per_day: 0.0,
             home: [0.0, 0.0],
         }

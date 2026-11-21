@@ -35,6 +35,8 @@ pub struct CitySummary {
     pub rest: f32,
     /// Resident-weighted average commute in metres.
     pub average_commute_m: f32,
+    /// Resident-weighted average commute time in seconds.
+    pub average_commute_time_s: f32,
     /// Gross wages paid per game day.
     pub daily_wages: f64,
     /// Completed buildings represented in the ledger.
@@ -82,6 +84,7 @@ pub fn summarize(
     let mut water = 0.0;
     let mut rest = 0.0;
     let mut commune = 0.0;
+    let mut commute_time = 0.0;
     let mut daily_wages = 0.0;
     let mut happiness = 0.0;
     for (&id, household) in &runtime.households {
@@ -99,6 +102,7 @@ pub fn summarize(
         water += household.water * weight;
         rest += household.rest * weight;
         commune += household.commute_m * weight;
+        commute_time += household.commute_time_s * weight;
         daily_wages += household.income_per_day;
         happiness += household.happiness() * weight;
     }
@@ -108,12 +112,14 @@ pub fn summarize(
         water *= scale;
         rest *= scale;
         commune *= scale;
+        commute_time *= scale;
         happiness *= scale;
     } else {
         food = 0.0;
         water = 0.0;
         rest = 0.0;
         commune = 0.0;
+        commute_time = 0.0;
         daily_wages = 0.0;
         happiness = 0.0;
     }
@@ -139,6 +145,7 @@ pub fn summarize(
         water,
         rest,
         average_commute_m: commune,
+        average_commute_time_s: commute_time,
         daily_wages,
         completed_buildings,
         construction_sites,

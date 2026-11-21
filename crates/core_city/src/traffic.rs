@@ -18,6 +18,36 @@ use crate::road::RoadSegment;
 /// Maximum road segments accepted by one traffic graph.
 pub const MAX_TRAFFIC_ROADS: usize = 10_000;
 
+/// Default average travel speed for commute time estimates, in metres per
+/// second (8.0 m/s = 28.8 km/h).
+///
+/// This is one flat city-traffic speed, not a per-road or congested speed.
+/// It converts the measured road distance into a measurement-layer travel
+/// time; it does not feed job assignment.
+pub const DEFAULT_TRAVEL_SPEED_MPS: f32 = 8.0;
+
+/// Convert a distance in metres to travel time in seconds at a fixed speed.
+///
+/// This is a pure helper for the measurement layer. It performs no pathfinding
+/// and does not model congestion, signals, or acceleration.
+///
+/// # Returns
+///
+/// `None` when `distance_m` or `speed_mps` is not finite, when `distance_m` is
+/// negative, or when `speed_mps` is zero or negative. A zero distance at a
+/// positive speed returns `Some(0.0)`.
+#[must_use]
+pub fn travel_time_seconds(distance_m: f32, speed_mps: f32) -> Option<f32> {
+    if !distance_m.is_finite() || !speed_mps.is_finite() {
+        return None;
+    }
+    if distance_m < 0.0 || speed_mps <= 0.0 {
+        return None;
+    }
+    let seconds = distance_m / speed_mps;
+    seconds.is_finite().then_some(seconds.max(0.0))
+}
+
 /// Maximum graph nodes accepted by one traffic graph.
 pub const MAX_TRAFFIC_NODES: usize = 20_000;
 
@@ -817,6 +847,42 @@ mod tests {
         let from_origin = first.flow_to([0.0, 0.0]).expect("field");
         assert_eq!(from_corner.checksum(), rebuilt.checksum());
         assert_ne!(from_corner.checksum(), from_origin.checksum());
+    }
+
+    #[test]
+    fn travel_time_is_distance_over_speed() {
+        assert_eq!(
+            travel_time_seconds(0.0, DEFAULT_TRAVEL_SPEED_MPS),
+            Some(0.0)
+        );
+        assert_eq!(
+            travel_time_seconds(80.0, DEFAULT_TRAVEL_SPEED_MPS),
+            Some(10.0)
+        );
+        let default = travel_time_seconds(136.4, DEFAULT_TRAVEL_SPEED_MPS).expect("time");
+        assert!((default - 17.05).abs() < 0.001);
+        let custom = travel_time_seconds(100.0, 4.0).expect("time");
+        assert!((custom - 25.0).abs() < 0.001);
+        // Negative zero distance is non-negative and canonicalizes to zero.
+        assert_eq!(travel_time_seconds(-0.0, 8.0), Some(0.0));
+    }
+
+    #[test]
+    fn invalid_travel_time_inputs_are_rejected() {
+        assert_eq!(travel_time_seconds(-1.0, 8.0), None);
+        assert_eq!(travel_time_seconds(f32::NAN, 8.0), None);
+        assert_eq!(travel_time_seconds(f32::INFINITY, 8.0), None);
+        assert_eq!(travel_time_seconds(f32::NEG_INFINITY, 8.0), None);
+        assert_eq!(travel_time_seconds(10.0, 0.0), None);
+        assert_eq!(travel_time_seconds(10.0, -8.0), None);
+        assert_eq!(travel_time_seconds(10.0, f32::NAN), None);
+        assert_eq!(travel_time_seconds(10.0, f32::INFINITY), None);
+        // A finite result that overflows to infinity is rejected.
+        assert_eq!(
+            travel_time_seconds(f32::MAX, f32::MIN_POSITIVE),
+            None,
+            "overflow must not produce an infinite travel time"
+        );
     }
 
     #[test]

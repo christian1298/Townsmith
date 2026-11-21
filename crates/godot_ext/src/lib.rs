@@ -2134,6 +2134,10 @@ impl TownsmithCore {
         result.set("water", f64::from(summary.water));
         result.set("rest", f64::from(summary.rest));
         result.set("average_commute_m", f64::from(summary.average_commute_m));
+        result.set(
+            "average_commute_time_s",
+            f64::from(summary.average_commute_time_s),
+        );
         result.set("daily_wages", summary.daily_wages);
         result.set("completed_buildings", summary.completed_buildings as i64);
         result.set("construction_sites", summary.construction_sites as i64);
@@ -2235,6 +2239,10 @@ impl TownsmithCore {
         result.set("workers", report.workers as i64);
         result.set("happiness", f64::from(runtime.happiness()));
         result.set("average_commute_m", f64::from(runtime.average_commute_m()));
+        result.set(
+            "average_commute_time_s",
+            f64::from(runtime.average_commute_time_s()),
+        );
         result.set("daily_wages", runtime.daily_wages());
         result.set("water_supply", water_supply);
         result.set("power_supply", power_supply);
@@ -2265,6 +2273,14 @@ impl TownsmithCore {
                 result.set("workers", runtime.workers() as i64);
                 result.set("happiness", f64::from(runtime.happiness()));
                 result.set("average_commute_m", f64::from(runtime.average_commute_m()));
+                result.set(
+                    "average_commute_time_s",
+                    f64::from(runtime.average_commute_time_s()),
+                );
+                result.set(
+                    "average_commute_time_s",
+                    f64::from(runtime.average_commute_time_s()),
+                );
                 result.set("daily_wages", runtime.daily_wages());
                 let mut households: Array<VarDictionary> = Array::new();
                 for (&id, household) in &runtime.households {
@@ -2277,6 +2293,7 @@ impl TownsmithCore {
                     item.set("water", f64::from(household.water));
                     item.set("rest", f64::from(household.rest));
                     item.set("commute_m", f64::from(household.commute_m));
+                    item.set("commute_time_s", f64::from(household.commute_time_s));
                     item.set("income_per_day", household.income_per_day);
                     item.set("happiness", f64::from(household.happiness()));
                     households.push(&item);
