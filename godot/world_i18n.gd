@@ -35,6 +35,23 @@ const TABLES := {
 		"base.ui.citizen.needs": "Food {food}% · water {water}% · rest {rest}%",
 		"base.ui.citizen.household_unavailable": "Household runtime is not available yet.",
 
+		# Dashboard shell.
+		"base.ui.dashboard.title": "City Dashboard",
+		"base.ui.dashboard.close_hint": "F1 or Esc to close",
+		"base.ui.dashboard.section.population": "Population",
+		"base.ui.dashboard.section.age": "Age",
+		"base.ui.dashboard.section.research": "Research",
+		"base.ui.dashboard.section.tutorial": "Tutorial",
+		"base.ui.dashboard.section.work": "Work",
+		"base.ui.dashboard.section.wellbeing": "Wellbeing",
+		"base.ui.dashboard.section.utilities": "Utilities",
+		"base.ui.dashboard.section.civic": "Civic services",
+		"base.ui.dashboard.section.treasury": "Treasury",
+		"base.ui.dashboard.section.industry": "Industry",
+		"base.ui.dashboard.section.roads": "Roads",
+		"base.ui.dashboard.section.construction": "Construction",
+		"base.ui.dashboard.section.advisor": "Advisor",
+
 		# Follow camera.
 		"base.ui.citizen.follow_hint": "F3 follows the selected home · Esc stops",
 		"base.ui.citizen.following": "Following home #{id} · Esc stops",
@@ -57,6 +74,23 @@ const TABLES := {
 		"base.ui.citizen.commute_income": "Arbeitsweg {commute} m · Einkommen {income}/Tag",
 		"base.ui.citizen.needs": "Essen {food}% · Wasser {water}% · Ruhe {rest}%",
 		"base.ui.citizen.household_unavailable": "Haushaltsdaten sind noch nicht verfügbar.",
+
+		# Dashboard-Hülle.
+		"base.ui.dashboard.title": "Stadt-Dashboard",
+		"base.ui.dashboard.close_hint": "F1 oder Esc zum Schließen",
+		"base.ui.dashboard.section.population": "Bevölkerung",
+		"base.ui.dashboard.section.age": "Zeitalter",
+		"base.ui.dashboard.section.research": "Forschung",
+		"base.ui.dashboard.section.tutorial": "Tutorial",
+		"base.ui.dashboard.section.work": "Arbeit",
+		"base.ui.dashboard.section.wellbeing": "Wohlergehen",
+		"base.ui.dashboard.section.utilities": "Versorgung",
+		"base.ui.dashboard.section.civic": "Bürgerdienste",
+		"base.ui.dashboard.section.treasury": "Staatskasse",
+		"base.ui.dashboard.section.industry": "Industrie",
+		"base.ui.dashboard.section.roads": "Straßen",
+		"base.ui.dashboard.section.construction": "Bau",
+		"base.ui.dashboard.section.advisor": "Berater",
 
 		# Folgekamera.
 		"base.ui.citizen.follow_hint": "F3 folgt dem ausgewählten Zuhause · Esc beendet",
