@@ -13,7 +13,7 @@ tags:
 # 61 — Research
 
 > [!info] What this note is
-> Phase 4.3 adds the city-wide research pool, a data-driven technology tree, and age gates on structural systems. Population generates a small administration rate; the tree gates the systems a city can place. Civic-building research output and a full tech-tree panel arrive with the content and tutorial slices.
+> Phase 4.3 adds the city-wide research pool, a data-driven technology tree, and age gates on structural systems. Population generates a small administration rate. The population-derived age gates structural systems; the tree records unlocks and is ready to gate content as the library grows. Civic-building research output and a full tech-tree panel arrive with the content and tutorial slices.
 
 ## 1. Scope
 
@@ -97,8 +97,8 @@ A success subtracts the cost and adds the node to `completed`. The pool is not t
 | Industrial | `industry.factory` | 500 | masonry | factory |
 | Industrial | `construction.concrete` | 600 | masonry | reinforced concrete |
 | Industrial | `utilities.power` | 700 | aqueduct | power |
+| Industrial | `construction.steel` | 2,500 | concrete | steel frame |
 | Modern | `services.hospital` | 3,000 | school | hospital |
-| Modern | `construction.steel` | 2,500 | concrete | steel frame |
 | Information | `utilities.solar` | 6,000 | power | solar |
 | Information | `services.university` | 8,000 | school | university |
 | Information | `construction.composite` | 9,000 | steel | composite core |
@@ -154,7 +154,8 @@ The dashboard adds a **Research** section with points, rate, and completed count
 The scene smoke:
 
 - opens the pool after the acceptance house is occupied;
-- checks the 14-node tree, Wood age, and at least 50 points;
+- generates points for one day and checks `gained > 0` and points above the 50-point starting grant;
+- checks the 14-node tree and Wood age;
 - unlocks timber framing, checks the cost and completed count;
 - rejects a duplicate with `already_unlocked`;
 - rejects reinforced concrete with `age_locked`;
@@ -163,7 +164,7 @@ The scene smoke:
 
 ## 8. Tests
 
-- `core_city::research`: 12 tests — default tree and ages, starting pool, generation, unlock/spend, duplicate/unknown, age/prerequisite gates, insufficient points, availability flags, JSON/checksum, invalid state, invalid/cyclic trees, invalid costs.
+- `core_city::research`: 14 tests — default tree and ages, starting pool, generation, unlock/spend, duplicate/unknown, age/prerequisite gates, insufficient points, availability flags, JSON/checksum, invalid state, prerequisite closure and spend consistency, invalid/cyclic trees, invalid costs.
 - `core_city::progression`: 6 tests including age id aliases.
 - `core_structure`: 19 tests + 1 doctest, including minimum-age mapping.
 - `godot_ext`: 46 tests, including research JSON roundtrip/old save, unknown completed nodes, and structure age helpers.
@@ -178,6 +179,10 @@ The scene smoke:
 - The tree has no repeatable, mutually exclusive, or hidden nodes.
 - Research is global, not per settlement or district.
 - Costs and the 0.05 rate are draft balance, not a tuned campaign curve.
+- `research_tick` is a developer bridge API with an arbitrary simulated delta; the authoritative server tick does not drive it yet.
+- Changing or removing a node id can make an older save fail validation because completed node ids must exist in the compiled tree.
+- Legacy blueprints with no structure metadata bypass the structural age gate.
+- The tree records unlocks but placement still consults only the population-derived age.
 
 ## 10. Next
 

@@ -187,7 +187,7 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 
 ## 7. Tests
 
-- `core_city`: placement persistence, construction, roads, lots, settlements, households, treasury/loans, industry, utilities, traffic, the advisor, structural placement limits, research, and age gates; **170 tests**.
+- `core_city`: placement persistence, construction, roads, lots, settlements, households, treasury/loans, industry, utilities, traffic, the advisor, structural placement limits, research, and age gates; **172 tests**.
 - `core_structure`: **19 tests + 1 doctest** for system tiers, story/height/span/foundation rules, and composite grounds.
 - `godot_ext`: **46 tests** total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
 - Workspace: **409 tests + 2 doctests**.

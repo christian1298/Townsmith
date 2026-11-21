@@ -179,7 +179,7 @@ impl TechTree {
             node(
                 "construction.steel",
                 "Steel frames",
-                Age::Modern,
+                Age::Industrial,
                 2_500.0,
                 &["construction.concrete"],
                 &["structure:steel_frame"],
@@ -501,12 +501,31 @@ impl ResearchStore {
         if self.completed.len() > tree.len() {
             return Err(ResearchError::InvalidState("too many completed nodes"));
         }
+        let mut spent = 0.0;
         for id in &self.completed {
-            if !tree.nodes.contains_key(id) {
+            let Some(node) = tree.nodes.get(id) else {
                 return Err(ResearchError::InvalidState(
                     "completed node is not in the tree",
                 ));
+            };
+            if let Some(missing) = node
+                .prerequisites
+                .iter()
+                .find(|prerequisite| !self.completed.contains(*prerequisite))
+            {
+                return Err(ResearchError::InvalidState(if missing.is_empty() {
+                    "completed node has an empty prerequisite"
+                } else {
+                    "completed node is missing a prerequisite"
+                }));
             }
+            spent += node.cost;
+        }
+        let implied_spent = self.lifetime_points - self.points;
+        if (implied_spent - spent).abs() > 0.001 {
+            return Err(ResearchError::InvalidState(
+                "lifetime points do not match completed techs",
+            ));
         }
         Ok(())
     }
@@ -783,6 +802,38 @@ mod tests {
         assert_eq!(decoded.checksum(), store.checksum());
         let tree_json = tree.to_json_pretty().expect("tree json");
         assert_eq!(TechTree::from_json(&tree_json).expect("tree"), tree);
+    }
+
+    #[test]
+    fn steel_frames_are_an_industrial_technology() {
+        let tree = tree();
+        assert_eq!(
+            tree.node("construction.steel").expect("steel").age,
+            Age::Industrial
+        );
+    }
+
+    #[test]
+    fn completed_techs_must_be_prerequisite_closed_and_paid_for() {
+        let tree = tree();
+        let mut store = ResearchStore::new(2026);
+        store
+            .unlock("construction.timber_frame", &tree, Age::Wood)
+            .expect("timber");
+        store.validate(&tree).expect("valid");
+        store.completed.insert("services.school".to_string());
+        assert_eq!(
+            store.validate(&tree).expect_err("missing masonry").code(),
+            "invalid_research"
+        );
+        let mut store = ResearchStore::new(2026);
+        store
+            .completed
+            .insert("construction.timber_frame".to_string());
+        assert_eq!(
+            store.validate(&tree).expect_err("unpaid").code(),
+            "invalid_research"
+        );
     }
 
     #[test]

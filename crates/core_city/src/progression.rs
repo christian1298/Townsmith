@@ -100,11 +100,11 @@ impl Age {
             })
             .collect();
         match normalized.as_str() {
-            "wood" | "timber" => Some(Self::Wood),
-            "masonry" | "stone" => Some(Self::Masonry),
-            "industrial" | "industry" => Some(Self::Industrial),
-            "modern" => Some(Self::Modern),
-            "information" | "info" => Some(Self::Information),
+            "wood" | "timber" | "wood_age" => Some(Self::Wood),
+            "masonry" | "stone" | "masonry_age" => Some(Self::Masonry),
+            "industrial" | "industry" | "industrial_age" => Some(Self::Industrial),
+            "modern" | "modern_age" => Some(Self::Modern),
+            "information" | "info" | "information_age" => Some(Self::Information),
             _ => None,
         }
     }
@@ -234,6 +234,8 @@ mod tests {
         assert_eq!(Age::parse("MASONRY"), Some(Age::Masonry));
         assert_eq!(Age::parse("stone"), Some(Age::Masonry));
         assert_eq!(Age::parse("information"), Some(Age::Information));
+        assert_eq!(Age::parse("information age"), Some(Age::Information));
+        assert_eq!(Age::parse("information_age"), Some(Age::Information));
         assert_eq!(Age::parse("future"), None);
     }
 

@@ -84,18 +84,19 @@ pub struct AgeState {
 ## 6. Tests
 
 - `core_city::progression`: 6 tests — thresholds, boundary populations, next threshold/progress, final age, stable names/materials, determinism, age-id aliases.
-- `core_city` total: **170 tests**; `core_structure` **19 tests + 1 doctest**.
-- `godot_ext`: **46 tests**; the scene smoke covers `progression_state`, structural limits, research, and age gates.
+- `core_city` total: **172 tests**; `core_structure` **19 tests + 1 doctest**.
+- `godot_ext`: **46 tests**; the scene smoke covers `progression_state`, structural limits, research generation, and the HUD; structural age rejection is covered by the bridge helper and core placement tests.
 - Workspace: **409 tests + 2 doctests (411 passed)**.
 - Smoke marker includes `age=ok` and `research=ok`.
 
 ## 7. Limits
 
 - Population alone sets the age; research does not change the age threshold.
-- Research gates structural systems by age. Materials, props, and blueprint libraries are not gated yet.
-- A Wood-age city can still author a concrete blueprint; placement rejects it with `age_locked`.
+- The population-derived age gates structural systems; research nodes record unlocks but do not gate placement yet. Materials, props, and blueprint libraries are not gated.
+- A Wood-age city can still author a concrete blueprint; placement rejects it with `age_locked`. Legacy blueprints without structural metadata bypass this gate.
 - No age-specific art, roofs, lights, vehicles, or construction trades.
 - The 1,000-resident late scenario is still Masonry; Industrial is a 20,000-resident target.
+- Research generation is a bridge tick in this slice, not yet part of the authoritative server loop.
 - The age table is draft balance, not a tuned campaign curve.
 
 ## 8. Next
