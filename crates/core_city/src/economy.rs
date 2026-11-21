@@ -28,6 +28,15 @@ pub const DEFAULT_BUSINESS_TAX_PER_JOB_PER_DAY: f64 = 4.0;
 /// Default upkeep per completed building per game day.
 pub const DEFAULT_UPKEEP_PER_BUILDING_PER_DAY: f64 = 5.0;
 
+/// Default upkeep per utility site per game day.
+pub const DEFAULT_UTILITY_UPKEEP_PER_SITE_PER_DAY: f64 = 2.0;
+
+/// Default upkeep per civic service site per game day.
+pub const DEFAULT_SERVICE_UPKEEP_PER_SITE_PER_DAY: f64 = 5.0;
+
+/// Upper bound for one infrastructure site's daily upkeep.
+pub const MAX_INFRASTRUCTURE_UPKEEP_PER_SITE_PER_DAY: f64 = 1_000.0;
+
 /// Balance at or below which the city is flagged bankrupt.
 pub const BANKRUPTCY_THRESHOLD: f64 = -50_000.0;
 
@@ -83,6 +92,24 @@ pub struct Economy {
     pub business_tax_per_job_per_day: f64,
     /// Upkeep per completed building per game day.
     pub upkeep_per_building_per_day: f64,
+    /// Upkeep per utility site per game day.
+    ///
+    /// Older saves load the default. The default is omitted from serialization
+    /// so existing economy and city-loop checksums stay pinned.
+    #[serde(
+        default = "default_utility_upkeep_per_site_per_day",
+        skip_serializing_if = "utility_upkeep_is_default"
+    )]
+    pub utility_upkeep_per_site_per_day: f64,
+    /// Upkeep per civic service site per game day.
+    ///
+    /// Older saves load the default. The default is omitted from serialization
+    /// so existing economy and city-loop checksums stay pinned.
+    #[serde(
+        default = "default_service_upkeep_per_site_per_day",
+        skip_serializing_if = "service_upkeep_is_default"
+    )]
+    pub service_upkeep_per_site_per_day: f64,
     /// Construction spending accumulated so far.
     pub construction_spent: f64,
     /// Simulated economy days.
@@ -99,8 +126,10 @@ pub struct Economy {
 pub struct EconomyTick {
     /// Taxes collected this tick.
     pub income: f64,
-    /// Wages plus upkeep this tick.
+    /// Loans plus wages and upkeep accumulated this tick.
     pub expenses: f64,
+    /// Infrastructure upkeep (utility plus service sites) this tick.
+    pub infrastructure: f64,
     /// Balance after the tick.
     pub balance: f64,
     /// Simulated days after the tick.
@@ -126,6 +155,8 @@ impl Economy {
             tax_per_resident_per_day: DEFAULT_TAX_PER_RESIDENT_PER_DAY,
             business_tax_per_job_per_day: DEFAULT_BUSINESS_TAX_PER_JOB_PER_DAY,
             upkeep_per_building_per_day: DEFAULT_UPKEEP_PER_BUILDING_PER_DAY,
+            utility_upkeep_per_site_per_day: DEFAULT_UTILITY_UPKEEP_PER_SITE_PER_DAY,
+            service_upkeep_per_site_per_day: DEFAULT_SERVICE_UPKEEP_PER_SITE_PER_DAY,
             construction_spent: 0.0,
             days_elapsed: 0.0,
             bankrupt: false,
@@ -137,6 +168,14 @@ impl Economy {
     pub fn set_taxes(&mut self, resident: f64, business: f64) {
         self.tax_per_resident_per_day = clamp_rate(resident);
         self.business_tax_per_job_per_day = clamp_rate(business);
+    }
+
+    /// Set utility and civic service upkeep per site per game day.
+    ///
+    /// Values are clamped to a finite 0..=1,000 range.
+    pub fn set_infrastructure_upkeep(&mut self, utility: f64, service: f64) {
+        self.utility_upkeep_per_site_per_day = clamp_infrastructure_upkeep(utility);
+        self.service_upkeep_per_site_per_day = clamp_infrastructure_upkeep(service);
     }
 
     /// Record construction spending.
@@ -241,12 +280,30 @@ impl Economy {
     }
 
     /// Advance taxes, wages, upkeep, and loan service by `dt_s` seconds.
+    ///
+    /// This is the legacy path: it charges no utility or civic service upkeep.
+    /// Use [`Self::tick_with_infrastructure`] when the caller knows the site
+    /// counts.
     pub fn tick(
         &mut self,
         dt_s: f64,
         population: u64,
         employed: u64,
         completed_buildings: u64,
+    ) -> EconomyTick {
+        self.tick_with_infrastructure(dt_s, population, employed, completed_buildings, 0, 0)
+    }
+
+    /// Advance taxes, wages, building and infrastructure upkeep, and loan
+    /// service by `dt_s` seconds.
+    pub fn tick_with_infrastructure(
+        &mut self,
+        dt_s: f64,
+        population: u64,
+        employed: u64,
+        completed_buildings: u64,
+        utility_sites: u64,
+        service_sites: u64,
     ) -> EconomyTick {
         let dt = if dt_s.is_finite() {
             dt_s.clamp(0.0, MAX_ECONOMY_TICK_SECONDS)
@@ -257,9 +314,12 @@ impl Economy {
         let income = (population as f64 * self.tax_per_resident_per_day
             + employed as f64 * self.business_tax_per_job_per_day)
             * days;
+        let infrastructure =
+            self.infrastructure_upkeep_per_day(utility_sites, service_sites) * days;
         let operating = (employed as f64 * WAGE_PER_WORKER_PER_DAY
             + completed_buildings as f64 * self.upkeep_per_building_per_day)
-            * days;
+            * days
+            + infrastructure;
         let mut loan_interest = 0.0;
         let mut loan_principal = 0.0;
         for loan in &mut self.loans {
@@ -276,6 +336,7 @@ impl Economy {
         EconomyTick {
             income,
             expenses,
+            infrastructure,
             balance: self.balance,
             days_elapsed: self.days_elapsed,
             loan_interest,
@@ -285,13 +346,37 @@ impl Economy {
         }
     }
 
+    /// Infrastructure upkeep per game day at the current rates.
+    #[must_use]
+    pub fn infrastructure_upkeep_per_day(&self, utility_sites: u64, service_sites: u64) -> f64 {
+        utility_sites as f64 * self.utility_upkeep_per_site_per_day
+            + service_sites as f64 * self.service_upkeep_per_site_per_day
+    }
+
     /// Net cash flow per game day at current rates.
+    ///
+    /// This is the legacy path: it charges no utility or civic service upkeep.
+    /// Use [`Self::daily_net_with_infrastructure`] to include them.
     #[must_use]
     pub fn daily_net(&self, population: u64, employed: u64, completed_buildings: u64) -> f64 {
+        self.daily_net_with_infrastructure(population, employed, completed_buildings, 0, 0)
+    }
+
+    /// Net cash flow per game day including utility and civic service upkeep.
+    #[must_use]
+    pub fn daily_net_with_infrastructure(
+        &self,
+        population: u64,
+        employed: u64,
+        completed_buildings: u64,
+        utility_sites: u64,
+        service_sites: u64,
+    ) -> f64 {
         let income = population as f64 * self.tax_per_resident_per_day
             + employed as f64 * self.business_tax_per_job_per_day;
         let expenses = employed as f64 * WAGE_PER_WORKER_PER_DAY
             + completed_buildings as f64 * self.upkeep_per_building_per_day
+            + self.infrastructure_upkeep_per_day(utility_sites, service_sites)
             + self.loan_interest_per_day()
             + self.loan_payment_per_day();
         income - expenses
@@ -311,6 +396,22 @@ impl Economy {
             ("upkeep", self.upkeep_per_building_per_day),
         ] {
             if !value.is_finite() || !(0.0..=100.0).contains(&value) {
+                return Err(EconomyError::Invalid(name));
+            }
+        }
+        for (name, value) in [
+            (
+                "utility infrastructure upkeep",
+                self.utility_upkeep_per_site_per_day,
+            ),
+            (
+                "service infrastructure upkeep",
+                self.service_upkeep_per_site_per_day,
+            ),
+        ] {
+            if !value.is_finite()
+                || !(0.0..=MAX_INFRASTRUCTURE_UPKEEP_PER_SITE_PER_DAY).contains(&value)
+            {
                 return Err(EconomyError::Invalid(name));
             }
         }
@@ -384,6 +485,30 @@ fn clamp_rate(value: f64) -> f64 {
     }
 }
 
+fn clamp_infrastructure_upkeep(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, MAX_INFRASTRUCTURE_UPKEEP_PER_SITE_PER_DAY)
+    } else {
+        0.0
+    }
+}
+
+fn default_utility_upkeep_per_site_per_day() -> f64 {
+    DEFAULT_UTILITY_UPKEEP_PER_SITE_PER_DAY
+}
+
+fn default_service_upkeep_per_site_per_day() -> f64 {
+    DEFAULT_SERVICE_UPKEEP_PER_SITE_PER_DAY
+}
+
+fn utility_upkeep_is_default(value: &f64) -> bool {
+    (*value - DEFAULT_UTILITY_UPKEEP_PER_SITE_PER_DAY).abs() < f64::EPSILON
+}
+
+fn service_upkeep_is_default(value: &f64) -> bool {
+    (*value - DEFAULT_SERVICE_UPKEEP_PER_SITE_PER_DAY).abs() < f64::EPSILON
+}
+
 /// Errors returned by the economy store.
 #[derive(Debug)]
 pub enum EconomyError {
@@ -440,6 +565,61 @@ mod tests {
         assert!((tick.expenses - (80.0 * 20.0 + 20.0 * 5.0)).abs() < 0.001);
         assert!((tick.balance - (STARTING_BALANCE + 1120.0 - 1700.0)).abs() < 0.001);
         assert_eq!(tick.days_elapsed, 1.0);
+    }
+
+    #[test]
+    fn infrastructure_upkeep_changes_the_balance() {
+        let mut economy = Economy::new(2026);
+        let tick = economy.tick_with_infrastructure(DAY_SECONDS, 100, 80, 20, 10, 5);
+        let expected = 10.0 * DEFAULT_UTILITY_UPKEEP_PER_SITE_PER_DAY
+            + 5.0 * DEFAULT_SERVICE_UPKEEP_PER_SITE_PER_DAY;
+        assert!((tick.infrastructure - expected).abs() < 0.001);
+        assert!((tick.expenses - (1700.0 + expected)).abs() < 0.001);
+        assert!((tick.balance - (STARTING_BALANCE + 1120.0 - 1700.0 - expected)).abs() < 0.001);
+    }
+
+    #[test]
+    fn legacy_tick_ignores_infrastructure() {
+        let mut legacy = Economy::new(2026);
+        let mut explicit = Economy::new(2026);
+        let left = legacy.tick(DAY_SECONDS, 100, 80, 20);
+        let right = explicit.tick_with_infrastructure(DAY_SECONDS, 100, 80, 20, 0, 0);
+        assert_eq!(left, right);
+        assert_eq!(left.infrastructure, 0.0);
+    }
+
+    #[test]
+    fn old_saves_default_infrastructure_rates() {
+        let economy = Economy::new(2026);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&economy.to_json_pretty().expect("json")).expect("value");
+        value
+            .as_object_mut()
+            .expect("economy")
+            .remove("utility_upkeep_per_site_per_day");
+        value
+            .as_object_mut()
+            .expect("economy")
+            .remove("service_upkeep_per_site_per_day");
+        let decoded = Economy::from_json(&value.to_string()).expect("decode");
+        assert_eq!(
+            decoded.utility_upkeep_per_site_per_day,
+            DEFAULT_UTILITY_UPKEEP_PER_SITE_PER_DAY
+        );
+        assert_eq!(
+            decoded.service_upkeep_per_site_per_day,
+            DEFAULT_SERVICE_UPKEEP_PER_SITE_PER_DAY
+        );
+    }
+
+    #[test]
+    fn custom_infrastructure_rates_round_trip() {
+        let mut economy = Economy::new(2026);
+        economy.set_infrastructure_upkeep(7.0, 11.0);
+        let json = economy.to_json_pretty().expect("json");
+        let decoded = Economy::from_json(&json).expect("decode");
+        assert_eq!(decoded.utility_upkeep_per_site_per_day, 7.0);
+        assert_eq!(decoded.service_upkeep_per_site_per_day, 11.0);
     }
 
     #[test]
