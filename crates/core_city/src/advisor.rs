@@ -105,6 +105,14 @@ pub struct AdvisorInput {
     pub water_supply: Option<f32>,
     /// Power service share, if a utility store exists.
     pub power_supply: Option<f32>,
+    /// School service share, if a civic service store exists.
+    pub school_supply: Option<f32>,
+    /// Clinic service share, if a civic service store exists.
+    pub clinic_supply: Option<f32>,
+    /// Fire service share, if a civic service store exists.
+    pub fire_supply: Option<f32>,
+    /// Police service share, if a civic service store exists.
+    pub police_supply: Option<f32>,
     /// Food stockpile.
     pub food_stock: f64,
     /// Wood stockpile.
@@ -241,6 +249,74 @@ pub fn advise(input: &AdvisorInput) -> AdvisorReport {
             ));
         }
 
+        let school = input.school_supply.unwrap_or(0.0).clamp(0.0, 1.0);
+        if school < 0.25 {
+            messages.push(AdvisorMessage::new(
+                "city.school_shortage",
+                Severity::Critical,
+                "School shortage",
+                "Few school-age residents are covered or school capacity is exhausted. Build or extend a school.",
+            ));
+        } else if school < 0.99 {
+            messages.push(AdvisorMessage::new(
+                "city.school_shortage",
+                Severity::Warning,
+                "School service is short",
+                "Some school demand is unserved. Check radius, capacity, and site completion.",
+            ));
+        }
+
+        let clinic = input.clinic_supply.unwrap_or(0.0).clamp(0.0, 1.0);
+        if clinic < 0.25 {
+            messages.push(AdvisorMessage::new(
+                "city.clinic_shortage",
+                Severity::Critical,
+                "Clinic shortage",
+                "Most residents are outside clinic coverage or capacity is exhausted. Build a clinic.",
+            ));
+        } else if clinic < 0.99 {
+            messages.push(AdvisorMessage::new(
+                "city.clinic_shortage",
+                Severity::Warning,
+                "Clinic service is short",
+                "Some residents are unserved. Check radius, capacity, and site completion.",
+            ));
+        }
+
+        let fire = input.fire_supply.unwrap_or(0.0).clamp(0.0, 1.0);
+        if fire < 0.25 {
+            messages.push(AdvisorMessage::new(
+                "city.fire_shortage",
+                Severity::Critical,
+                "Fire coverage is low",
+                "Most buildings are outside fire coverage or capacity is exhausted. Build a fire station.",
+            ));
+        } else if fire < 0.99 {
+            messages.push(AdvisorMessage::new(
+                "city.fire_shortage",
+                Severity::Warning,
+                "Fire service is short",
+                "Some buildings are unserved. Check radius, capacity, and site completion.",
+            ));
+        }
+
+        let police = input.police_supply.unwrap_or(0.0).clamp(0.0, 1.0);
+        if police < 0.25 {
+            messages.push(AdvisorMessage::new(
+                "city.police_shortage",
+                Severity::Critical,
+                "Police coverage is low",
+                "Most buildings are outside police coverage or capacity is exhausted. Build a police station.",
+            ));
+        } else if police < 0.99 {
+            messages.push(AdvisorMessage::new(
+                "city.police_shortage",
+                Severity::Warning,
+                "Police service is short",
+                "Some buildings are unserved. Check radius, capacity, and site completion.",
+            ));
+        }
+
         let employment = input.employed as f32 / input.population as f32;
         if input.unemployed > 0 && employment < 0.9 {
             messages.push(AdvisorMessage::new(
@@ -353,6 +429,10 @@ pub fn advise(input: &AdvisorInput) -> AdvisorReport {
         && input.food_supply.unwrap_or(1.0) >= 0.99
         && input.water_supply.unwrap_or(1.0) >= 0.99
         && input.power_supply.unwrap_or(1.0) >= 0.99
+        && input.school_supply.unwrap_or(0.0) >= 0.99
+        && input.clinic_supply.unwrap_or(0.0) >= 0.99
+        && input.fire_supply.unwrap_or(0.0) >= 0.99
+        && input.police_supply.unwrap_or(0.0) >= 0.99
         && input.happiness >= 0.7
         && input.daily_net.unwrap_or(0.0) >= 0.0
     {
@@ -367,9 +447,17 @@ pub fn advise(input: &AdvisorInput) -> AdvisorReport {
         && input.food_supply.is_some()
         && input.water_supply.is_some()
         && input.power_supply.is_some()
+        && input.school_supply.is_some()
+        && input.clinic_supply.is_some()
+        && input.fire_supply.is_some()
+        && input.police_supply.is_some()
         && input.food_supply.unwrap_or(0.0) >= 0.99
         && input.water_supply.unwrap_or(0.0) >= 0.99
         && input.power_supply.unwrap_or(0.0) >= 0.99
+        && input.school_supply.unwrap_or(0.0) >= 0.99
+        && input.clinic_supply.unwrap_or(0.0) >= 0.99
+        && input.fire_supply.unwrap_or(0.0) >= 0.99
+        && input.police_supply.unwrap_or(0.0) >= 0.99
         && input.happiness >= 0.7
         && input.daily_net.is_none()
     {
@@ -377,7 +465,7 @@ pub fn advise(input: &AdvisorInput) -> AdvisorReport {
             "city.services_healthy",
             Severity::Info,
             "Services are healthy",
-            "Food, water, and power are meeting demand. Open a treasury to track cash flow.",
+            "Food, water, power, and civic services are meeting demand. Open a treasury to track cash flow.",
         ));
     }
 
@@ -417,6 +505,10 @@ mod tests {
             food_supply: Some(1.0),
             water_supply: Some(1.0),
             power_supply: Some(1.0),
+            school_supply: Some(1.0),
+            clinic_supply: Some(1.0),
+            fire_supply: Some(1.0),
+            police_supply: Some(1.0),
             food_stock: 500.0,
             wood_stock: 200.0,
             balance: Some(50_000.0),
@@ -430,12 +522,113 @@ mod tests {
     }
 
     #[test]
-    fn a_healthy_city_reports_one_info_message() {
-        let report = advise(&healthy_city());
+    fn a_healthy_city_with_full_services_reports_one_info_message() {
+        let input = healthy_city();
+        assert_eq!(input.school_supply, Some(1.0));
+        assert_eq!(input.clinic_supply, Some(1.0));
+        assert_eq!(input.fire_supply, Some(1.0));
+        assert_eq!(input.police_supply, Some(1.0));
+        let report = advise(&input);
         assert!(report.healthy());
         assert_eq!(report.messages.len(), 1);
         assert_eq!(report.messages[0].code, "city.healthy");
         assert_eq!(report.messages[0].severity, Severity::Info);
+    }
+
+    fn assert_civic_rule(
+        mut input: AdvisorInput,
+        set: impl Fn(&mut AdvisorInput, Option<f32>),
+        code: &str,
+    ) {
+        for (supply, expected) in [
+            (Some(0.99), None),
+            (Some(0.98), Some(Severity::Warning)),
+            (Some(0.25), Some(Severity::Warning)),
+            (Some(0.24), Some(Severity::Critical)),
+            (Some(0.0), Some(Severity::Critical)),
+        ] {
+            set(&mut input, supply);
+            let report = advise(&input);
+            match expected {
+                None => {
+                    assert!(report.healthy(), "supply {supply:?} should be healthy");
+                    assert_eq!(report.messages[0].code, "city.healthy");
+                }
+                Some(severity) => {
+                    assert!(!report.healthy(), "supply {supply:?} should not be healthy");
+                    assert_eq!(report.messages[0].code, code);
+                    assert_eq!(report.messages[0].severity, severity);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_school_shortage_warns_then_goes_critical() {
+        assert_civic_rule(
+            healthy_city(),
+            |input, supply| input.school_supply = supply,
+            "city.school_shortage",
+        );
+    }
+
+    #[test]
+    fn a_clinic_shortage_warns_then_goes_critical() {
+        assert_civic_rule(
+            healthy_city(),
+            |input, supply| input.clinic_supply = supply,
+            "city.clinic_shortage",
+        );
+    }
+
+    #[test]
+    fn a_fire_shortage_warns_then_goes_critical() {
+        assert_civic_rule(
+            healthy_city(),
+            |input, supply| input.fire_supply = supply,
+            "city.fire_shortage",
+        );
+    }
+
+    #[test]
+    fn a_police_shortage_warns_then_goes_critical() {
+        assert_civic_rule(
+            healthy_city(),
+            |input, supply| input.police_supply = supply,
+            "city.police_shortage",
+        );
+    }
+
+    #[test]
+    fn a_missing_civic_store_is_a_shortage_for_residents() {
+        let mut input = healthy_city();
+        input.school_supply = None;
+        input.clinic_supply = None;
+        input.fire_supply = None;
+        input.police_supply = None;
+        let report = advise(&input);
+        assert_eq!(report.critical(), 4);
+        let codes: Vec<&str> = report
+            .messages
+            .iter()
+            .map(|message| message.code.as_str())
+            .collect();
+        assert!(codes.contains(&"city.school_shortage"));
+        assert!(codes.contains(&"city.clinic_shortage"));
+        assert!(codes.contains(&"city.fire_shortage"));
+        assert!(codes.contains(&"city.police_shortage"));
+        assert!(!codes.contains(&"city.healthy"));
+
+        let mut empty = AdvisorInput {
+            school_supply: None,
+            clinic_supply: None,
+            fire_supply: None,
+            police_supply: None,
+            ..AdvisorInput::default()
+        };
+        empty.population = 0;
+        let report = advise(&empty);
+        assert_eq!(report.messages[0].code, "city.quiet");
     }
 
     #[test]
