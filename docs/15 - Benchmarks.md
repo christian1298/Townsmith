@@ -37,6 +37,9 @@ A benchmark run is not a synthetic fly-through of an empty map. It is a represen
 > [!info] Phase 3 traffic microbenchmark
 > `cargo run --release -p townsmith-bench --bin traffic` builds a deterministic 64 × 64 road grid (128 roads, 4,096 nodes, 8,064 edges, 129,024 m). On the current developer machine: graph build ~1.9 ms, 1,000 pair queries ~449 ms, 1,000 flow queries ~4.8 ms, and 64 goal fields ~60 ms. This is a microbenchmark, not the 1M/60 FPS gate.
 
+> [!info] Industrial balance probe
+> `cargo run --release -p townsmith-bench --bin industrial` builds a 20,000-resident Industrial city and runs 30 days at two tax policies. Current result: default 8/4 bankrupt in ~2.3 days at −175,385/day; 20/4 ends +2,288,306 at +64,615/day. Notional construction cost is 195M against 600k of available financing. See [[72 - Industrial Balance]].
+
 > [!info] Job-assignment index microbenchmark
 > `cargo run --release -p townsmith-bench --bin jobs` assigns 2,000 residents across 1,000 homes and 1,000 workplaces (1,000,000 possible pairs) and checks the indexed result against a brute-force scan. On the current developer machine the indexed tick is **~1.77 ms** versus **~47.1 ms** for the scan (**~26.6×**), with an exact match. This is a microbenchmark, not the 1M-city gate; see [[51 - Jobs and Wages]].
 

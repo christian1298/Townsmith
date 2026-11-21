@@ -237,6 +237,9 @@ cargo run --release -p townsmith-bench --bin city_loop
 # Early/mid/late runner matrix against the committed baseline
 ./scripts/bench_city_loop.sh
 
+# 20,000-resident Industrial-age operating balance
+./scripts/bench_industrial.sh
+
 # Road graph and flow-field microbenchmark
 cargo run --release -p townsmith-bench --bin traffic
 
