@@ -20,7 +20,7 @@ tags:
 | Stage | Deliverable | Status |
 |---|---|---|
 | **4.1** | Age state: population milestones, current/next age, progress, materials, HUD/dashboard | **Done** — PR #76 |
-| **4.2** | Material tiers and structural limits: stories, spans, foundations, composite construction | **This PR** — see [[60 - Structural Limits]] |
+| **4.2** | Material tiers and structural limits: stories, spans, foundations, composite construction | **Done** — PR #78, see [[60 - Structural Limits]] |
 | **4.3** | Research pool and data-driven tech tree | Next |
 | **4.4** | Starter content library, service tiers, age-specific construction trades | Planned |
 | **4.5** | Tutorial scenario and the wood-to-industrial balance pass | Planned |
