@@ -169,7 +169,6 @@ pub struct ServiceSite {
     /// Installed capacity in demand units.
     pub capacity: f64,
     /// Research produced per game day when the site covers residents.
-    #[serde(default)]
     pub research_per_day: f64,
 }
 
@@ -177,19 +176,24 @@ impl ServiceSite {
     /// Default site for a kind and tier.
     #[must_use]
     pub fn default_for(kind: ServiceKind, tier: ServiceTier) -> Self {
-        let (radius_m, capacity, research_per_day) = match (kind, tier) {
-            (ServiceKind::School, ServiceTier::Basic) => (180.0, 200.0, 8.0),
-            (ServiceKind::School, ServiceTier::Improved) => (240.0, 400.0, 20.0),
-            (ServiceKind::School, ServiceTier::Advanced) => (320.0, 800.0, 50.0),
-            (ServiceKind::Clinic, ServiceTier::Basic) => (180.0, 300.0, 0.0),
-            (ServiceKind::Clinic, ServiceTier::Improved) => (240.0, 600.0, 0.0),
-            (ServiceKind::Clinic, ServiceTier::Advanced) => (320.0, 1_200.0, 0.0),
-            (ServiceKind::Fire, ServiceTier::Basic) => (240.0, 400.0, 0.0),
-            (ServiceKind::Fire, ServiceTier::Improved) => (300.0, 800.0, 0.0),
-            (ServiceKind::Fire, ServiceTier::Advanced) => (400.0, 1_600.0, 0.0),
-            (ServiceKind::Police, ServiceTier::Basic) => (240.0, 400.0, 0.0),
-            (ServiceKind::Police, ServiceTier::Improved) => (300.0, 800.0, 0.0),
-            (ServiceKind::Police, ServiceTier::Advanced) => (400.0, 1_600.0, 0.0),
+        let (radius_m, capacity) = match (kind, tier) {
+            (ServiceKind::School, ServiceTier::Basic) => (180.0, 200.0),
+            (ServiceKind::School, ServiceTier::Improved) => (240.0, 400.0),
+            (ServiceKind::School, ServiceTier::Advanced) => (320.0, 800.0),
+            (ServiceKind::Clinic, ServiceTier::Basic) => (180.0, 300.0),
+            (ServiceKind::Clinic, ServiceTier::Improved) => (240.0, 600.0),
+            (ServiceKind::Clinic, ServiceTier::Advanced) => (320.0, 1_200.0),
+            (ServiceKind::Fire, ServiceTier::Basic) => (240.0, 400.0),
+            (ServiceKind::Fire, ServiceTier::Improved) => (300.0, 800.0),
+            (ServiceKind::Fire, ServiceTier::Advanced) => (400.0, 1_600.0),
+            (ServiceKind::Police, ServiceTier::Basic) => (240.0, 400.0),
+            (ServiceKind::Police, ServiceTier::Improved) => (300.0, 800.0),
+            (ServiceKind::Police, ServiceTier::Advanced) => (400.0, 1_600.0),
+        };
+        let research_per_day = if kind.produces_research() {
+            tier.research_per_day()
+        } else {
+            0.0
         };
         Self {
             kind,
@@ -409,21 +413,31 @@ impl ServiceStore {
                 .count();
         }
 
-        self.research_per_day = if report.school_served > 0.0 {
-            self.sites
-                .values()
-                .filter(|site| site.kind == ServiceKind::School)
-                .filter(|site| {
-                    consumers.iter().any(|consumer| {
-                        consumer.school_demand() > 0.0 && site_covers(site, consumer)
-                    })
-                })
-                .map(|site| site.research_per_day)
-                .sum::<f64>()
-                .min(MAX_SERVICE_RESEARCH_PER_DAY)
-        } else {
-            0.0
-        };
+        // Allocate the served school demand across sites in id order. Flat
+        // per-site output is only counted for a site that receives part of the
+        // served demand, so overlapping schools cannot stack research.
+        let mut remaining = report.school_served;
+        let mut research = 0.0_f64;
+        for site in self
+            .sites
+            .values()
+            .filter(|site| site.kind == ServiceKind::School)
+        {
+            if remaining <= 0.0 || site.capacity <= 0.0 {
+                continue;
+            }
+            let covered_demand: f64 = consumers
+                .iter()
+                .filter(|consumer| consumer.school_demand() > 0.0 && site_covers(site, consumer))
+                .map(ServiceConsumer::school_demand)
+                .sum();
+            let allocated = covered_demand.min(site.capacity).min(remaining);
+            if allocated > 0.0 {
+                research += site.research_per_day;
+                remaining -= allocated;
+            }
+        }
+        self.research_per_day = research.min(MAX_SERVICE_RESEARCH_PER_DAY);
         report.research_per_day = self.research_per_day;
         report
     }
@@ -485,6 +499,13 @@ impl ServiceStore {
             }
             if site.kind.produces_research() != (site.research_per_day > 0.0) {
                 return Err(ServiceError::Invalid("site research kind"));
+            }
+            let expected = ServiceSite::default_for(site.kind, site.tier);
+            if site.radius_m != expected.radius_m
+                || site.capacity != expected.capacity
+                || site.research_per_day != expected.research_per_day
+            {
+                return Err(ServiceError::Invalid("site tier stats"));
             }
         }
         Ok(())
@@ -747,6 +768,31 @@ mod tests {
         assert_eq!(report.school_supply, 1.0);
         assert_eq!(report.school_coverage, 1.0);
         assert_eq!(report.research_per_day, 0.0);
+    }
+
+    #[test]
+    fn overlapping_schools_do_not_stack_research() {
+        let mut store = ServiceStore::new(2026);
+        for id in 1..=3 {
+            store
+                .add_site(id, ServiceKind::School, ServiceTier::Basic, [0.0, 0.0, 0.0])
+                .expect("site");
+        }
+        store.sites.get_mut(&3).expect("site").capacity = 0.0;
+        let report = store.refresh(&[consumer(10, 0.0, 4, 0)]);
+        assert!(report.school_supply > 0.99);
+        assert!((report.research_per_day - 8.0).abs() < 0.001);
+        assert!((store.research_per_day - 8.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn tier_stats_must_match_the_table() {
+        let mut store = ServiceStore::new(2026);
+        store
+            .add_site(1, ServiceKind::School, ServiceTier::Basic, [0.0, 0.0, 0.0])
+            .expect("site");
+        store.sites.get_mut(&1).expect("site").capacity = 999.0;
+        assert!(store.validate().is_err());
     }
 
     #[test]

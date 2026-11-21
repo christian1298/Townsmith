@@ -77,8 +77,8 @@ pub struct ServiceStore {
 - Demand: school = `0.25 × residents`; clinic/fire/police = `residents + 0.5 × workers`.
 - Zero demand with at least one site reports 1.0 supply; no site reports 0.
 - Overlapping sites add capacity but do not double-count demand.
-- A school produces its tier's research only when at least some school demand is served.
-- Validation checks site ranges, finite centres, research ranges, and the school/non-school research split.
+- School research is allocated across the served school demand in site-id order; each site adds its tier output only when it receives part of that served demand, so overlapping schools do not stack research.
+- Validation checks site ranges, finite centres, research ranges, the school/non-school research split, and that each site's radius/capacity/research match its `(kind, tier)` table row.
 
 ## 3. Tiers and rates
 
@@ -96,7 +96,7 @@ The bridge derives the tier from `AgeState` when a site is added. A later age ch
 research/day = population × 0.05 + covered school output
 ```
 
-A basic school on a 2-resident acceptance house adds **8/day**, so the rate is 8.1/day instead of 0.1/day. The research smoke ticks one day and requires more than 8 gained points, not merely the 50-point starting pool.
+A basic school on a 2-resident acceptance house adds **8/day**, so the rate is 8.1/day instead of 0.1/day. A second school covering the same residents adds no research until it receives served demand of its own. The research smoke ticks one day and requires more than 8 gained points, not merely the 50-point starting pool.
 
 ## 5. Bridge
 
@@ -155,8 +155,8 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 
 ## 9. Tests
 
-- `core_city::services`: 11 tests — empty, school coverage/research, clinic/fire/police, capacity shortage, out-of-range, overlap, zero demand, tiers/aliases, remove/clear, JSON/checksum, invalid ranges.
-- `core_city`: **183 tests**.
+- `core_city::services`: 13 tests — empty, school coverage/research, clinic/fire/police, capacity shortage, out-of-range, overlapping research, tier-stat validation, zero demand, tiers/aliases, remove/clear, JSON/checksum, invalid ranges.
+- `core_city`: **185 tests**.
 - `godot_ext`: 3 new tests — service JSON roundtrip/old save, invalid sites, civic research rate; **49 tests**.
 - Workspace: **425 tests + 2 doctests (427 passed)**.
 
@@ -165,6 +165,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 - Health, fire, and police coverage are displayed but do not yet affect happiness, health, damage, or production.
 - Service sites require a completed job building; there is no separate civic-building blueprint type yet.
 - Tiers do not auto-upgrade when the age changes.
+- Research is allocated greedily by site id; a new school may add no output until demand grows or the older school is removed.
 - Research is still a global pool; there is no per-school queue or university tier.
 - No funding, upkeep, staffing, or service quality.
 - No district coverage overlay or response-time model.
