@@ -59,6 +59,21 @@ const SMALL_JOB_PAIRS: usize = 4_096;
 /// itself.
 const MIN_GRID_SIDE: usize = 8;
 
+#[cfg(test)]
+std::thread_local! {
+    static LAST_JOB_PATH_WAS_GRID: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn mark_job_path(grid: bool) {
+    LAST_JOB_PATH_WAS_GRID.with(|cell| cell.set(grid));
+}
+
+#[cfg(test)]
+fn last_job_path_was_grid() -> bool {
+    LAST_JOB_PATH_WAS_GRID.with(std::cell::Cell::get)
+}
+
 /// One completed residential building available to households.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Home {
@@ -848,6 +863,12 @@ fn grow_home(
         return;
     }
     gathered.sort_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)));
+    // Drop consumed prefixes so a long-running home does not retain the whole
+    // explored candidate list. The cursor and order are preserved.
+    if state.cursor > 1_024 && state.cursor * 2 > state.candidates.len() {
+        state.candidates.drain(..state.cursor);
+        state.cursor = 0;
+    }
     let tail = state.candidates.split_off(state.cursor);
     state.candidates.extend(merge_sorted(tail, gathered));
 }
@@ -887,6 +908,8 @@ fn assign_with_grid(
     roads: Option<&RoadGraph>,
     flows: &[Option<FlowField>],
 ) -> JobAssignment {
+    #[cfg(test)]
+    mark_job_path(true);
     let mut need: Vec<u32> = homes.iter().map(|home| home.residents).collect();
     let mut remaining: Vec<u32> = workplaces.iter().map(|work| work.slots).collect();
     let mut commute_weighted = vec![0.0_f32; homes.len()];
@@ -963,6 +986,8 @@ fn greedy_full(
     roads: Option<&RoadGraph>,
     flows: &[Option<FlowField>],
 ) -> JobAssignment {
+    #[cfg(test)]
+    mark_job_path(false);
     let mut pairs: Vec<JobPair> = Vec::new();
     for (home_index, home) in homes.iter().enumerate() {
         for (work_index, work) in workplaces.iter().enumerate() {
@@ -1938,6 +1963,7 @@ mod tests {
             "fixture must exercise the indexed path"
         );
         compare_with_reference(&homes, &workplaces, None);
+        assert!(last_job_path_was_grid());
     }
 
     #[test]
@@ -1961,6 +1987,7 @@ mod tests {
             })
             .collect();
         compare_with_reference(&homes, &workplaces, None);
+        assert!(last_job_path_was_grid());
     }
 
     #[test]
@@ -1988,6 +2015,7 @@ mod tests {
             "fixture must exercise the indexed path"
         );
         compare_with_reference(&homes, &workplaces, Some(&graph));
+        assert!(last_job_path_was_grid());
     }
 
     #[test]
@@ -2003,6 +2031,7 @@ mod tests {
             "fixture must exercise the indexed path"
         );
         compare_with_reference(&homes, &workplaces, None);
+        assert!(!last_job_path_was_grid());
     }
 
     #[test]
