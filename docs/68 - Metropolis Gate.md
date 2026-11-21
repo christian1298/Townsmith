@@ -376,6 +376,32 @@ Local gap IDs only; they are not ADRs or questions.
 
 The biggest gap is not a number. It is that **the current evidence is the easy part of the problem**: one mesh reused 21 times, or boxes with no LOD. The gate lives in the part that does not exist yet — a real 1M city with 250k distinct building records, LOD/impostors, streaming, shadows, and simulation.
 
+### 7.4 Data-scale harness
+
+`cargo run --release -p townsmith-bench --bin metropolis` builds the data side of the gate without rendering:
+
+- 10,000 cohorts × 100 = **1,000,000 population** across 128 districts;
+- **2,000 active agents** split 1,000 sparse (128 m) and 1,000 dense (32 m), with ten 10 Hz agent steps per 1 Hz city tick;
+- **250,000 compact building records** (16 bytes each, 4 MB), no strings or render data;
+- fixed seed, **120 ticks**, no sleeps;
+- checksum over cohorts, agents, and building records, plus median/p95 tick timings and a `render:false` marker.
+
+Measured on the developer machine (Ryzen 9 7950X, Linux, release build, three runs):
+
+| Metric | Result |
+|---|---:|
+| Wall time | 404–410 ms |
+| City tick median | 3.29–3.38 ms |
+| City tick p95 | 4.19–4.21 ms |
+| 10k-cohort update | ~0.217 ms |
+| 20 agent updates per city tick | ~3.12 ms |
+| Checksum | `3632d2135fa98d29` (stable across runs/processes) |
+
+`--smoke` runs the scene twice and fails on checksum/state drift.
+
+> [!warning] What it does not prove
+> This is not the gate. It has no renderer, GPU, LOD, streaming, shadows, voxel meshes, pathfinding, schedules, needs, traffic, economy, save/load, or peak-memory measurement. It does not close G-02, G-04, G-05, G-07, or G-08, and it is not §8 gate evidence. It only proves the 1M cohort/agent/building data loop fits the CPU budget at this scale.
+
 ## 8. Pass/fail decision rules
 
 ### 8.1 Validity first
