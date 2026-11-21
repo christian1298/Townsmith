@@ -95,6 +95,10 @@ jobs:
         run: |
           set -o pipefail
           bash ./scripts/smoke_godot.sh 2>&1 | tee "$RUNNER_TEMP/godot-smoke.log"
+      - name: Locale table gate
+        run: bash ./scripts/check_locale.sh
+      - name: Locale gate self-test
+        run: bash ./scripts/check_locale.sh --self-test
       - name: Run locale smoke
         shell: bash
         run: |

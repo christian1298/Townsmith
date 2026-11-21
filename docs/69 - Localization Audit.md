@@ -22,7 +22,7 @@ tags:
 
 | Surface | Runtime source | EN keys | DE keys | Parity | Gate |
 |---|---|---:|---:|---|---|
-| First-person volume editor | `godot/editor_i18n.gd` | 96 | 96 | complete | `smoke_locale.sh` |
+| First-person volume editor | `godot/editor_i18n.gd` | 96 | 96 | complete | `check_locale.sh` + `smoke_locale.sh` |
 | World-placement HUD, status, help | `godot/world_placement.gd` | 0 | 0 | n/a | none |
 | Dashboard shell and body | `world_placement.gd` + Rust `core_city` payload | 0 | 0 | n/a | none |
 | Advisor titles and details | Rust `core_city::advisor` | 0 | 0 | n/a | none |
@@ -270,13 +270,17 @@ Acceptance checks:
 
 ### Current contract
 
+### Static gate
+
+`scripts/check_locale.sh` parses the `TABLES` const in `godot/editor_i18n.gd` and checks key parity, the 96-key floor, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. It prints `LOCALE_CHECK keys=96 status=ok`, supports `--self-test` with six failure cases, and runs in `scripts/check.sh` and the Rust CI job before the Godot locale smoke.
+
 `scripts/smoke_locale.sh` parses the last `LOCALE_SMOKE` line and requires:
 
 ```bash
-if [[ "$KEYS" != "96" || "$STATUS" != "ok" ]]; then
+if [[ -z "$KEYS" || "$KEYS" -lt 96 || "$STATUS" != "ok" ]]; then
 ```
 
-The exact `96` is a hand-edited constant. Adding keys turns a coverage improvement into a red build, and a partial migration can hide behind an unchanged total.
+The exact `96` was a hand-edited constant in the runtime smoke. The static gate now enforces a floor (`MIN_KEYS=96`) plus EN/DE parity, empty values, and placeholder parity; `smoke_locale.sh` accepts `keys >= 96`. Adding keys is no longer a red build.
 
 ### Proposed contract
 
