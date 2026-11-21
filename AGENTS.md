@@ -289,6 +289,7 @@ GODOT=/path/to/godot ./scripts/smoke_metropolis_render.sh
 GODOT=/path/to/godot ./scripts/bench_metropolis_gate.sh --setup-only
 GODOT=/path/to/godot ./scripts/smoke_metropolis_voxel_gate.sh
 GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only
+GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --lod
 GODOT=/path/to/godot ./scripts/smoke_volume.sh
 GODOT=/path/to/godot ./scripts/smoke_editor.sh
 GODOT=/path/to/godot ./scripts/smoke_locale.sh

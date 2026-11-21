@@ -460,27 +460,30 @@ The route is `benchmarks/routes/metropolis_gate_v1.json`; setup is deterministic
 
 ### 7.7 Voxel-proxy setup and frame-budget harness
 
-`godot/metropolis_voxel_gate.gd` builds three deterministic `MultiMesh` tiers from the Phase 0 demo voxel hut: 1k, 5k, and 20k instances (26k total). It reports per-tier instances, quads, triangles, setup ms, instance-buffer bytes, static-memory delta, and an FNV checksum. `scripts/bench_metropolis_voxel_gate.sh --setup-only` runs headless twice and fails if the layout drifts; the short/full modes capture display-backed frame times with hardware provenance.
+`godot/metropolis_voxel_gate.gd` builds three deterministic `MultiMesh` tiers from the Phase 0 demo voxel hut: 1k, 5k, and 20k instances (26k total). Each tier is split into static distance bands: **LOD 0 near** (`<=150 m`, greedy hut), **LOD 1 mid** (`<=400 m`, box proxy), and **LOD 2 far** (impostor quad). There is no runtime LOD switching. It reports per-tier/per-LOD instances, quads, triangles, setup ms, instance-buffer bytes, static-memory delta, and an FNV checksum. `scripts/bench_metropolis_voxel_gate.sh --setup-only` runs headless twice and fails if the layout drifts; the short/full modes capture display-backed frame times with hardware provenance.
 
 Current headless setup (Ryzen 9 7950X, Godot 4.7.2):
 
 | Tier | Instances | Quads | Triangles | Setup ms | Buffer |
 |---|---:|---:|---:|---:|---:|
-| small | 1,000 | 56,000 | 112,000 | ~9.3 | 48,000 B |
-| medium | 5,000 | 280,000 | 560,000 | ~2.3 | 240,000 B |
-| large | 20,000 | 1,120,000 | 2,240,000 | ~10.4 | 960,000 B |
-| **total** | **26,000** | **1,456,000** | **2,912,000** | **~37 ms** | **1,248,000 B** |
+| small | 1,000 | 41,800 | 83,600 | ~3 | 48,000 B |
+| medium | 5,000 | 63,270 | 126,540 | ~6 | 240,000 B |
+| large | 20,000 | 79,980 | 159,960 | ~25 | 960,000 B |
+| **total** | **26,000** | **185,050** | **370,100** | **~34–41 ms** | **1,248,000 B** |
 
-Combined checksum **`acc9a456`**; mesh build ~15 ms; static-memory delta ~2.8 MB.
+LOD split: near **2,123** instances / 118,888 quads / 237,776 triangles; mid **8,457** / 50,742 / 101,484; far **15,420** / 15,420 / 30,840. Combined checksum **`4d14065f`**; static-memory delta ~2.4 MB.
+
+`--lod` mode uses one 26,000-building layout instead of three spatial tiers: near 698 / mid 4,318 / far 20,984; **85,980 quads / 171,960 triangles**; checksum **`73ac0757`**.
 
 ```bash
 GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only
+GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --lod
 GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --short
 GODOT=/path/to/godot ./scripts/smoke_metropolis_voxel_gate.sh
 ```
 
 > [!warning] Evidence limit
-> This is **26k reused low-poly huts**, not 250k distinct voxel buildings. It has no LOD/impostors, streaming, shadows/GI/SSAO, simulation, save/load, or RTX 3060 reference run. It proves the voxel-proxy instance path and memory shape, and it can capture a frame budget; it does not close the M5 gate.
+> This is **26k reused low-poly proxies** with static distance bands, not 250k distinct voxel buildings. It has no runtime LOD switching, streaming, shadows/GI/SSAO, simulation, save/load, or RTX 3060 reference run. It proves the voxel-proxy instance/LOD memory shape, and it can capture a frame budget; it does not close the M5 gate.
 
 ## 8. Pass/fail decision rules
 

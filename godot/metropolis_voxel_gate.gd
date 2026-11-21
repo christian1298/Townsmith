@@ -2,26 +2,38 @@ extends Node3D
 
 ## Voxel-proxy setup and frame-budget harness for the metropolis gate (docs/68 §7.7).
 ##
-## Builds three deterministic `MultiMesh` tiers of the existing greedy-meshed
-## Phase 0 hut (`TownsmithCore.build_demo_mesh()`): 1k / 5k / 20k instances,
-## 26k total. It reports per-tier instance counts, quads/triangles, setup time,
-## instance-buffer bytes, static-memory delta, and a platform-stable checksum.
+## Builds three deterministic `MultiMesh` spatial tiers from the Phase 0 demo
+## voxel hut: 1k / 5k / 20k buildings, 26k total. Every building is assigned a
+## static LOD by distance band around its layout centre:
+##   LOD 0 `near`  existing greedy-meshed demo hut (56 quads / 112 triangles)
+##   LOD 1 `mid`   12-triangle box with the hut AABB
+##   LOD 2 `far`   2-triangle quad impostor card
+## The bands are 150 m (near) and 400 m (mid); farther instances are far. This
+## is a deterministic setup-time stand-in for per-frame camera-distance LOD
+## selection: instances never switch LOD in this harness.
+##
+## It reports per-spatial-tier and per-LOD instance counts, quads/triangles,
+## setup time, instance-buffer bytes, static-memory delta, and a stable
+## checksum. `--lod` builds a single 26k-building layout instead of the three
+## spatial tiers, so the LOD mix can be validated on its own.
 ##
 ## With a display it also flies a fixed 60 s camera route after a warm-up and
 ## records real frame times. Headless (`--setup-only`) validates the layout and
 ## upload path only; it never claims FPS.
 ##
 ## This is **voxel-proxy setup/memory evidence**, not the RTX 3060 metropolis
-## gate: one low-poly hut mesh is reused, there is no LOD/impostor pipeline,
+## gate: one reused low-poly hut, static LOD bands with no switching, no
 ## streaming, shadows (unless `--shadows`), GI/SSAO, simulation, or 250k
 ## buildings, and the route is a single run on whatever GPU is attached.
 ##
 ## Usage:
 ##   godot --headless --path godot res://metropolis_voxel_gate.tscn -- --setup-only
+##   godot --headless --path godot res://metropolis_voxel_gate.tscn -- --setup-only --lod
 ##   godot --path godot res://metropolis_voxel_gate.tscn -- --short
 ##
 ## Options after `--`:
 ##   --setup-only        Build, validate, print setup JSON, exit 0
+##   --lod               Build the single 26k-building LOD-band layout
 ##   --short             Use a 10 s measured route with a 3 s warm-up
 ##   --duration S        Measured seconds (default route value, 60)
 ##   --warmup S          Discarded warm-up seconds (default route value, 8)
@@ -35,6 +47,17 @@ const TIER_COUNTS := [1_000, 5_000, 20_000]
 const TIER_NAMES := ["small", "medium", "large"]
 # Fixed tier centres along X, 10 m grid. The three footprints do not overlap.
 const TIER_CENTER_X := [-1700.0, -700.0, 900.0]
+# `--lod` mode: one 26k-building layout, still 10 m spacing.
+const LOD_ONLY_COUNT := 26_000
+const LOD_ONLY_CENTER_X := 0.0
+const LOD_ONLY_NAME := "lod_single"
+# Static distance bands from each layout centre. Not a runtime LOD selector.
+const LOD_NEAR_RADIUS_M := 150.0
+const LOD_MID_RADIUS_M := 400.0
+const LOD_NAMES := ["near", "mid", "far"]
+# LOD 0 reuses the greedy-meshed demo hut. LOD 1 is a 12-triangle box with the
+# same AABB. LOD 2 is a 2-triangle vertical quad impostor card.
+const LOD_MESH_IDS := ["phase0_demo_hut", "phase0_lod1_box", "phase0_lod2_quad"]
 const MESH_ID := "phase0_demo_hut"
 const SEED := 2026
 const GRID_SPACING_M := 10.0
@@ -58,6 +81,7 @@ var git_dirty := ""
 var setup_only := false
 var short_route := false
 var shadows_enabled := false
+var lod_mode := false
 
 var camera: Camera3D
 var light: DirectionalLight3D
@@ -80,6 +104,7 @@ func _ready() -> void:
 	setup_only = args.has("--setup-only")
 	short_route = args.has("--short")
 	shadows_enabled = args.has("--shadows")
+	lod_mode = args.has("--lod")
 	git_commit = _arg(args, "--git-commit", "")
 	git_dirty = _arg(args, "--git-dirty", "")
 	route_path = _arg(args, "--route", _project_root().path_join(DEFAULT_ROUTE))
@@ -140,19 +165,55 @@ func _build_scene() -> void:
 	var scene_started_usec := Time.get_ticks_usec()
 	var core := TownsmithCore.new()
 	var mesh_started_usec := Time.get_ticks_usec()
-	var mesh: ArrayMesh = core.build_demo_mesh()
+	var near_mesh: ArrayMesh = core.build_demo_mesh()
 	var mesh_usec := Time.get_ticks_usec() - mesh_started_usec
-	if mesh == null or mesh.get_surface_count() < 1:
+	if near_mesh == null or near_mesh.get_surface_count() < 1:
 		_scene_stats = {"error": "demo_mesh_empty"}
 		return
-	var mesh_stats := _mesh_stats(mesh)
-	var mesh_aabb := mesh.get_aabb()
-	var mesh_triangles := int(mesh_stats["triangles"])
+	var near_stats := _mesh_stats(near_mesh)
+	var hut_aabb := near_mesh.get_aabb()
 	var material := _hut_material()
+	var meshes: Array[Mesh] = [
+		near_mesh,
+		_mid_lod_mesh(hut_aabb),
+		_far_lod_mesh(hut_aabb),
+	]
+	var lod_meshes: Array = []
+	var half_span := 0.0
+	var max_height := 0.0
+	for lod in meshes.size():
+		var current_mesh: Mesh = meshes[lod]
+		var stats := _mesh_stats_any(current_mesh)
+		stats["lod"] = lod
+		stats["name"] = LOD_NAMES[lod]
+		stats["mesh"] = LOD_MESH_IDS[lod]
+		lod_meshes.append(stats)
+		var aabb: Array = stats["aabb"]
+		var base_y := -float(aabb[1])
+		max_height = maxf(max_height, float(aabb[1]) + float(aabb[4]) + base_y)
+		half_span = maxf(half_span, maxf(float(aabb[3]), float(aabb[5])) * 0.5)
 
 	_container = Node3D.new()
-	_container.name = "MetropolisVoxelGateTiers"
+	_container.name = "MetropolisVoxelGateLods"
 	add_child(_container)
+
+	var layout_id := "lod_single_v1" if lod_mode else "tiers_v1"
+	var layouts: Array = []
+	if lod_mode:
+		layouts.append({
+			"tier": 0,
+			"name": LOD_ONLY_NAME,
+			"count": LOD_ONLY_COUNT,
+			"center_x": LOD_ONLY_CENTER_X,
+		})
+	else:
+		for tier in TIER_COUNTS.size():
+			layouts.append({
+				"tier": tier,
+				"name": TIER_NAMES[tier],
+				"count": int(TIER_COUNTS[tier]),
+				"center_x": float(TIER_CENTER_X[tier]),
+			})
 
 	var tier_stats: Array = []
 	var total_instances := 0
@@ -162,21 +223,28 @@ func _build_scene() -> void:
 	var total_setup_usec := 0
 	var total_mem_kb := 0
 	var combined_checksum := FNV_OFFSET_BASIS
-	combined_checksum = _mix_string(combined_checksum, MESH_ID)
+	combined_checksum = _mix_string(combined_checksum, layout_id)
+	for mesh_id in LOD_MESH_IDS:
+		combined_checksum = _mix_string(combined_checksum, str(mesh_id))
 	combined_checksum = _mix(combined_checksum, SEED)
 	combined_checksum = _mix(combined_checksum, int(round(GRID_SPACING_M * 1000.0)))
+	combined_checksum = _mix(combined_checksum, int(round(LOD_NEAR_RADIUS_M * 1000.0)))
+	combined_checksum = _mix(combined_checksum, int(round(LOD_MID_RADIUS_M * 1000.0)))
 
-	for tier in TIER_COUNTS.size():
-		var count := int(TIER_COUNTS[tier])
+	for layout in layouts:
+		var tier := int(layout["tier"])
+		var count := int(layout["count"])
 		var tier_started_usec := Time.get_ticks_usec()
-		var tier_result := _build_tier(tier, count, mesh, mesh_aabb, mesh_triangles, material)
+		var tier_result := _build_layout(
+			tier, str(layout["name"]), count, float(layout["center_x"]),
+			layout_id, meshes, lod_meshes, half_span, max_height, material)
 		if tier_result.has("error"):
 			_scene_stats = {"error": str(tier_result["error"])}
 			return
 		var setup_usec := Time.get_ticks_usec() - tier_started_usec
 		var stats: Dictionary = tier_result["stats"]
 		stats["setup_ms"] = _ms(setup_usec)
-		var tier_hash := _tier_checksum(tier, count, stats, mesh_aabb)
+		var tier_hash := _tier_checksum(tier, count, stats, layout_id)
 		stats["checksum"] = _checksum_hex(tier_hash)
 		combined_checksum = _mix(combined_checksum, tier_hash)
 		tier_stats.append(stats)
@@ -188,15 +256,57 @@ func _build_scene() -> void:
 		total_setup_usec += setup_usec
 		total_mem_kb += int(stats["cpu_mem_kb_delta"])
 
+	var lod_totals: Array = []
+	var lod_instances := {}
+	for lod in LOD_NAMES.size():
+		var instances := 0
+		var quads := 0
+		var triangles := 0
+		var buffer_bytes := 0
+		var lod_setup_ms := 0.0
+		for tier_entry in tier_stats:
+			for lod_entry in (tier_entry["lod"] as Array):
+				if int(lod_entry["lod"]) != lod:
+					continue
+				instances += int(lod_entry["instances"])
+				quads += int(lod_entry["quads"])
+				triangles += int(lod_entry["triangles"])
+				buffer_bytes += int(lod_entry["buffer_bytes"])
+				lod_setup_ms += float(lod_entry["setup_ms"])
+		var mesh_entry: Dictionary = lod_meshes[lod]
+		lod_totals.append({
+			"name": LOD_NAMES[lod],
+			"lod": lod,
+			"mesh": LOD_MESH_IDS[lod],
+			"mesh_quads": int(mesh_entry["quads"]),
+			"mesh_triangles": int(mesh_entry["triangles"]),
+			"instances": instances,
+			"quads": quads,
+			"triangles": triangles,
+			"buffer_bytes": buffer_bytes,
+			"buffer_mb": _round2(float(buffer_bytes) / (1024.0 * 1024.0)),
+			"setup_ms": _round2(lod_setup_ms),
+		})
+		lod_instances[LOD_NAMES[lod]] = instances
+
 	_scene_stats = {
 		"mesh": MESH_ID,
 		"seed": SEED,
 		"spacing_m": GRID_SPACING_M,
+		"layout": layout_id,
+		"lod_model": {
+			"mode": "static_distance_bands",
+			"near_radius_m": LOD_NEAR_RADIUS_M,
+			"mid_radius_m": LOD_MID_RADIUS_M,
+			"levels": lod_meshes,
+		},
 		"instances": total_instances,
 		"quads": total_quads,
 		"triangles": total_triangles,
 		"tiers": tier_stats,
-		"mesh_stats": mesh_stats,
+		"lod_tiers": lod_totals,
+		"lod_instances": lod_instances,
+		"mesh_stats": near_stats,
 		"mesh_build_ms": _ms(mesh_usec),
 		"tier_setup_ms": _ms(total_setup_usec),
 		"setup_ms": _ms(mesh_usec + total_setup_usec),
@@ -207,33 +317,124 @@ func _build_scene() -> void:
 		"checksum": _checksum_hex(combined_checksum),
 	}
 
-func _build_tier(
+func _build_layout(
 	tier: int,
+	tier_name: String,
 	count: int,
-	mesh: ArrayMesh,
-	mesh_aabb: AABB,
-	mesh_triangles: int,
+	center_x: float,
+	layout_id: String,
+	meshes: Array,
+	lod_meshes: Array,
+	half_span: float,
+	max_height: float,
 	material: Material) -> Dictionary:
 	var columns := maxi(1, int(ceil(sqrt(float(count)))))
 	var rows := maxi(1, int(ceil(float(count) / float(columns))))
 	var extent_x := float(columns - 1) * GRID_SPACING_M
 	var extent_z := float(rows - 1) * GRID_SPACING_M
-	var center_x := float(TIER_CENTER_X[tier])
 	var x0 := center_x - extent_x * 0.5
 	var z0 := -extent_z * 0.5
-	var mesh_center := mesh_aabb.get_center()
-	var half_width := mesh_aabb.size.x * 0.5
-	var half_depth := mesh_aabb.size.z * 0.5
-	var half_span := maxf(half_width, half_depth)
 	var min_x := x0 - half_span
 	var max_x := x0 + extent_x + half_span
 	var min_z := z0 - half_span
 	var max_z := z0 + extent_z + half_span
+	var city_aabb := AABB(
+		Vector3(min_x, 0.0, min_z),
+		Vector3(max_x - min_x, maxf(max_height, 1.0), max_z - min_z))
 	var mem_before_kb := OS.get_static_memory_usage() / 1024
+
+	var indices_by_lod: Array = [[], [], []]
+	for index in count:
+		var column := index % columns
+		var row := index / columns
+		var x := x0 + float(column) * GRID_SPACING_M
+		var z := z0 + float(row) * GRID_SPACING_M
+		var lod := _lod_for_position(x, z, center_x)
+		(indices_by_lod[lod] as Array).append(index)
+
+	var lod_stats: Array = []
+	var tier_quads := 0
+	var tier_triangles := 0
+	var tier_buffer_bytes := 0
+	for lod in meshes.size():
+		var indices: Array = indices_by_lod[lod]
+		var current_mesh: Mesh = meshes[lod]
+		var mesh_entry: Dictionary = lod_meshes[lod]
+		var group_started_usec := Time.get_ticks_usec()
+		var lod_result := _build_lod_group(
+			tier, tier_name, lod, indices, columns, x0, z0,
+			current_mesh, mesh_entry, city_aabb, material)
+		if lod_result.has("error"):
+			return {"error": str(lod_result["error"])}
+		var lod_setup_usec := Time.get_ticks_usec() - group_started_usec
+		var entry: Dictionary = lod_result
+		entry["setup_ms"] = _ms(lod_setup_usec)
+		lod_stats.append(entry)
+		tier_quads += int(entry["quads"])
+		tier_triangles += int(entry["triangles"])
+		tier_buffer_bytes += int(entry["buffer_bytes"])
+
+	var mem_after_kb := OS.get_static_memory_usage() / 1024
+	var stats := {
+		"name": tier_name,
+		"tier": tier,
+		"instances": count,
+		"grid": [columns, rows],
+		"center_x": center_x,
+		"bounds": [min_x, min_z, max_x, max_z],
+		"lod": lod_stats,
+		"quads": tier_quads,
+		"triangles": tier_triangles,
+		"buffer_bytes": tier_buffer_bytes,
+		"buffer_mb": _round2(float(tier_buffer_bytes) / (1024.0 * 1024.0)),
+		"cpu_mem_kb_delta": mem_after_kb - mem_before_kb,
+	}
+	return {"stats": stats}
+
+func _build_lod_group(
+	tier: int,
+	tier_name: String,
+	lod: int,
+	indices: Array,
+	columns: int,
+	x0: float,
+	z0: float,
+	mesh: Mesh,
+	mesh_stats: Dictionary,
+	city_aabb: AABB,
+	material: Material) -> Dictionary:
+	var count := indices.size()
+	var mesh_quads := int(mesh_stats["quads"])
+	var mesh_triangles := int(mesh_stats["triangles"])
+	var stats := {
+		"name": LOD_NAMES[lod],
+		"lod": lod,
+		"mesh": LOD_MESH_IDS[lod],
+		"instances": count,
+		"mesh_quads": mesh_quads,
+		"mesh_triangles": mesh_triangles,
+		"quads": mesh_quads * count,
+		"triangles": mesh_triangles * count,
+		"buffer_ms": 0.0,
+		"buffer_bytes": 0,
+		"buffer_mb": 0.0,
+	}
+	if count == 0:
+		return stats
+
+	var local_aabb: Array = mesh_stats["aabb"]
+	var mesh_center := Vector3(
+		float(local_aabb[0]) + float(local_aabb[3]) * 0.5,
+		float(local_aabb[1]) + float(local_aabb[4]) * 0.5,
+		float(local_aabb[2]) + float(local_aabb[5]) * 0.5)
+	# BoxMesh and QuadMesh are centred on the origin; lift them so their base
+	# sits on the ground like the hut mesh.
+	var base_y := -float(local_aabb[1])
 
 	var data := PackedFloat32Array()
 	data.resize(count * FLOATS_PER_INSTANCE)
-	for index in count:
+	for slot in count:
+		var index := int(indices[slot])
 		var column := index % columns
 		var row := index / columns
 		var x := x0 + float(column) * GRID_SPACING_M
@@ -245,7 +446,7 @@ func _build_tier(
 		var c := cos(angle)
 		var s := sin(angle)
 		var rotated_center := _rotated_center(angle, mesh_center)
-		var offset := index * FLOATS_PER_INSTANCE
+		var offset := slot * FLOATS_PER_INSTANCE
 		data[offset + 0] = c
 		data[offset + 1] = 0.0
 		data[offset + 2] = -s
@@ -253,7 +454,7 @@ func _build_tier(
 		data[offset + 4] = 0.0
 		data[offset + 5] = 1.0
 		data[offset + 6] = 0.0
-		data[offset + 7] = 0.0
+		data[offset + 7] = base_y
 		data[offset + 8] = s
 		data[offset + 9] = 0.0
 		data[offset + 10] = c
@@ -266,18 +467,13 @@ func _build_tier(
 	multimesh.use_colors = false
 	multimesh.instance_count = count
 	# Set the AABB before the bulk upload so Godot skips its own instance scan.
-	multimesh.custom_aabb = AABB(
-		Vector3(min_x, mesh_aabb.position.y, min_z),
-		Vector3(
-			max_x - min_x,
-			maxf(mesh_aabb.size.y, 1.0),
-			max_z - min_z))
+	multimesh.custom_aabb = city_aabb
 	var buffer_started_usec := Time.get_ticks_usec()
 	multimesh.buffer = data
 	var buffer_usec := Time.get_ticks_usec() - buffer_started_usec
 
 	var node := MultiMeshInstance3D.new()
-	node.name = "VoxelTier%s" % TIER_NAMES[tier]
+	node.name = "VoxelLod%dTier%s" % [lod, tier_name]
 	node.multimesh = multimesh
 	node.material_override = material
 	node.cast_shadow = (
@@ -285,49 +481,34 @@ func _build_tier(
 		else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
 	_container.add_child(node)
 
-	var mem_after_kb := OS.get_static_memory_usage() / 1024
-	# Quads are half the triangle count for the greedy mesher's
-	# two-triangle-per-quad output.
-	var instance_quads := int(mesh_triangles / 2)
-	var stats := {
-		"name": TIER_NAMES[tier],
-		"tier": tier,
-		"instances": count,
-		"grid": [columns, rows],
-		"center_x": center_x,
-		"bounds": [min_x, min_z, max_x, max_z],
-		"mesh_quads": instance_quads,
-		"mesh_triangles": mesh_triangles,
-		"quads": instance_quads * count,
-		"triangles": mesh_triangles * count,
-		"buffer_ms": _ms(buffer_usec),
-		"buffer_bytes": data.size() * FLOAT_BYTES,
-		"buffer_mb": _round2(float(data.size() * FLOAT_BYTES) / (1024.0 * 1024.0)),
-		"cpu_mem_kb_delta": mem_after_kb - mem_before_kb,
-	}
-	return {"stats": stats}
+	stats["buffer_ms"] = _ms(buffer_usec)
+	stats["buffer_bytes"] = data.size() * FLOAT_BYTES
+	stats["buffer_mb"] = _round2(float(data.size() * FLOAT_BYTES) / (1024.0 * 1024.0))
+	return stats
 
-func _tier_checksum(tier: int, count: int, stats: Dictionary, mesh_aabb: AABB) -> int:
+func _tier_checksum(tier: int, count: int, stats: Dictionary, layout_id: String) -> int:
 	var hash := FNV_OFFSET_BASIS
-	hash = _mix_string(hash, MESH_ID)
+	hash = _mix_string(hash, layout_id)
+	for mesh_id in LOD_MESH_IDS:
+		hash = _mix_string(hash, str(mesh_id))
 	hash = _mix(hash, tier)
 	hash = _mix(hash, count)
 	hash = _mix(hash, SEED)
 	hash = _mix(hash, int(round(GRID_SPACING_M * 1000.0)))
-	hash = _mix(hash, int(round(float(stats.get("center_x", 0.0)) * 1000.0)))
-	for value in [
-		mesh_aabb.position.x,
-		mesh_aabb.position.y,
-		mesh_aabb.position.z,
-		mesh_aabb.size.x,
-		mesh_aabb.size.y,
-		mesh_aabb.size.z,
-	]:
-		hash = _mix(hash, int(round(float(value) * 1000.0)))
+	hash = _mix(hash, int(round(LOD_NEAR_RADIUS_M * 1000.0)))
+	hash = _mix(hash, int(round(LOD_MID_RADIUS_M * 1000.0)))
+	var center_x := float(stats.get("center_x", 0.0))
+	hash = _mix(hash, int(round(center_x * 1000.0)))
 	var columns := int((stats.get("grid", [1, 1]) as Array)[0])
 	var rows := int((stats.get("grid", [1, 1]) as Array)[1])
 	hash = _mix(hash, columns)
 	hash = _mix(hash, rows)
+	for lod_entry in (stats.get("lod", []) as Array):
+		hash = _mix(hash, int(lod_entry.get("lod", 0)))
+		hash = _mix(hash, int(lod_entry.get("mesh_quads", 0)))
+		hash = _mix(hash, int(lod_entry.get("mesh_triangles", 0)))
+	var x0 := center_x - float(columns - 1) * GRID_SPACING_M * 0.5
+	var z0 := -float(rows - 1) * GRID_SPACING_M * 0.5
 	for index in count:
 		var column := index % columns
 		var row := index / columns
@@ -335,7 +516,47 @@ func _tier_checksum(tier: int, count: int, stats: Dictionary, mesh_aabb: AABB) -
 		hash = _mix(hash, column)
 		hash = _mix(hash, row)
 		hash = _mix(hash, yaw)
+		hash = _mix(hash, _lod_for_position(
+			x0 + float(column) * GRID_SPACING_M,
+			z0 + float(row) * GRID_SPACING_M,
+			center_x))
 	return hash
+
+func _lod_for_position(x: float, z: float, center_x: float) -> int:
+	var dx := x - center_x
+	var distance_squared := dx * dx + z * z
+	if distance_squared <= LOD_NEAR_RADIUS_M * LOD_NEAR_RADIUS_M:
+		return 0
+	if distance_squared <= LOD_MID_RADIUS_M * LOD_MID_RADIUS_M:
+		return 1
+	return 2
+
+func _mid_lod_mesh(hut_aabb: AABB) -> BoxMesh:
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(hut_aabb.size.x, hut_aabb.size.y, hut_aabb.size.z)
+	return mesh
+
+func _far_lod_mesh(hut_aabb: AABB) -> QuadMesh:
+	var mesh := QuadMesh.new()
+	mesh.size = Vector2(hut_aabb.size.x, hut_aabb.size.y)
+	return mesh
+
+func _mesh_stats_any(mesh: Mesh) -> Dictionary:
+	if mesh is ArrayMesh:
+		return _mesh_stats(mesh as ArrayMesh)
+	var faces := mesh.get_faces()
+	var triangles := int(faces.size() / 3)
+	var aabb := mesh.get_aabb()
+	return {
+		"surfaces": 1,
+		"vertices": faces.size(),
+		"triangles": triangles,
+		"quads": int(triangles / 2),
+		"aabb": [
+			aabb.position.x, aabb.position.y, aabb.position.z,
+			aabb.size.x, aabb.size.y, aabb.size.z,
+		],
+	}
 
 func _mesh_stats(mesh: ArrayMesh) -> Dictionary:
 	var triangles := _mesh_triangle_count(mesh)
@@ -513,28 +734,35 @@ func _finish() -> void:
 	result["gate_result"] = "not_measured"
 	result["gate_scope"] = "voxel_proxy_frame_budget"
 	result["gate_reason"] = (
-		"voxel-proxy frame budget observed; one reused low-poly mesh, no LOD, "
+		"voxel-proxy frame budget observed with static LOD bands "
+		+ "(hut/box/quad impostor): no runtime LOD selection or switching, "
 		+ "streaming, GI/SSAO, simulation, or reference 3060 rig; not gate M5")
 	_write_result(result, "METROPOLIS_VOXEL_GATE_RESULT")
 
 func _write_setup() -> void:
-	var result := _base_result("setup")
+	var result := _base_result("setup_lod" if lod_mode else "setup")
 	result["setup_status"] = "ok"
 	result["gate_result"] = "not_measured"
 	result["gate_scope"] = "voxel_proxy_setup"
 	result["gate_reason"] = (
-		"voxel-proxy setup-only run: instance layout, quads/triangles, setup time, "
-		+ "and buffer memory only; no frames, no FPS claim, not gate M5")
+		"voxel-proxy setup-only run with static LOD bands (hut/box/quad "
+		+ "impostor): instance and per-LOD layout, quads/triangles, setup time, "
+		+ "and instance-buffer memory only; no runtime LOD switching, no frames, "
+		+ "no FPS claim, not gate M5")
 	_write_result(result, "METROPOLIS_VOXEL_GATE_SETUP")
 
 func _base_result(run_kind: String) -> Dictionary:
 	return {
-		"format_version": 1,
+		"format_version": 2,
 		"suite": "metropolis_voxel_gate",
 		"gate": "G5",
 		"scene": _scene_name(),
-		"scene_kind": "voxel_multimesh_proxy",
+		"scene_kind": "voxel_multimesh_proxy_lod",
 		"run_kind": run_kind,
+		"layout": str(_scene_stats.get("layout", "")),
+		"lod_mode": lod_mode,
+		"lod_model": _scene_stats.get("lod_model", {}),
+		"lod_instances": _scene_stats.get("lod_instances", {}),
 		"mesh": MESH_ID,
 		"seed": SEED,
 		"spacing_m": GRID_SPACING_M,
@@ -549,6 +777,7 @@ func _base_result(run_kind: String) -> Dictionary:
 		"cpu_mem_kb_delta": int(_scene_stats.get("cpu_mem_kb_delta", 0)),
 		"checksum": str(_scene_stats.get("checksum", "")),
 		"tiers": _scene_stats.get("tiers", []),
+		"lod_tiers": _scene_stats.get("lod_tiers", []),
 		"mesh_stats": _scene_stats.get("mesh_stats", {}),
 		"route": route_id,
 		"route_path": route_path,
@@ -567,7 +796,9 @@ func _base_result(run_kind: String) -> Dictionary:
 	}
 
 func _scene_name() -> String:
-	return "metropolis_voxel_gate_huts_%dk" % int(int(_scene_stats.get("instances", 0)) / 1000)
+	var layout_tag := "lod_single" if lod_mode else "lod"
+	return "metropolis_voxel_gate_%s_%dk" % [
+		layout_tag, int(int(_scene_stats.get("instances", 0)) / 1000)]
 
 func _write_result(result: Dictionary, marker: String) -> void:
 	DirAccess.make_dir_recursive_absolute(output_path.get_base_dir())
