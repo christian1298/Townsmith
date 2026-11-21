@@ -164,7 +164,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
 | Traffic graph, 32 × 32 grid | 64 roads | 1,024 nodes | 1,984 edges | ~0.44 ms build; 1.3 ms / 1,000 flow queries |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, agent, and traffic paths and a baseline for regressions. The workspace has **502 tests + 2 doctests**: 52 voxel, 62 world, 26 simulation, 239 city, 15 blueprint, 12 rooms, 53 bridge, 19 structure, 7 city-loop tests, 4 industrial tests, 4 metropolis tests, 5 modern tests, 3 traffic-grid tests, and 1 save-stress test.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, agent, and traffic paths and a baseline for regressions. The workspace has **510 tests + 2 doctests**: 52 voxel, 62 world, 26 simulation, 239 city, 15 blueprint, 12 rooms, 53 bridge, 19 structure, 7 city-loop tests, 4 industrial tests, 4 metropolis tests, 5 modern tests, 3 traffic-grid tests, 1 save-stress test, 2 materialization-selection tests, and 6 financing tests.
 
 ### Vertical slice acceptance
 
