@@ -120,8 +120,8 @@ The non-zero commute and split-assignment cases are covered by the core tests, b
 ## 6. Tests
 
 - `core_city`: 7 new tests — global nearest-slot order, id-order independence, split assignment, shortage, commute happiness, JSON roundtrip, old-save defaults.
-- `core_city` total: **170 tests**.
-- `godot_ext`: **40 tests** total; the scene smoke covers the bridge path.
+- `core_city` total: **172 tests**.
+- `godot_ext`: **46 tests** total; the scene smoke covers the bridge path.
 - Workspace: **409 tests + 2 doctests**.
 
 ## 7. Limits

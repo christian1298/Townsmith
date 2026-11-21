@@ -1232,7 +1232,7 @@ func _update_hud() -> void:
 			]
 	var research: Dictionary = core.research_state(SEED)
 	var research_text := "—"
-	if bool(research.get("ok", false)):
+	if bool(research.get("open", false)):
 		research_text = "%d pts · %d/%d techs · +%.1f/day" % [
 			roundi(float(research.get("points", 0.0))),
 			int(research.get("completed_count", 0)),
@@ -1401,7 +1401,7 @@ func _update_dashboard() -> void:
 			]
 	text += "[b]Age[/b]\n%s\n" % age_line
 	var research_line := "—"
-	if bool(research.get("ok", false)):
+	if bool(research.get("open", false)):
 		research_line = "%d points · +%.1f/day · %d / %d technologies" % [
 			roundi(float(research.get("points", 0.0))),
 			float(research.get("rate_per_day", 0.0)),
@@ -2460,13 +2460,16 @@ func _run_scene_smoke() -> void:
 				var economy_balance := float(economy_recovered.get("balance", 0.0))
 				var economy_net := float(economy_recovered.get("daily_net", 0.0))
 				var economy_debt := float(economy_recovered.get("debt", 0.0))
+				var research_generation: Dictionary = core.research_tick(SEED, 86400.0)
 				var research_before: Dictionary = core.research_state(SEED)
 				var research_checksum: String = str(core.research_checksum())
 				var research_points := float(research_before.get("points", 0.0))
-				research_ok = bool(research_before.get("ok", false))
+				research_ok = bool(research_generation.get("ok", false))
+				research_ok = research_ok and float(research_generation.get("gained", 0.0)) > 0.0
+				research_ok = research_ok and bool(research_before.get("ok", false))
 				research_ok = research_ok and int(research_before.get("node_count", 0)) >= 14
 				research_ok = research_ok and str(research_before.get("age", "")) == "wood"
-				research_ok = research_ok and research_points >= 50.0
+				research_ok = research_ok and research_points > 50.0
 				var timber_result: Dictionary = core.research_unlock(SEED, "construction.timber_frame")
 				research_ok = research_ok and bool(timber_result.get("ok", false))
 				research_ok = research_ok and int(timber_result.get("completed_count", 0)) == 1

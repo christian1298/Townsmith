@@ -846,6 +846,33 @@ impl TownsmithCore {
     /// Returns `{ ok, center, foundation_m, footprint, rotation_deg,
     /// blueprint_hash, bounds }` on success and `{ ok: false, error,
     /// error_code }` on failure.
+    fn world_seed_error(&self, seed: u64) -> Option<VarDictionary> {
+        let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(store) = world.as_ref() {
+            if store.seed != seed {
+                return Some(placement_simple_error(
+                    "seed_mismatch",
+                    "the placement store belongs to a different seed",
+                ));
+            }
+        }
+        None
+    }
+
+    fn research_seed_error(&self, seed: u64) -> Option<VarDictionary> {
+        let research = self
+            .research
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if research.as_ref().is_some_and(|store| store.seed != seed) {
+            return Some(placement_simple_error(
+                "seed_mismatch",
+                "the research pool belongs to a different seed",
+            ));
+        }
+        None
+    }
+
     #[func]
     fn world_validate_placement(
         &self,
@@ -860,6 +887,9 @@ impl TownsmithCore {
             Ok(value) => value,
             Err(error) => return error,
         };
+        if let Some(error) = self.world_seed_error(seed) {
+            return error;
+        }
         let current_age =
             AgeState::from_population(variant_u64(&self.city_summary(), "population")).age;
         if let Some(structure) = request.structure.as_ref() {
@@ -993,6 +1023,12 @@ impl TownsmithCore {
             Ok(value) => value,
             Err(error) => return error,
         };
+        if let Some(error) = self.world_seed_error(seed) {
+            return error;
+        }
+        if let Some(error) = self.research_seed_error(seed) {
+            return error;
+        }
         let current_age =
             AgeState::from_population(variant_u64(&self.city_summary(), "population")).age;
         if let Some(structure) = request.structure.as_ref() {
@@ -5336,19 +5372,23 @@ fn age_rank(age: Age) -> usize {
         .unwrap_or(0)
 }
 
-fn structure_required_age(spec: &StructureSpec) -> Age {
-    let mut required = Age::parse(spec.system.min_age()).unwrap_or(Age::Wood);
+fn structure_required_age(spec: &StructureSpec) -> (Age, StructuralSystem) {
+    let mut required_system = spec.system;
+    let mut required =
+        Age::parse(spec.system.min_age()).expect("compiled structural systems have a known age");
     if let Some(ground) = spec.ground_system {
-        let ground_age = Age::parse(ground.min_age()).unwrap_or(Age::Wood);
+        let ground_age =
+            Age::parse(ground.min_age()).expect("compiled structural systems have a known age");
         if age_rank(ground_age) > age_rank(required) {
             required = ground_age;
+            required_system = ground;
         }
     }
-    required
+    (required, required_system)
 }
 
 fn structure_age_error(spec: &StructureSpec, current: Age) -> Option<(&'static str, String)> {
-    let required = structure_required_age(spec);
+    let (required, required_system) = structure_required_age(spec);
     if age_rank(current) >= age_rank(required) {
         return None;
     }
@@ -5356,7 +5396,7 @@ fn structure_age_error(spec: &StructureSpec, current: Age) -> Option<(&'static s
         "age_locked",
         format!(
             "{} requires the {} age; the city is in the {} age",
-            spec.system.name(),
+            required_system.name(),
             required.name(),
             current.name()
         ),
@@ -5398,7 +5438,7 @@ fn research_payload(
             .iter()
             .all(|prerequisite| store.is_completed(prerequisite));
         let affordable = store.points + 0.000_001 >= node.cost;
-        let available = !unlocked && !age_locked && prerequisites_met && affordable;
+        let available = store.can_unlock(node, age);
         let mut item = VarDictionary::new();
         item.set("id", &GString::from(node.id.as_str()));
         item.set("name", &GString::from(node.name.as_str()));
@@ -6769,7 +6809,8 @@ mod tests {
         let timber = StructureSpec::new(StructuralSystem::TimberFrame, 2, 6.0, 6.0);
         assert!(structure_age_error(&timber, Age::Wood).is_none());
         let composite = timber.with_ground_system(StructuralSystem::LoadBearingBrick);
-        assert!(structure_age_error(&composite, Age::Wood).is_some());
+        let error = structure_age_error(&composite, Age::Wood).expect("ground locked");
+        assert!(error.1.contains("load-bearing brick"), "{}", error.1);
         assert!(structure_age_error(&composite, Age::Masonry).is_none());
     }
 
