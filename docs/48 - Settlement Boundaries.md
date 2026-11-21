@@ -138,7 +138,7 @@ It checks:
 ## 7. Tests
 
 - `core_city` settlement tests: 7; core_city total **170**.
-- Workspace: **448 tests + 2 doctests**.
+- Workspace: **453 tests + 2 doctests**.
 - Godot headless: `WORLD_SCENE ... settlements=ok ... status=ok`.
 - `WORLD_PLACEMENT` still passes unchanged.
 

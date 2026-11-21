@@ -240,6 +240,9 @@ cargo run --release -p townsmith-bench --bin city_loop
 # Road graph and flow-field microbenchmark
 cargo run --release -p townsmith-bench --bin traffic
 
+# Job-assignment index benchmark (1,000 x 1,000)
+cargo run --release -p townsmith-bench --bin jobs
+
 # 2,000 active-agent tick benchmark (sparse + dense)
 cargo run --release -p townsmith-bench --bin agents
 
