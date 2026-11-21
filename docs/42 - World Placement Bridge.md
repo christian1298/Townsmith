@@ -153,7 +153,7 @@ GODOT=/path/to/godot ./scripts/smoke_world_scene.sh
 `WORLD_SCENE` exercises the green/red ghost, water rejection, a 90° ghost rotation, a terrain edit and dirty chunk, placing at the fixture site, save/load of placements + deltas, rebuilding the placed node and foundation, and a failed load leaving the scene untouched. Terrain-edit details are in [[43 - Terrain Edits]]. Recorded marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok occupancy=ok industry=ok utilities=ok economy=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok render=ok occupancy=ok industry=ok utilities=ok economy=ok dashboard=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 ## 5. Scene
@@ -164,8 +164,10 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 - In Mayor Mode the target is the orbit point, snapped to the 1 m grid. The first-person view is read-only in this slice.
 - The ghost is a `Node3D` pivot with the blueprint mesh offset by `-bounds_m / 2` on X/Z. It is green when validation passes and red with the error code when it fails.
 - A transparent foundation box previews the unrotated blueprint footprint × `foundation_m`; the pivot carries the rotation.
+- Placed meshes carry per-material vertex colors: timber, stone, roof, glass, and door surfaces. The placement material uses `vertex_color_use_as_albedo`; doors and windows are therefore visible without one draw call per material.
+- Placed foundations extend 2 cm above the base. A foundation top exactly coplanar with the terrain z-fights across the full lot; the thin plinth removes it while staying hidden at the building edge.
 - `R` rotates 90°, `X` raises and `Z` lowers the target terrain by 1 m, left click creates a construction site, right click selects, `Enter` enters the selected building, `Delete` clears, `F5` saves, and `F9` loads. See [[44 - Mayor Mode]] for the camera and selection rules.
-- Placed buildings are rebuilt from the `.tsbp`; each has a mesh child, plus a foundation box when `foundation_m > 0`. The scene does not cache scenes.
+- Placed buildings are rebuilt from the `.tsbp`; each has a mesh child, plus a named `Foundation` box when `foundation_m > 0`. The scene does not cache scenes.
 - Terrain edits remesh only the affected chunk; loading a world marks every loaded chunk dirty.
 - Validation runs when the 1 m target cell or rotation changes, not every frame. The ghost y comes from the validated centre; an invalid ghost sits on the sampled terrain.
 - The default blueprint is generated once from the shared acceptance house at `user://world_placement/acceptance_house.tsbp`; `--blueprint <absolute.tsbp>` overrides it. The default save is `user://world_placement/world.json`; `--world-save <absolute.json>` overrides it.
@@ -185,8 +187,8 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 ## 7. Tests
 
 - `core_city`: placement persistence, construction, roads, lots, settlements, households, treasury/loans, industry, utilities, traffic, and the advisor; **146 tests**.
-- `godot_ext`: **41 tests** total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
-- Workspace: **355 tests + 1 doctest**.
+- `godot_ext`: **42 tests** total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
+- Workspace: **356 tests + 1 doctest**.
 - Godot headless: `WORLD_PLACEMENT ... status=ok` and `WORLD_SCENE ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 

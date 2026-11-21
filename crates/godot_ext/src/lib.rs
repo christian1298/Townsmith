@@ -5516,10 +5516,29 @@ fn volume_config_to_dictionary(config: VolumeConfig, target: &mut VarDictionary)
     target.set("voxel_size_m", f64::from(VOXEL_SIZE_M));
 }
 
+/// Display color for an editor-palette material.
+///
+/// The editor still uses a single neutral override, but placed blueprints read
+/// the vertex colors so doors, windows, roofs, and stone remain legible at
+/// city distance. Unknown materials fall back to the warm timber tone.
+#[must_use]
+fn voxel_material_color(material: MaterialId) -> [f32; 3] {
+    match material {
+        EDITOR_WALL => [0.72, 0.62, 0.48],
+        EDITOR_FLOOR => [0.52, 0.50, 0.46],
+        EDITOR_CEILING => [0.35, 0.30, 0.27],
+        EDITOR_WINDOW => [0.35, 0.62, 0.82],
+        EDITOR_DOOR => [0.30, 0.18, 0.10],
+        _ => [0.75, 0.70, 0.60],
+    }
+}
+
 /// Upload one engine-neutral voxel mesh as a single packed-array surface.
 ///
-/// Vertex colors and per-vertex material ids are deliberately omitted: the
-/// editor uses one material override for now. UVs are passed through in meters.
+/// Vertex colors carry the palette material so placed blueprints can show
+/// doors and windows without one draw call per material. The editor still
+/// overrides the surface with one neutral material. UVs are passed through in
+/// meters.
 fn voxel_mesh_to_godot(buffers: &MeshBuffers) -> Result<Gd<ArrayMesh>, &'static str> {
     if buffers.vertices.is_empty() || buffers.indices.is_empty() {
         return Ok(ArrayMesh::new_gd());
@@ -5529,6 +5548,7 @@ fn voxel_mesh_to_godot(buffers: &MeshBuffers) -> Result<Gd<ArrayMesh>, &'static 
     let mut vertices = Vec::with_capacity(vertex_count);
     let mut normals = Vec::with_capacity(vertex_count);
     let mut uvs = Vec::with_capacity(vertex_count);
+    let mut colors = Vec::with_capacity(vertex_count);
 
     for vertex in &buffers.vertices {
         vertices.push(Vector3::new(
@@ -5542,6 +5562,8 @@ fn voxel_mesh_to_godot(buffers: &MeshBuffers) -> Result<Gd<ArrayMesh>, &'static 
             vertex.normal[2],
         ));
         uvs.push(Vector2::new(vertex.uv[0], vertex.uv[1]));
+        let color = voxel_material_color(vertex.material);
+        colors.push(Color::from_rgb(color[0], color[1], color[2]));
     }
 
     let mut indices = Vec::with_capacity(buffers.indices.len());
@@ -5568,6 +5590,10 @@ fn voxel_mesh_to_godot(buffers: &MeshBuffers) -> Result<Gd<ArrayMesh>, &'static 
     arrays.set(
         ArrayType::TEX_UV.ord() as usize,
         &PackedVector2Array::from(uvs),
+    );
+    arrays.set(
+        ArrayType::COLOR.ord() as usize,
+        &PackedColorArray::from(colors),
     );
     arrays.set(
         ArrayType::INDEX.ord() as usize,
@@ -6391,6 +6417,26 @@ mod tests {
         runtime.format_version = 99;
         let json = attach_population("{}", &runtime).expect("attach");
         assert!(population_from_world_json(&json).is_err());
+    }
+
+    #[test]
+    fn palette_materials_have_distinct_display_colors() {
+        let wall = voxel_material_color(EDITOR_WALL);
+        let floor = voxel_material_color(EDITOR_FLOOR);
+        let roof = voxel_material_color(EDITOR_CEILING);
+        let window = voxel_material_color(EDITOR_WINDOW);
+        let door = voxel_material_color(EDITOR_DOOR);
+        for (left, right) in [
+            (wall, floor),
+            (wall, roof),
+            (wall, window),
+            (wall, door),
+            (window, door),
+        ] {
+            assert_ne!(left, right);
+        }
+        assert!(door[0] < wall[0]);
+        assert!(window[2] > wall[2]);
     }
 
     #[test]
