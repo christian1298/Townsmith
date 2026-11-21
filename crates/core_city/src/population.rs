@@ -6,12 +6,13 @@
 //! slowly. It is deliberately aggregate: one household record per occupied
 //! building, not one record per citizen yet.
 
-use std::collections::BTreeMap;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::traffic::RoadGraph;
+use crate::traffic::{FlowField, RoadGraph};
 
 /// Current household save format.
 pub const POPULATION_FORMAT_VERSION: u16 = 1;
@@ -49,6 +50,14 @@ pub const REST_REPLENISH_PER_S: f32 = 0.0018;
 
 /// Largest per-workplace staffing value accepted from a save.
 const MAX_STAFFING_PER_WORKPLACE: u32 = 1_000_000;
+
+/// Below this many household/workplace pairs, the plain global scan is
+/// cheaper than building a spatial index.
+const SMALL_JOB_PAIRS: usize = 4_096;
+
+/// Both sides need at least this many entries before the index pays for
+/// itself.
+const MIN_GRID_SIDE: usize = 8;
 
 /// One completed residential building available to households.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -359,7 +368,6 @@ impl CityRuntime {
         }
         self.move_in_carry = (desired - target as f32).clamp(0.0, 0.999_999);
 
-        let mut remaining: Vec<u32> = workplaces.iter().map(|work| work.slots).collect();
         let flows = roads
             .map(|graph| {
                 workplaces
@@ -368,63 +376,25 @@ impl CityRuntime {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let mut need: BTreeMap<u64, u32> = self
-            .households
-            .iter()
-            .filter(|(_, household)| household.residents > 0)
-            .map(|(&id, household)| (id, household.residents))
-            .collect();
-        let mut pairs: Vec<(f32, u64, usize)> = Vec::new();
-        for (&id, household) in &self.households {
-            if household.residents == 0 {
-                continue;
-            }
-            for (index, work) in workplaces.iter().enumerate() {
-                if work.slots == 0 {
-                    continue;
-                }
-                let distance = roads
-                    .and_then(|graph| {
-                        flows
-                            .get(index)
-                            .and_then(Option::as_ref)
-                            .and_then(|flow| graph.flow_distance_m(household.home, flow))
-                    })
-                    .unwrap_or_else(|| RoadGraph::straight_line_m(household.home, work.center));
-                pairs.push((distance, id, index));
-            }
-        }
-        pairs.sort_by(|left, right| {
-            left.0
-                .total_cmp(&right.0)
-                .then(left.1.cmp(&right.1))
-                .then(left.2.cmp(&right.2))
-        });
-        let mut assignments: BTreeMap<u64, (u32, f32)> = BTreeMap::new();
-        let mut staffing_out: BTreeMap<u64, u32> = BTreeMap::new();
-        for (distance, id, index) in pairs {
-            if remaining[index] == 0 {
-                continue;
-            }
-            let Some(left) = need.get_mut(&id) else {
-                continue;
-            };
-            if *left == 0 {
-                continue;
-            }
-            let take = (*left).min(remaining[index]);
-            remaining[index] -= take;
-            *left -= take;
-            let entry = assignments.entry(id).or_insert((0, 0.0));
-            entry.0 += take;
-            entry.1 += distance * take as f32;
-            let workplace_id = workplaces[index].id;
-            let staffed = staffing_out.entry(workplace_id).or_insert(0);
-            *staffed = staffed.saturating_add(take);
-        }
-        self.staffing = staffing_out;
+        let assignment = assign_jobs(&self.households, workplaces, roads, &flows);
+        self.staffing = assignment.staffing;
+        let mut assigned = 0_usize;
         for (&id, household) in &mut self.households {
-            let (workers, weighted) = assignments.get(&id).copied().unwrap_or((0, 0.0));
+            let (workers, weighted) = if household.residents > 0 {
+                debug_assert_eq!(
+                    assignment.home_ids.get(assigned).copied(),
+                    Some(id),
+                    "job assignment must follow household id order"
+                );
+                let values = (
+                    assignment.workers[assigned],
+                    assignment.commute_weighted[assigned],
+                );
+                assigned += 1;
+                values
+            } else {
+                (0, 0.0)
+            };
             household.workers = workers;
             household.commute_m = if workers > 0 {
                 weighted / workers as f32
@@ -644,6 +614,653 @@ impl CityRuntime {
         }
         hash
     }
+}
+
+/// One household considered for job assignment.
+struct JobHome {
+    id: u64,
+    center: [f32; 2],
+    residents: u32,
+}
+
+/// Result of one tick's job assignment.
+struct JobAssignment {
+    /// Household ids in the same order as `workers` and `commute_weighted`.
+    home_ids: Vec<u64>,
+    /// Employed residents per household.
+    workers: Vec<u32>,
+    /// Worker-weighted commute distance per household in metres.
+    commute_weighted: Vec<f32>,
+    /// Workers per workplace id.
+    staffing: BTreeMap<u64, u32>,
+}
+
+/// One candidate pair, ordered by the global allocation comparator:
+/// distance, then household id, then workplace index.
+///
+/// `JobHome` entries are collected in ascending id order, so the household
+/// index orders exactly like the household id it replaces.
+type JobPair = (f32, usize, usize);
+
+/// Allocation state after one greedy pass.
+struct JobPass {
+    /// Residents of each household still looking for work.
+    need: Vec<u32>,
+    /// Job slots still open at each workplace.
+    remaining: Vec<u32>,
+    /// Worker-weighted commute distance per household.
+    commute_weighted: Vec<f32>,
+}
+
+/// Assign residents to job slots, globally nearest pair first.
+///
+/// Below [`SMALL_JOB_PAIRS`] this is the original full scan. Above it, each
+/// household keeps a sorted candidate stream built from a uniform grid over
+/// workplace centres, and a binary heap merges those streams in the same
+/// global `(distance, household id, workplace index)` order as the full scan.
+/// Only the prefix the greedy actually examines is materialized, so the
+/// allocation, tie-break, and float accumulation order match the full scan
+/// exactly. Layouts the grid cannot index fall back to the full scan.
+fn assign_jobs(
+    households: &BTreeMap<u64, Household>,
+    workplaces: &[Workplace],
+    roads: Option<&RoadGraph>,
+    flows: &[Option<FlowField>],
+) -> JobAssignment {
+    let homes: Vec<JobHome> = households
+        .iter()
+        .filter(|(_, household)| household.residents > 0)
+        .map(|(&id, household)| JobHome {
+            id,
+            center: household.home,
+            residents: household.residents,
+        })
+        .collect();
+    let active_workplaces = workplaces.iter().filter(|work| work.slots > 0).count();
+    if homes.is_empty() || active_workplaces == 0 {
+        return finish_assignment(&homes, workplaces, run_pass(&[], &homes, workplaces));
+    }
+    let pairs = homes.len().saturating_mul(active_workplaces);
+    if pairs <= SMALL_JOB_PAIRS || homes.len() < MIN_GRID_SIDE || active_workplaces < MIN_GRID_SIDE
+    {
+        return greedy_full(&homes, workplaces, roads, flows);
+    }
+    match WorkplaceGrid::build(workplaces, &homes) {
+        Some(grid) => assign_with_grid(&grid, &homes, workplaces, roads, flows),
+        None => greedy_full(&homes, workplaces, roads, flows),
+    }
+}
+
+/// One entry in the best-first merge: either a real candidate pair or a
+/// frontier marker that grows a household's stream.
+///
+/// Home indices ascend with household ids, so ordering by `(key, home_index)`
+/// reproduces the global `(distance, household id, …)` tie-break. Within one
+/// household the stream is sorted by `(distance, workplace index)`, covering
+/// the last tie-break.
+///
+/// A frontier's `key` is the straight-line radius already collected, which is
+/// a lower bound on any undiscovered pair's actual distance (`straight-line`
+/// never exceeds road distance). A real pair is only queued when every
+/// undiscovered pair is provably farther, so the heap minimum is always the
+/// globally nearest unconsumed pair.
+#[derive(Clone, Copy, Debug)]
+struct JobCandidate {
+    key: f32,
+    home_index: usize,
+    /// `None` marks a frontier that must grow before its household can be
+    /// compared as a real pair.
+    work_index: Option<u32>,
+}
+
+impl PartialEq for JobCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for JobCandidate {}
+
+impl Ord for JobCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key
+            .total_cmp(&other.key)
+            .then(self.home_index.cmp(&other.home_index))
+            // `None` (frontier) sorts before `Some`, which is the conservative
+            // order for equal keys: grow first, then decide.
+            .then(self.work_index.cmp(&other.work_index))
+    }
+}
+
+impl PartialOrd for JobCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Per-household candidate stream.
+///
+/// `radius` is the straight-line radius already collected. A head candidate is
+/// only trusted once its actual distance is at most `radius` (or the range is
+/// complete): every uncollected pair has straight-line distance above the
+/// radius and therefore actual distance above it as well, because straight-line
+/// distance is a lower bound for road distance. Until then this household is
+/// grown and re-queued.
+struct JobCursor {
+    radius: f32,
+    complete: bool,
+    /// Sorted by `(actual distance, workplace index)`.
+    candidates: Vec<(f32, u32)>,
+    cursor: usize,
+}
+
+impl JobCursor {
+    fn new() -> Self {
+        Self {
+            radius: 0.0,
+            complete: false,
+            candidates: Vec::new(),
+            cursor: 0,
+        }
+    }
+
+    fn current(&self) -> Option<(f32, u32)> {
+        self.candidates.get(self.cursor).copied()
+    }
+
+    fn advance(&mut self) {
+        self.cursor += 1;
+    }
+}
+
+fn candidate_ready(state: &JobCursor, distance: f32) -> bool {
+    state.complete || distance <= state.radius
+}
+
+/// Queue a household's next decision: a ready pair, or a frontier to grow.
+fn push_next(
+    heap: &mut BinaryHeap<std::cmp::Reverse<JobCandidate>>,
+    state: &JobCursor,
+    home_index: usize,
+) {
+    match state.current() {
+        Some((distance, work_index)) if candidate_ready(state, distance) => {
+            heap.push(std::cmp::Reverse(JobCandidate {
+                key: distance,
+                home_index,
+                work_index: Some(work_index),
+            }));
+        }
+        _ if !state.complete => {
+            heap.push(std::cmp::Reverse(JobCandidate {
+                key: state.radius,
+                home_index,
+                work_index: None,
+            }));
+        }
+        _ => {}
+    }
+}
+
+/// Grow one household's candidate stream to the next radius.
+///
+/// The annulus is `(previous radius, next radius]` in straight-line distance,
+/// so every workplace enters the stream once. Collected pairs are merged into
+/// the unconsumed suffix; consumed pairs are provably earlier than anything a
+/// later annulus can hold.
+fn grow_home(
+    state: &mut JobCursor,
+    home: &JobHome,
+    grid: &WorkplaceGrid,
+    workplaces: &[Workplace],
+    roads: Option<&RoadGraph>,
+    flows: &[Option<FlowField>],
+) {
+    if state.complete {
+        return;
+    }
+    let previous = state.radius;
+    let doubled = if previous > 0.0 {
+        previous * 2.0
+    } else {
+        grid.cell_m
+    };
+    let complete = !doubled.is_finite() || doubled >= grid.cover_m;
+    let upper = if complete { grid.cover_m } else { doubled };
+    if previous > 0.0 && upper <= previous {
+        state.complete = true;
+        return;
+    }
+    state.radius = upper;
+    state.complete = complete;
+    let lower = if previous > 0.0 { previous } else { -1.0 };
+    let mut gathered = Vec::new();
+    grid.collect_annulus(
+        home.center,
+        lower,
+        upper,
+        workplaces,
+        roads,
+        flows,
+        &mut gathered,
+    );
+    if gathered.is_empty() {
+        return;
+    }
+    gathered.sort_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)));
+    let tail = state.candidates.split_off(state.cursor);
+    state.candidates.extend(merge_sorted(tail, gathered));
+}
+
+fn merge_sorted(mut left: Vec<(f32, u32)>, mut right: Vec<(f32, u32)>) -> Vec<(f32, u32)> {
+    let mut merged = Vec::with_capacity(left.len() + right.len());
+    let mut left_index = 0;
+    let mut right_index = 0;
+    while left_index < left.len() && right_index < right.len() {
+        let order = left[left_index]
+            .0
+            .total_cmp(&right[right_index].0)
+            .then(left[left_index].1.cmp(&right[right_index].1));
+        if order == Ordering::Greater {
+            merged.push(right[right_index]);
+            right_index += 1;
+        } else {
+            merged.push(left[left_index]);
+            left_index += 1;
+        }
+    }
+    merged.extend(left.drain(left_index..));
+    merged.extend(right.drain(right_index..));
+    merged
+}
+
+/// Best-first allocation over per-household candidate streams.
+///
+/// Popping the heap minimum yields the globally nearest unconsumed pair, so
+/// the greedy decisions are identical to the full scan. The loop stops as soon
+/// as all demand or all slots are consumed; if the heap drains first, only
+/// off-grid workplaces can be left, and the full scan decides.
+fn assign_with_grid(
+    grid: &WorkplaceGrid,
+    homes: &[JobHome],
+    workplaces: &[Workplace],
+    roads: Option<&RoadGraph>,
+    flows: &[Option<FlowField>],
+) -> JobAssignment {
+    let mut need: Vec<u32> = homes.iter().map(|home| home.residents).collect();
+    let mut remaining: Vec<u32> = workplaces.iter().map(|work| work.slots).collect();
+    let mut commute_weighted = vec![0.0_f32; homes.len()];
+    let mut need_left: u64 = need.iter().map(|&value| u64::from(value)).sum();
+    let mut slots_left: u64 = remaining.iter().map(|&value| u64::from(value)).sum();
+
+    let mut cursors: Vec<JobCursor> = homes.iter().map(|_| JobCursor::new()).collect();
+    let mut heap: BinaryHeap<std::cmp::Reverse<JobCandidate>> = BinaryHeap::new();
+    for (index, home) in homes.iter().enumerate() {
+        if !home.center.iter().all(|value| value.is_finite()) {
+            cursors[index].complete = true;
+            continue;
+        }
+        push_next(&mut heap, &cursors[index], index);
+    }
+
+    while let Some(std::cmp::Reverse(candidate)) = heap.pop() {
+        let index = candidate.home_index;
+        let Some(work_index) = candidate.work_index else {
+            // Frontier: extend this household's stream, then re-queue.
+            grow_home(
+                &mut cursors[index],
+                &homes[index],
+                grid,
+                workplaces,
+                roads,
+                flows,
+            );
+            push_next(&mut heap, &cursors[index], index);
+            continue;
+        };
+        let work_index = work_index as usize;
+        let Some((distance, head_work)) = cursors[index].current() else {
+            continue;
+        };
+        debug_assert!(candidate_ready(&cursors[index], distance));
+        debug_assert_eq!(Some(head_work), candidate.work_index);
+        if remaining[work_index] > 0 && need[index] > 0 {
+            let take = need[index].min(remaining[work_index]);
+            need[index] -= take;
+            remaining[work_index] -= take;
+            need_left -= u64::from(take);
+            slots_left -= u64::from(take);
+            commute_weighted[index] += distance * take as f32;
+        }
+        cursors[index].advance();
+        if need[index] > 0 {
+            push_next(&mut heap, &cursors[index], index);
+        }
+        if need_left == 0 || slots_left == 0 {
+            break;
+        }
+    }
+
+    if need_left > 0 && slots_left > 0 {
+        // Only off-grid workplaces (non-finite centres) can remain unmatched.
+        return greedy_full(homes, workplaces, roads, flows);
+    }
+    finish_assignment(
+        homes,
+        workplaces,
+        JobPass {
+            need,
+            remaining,
+            commute_weighted,
+        },
+    )
+}
+
+/// Original global scan: materialize every household/workplace pair.
+fn greedy_full(
+    homes: &[JobHome],
+    workplaces: &[Workplace],
+    roads: Option<&RoadGraph>,
+    flows: &[Option<FlowField>],
+) -> JobAssignment {
+    let mut pairs: Vec<JobPair> = Vec::new();
+    for (home_index, home) in homes.iter().enumerate() {
+        for (work_index, work) in workplaces.iter().enumerate() {
+            if work.slots == 0 {
+                continue;
+            }
+            let distance = job_distance(roads, flows, home.center, work_index, work.center);
+            pairs.push((distance, home_index, work_index));
+        }
+    }
+    sort_job_pairs(&mut pairs);
+    finish_assignment(homes, workplaces, run_pass(&pairs, homes, workplaces))
+}
+
+fn sort_job_pairs(pairs: &mut [JobPair]) {
+    pairs.sort_by(|left, right| {
+        left.0
+            .total_cmp(&right.0)
+            .then(left.1.cmp(&right.1))
+            .then(left.2.cmp(&right.2))
+    });
+}
+
+/// Commute distance for one home/workplace pair.
+fn job_distance(
+    roads: Option<&RoadGraph>,
+    flows: &[Option<FlowField>],
+    home: [f32; 2],
+    work_index: usize,
+    center: [f32; 2],
+) -> f32 {
+    roads
+        .and_then(|graph| {
+            flows
+                .get(work_index)
+                .and_then(Option::as_ref)
+                .and_then(|flow| graph.flow_distance_m(home, flow))
+        })
+        .unwrap_or_else(|| RoadGraph::straight_line_m(home, center))
+}
+
+/// One greedy allocation pass over sorted candidate pairs.
+fn run_pass(pairs: &[JobPair], homes: &[JobHome], workplaces: &[Workplace]) -> JobPass {
+    let mut need: Vec<u32> = homes.iter().map(|home| home.residents).collect();
+    let mut remaining: Vec<u32> = workplaces.iter().map(|work| work.slots).collect();
+    let mut commute_weighted = vec![0.0_f32; homes.len()];
+    let mut need_left: u64 = need.iter().map(|&value| u64::from(value)).sum();
+    let mut slots_left: u64 = remaining.iter().map(|&value| u64::from(value)).sum();
+    for &(distance, home_index, work_index) in pairs {
+        if need_left == 0 || slots_left == 0 {
+            break;
+        }
+        let slots = &mut remaining[work_index];
+        if *slots == 0 {
+            continue;
+        }
+        let needed = &mut need[home_index];
+        if *needed == 0 {
+            continue;
+        }
+        let take = (*needed).min(*slots);
+        *needed -= take;
+        *slots -= take;
+        need_left -= u64::from(take);
+        slots_left -= u64::from(take);
+        commute_weighted[home_index] += distance * take as f32;
+    }
+    JobPass {
+        need,
+        remaining,
+        commute_weighted,
+    }
+}
+
+fn finish_assignment(homes: &[JobHome], workplaces: &[Workplace], pass: JobPass) -> JobAssignment {
+    let workers = homes
+        .iter()
+        .zip(&pass.need)
+        .map(|(home, &left)| home.residents.saturating_sub(left))
+        .collect();
+    let mut staffing: BTreeMap<u64, u32> = BTreeMap::new();
+    for (index, work) in workplaces.iter().enumerate() {
+        let staffed = work.slots.saturating_sub(pass.remaining[index]);
+        if staffed > 0 {
+            let entry = staffing.entry(work.id).or_insert(0);
+            *entry = entry.saturating_add(staffed);
+        }
+    }
+    JobAssignment {
+        home_ids: homes.iter().map(|home| home.id).collect(),
+        workers,
+        commute_weighted: pass.commute_weighted,
+        staffing,
+    }
+}
+
+/// Deterministic uniform grid over workplace centres.
+///
+/// Workplace indices are bucketed with a flat CSR layout: `offsets` holds the
+/// start of each cell in `items`. The grid only narrows candidates; callers
+/// still sort every pair with the global comparator.
+struct WorkplaceGrid {
+    origin: [f32; 2],
+    cell_m: f32,
+    cols: usize,
+    rows: usize,
+    offsets: Vec<usize>,
+    items: Vec<u32>,
+    /// Farthest distance from any home to the workplace bounding-box corner.
+    /// Once the search radius reaches it, every indexed workplace is a
+    /// candidate.
+    cover_m: f32,
+}
+
+impl WorkplaceGrid {
+    fn build(workplaces: &[Workplace], homes: &[JobHome]) -> Option<Self> {
+        // Workplace indices are stored as `u32`.
+        if workplaces.len() >= u32::MAX as usize {
+            return None;
+        }
+        let mut min = [f32::INFINITY; 2];
+        let mut max = [f32::NEG_INFINITY; 2];
+        let mut indexed = 0_usize;
+        for work in workplaces {
+            if !is_indexable_workplace(work) {
+                continue;
+            }
+            min[0] = min[0].min(work.center[0]);
+            min[1] = min[1].min(work.center[1]);
+            max[0] = max[0].max(work.center[0]);
+            max[1] = max[1].max(work.center[1]);
+            indexed += 1;
+        }
+        if indexed == 0 {
+            return None;
+        }
+        let width = max[0] - min[0];
+        let depth = max[1] - min[1];
+        if !width.is_finite() || !depth.is_finite() {
+            return None;
+        }
+        // Target roughly one workplace per cell, with a one-metre floor for
+        // dense or fully collinear layouts.
+        let extent = width.max(depth).max(1.0);
+        let area = width * depth;
+        let mut cell_m = if area > 0.0 {
+            (area / indexed as f32).sqrt()
+        } else {
+            extent / (indexed as f32).sqrt()
+        };
+        if !cell_m.is_finite() || cell_m <= 0.0 {
+            cell_m = 1.0;
+        }
+        cell_m = cell_m.max(1.0);
+
+        let max_cells = indexed.saturating_mul(4).saturating_add(64);
+        let (mut cols, mut rows) = grid_dims(width, depth, cell_m);
+        while cols.saturating_mul(rows) > max_cells {
+            cell_m *= 2.0;
+            if !cell_m.is_finite() {
+                return None;
+            }
+            (cols, rows) = grid_dims(width, depth, cell_m);
+        }
+        let cell_count = cols.checked_mul(rows)?;
+
+        let mut cell_of = vec![0_u32; workplaces.len()];
+        let mut counts = vec![0_u32; cell_count];
+        for (index, work) in workplaces.iter().enumerate() {
+            if !is_indexable_workplace(work) {
+                continue;
+            }
+            let col = grid_coord(work.center[0], min[0], cell_m, cols);
+            let row = grid_coord(work.center[1], min[1], cell_m, rows);
+            let cell = row * cols + col;
+            cell_of[index] = u32::try_from(cell).ok()?;
+            counts[cell] = counts[cell].saturating_add(1);
+        }
+
+        let mut offsets = Vec::with_capacity(cell_count + 1);
+        let mut total = 0_usize;
+        for &count in &counts {
+            offsets.push(total);
+            total += count as usize;
+        }
+        offsets.push(total);
+
+        let mut cursor = offsets.clone();
+        let mut items = vec![0_u32; indexed];
+        for (index, work) in workplaces.iter().enumerate() {
+            if !is_indexable_workplace(work) {
+                continue;
+            }
+            let cell = cell_of[index] as usize;
+            items[cursor[cell]] = index as u32;
+            cursor[cell] += 1;
+        }
+
+        let mut cover_m = 0.0_f32;
+        for home in homes {
+            if !home.center.iter().all(|value| value.is_finite()) {
+                continue;
+            }
+            let dx = (home.center[0] - min[0])
+                .abs()
+                .max((home.center[0] - max[0]).abs());
+            let dz = (home.center[1] - min[1])
+                .abs()
+                .max((home.center[1] - max[1]).abs());
+            // Overflow makes the cover unreachable; the build then returns
+            // `None` and the caller falls back to the full scan.
+            cover_m = cover_m.max((dx * dx + dz * dz).sqrt());
+        }
+        if !cover_m.is_finite() {
+            return None;
+        }
+
+        Some(Self {
+            origin: min,
+            cell_m,
+            cols,
+            rows,
+            offsets,
+            items,
+            cover_m,
+        })
+    }
+
+    /// Workplace pairs whose straight-line distance from `home` lies in
+    /// `(lower, upper]`, with their actual commute distances.
+    #[allow(clippy::too_many_arguments)]
+    fn collect_annulus(
+        &self,
+        home: [f32; 2],
+        lower: f32,
+        upper: f32,
+        workplaces: &[Workplace],
+        roads: Option<&RoadGraph>,
+        flows: &[Option<FlowField>],
+        out: &mut Vec<(f32, u32)>,
+    ) {
+        if !upper.is_finite() || !home.iter().all(|value| value.is_finite()) {
+            return;
+        }
+        let last_col = self.cols as i64 - 1;
+        let last_row = self.rows as i64 - 1;
+        let low_col = cell_floor(home[0] - upper, self.origin[0], self.cell_m);
+        let high_col = cell_floor(home[0] + upper, self.origin[0], self.cell_m);
+        let low_row = cell_floor(home[1] - upper, self.origin[1], self.cell_m);
+        let high_row = cell_floor(home[1] + upper, self.origin[1], self.cell_m);
+        if high_col < 0 || low_col > last_col || high_row < 0 || low_row > last_row {
+            return;
+        }
+        let col_start = low_col.max(0) as usize;
+        let col_end = high_col.min(last_col) as usize;
+        let row_start = low_row.max(0) as usize;
+        let row_end = high_row.min(last_row) as usize;
+        for row in row_start..=row_end {
+            for col in col_start..=col_end {
+                let cell = row * self.cols + col;
+                let start = self.offsets[cell];
+                let end = self.offsets[cell + 1];
+                for &item in &self.items[start..end] {
+                    let work_index = item as usize;
+                    let center = workplaces[work_index].center;
+                    let straight = RoadGraph::straight_line_m(home, center);
+                    if straight <= lower || straight > upper {
+                        continue;
+                    }
+                    let distance = if roads.is_some() {
+                        job_distance(roads, flows, home, work_index, center)
+                    } else {
+                        straight
+                    };
+                    out.push((distance, item));
+                }
+            }
+        }
+    }
+}
+
+fn is_indexable_workplace(work: &Workplace) -> bool {
+    work.slots > 0 && work.center.iter().all(|value| value.is_finite())
+}
+
+fn grid_dims(width: f32, depth: f32, cell_m: f32) -> (usize, usize) {
+    let cols = ((width / cell_m).floor().max(0.0) as usize).saturating_add(1);
+    let rows = ((depth / cell_m).floor().max(0.0) as usize).saturating_add(1);
+    (cols, rows)
+}
+
+fn grid_coord(value: f32, origin: f32, cell_m: f32, cells: usize) -> usize {
+    let index = ((value - origin) / cell_m).floor().max(0.0) as usize;
+    index.min(cells - 1)
+}
+
+fn cell_floor(value: f32, origin: f32, cell_m: f32) -> i64 {
+    ((value - origin) / cell_m).floor() as i64
 }
 
 fn normalize_supply(value: f32) -> f32 {
@@ -1166,5 +1783,241 @@ mod tests {
         assert_eq!(runtime.households.len(), 1);
         runtime.clear();
         assert!(runtime.households.is_empty());
+    }
+
+    // --- Job-assignment index -------------------------------------------
+
+    fn lcg_next(seed: &mut u64) -> u32 {
+        *seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        u32::try_from(*seed >> 33).unwrap_or(0)
+    }
+
+    fn jitter(seed: &mut u64, span: f32) -> f32 {
+        let unit = f32::from(u16::try_from(lcg_next(seed) % 65_536).unwrap_or(0)) / 65_535.0;
+        unit * span
+    }
+
+    fn cluster_fixture(
+        homes: usize,
+        workplaces: usize,
+        capacity: u32,
+        slots: u32,
+        span: f32,
+    ) -> (Vec<Home>, Vec<Workplace>) {
+        let mut seed = 0x5eed_2026_u64;
+        let homes = (0..homes)
+            .map(|index| Home {
+                id: u64::try_from(index).expect("id") + 1,
+                capacity,
+                center: [jitter(&mut seed, span), jitter(&mut seed, span)],
+            })
+            .collect();
+        let workplaces = (0..workplaces)
+            .map(|index| Workplace {
+                id: 1_000_000 + u64::try_from(index).expect("id"),
+                slots,
+                center: [jitter(&mut seed, span), jitter(&mut seed, span)],
+            })
+            .collect();
+        (homes, workplaces)
+    }
+
+    /// The original global scan, kept as an independent reference.
+    fn brute_force_reference(
+        runtime: &CityRuntime,
+        workplaces: &[Workplace],
+        roads: Option<&RoadGraph>,
+    ) -> (BTreeMap<u64, u32>, BTreeMap<u64, f32>, BTreeMap<u64, u32>) {
+        let flows = roads
+            .map(|graph| {
+                workplaces
+                    .iter()
+                    .map(|work| graph.flow_to(work.center))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut pairs: Vec<(f32, u64, usize)> = Vec::new();
+        for (&id, household) in &runtime.households {
+            if household.residents == 0 {
+                continue;
+            }
+            for (index, work) in workplaces.iter().enumerate() {
+                if work.slots == 0 {
+                    continue;
+                }
+                let distance = roads
+                    .and_then(|graph| {
+                        flows
+                            .get(index)
+                            .and_then(Option::as_ref)
+                            .and_then(|flow| graph.flow_distance_m(household.home, flow))
+                    })
+                    .unwrap_or_else(|| RoadGraph::straight_line_m(household.home, work.center));
+                pairs.push((distance, id, index));
+            }
+        }
+        pairs.sort_by(|left, right| {
+            left.0
+                .total_cmp(&right.0)
+                .then(left.1.cmp(&right.1))
+                .then(left.2.cmp(&right.2))
+        });
+        let mut remaining: Vec<u32> = workplaces.iter().map(|work| work.slots).collect();
+        let mut need: BTreeMap<u64, u32> = runtime
+            .households
+            .iter()
+            .filter(|(_, household)| household.residents > 0)
+            .map(|(&id, household)| (id, household.residents))
+            .collect();
+        let mut workers: BTreeMap<u64, u32> = BTreeMap::new();
+        let mut weighted: BTreeMap<u64, f32> = BTreeMap::new();
+        let mut staffing: BTreeMap<u64, u32> = BTreeMap::new();
+        for (distance, id, index) in pairs {
+            if remaining[index] == 0 {
+                continue;
+            }
+            let Some(left) = need.get_mut(&id) else {
+                continue;
+            };
+            if *left == 0 {
+                continue;
+            }
+            let take = (*left).min(remaining[index]);
+            remaining[index] -= take;
+            *left -= take;
+            *workers.entry(id).or_insert(0) += take;
+            *weighted.entry(id).or_insert(0.0) += distance * take as f32;
+            let staffed = staffing.entry(workplaces[index].id).or_insert(0);
+            *staffed = staffed.saturating_add(take);
+        }
+        (workers, weighted, staffing)
+    }
+
+    fn compare_with_reference(homes: &[Home], workplaces: &[Workplace], roads: Option<&RoadGraph>) {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.set_move_in_per_second(MAX_MOVE_IN_PER_SECOND);
+        runtime.tick_with_supplies_and_roads(
+            MAX_TICK_SECONDS,
+            homes,
+            workplaces,
+            1.0,
+            1.0,
+            1.0,
+            roads,
+        );
+        let (workers, weighted, staffing) = brute_force_reference(&runtime, workplaces, roads);
+        assert_eq!(runtime.staffing, staffing, "staffing map");
+        for (&id, household) in &runtime.households {
+            let expected_workers = workers.get(&id).copied().unwrap_or(0);
+            assert_eq!(household.workers, expected_workers, "workers for {id}");
+            let expected_commute = if expected_workers > 0 {
+                weighted[&id] / expected_workers as f32
+            } else {
+                0.0
+            };
+            assert_eq!(
+                household.commute_m.to_bits(),
+                expected_commute.to_bits(),
+                "commute for {id}"
+            );
+            assert_eq!(
+                household.income_per_day,
+                f64::from(expected_workers) * WAGE_PER_WORKER_PER_DAY,
+                "income for {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn grid_assignment_matches_the_global_scan() {
+        let (homes, workplaces) = cluster_fixture(96, 112, 4, 3, 1_200.0);
+        assert!(
+            homes.len() * workplaces.len() > SMALL_JOB_PAIRS,
+            "fixture must exercise the indexed path"
+        );
+        compare_with_reference(&homes, &workplaces, None);
+    }
+
+    #[test]
+    fn grid_assignment_expands_to_far_workplaces() {
+        let mut seed = 7_u64;
+        let homes: Vec<Home> = (0..100)
+            .map(|index| Home {
+                id: u64::try_from(index).expect("id") + 1,
+                capacity: 2,
+                center: [jitter(&mut seed, 200.0), jitter(&mut seed, 200.0)],
+            })
+            .collect();
+        let workplaces: Vec<Workplace> = (0..100)
+            .map(|index| Workplace {
+                id: 1_000_000 + u64::try_from(index).expect("id"),
+                slots: 1,
+                center: [
+                    8_000.0 + jitter(&mut seed, 400.0),
+                    jitter(&mut seed, 5_000.0),
+                ],
+            })
+            .collect();
+        compare_with_reference(&homes, &workplaces, None);
+    }
+
+    #[test]
+    fn grid_assignment_matches_the_global_scan_on_roads() {
+        fn road(id: u64, start: [i32; 2], end: [i32; 2]) -> crate::road::RoadSegment {
+            crate::road::RoadSegment {
+                id,
+                start,
+                end,
+                width_m: 8,
+            }
+        }
+        let mut roads = Vec::new();
+        let mut id = 1_u64;
+        for offset in (0..=600).step_by(100) {
+            roads.push(road(id, [offset, 0], [offset, 600]));
+            id += 1;
+            roads.push(road(id, [0, offset], [600, offset]));
+            id += 1;
+        }
+        let graph = RoadGraph::build(&roads).expect("road grid");
+        let (homes, workplaces) = cluster_fixture(80, 80, 4, 3, 600.0);
+        assert!(
+            homes.len() * workplaces.len() > SMALL_JOB_PAIRS,
+            "fixture must exercise the indexed path"
+        );
+        compare_with_reference(&homes, &workplaces, Some(&graph));
+    }
+
+    #[test]
+    fn grid_assignment_falls_back_for_non_finite_workplaces() {
+        let (homes, mut workplaces) = cluster_fixture(80, 80, 1, 1, 1_000.0);
+        for (index, work) in workplaces.iter_mut().enumerate() {
+            if index % 2 == 0 {
+                work.center = [f32::NAN, work.center[1]];
+            }
+        }
+        assert!(
+            homes.len() * workplaces.len() > SMALL_JOB_PAIRS,
+            "fixture must exercise the indexed path"
+        );
+        compare_with_reference(&homes, &workplaces, None);
+    }
+
+    #[test]
+    fn a_thousand_homes_and_workplaces_assign_in_one_tick() {
+        let (homes, workplaces) = cluster_fixture(1_000, 1_000, 1, 1, 3_000.0);
+        let mut runtime = CityRuntime::new(2026);
+        runtime.set_move_in_per_second(MAX_MOVE_IN_PER_SECOND);
+        runtime.tick_with_workplaces(MAX_TICK_SECONDS, &homes, &workplaces);
+        assert_eq!(runtime.population(), 1_000);
+        assert_eq!(runtime.workers(), 1_000);
+        assert_eq!(runtime.staffing.values().sum::<u32>(), 1_000);
+        assert_eq!(runtime.staffing.len(), 1_000);
+        for household in runtime.households.values() {
+            assert_eq!(household.workers, 1);
+            assert!(household.commute_m >= 0.0);
+        }
     }
 }

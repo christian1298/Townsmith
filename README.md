@@ -76,6 +76,9 @@ cargo run --release -p townsmith-bench --bin cohort
 cargo run --release -p townsmith-bench --bin city_loop
 ./scripts/bench_city_loop.sh
 cargo run --release -p townsmith-bench --bin traffic
+
+# Job-assignment index benchmark (1,000 x 1,000)
+cargo run --release -p townsmith-bench --bin jobs
 cargo run --release -p townsmith-bench --bin terrain
 cargo run --release -p townsmith-bench --bin city_layout
 ./scripts/bench_core.sh                    # 3-run core benchmark summary

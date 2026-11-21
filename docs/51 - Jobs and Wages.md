@@ -119,23 +119,50 @@ The non-zero commute and split-assignment cases are covered by the core tests, b
 
 ## 6. Tests
 
-- `core_city`: 7 new tests — global nearest-slot order, id-order independence, split assignment, shortage, commute happiness, JSON roundtrip, old-save defaults.
-- `core_city` total: **204 tests**.
-- `godot_ext`: **49 tests** total; the scene smoke covers the bridge path.
-- Workspace: **448 tests + 2 doctests**.
+- `core_city`: 7 assignment tests — global nearest-slot order, id-order independence, split assignment, shortage, commute happiness, JSON roundtrip, old-save defaults — plus 5 index exactness/fallback tests.
+- `core_city` total: **209 tests**.
+- `godot_ext`: **50 tests** total; the scene smoke covers the bridge path.
+- Workspace: **453 tests + 2 doctests (455 passed)**.
 
-## 7. Limits
+## 7. Assignment index
 
-- Assignment materializes every household/workplace pair, sorts by distance, and greedily consumes the closest slots: O(H × W) memory and O(H × W log(H × W)) time. Fine for the slice, not for 100k buildings. A spatial index is required before the 1M gate.
+The original full scan materialized every household/workplace pair and sorted them. `assign_with_grid` now uses a uniform CSR-like workplace grid plus a lazy best-first merge:
+
+- Small inputs (fewer than 4,096 possible pairs, or fewer than 8 homes/workplaces) keep the original full scan.
+- Each household grows a straight-line annulus around its home and collects the workplaces inside it, sorted by `(actual road distance, workplace index)`.
+- A binary heap orders the next ready pair globally by `(distance, household id, workplace index)`. A frontier marker per household is a lower bound on its undiscovered pairs; it is only expanded when it reaches the heap minimum.
+- Road distance is never below straight-line distance, so a pair is safe to consume when its actual distance is within the collected radius. The frontier marker keeps the proof intact while a household still has undiscovered pairs.
+- Non-finite centres and pathological layouts fall back to the exact full scan. Public APIs and save format are unchanged.
+
+Benchmark (`cargo run --release -p townsmith-bench --bin jobs`), 1,000 homes × 1,000 workplaces, 2,000 residents, 1,000,000 possible pairs:
+
+| Metric | Indexed tick | Brute-force scan |
+|---|---:|---:|
+| Median | **1.77 ms** | **47.11 ms** |
+| Speedup | **26.6×** | 1× |
+| Exact match | **yes** | — |
+
+This is a single-machine measurement, not the 1M-city gate. The balanced benchmark is the hard case: all 1M pairs are candidates in principle, but the heap examines only the needed prefixes.
+
+## 8. Limits
+
+- The indexed path is exact and its output is byte-identical to the full scan on the tested fixtures, but a pathological layout can still fall back to O(H × W) memory/time for the fallback scan.
+- The grid is rebuilt per assignment tick; there is no incremental update when a workplace or household moves.
+- A household can split workers across workplaces, but only the weighted average commute is stored.
+- Wages are fixed and gross; no trade/skill differences.
+- Commute was straight-line metres in 3.3; [[56 - Traffic]] now uses road distance when the graph is connected, with a straight-line fallback.
+- No named workers, shifts, attendance, or unemployment benefits.
+- The runtime is still one aggregate household per completed residential building.
 - A household can split workers across workplaces, but only the weighted average commute is stored.
 - Wages are fixed and gross; no trade/skill differences.
 - Commute was straight-line metres in 3.3; [[56 - Traffic]] now uses road distance when the graph is connected, with a straight-line fallback.
 - No named workers, shifts, attendance, or unemployment benefits.
 - The runtime is still one aggregate household per completed residential building.
 
-## 8. Next
+## 9. Next
 
-1. 3.7: road graph and traffic ([[56 - Traffic]]).
-2. Replace the O(H×W) assignment with a spatial grid before scaling.
-3. Add travel time and congestion when the traffic graph matures.
+1. Named citizens ([[67 - Named Citizens]]) and the 2,000-active-agent budget.
+2. Add travel time and congestion when the traffic graph matures.
+3. Incremental grid updates when households or workplaces change.
+4. Industrial-scale balance and the 1M gate ([[68 - Metropolis Gate]]).
 4. Add wages to the budget/treasury in 3.6.
