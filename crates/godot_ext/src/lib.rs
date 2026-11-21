@@ -29,14 +29,14 @@ use core_blueprint::{
 use core_city::{
     advise, evaluate_tutorial, normalize_rotation, starter, summarize, AdvisorInput, AdvisorReport,
     Age, AgeState, CityLayout, CityRuntime, CitySummary, CityTier, ConstructionSite,
-    ConstructionStore, Economy, Home, IndustryKind, IndustryStore, Lot, LotError, LotRequest,
-    LotStore, NamedCitizens, NamedSave, Placement, PlacementError, PlacementRequest,
-    PlacementStore, ResearchStore, RoadError, RoadGraph, RoadRequest, RoadSegment, RoadStore,
-    ServiceConsumer, ServiceKind, ServiceReport, ServiceStore, ServiceTier, Settlement,
-    SettlementError, SettlementRequest, SettlementStore, TechTree, Trade, TradePool, TutorialInput,
-    UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
-    DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT,
-    MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    ConstructionStore, Economy, Home, Household, IndustryKind, IndustryStore, Lot, LotError,
+    LotRequest, LotStore, MaterializationBudget, MaterializedCitizen, NamedCitizens, NamedSave,
+    Placement, PlacementError, PlacementRequest, PlacementStore, ResearchStore, RoadError,
+    RoadGraph, RoadRequest, RoadSegment, RoadStore, ServiceConsumer, ServiceKind, ServiceReport,
+    ServiceStore, ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore,
+    TechTree, Trade, TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport,
+    UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS,
+    MAX_TOTAL_DEBT, MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -2397,6 +2397,103 @@ impl TownsmithCore {
         result.set("count", citizens.len() as i64);
         result.set("citizens", &citizens.to_variant());
         result
+    }
+
+    /// Read-only active/detailed materialization selection around a camera point.
+    ///
+    /// Returns `{ok, seed, center:[x,z], counts:{active,detailed}, active,
+    /// detailed}`. Each citizen has `id`, `name`, `placement_id`, `slot`,
+    /// `distance_m`, and `home:[x,z]`. The detailed list is a prefix of the
+    /// active list.
+    ///
+    /// The named pool is synced on a local copy: this call does not mutate the
+    /// named pool, the household runtime, or the save state.
+    #[func]
+    fn materialization_state(
+        &self,
+        seed: i64,
+        center_x: f64,
+        center_z: f64,
+        active_radius_m: f64,
+        detailed_radius_m: f64,
+    ) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        let center = [center_x as f32, center_z as f32];
+        if !center.iter().all(|value| value.is_finite()) {
+            return placement_simple_error(
+                "invalid_center",
+                "materialization center must be finite",
+            );
+        }
+        let max_radius_m = f64::from(MAX_WORLD_COORD_M);
+        if !active_radius_m.is_finite() || !(0.0..=max_radius_m).contains(&active_radius_m) {
+            return placement_simple_error(
+                "invalid_radius",
+                "active materialization radius must be finite and within 0..=1,000,000 m",
+            );
+        }
+        if !detailed_radius_m.is_finite() || !(0.0..=max_radius_m).contains(&detailed_radius_m) {
+            return placement_simple_error(
+                "invalid_radius",
+                "detailed materialization radius must be finite and within 0..=1,000,000 m",
+            );
+        }
+
+        let placement_centers = {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            if world.as_ref().is_some_and(|store| store.seed != seed) {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the placement store belongs to a different seed",
+                );
+            }
+            let construction = self
+                .construction
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            world.as_ref().map_or_else(BTreeMap::new, |store| {
+                completed_homes(store, &construction)
+                    .into_iter()
+                    .map(|home| (home.id, home.center))
+                    .collect()
+            })
+        };
+
+        let population = self
+            .population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if population
+            .as_ref()
+            .is_some_and(|runtime| runtime.seed != seed)
+        {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the household runtime belongs to a different seed",
+            );
+        }
+        let named = self.named.lock().unwrap_or_else(|error| error.into_inner());
+        let empty = BTreeMap::new();
+        let households = population
+            .as_ref()
+            .map_or(&empty, |runtime| &runtime.households);
+        let payload = match materialization_payload(
+            seed,
+            named.as_ref(),
+            households,
+            &placement_centers,
+            center,
+            active_radius_m as f32,
+            detailed_radius_m as f32,
+        ) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return placement_simple_error("materialization_failed", error.to_string())
+            }
+        };
+        materialization_payload_to_dictionary(&payload)
     }
 
     /// Remove every household.
@@ -6760,6 +6857,85 @@ fn named_pool_for_save(
     Ok(Some(pool))
 }
 
+struct MaterializationPayload {
+    seed: u64,
+    center: [f32; 2],
+    active: Vec<MaterializedCitizen>,
+    detailed: Vec<MaterializedCitizen>,
+}
+
+fn materialization_payload(
+    seed: u64,
+    named: Option<&NamedCitizens>,
+    households: &BTreeMap<u64, Household>,
+    placement_centers: &BTreeMap<u64, [f32; 2]>,
+    center: [f32; 2],
+    active_radius_m: f32,
+    detailed_radius_m: f32,
+) -> Result<MaterializationPayload, core_city::NamedError> {
+    let Some(pool) = named else {
+        return Ok(MaterializationPayload {
+            seed,
+            center,
+            active: Vec::new(),
+            detailed: Vec::new(),
+        });
+    };
+    if pool.seed != seed {
+        return Err(core_city::NamedError::Invalid(
+            "named pool belongs to a different seed",
+        ));
+    }
+    let mut pool = pool.clone();
+    pool.sync(households);
+    let selection = pool.select_near(
+        center,
+        placement_centers,
+        MaterializationBudget::default(),
+        active_radius_m,
+        detailed_radius_m,
+    )?;
+    Ok(MaterializationPayload {
+        seed,
+        center,
+        active: selection.active,
+        detailed: selection.detailed,
+    })
+}
+
+fn materialized_citizen_to_dictionary(citizen: &MaterializedCitizen) -> VarDictionary {
+    let mut item = VarDictionary::new();
+    item.set("id", citizen.id as i64);
+    item.set("name", &GString::from(citizen.name.as_str()));
+    item.set("placement_id", citizen.placement_id as i64);
+    item.set("slot", i64::from(citizen.slot));
+    item.set("distance_m", f64::from(citizen.distance));
+    item.set("home", &PackedFloat32Array::from(citizen.home));
+    item
+}
+
+fn materialization_payload_to_dictionary(payload: &MaterializationPayload) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set("seed", payload.seed as i64);
+    result.set("center", &PackedFloat32Array::from(payload.center));
+    let mut active: Array<VarDictionary> = Array::new();
+    for citizen in &payload.active {
+        active.push(&materialized_citizen_to_dictionary(citizen));
+    }
+    let mut detailed: Array<VarDictionary> = Array::new();
+    for citizen in &payload.detailed {
+        detailed.push(&materialized_citizen_to_dictionary(citizen));
+    }
+    let mut counts = VarDictionary::new();
+    counts.set("active", payload.active.len() as i64);
+    counts.set("detailed", payload.detailed.len() as i64);
+    result.set("counts", &counts);
+    result.set("active", &active.to_variant());
+    result.set("detailed", &detailed.to_variant());
+    result
+}
+
 fn attach_roads(json: &str, store: &RoadStore) -> Result<String, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(json).map_err(|error| error.to_string())?;
@@ -8304,6 +8480,43 @@ mod tests {
             .expect("old save")
             .is_none());
         assert!(named_from_world_json(&json, 2027).is_err());
+    }
+
+    #[test]
+    fn materialization_payload_orders_and_caps_citizens() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.tick(10.0, 8, &[(1, 4), (2, 4)]);
+        let mut named = NamedCitizens::new(2026);
+        named.sync(&runtime.households);
+        let centers = BTreeMap::from([(1, [0.0_f32, 0.0]), (2, [100.0, 0.0])]);
+        let payload = materialization_payload(
+            2026,
+            Some(&named),
+            &runtime.households,
+            &centers,
+            [0.0, 0.0],
+            50.0,
+            50.0,
+        )
+        .expect("payload");
+        assert_eq!(payload.seed, 2026);
+        assert_eq!(payload.active.len(), 4);
+        assert_eq!(payload.detailed.len(), 4);
+        assert!(payload
+            .active
+            .iter()
+            .all(|citizen| citizen.placement_id == 1));
+        for window in payload.active.windows(2) {
+            assert!(
+                window[0].distance < window[1].distance
+                    || (window[0].distance == window[1].distance && window[0].id < window[1].id)
+            );
+        }
+        assert_eq!(
+            payload.active[0].name,
+            core_city::name_for(payload.active[0].id)
+        );
+        assert_eq!(&payload.detailed[..], &payload.active[..]);
     }
 
     #[test]
