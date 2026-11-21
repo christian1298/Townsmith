@@ -18,6 +18,7 @@ pub mod limits;
 pub mod metadata;
 pub mod package;
 
+pub use core_structure::{StructuralSystem, StructureError, StructureSpec, StructureSummary};
 pub use error::BlueprintError;
 pub use format::{decode_voxels, encode_voxels, DecodedVoxels};
 pub use hash::compute_hash;

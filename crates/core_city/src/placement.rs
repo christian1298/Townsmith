@@ -8,6 +8,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
+use core_structure::{StructureError, StructureSpec};
 use serde::{Deserialize, Serialize};
 
 /// Current world-save placement format.
@@ -58,6 +59,8 @@ pub struct PlacementRequest {
     pub job_slots: u32,
     /// Blueprint solid voxels, used as material litres by construction.
     pub solid_voxels: u64,
+    /// Declared structural system and limits, when the blueprint has them.
+    pub structure: Option<StructureSpec>,
 }
 
 /// A placed building after validation.
@@ -92,6 +95,9 @@ pub struct Placement {
     /// Blueprint solid voxels, used as material litres by construction.
     #[serde(default)]
     pub solid_voxels: u64,
+    /// Declared structural system and limits; older saves have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structure: Option<StructureSpec>,
 }
 
 impl Placement {
@@ -113,6 +119,7 @@ impl Placement {
             resident_capacity: request.resident_capacity,
             job_slots: request.job_slots,
             solid_voxels: request.solid_voxels,
+            structure: request.structure,
         }
     }
 }
@@ -234,6 +241,8 @@ pub enum PlacementError {
     },
     /// The id counter is exhausted.
     IdExhausted,
+    /// The declared structural system exceeds its limits.
+    Structure(StructureError),
 }
 
 impl PlacementError {
@@ -258,6 +267,7 @@ impl PlacementError {
             Self::InvalidRecord { .. } => "invalid_record",
             Self::InvalidNextId { .. } => "invalid_next_id",
             Self::IdExhausted => "id_exhausted",
+            Self::Structure(error) => error.code(),
         }
     }
 }
@@ -334,6 +344,7 @@ impl fmt::Display for PlacementError {
                 )
             }
             Self::IdExhausted => formatter.write_str("placement id counter is exhausted"),
+            Self::Structure(error) => write!(formatter, "structural limit: {error}"),
         }
     }
 }
@@ -456,6 +467,12 @@ fn validate_request(request: &PlacementRequest) -> Result<(), PlacementError> {
             field: "material_cost",
             value: request.material_cost,
         });
+    }
+
+    if let Some(structure) = request.structure {
+        structure
+            .validate_against_bounds(request.bounds_m)
+            .map_err(PlacementError::Structure)?;
     }
 
     Ok(())
@@ -728,6 +745,11 @@ fn validate_record(placement: &Placement, next_id: u64) -> Result<(), PlacementE
             reason: "invalid material cost",
         });
     }
+    if let Some(structure) = placement.structure {
+        structure
+            .validate_against_bounds(placement.bounds_m)
+            .map_err(PlacementError::Structure)?;
+    }
     Ok(())
 }
 
@@ -749,6 +771,7 @@ mod tests {
             resident_capacity: 2,
             job_slots: 0,
             solid_voxels: 100,
+            structure: None,
         }
     }
 
@@ -973,6 +996,84 @@ mod tests {
                 .code(),
             "invalid_record"
         );
+    }
+
+    fn timber(
+        system: core_structure::StructuralSystem,
+        stories: u16,
+        height: f32,
+    ) -> StructureSpec {
+        StructureSpec::new(system, stories, height, 6.0)
+    }
+
+    #[test]
+    fn a_four_story_timber_building_is_rejected() {
+        let mut tall = request(128.0, 128.0);
+        tall.bounds_m = [8.0, 12.8, 8.0];
+        tall.structure = Some(timber(
+            core_structure::StructuralSystem::TimberFrame,
+            4,
+            12.8,
+        ));
+        let error = validate_placement(&tall, &[], flat).expect_err("timber limit");
+        assert_eq!(error.code(), "structure_stories");
+        assert!(error.to_string().contains("timber frame"));
+    }
+
+    #[test]
+    fn a_four_story_brick_building_is_allowed() {
+        let mut tall = request(128.0, 128.0);
+        tall.bounds_m = [8.0, 12.8, 8.0];
+        tall.structure = Some(timber(
+            core_structure::StructuralSystem::LoadBearingBrick,
+            4,
+            12.8,
+        ));
+        validate_placement(&tall, &[], flat).expect("brick allows four stories");
+    }
+
+    #[test]
+    fn a_stone_ground_floor_raises_the_timber_limit() {
+        let mut composite = request(128.0, 128.0);
+        composite.bounds_m = [8.0, 12.8, 8.0];
+        composite.structure = Some(
+            timber(core_structure::StructuralSystem::TimberFrame, 4, 12.8)
+                .with_ground_system(core_structure::StructuralSystem::LoadBearingStone),
+        );
+        validate_placement(&composite, &[], flat).expect("stone base carries four stories");
+    }
+
+    #[test]
+    fn structure_height_must_match_the_blueprint_bounds() {
+        let mut mismatched = request(128.0, 128.0);
+        mismatched.structure = Some(StructureSpec::new(
+            core_structure::StructuralSystem::TimberFrame,
+            2,
+            3.0,
+            0.0,
+        ));
+        let error = validate_placement(&mismatched, &[], flat).expect_err("height mismatch");
+        assert_eq!(error.code(), "invalid_structure");
+        assert!(error.to_string().contains("does not match"));
+    }
+
+    #[test]
+    fn placements_without_structure_metadata_remain_compatible() {
+        validate_placement(&request(128.0, 128.0), &[], flat).expect("legacy request");
+    }
+
+    #[test]
+    fn loaded_placements_revalidate_their_structure() {
+        let mut store = PlacementStore::new(2026);
+        store.place(&request(128.0, 128.0), flat).expect("place");
+        store.placements[0].structure = Some(timber(
+            core_structure::StructuralSystem::TimberFrame,
+            4,
+            12.8,
+        ));
+        let error = PlacementStore::from_json(&store.to_json_pretty().expect("json"))
+            .expect_err("stale structure");
+        assert_eq!(error.code(), "structure_stories");
     }
 
     #[test]

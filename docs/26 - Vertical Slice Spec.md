@@ -2,7 +2,7 @@
 title: Vertical Slice Spec
 project: Townsmith
 status: active
-updated: 2026-11-20
+updated: 2026-11-21
 tags:
   - townsmith
   - vertical-slice
@@ -175,7 +175,7 @@ v1 ships BLAKE3 and a Stored zip; zstd (and deflate) are future format versions.
 | Stats report capacity, cost, rooms correctly | Golden expected values in the acceptance smoke; ±1% cost tolerance | **Pass** — capacity 2, jobs 2, cost **38,028.8** at 64,224 solid voxels |
 | 60 FPS with house + 21 copies in view | **Pass** on RTX 4080: 6,195 FPS avg / 4,484 1% low, p99 0.22 ms; see [[39 - Slice House Benchmark]] | **Pass** |
 | No data loss on undo/redo or save/load | 500 random edits + undo/redo replay; save/load hash equal | **Pass** — 500 deterministic edits, undo/redo content hashes equal |
-| EN/DE UI without missing keys or clipped text | 0 missing keys; placeholder lint pass; German layout review | **Pass mechanically** — 95 keys/locale, parity + placeholder checks, 16-control width budget; visual pass still recommended (Q-101) |
+| EN/DE UI without missing keys or clipped text | 0 missing keys; placeholder lint pass; German layout review | **Pass mechanically** — 96 keys/locale, parity + placeholder checks, 16-control width budget; visual pass still recommended (Q-101) |
 
 Additional:
 

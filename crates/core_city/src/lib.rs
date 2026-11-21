@@ -56,6 +56,7 @@ pub use construction::{
     ConstructionTick, CONSTRUCTION_FORMAT_VERSION, MAX_SITES as MAX_CONSTRUCTION_SITES,
     MAX_TICK_SECONDS,
 };
+pub use core_structure::{StructuralSystem, StructureError, StructureSpec, StructureSummary};
 pub use economy::{
     Economy, EconomyError, EconomyTick, Loan, BANKRUPTCY_THRESHOLD, DAY_SECONDS,
     DEFAULT_BUSINESS_TAX_PER_JOB_PER_DAY, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS,

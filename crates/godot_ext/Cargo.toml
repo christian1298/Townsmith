@@ -16,5 +16,6 @@ core_world.workspace = true
 core_city.workspace = true
 core_blueprint.workspace = true
 core_rooms.workspace = true
+core_structure.workspace = true
 serde_json.workspace = true
 godot = { version = "0.5.5", features = ["api-4-7"] }

@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 core_voxel.workspace = true
+core_structure.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 blake3.workspace = true

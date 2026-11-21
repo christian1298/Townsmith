@@ -2,7 +2,7 @@
 title: Editor Shell
 project: Townsmith
 status: active
-updated: 2026-11-20
+updated: 2026-11-21
 tags:
   - townsmith
   - vertical-slice
@@ -52,6 +52,7 @@ GODOT=/path/to/godot ./scripts/run_godot.sh   # defaults to main.tscn
 | `1` … `5` | Select timber, stone, roof, glass, door |
 | `6` … `9` | Select bed, stove, toilet, desk prop |
 | `R` | Toggle the room view: overlay boxes, labels, and stats panel |
+| `H` | Cycle the structural system: timber frame, stone, brick, concrete, steel |
 | `[` / `]` | Select previous/next room while the room view is open |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo the last voxel edit |
 | Mouse wheel | Unbound in v0 |
@@ -82,7 +83,7 @@ The ray stops at 20 m. There is no AABB pre-pass, no shape cast, and no physics 
 | `4` | 4 | glass |
 | `5` | 5 | door |
 
-The selected material is shown in the on-screen palette and printed when it changes. Materials are written as numeric ids into the volume; a mapping table to the namespaced content registry (`base:timber`, …) is still needed. The editor deliberately overrides the volume with one neutral material. The underlying mesh now carries per-material vertex colors, so placed blueprints in [[42 - World Placement Bridge]] show timber, stone, roof, glass, and door surfaces; the editor will adopt the same palette when its material UI is finished.
+The selected material is shown in the on-screen palette and printed when it changes. The palette also shows the selected structural system and its effective story limit; `H` cycles it. Structural limits are in [[60 - Structural Limits]]. Materials are written as numeric ids into the volume; a mapping table to the namespaced content registry (`base:timber`, …) is still needed. The editor deliberately overrides the volume with one neutral material. The underlying mesh now carries per-material vertex colors, so placed blueprints in [[42 - World Placement Bridge]] show timber, stone, roof, glass, and door surfaces; the editor will adopt the same palette when its material UI is finished.
 
 ## 6. Debounced remesh
 

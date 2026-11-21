@@ -38,6 +38,17 @@ const PAD_COLOR := Color(0.34, 0.36, 0.33)
 const SURROUND_COLOR := Color(0.20, 0.22, 0.20)
 const VOXEL_COLOR := Color(0.78, 0.73, 0.62)
 
+const STRUCTURES := [
+	"timber_frame",
+	"timber_shed",
+	"tent",
+	"load_bearing_stone",
+	"half_timber",
+	"load_bearing_brick",
+	"reinforced_concrete",
+	"steel_frame",
+	"composite_core",
+]
 const MATERIALS := [
 	{"id": 1, "name": "timber"},
 	{"id": 2, "name": "stone"},
@@ -182,6 +193,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 		if key == KEY_R:
 			_toggle_room_overlay()
+			return
+		if key == KEY_H:
+			_cycle_structure()
 			return
 		if event.keycode == KEY_BRACKETLEFT and not event.ctrl_pressed and not event.alt_pressed:
 			_cycle_room(-1)
@@ -978,6 +992,19 @@ func _select_prop(kind: int) -> void:
 	print("Editor prop: %d %s" % [kind, name])
 	_status("base.editor.status.prop_selected", [name])
 
+func _cycle_structure() -> void:
+	var state: Dictionary = _core.editor_structure_state()
+	var current := str(state.get("system", "timber_frame"))
+	var index := STRUCTURES.find(current)
+	var next_index := (index + 1) % STRUCTURES.size()
+	var selected: Dictionary = _core.editor_set_structure(STRUCTURES[next_index])
+	if not bool(selected.get("ok", false)):
+		_set_status("Structure: " + str(selected.get("error", "unknown error")))
+		return
+	_update_palette_label()
+	_refresh_stats_label()
+	print("Editor structure: %s" % str(selected.get("system_name", "?")))
+
 func _update_palette_label() -> void:
 	if _palette_label == null:
 		return
@@ -986,6 +1013,17 @@ func _update_palette_label() -> void:
 		var id := int(entry["id"])
 		var marker := ">" if id == _active_material and _active_prop < 0 else " "
 		lines.append("%s %d  %s" % [marker, id, _material_name(id)])
+	var structure: Dictionary = _core.editor_structure_state()
+	if bool(structure.get("ok", false)):
+		var limit := int(structure.get("effective_max_stories", 0))
+		var structure_line: String = _i18n.t("base.editor.palette.structure", [
+			str(structure.get("system_name", "?")),
+			int(structure.get("stories", 0)),
+			limit,
+		])
+		if not bool(structure.get("valid", false)):
+			structure_line += " — " + str(structure.get("error", ""))
+		lines.append(structure_line)
 	lines.append(_i18n.t("base.editor.palette.props"))
 	for index in PROPS.size():
 		var entry: Dictionary = PROPS[index]
@@ -1005,6 +1043,7 @@ func _refresh_stats_label(build_ms: float = -1.0) -> void:
 	elif _remesh_pending:
 		text += "\n" + _i18n.t("base.editor.stats.remesh_pending")
 	_stats_label.text = text
+	_update_palette_label()
 
 func _format_stats(stats: Dictionary) -> String:
 	return _i18n.t("base.editor.stats.solid_quads", [
@@ -1308,6 +1347,13 @@ func _run_blueprint_smoke() -> void:
 			status = "save_hash"
 		elif int(saved.get("props", -1)) != 1:
 			status = "save_props"
+		var saved_structure: Dictionary = saved.get("structure", {})
+		if status == "ok" and (
+			not bool(saved_structure.get("present", false))
+			or not bool(saved_structure.get("valid", false))
+			or str(saved_structure.get("system", "")) != "timber_frame"
+		):
+			status = "save_structure"
 
 	if status == "ok":
 		if not _core.editor_clear():
@@ -1329,6 +1375,12 @@ func _run_blueprint_smoke() -> void:
 			status = "load_props"
 		elif int(_core.editor_props().get("props", []).size()) != 1:
 			status = "load_prop_state"
+		var loaded_structure: Dictionary = loaded.get("structure", {})
+		if status == "ok" and (
+			not bool(loaded_structure.get("present", false))
+			or str(loaded_structure.get("system", "")) != "timber_frame"
+		):
+			status = "load_structure"
 		var bounds: PackedFloat32Array = loaded.get("bounds", PackedFloat32Array())
 		if status == "ok" and bounds.size() != 3:
 			status = "load_bounds"
@@ -1793,6 +1845,14 @@ func _run_editor_smoke() -> void:
 		status = "pad_cell"
 	elif status == "ok" and pad_hit.get("place") != Vector3i(40, 0, 40):
 		status = "pad_place"
+
+	var structure: Dictionary = _core.editor_structure_state()
+	if status == "ok" and (
+		not bool(structure.get("ok", false))
+		or not bool(structure.get("valid", false))
+		or str(structure.get("system", "")) != "timber_frame"
+	):
+		status = "structure_mismatch"
 
 	print("EDITOR_SMOKE solid=%d quads=%d surfaces=%d status=%s" % [solid, quads, surfaces, status])
 	get_tree().quit(0 if status == "ok" else 1)

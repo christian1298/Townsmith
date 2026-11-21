@@ -2,7 +2,7 @@
 title: Roadmap
 project: Townsmith
 status: draft
-updated: 2026-11-20
+updated: 2026-11-21
 tags:
   - townsmith
   - roadmap
@@ -181,7 +181,7 @@ The staged cut is in [[49 - Phase 3 Slice Plan]]: city ledger, households/needs,
 ### Phase 4 — Progression and content (6–8 weeks)
 
 > [!info] Slice plan
-> Phase 4 starts with [[59 - Progression and Ages]]: population-driven ages first, then structural limits, research, content, and the tutorial.
+> Phase 4 starts with [[59 - Progression and Ages]] and [[60 - Structural Limits]]: population-driven ages and the first material/story/span rules are implemented. Research, content, and the tutorial are next.
 
 **Goals**
 - The long arc: wood → masonry → industrial → modern.

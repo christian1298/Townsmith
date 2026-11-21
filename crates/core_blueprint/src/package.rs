@@ -243,6 +243,13 @@ fn validate_metadata(metadata: &BlueprintMetadata) -> Result<(), BlueprintError>
             "stats.material_cost must be finite and non-negative".to_string(),
         ));
     }
+    if let Some(structure) = &metadata.structure {
+        // Drafts may exceed material limits; placement and load revalidate
+        // the full structure. Fields and volume height must still be sane.
+        structure
+            .validate_declared_against_bounds(metadata.bounds_m)
+            .map_err(|error| BlueprintError::Format(format!("structure: {error}")))?;
+    }
     Ok(())
 }
 

@@ -11,5 +11,6 @@ name = "core_city"
 path = "src/lib.rs"
 
 [dependencies]
+core_structure.workspace = true
 serde.workspace = true
 serde_json.workspace = true

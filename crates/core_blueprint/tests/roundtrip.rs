@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use core_blueprint::{
     compute_hash, encode_voxels, load_tsbp, save_tsbp, save_tsbp_with_hash, Blueprint,
-    BlueprintError, BlueprintMetadata, BlueprintStats, FORMAT_VERSION,
+    BlueprintError, BlueprintMetadata, BlueprintStats, StructuralSystem, StructureSpec,
+    FORMAT_VERSION,
 };
 use core_voxel::volume::{VolumeConfig, VolumePos, VoxelVolume};
 
@@ -247,4 +248,87 @@ fn golden_checksum_is_stable() {
         hash,
         "blake3:9f5bcd407d25c5b5204315c873faa1321dfb5dd969c9a22d2322f7502f95a070"
     );
+}
+
+#[test]
+fn default_metadata_omits_structure() {
+    let metadata = BlueprintMetadata::new("local:no-structure", "No Structure");
+    assert!(metadata.structure.is_none());
+    let value = serde_json::to_value(&metadata).expect("metadata json");
+    assert!(
+        value.get("structure").is_none(),
+        "default metadata must stay byte-identical: {value}"
+    );
+}
+
+#[test]
+fn structure_survives_save_and_load() {
+    let dir = temp_dir("structure");
+    let path = dir.join("structure.tsbp");
+    let mut blueprint = test_blueprint();
+    let height = blueprint.metadata.bounds_m[1];
+    let structure = StructureSpec::new(StructuralSystem::TimberFrame, 2, height, 0.0);
+    blueprint.metadata.structure = Some(structure);
+    save_tsbp(&path, &blueprint).expect("save");
+
+    let loaded = load_tsbp(&path).expect("load");
+    assert_eq!(loaded.metadata.structure, Some(structure));
+
+    let json = serde_json::to_value(&loaded.metadata).expect("json");
+    let structure_json = json.get("structure").expect("structure object");
+    assert_eq!(
+        structure_json
+            .get("system")
+            .and_then(|value| value.as_str()),
+        Some("timber_frame")
+    );
+    assert!(
+        structure_json.get("max_span_m").is_none(),
+        "zero span is unspecified and stays out of the canonical JSON"
+    );
+    assert!(
+        structure_json.get("foundation_depth_m").is_none(),
+        "zero foundation stays out of the canonical JSON"
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn an_over_limit_structure_is_a_draft_not_a_package_error() {
+    let dir = temp_dir("structure-draft");
+    let path = dir.join("structure.tsbp");
+    let mut blueprint = test_blueprint();
+    let height = blueprint.metadata.bounds_m[1];
+    let structure = StructureSpec::new(StructuralSystem::TimberFrame, 4, height, 6.0);
+    assert!(structure.validate().is_err());
+    blueprint.metadata.structure = Some(structure);
+    save_tsbp(&path, &blueprint).expect("draft saves");
+    let loaded = load_tsbp(&path).expect("draft loads");
+    assert_eq!(loaded.metadata.structure, Some(structure));
+    assert!(loaded
+        .metadata
+        .structure
+        .expect("structure")
+        .validate()
+        .is_err());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_structure_height_mismatch_is_rejected_on_save() {
+    let dir = temp_dir("structure-height");
+    let path = dir.join("structure.tsbp");
+    let mut blueprint = test_blueprint();
+    let height = blueprint.metadata.bounds_m[1];
+    blueprint.metadata.structure = Some(StructureSpec::new(
+        StructuralSystem::TimberFrame,
+        2,
+        height + 1.0,
+        0.0,
+    ));
+    let error = save_tsbp(&path, &blueprint).expect_err("height mismatch");
+    assert!(matches!(error, BlueprintError::Format(_)));
+    assert!(error.to_string().contains("does not match"));
+    assert!(!path.exists());
+    fs::remove_dir_all(dir).unwrap();
 }

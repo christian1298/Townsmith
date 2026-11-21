@@ -168,6 +168,7 @@ fn simulate(scenario: &Scenario, days: u64, step: f64) -> serde_json::Value {
                 0
             },
             solid_voxels: SOLID_VOXELS,
+            structure: None,
         };
         let plan = PlacementPlan {
             center: [x, 40.0, z],
@@ -197,6 +198,7 @@ fn simulate(scenario: &Scenario, days: u64, step: f64) -> serde_json::Value {
             resident_capacity: 0,
             job_slots: JOBS_PER_WORKPLACE,
             solid_voxels: SOLID_VOXELS,
+            structure: None,
         };
         let plan = PlacementPlan {
             center: [x, 40.0, z],

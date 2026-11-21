@@ -168,6 +168,7 @@ mod tests {
             resident_capacity: capacity,
             job_slots: jobs,
             solid_voxels: 100,
+            structure: None,
         }
     }
 

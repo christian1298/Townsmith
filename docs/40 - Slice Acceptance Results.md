@@ -2,7 +2,7 @@
 title: Slice Acceptance Results
 project: Townsmith
 status: active
-updated: 2026-11-20
+updated: 2026-11-21
 tags:
   - townsmith
   - vertical-slice
@@ -30,7 +30,7 @@ tags:
 | Capacity, cost, rooms | **Pass** | capacity 2, jobs 2, cost **38,028.8**, 64,224 solid voxels |
 | 60 FPS with 21 houses | **Pass** | RTX 4080 1080p: **6,195 FPS avg / 4,484 1% low**, 0 hitches; [[39 - Slice House Benchmark]] |
 | 500 edits, undo/redo, save/load | **Pass** | 500 random edits; undo and redo content hashes match the before/after packages |
-| EN/DE missing keys / clipping | **Pass mechanically** | 95 keys/locale; parity + placeholders; 16 controls fit in both locales |
+| EN/DE missing keys / clipping | **Pass mechanically** | 96 keys/locale; parity + placeholders; 16 controls fit in both locales |
 | Room detection < 50 ms | **Pass** | ~2–4 ms for the acceptance house |
 | Missing dependencies are readable errors | **Pass** | `BlueprintError::MissingDependency`, no crash |
 | No OOB voxel writes | **Pass** | volume bounds tests + editor smoke |
@@ -53,7 +53,7 @@ Recorded markers:
 ```text
 SLICE_ACCEPTANCE rooms=4 bedrooms=2 kitchen=1 bathroom=1 capacity=2 jobs=2 cost=38028.80 solid=64224 hash=blake3:... copy=ok rooms_check=ok undo=ok status=ok
 LAYOUT_SMOKE en=ok de=ok checks=16 status=ok
-LOCALE_SMOKE en=ok de=ok keys=95 status=ok
+LOCALE_SMOKE en=ok de=ok keys=96 status=ok
 EDITOR_SMOKE solid=257 quads=14 surfaces=1 status=ok
 BLUEPRINT_SMOKE solid=257 props=1 hash=blake3:... status=ok
 SLICE_HOUSE_SMOKE instances=21 quads=293 status=ok

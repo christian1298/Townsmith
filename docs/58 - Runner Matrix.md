@@ -104,8 +104,8 @@ The comparison checks the checksum and structural counters exactly, and the econ
 ## 6. Tests
 
 - `city_loop` bin: 4 tests — five-house completion, 15-house road commute, scenario preset sizes, and a full early-scenario run with utilities and industry.
-- Workspace: **361 tests + 1 doctest**.
-- `core_city` 151; bridge 42; traffic-grid 1; city-loop 4.
+- Workspace: **390 tests + 2 doctests**.
+- `core_city` 157; `core_structure` 18; bridge 43; traffic-grid 1; city-loop 4.
 
 ## 7. Limits
 

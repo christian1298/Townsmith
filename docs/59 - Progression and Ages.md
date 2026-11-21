@@ -13,15 +13,15 @@ tags:
 # 59 — Progression and Ages
 
 > [!info] What this note is
-> Phase 4.1 starts the long arc: a settlement's age is a deterministic function of its population. The state is shared by the HUD, dashboard, and future content library. Research points, tech unlocks, and structural limits come next.
+> Phase 4.1 starts the long arc: a settlement's age is a deterministic function of its population. The state is shared by the HUD, dashboard, and future content library. Research points, tech unlocks, and structural limits come next; 4.2 structural limits are implemented in [[60 - Structural Limits]].
 
 ## 1. Phase 4 slices
 
 | Stage | Deliverable | Status |
 |---|---|---|
 | **4.1** | Age state: population milestones, current/next age, progress, materials, HUD/dashboard | **Done** — PR #76 |
-| **4.2** | Material tiers and structural limits: stories, spans, foundations, composite construction | Next |
-| **4.3** | Research pool and data-driven tech tree | Planned |
+| **4.2** | Material tiers and structural limits: stories, spans, foundations, composite construction | **This PR** — see [[60 - Structural Limits]] |
+| **4.3** | Research pool and data-driven tech tree | Next |
 | **4.4** | Starter content library, service tiers, age-specific construction trades | Planned |
 | **4.5** | Tutorial scenario and the wood-to-industrial balance pass | Planned |
 
@@ -84,9 +84,9 @@ pub struct AgeState {
 ## 6. Tests
 
 - `core_city::progression`: 5 tests — thresholds, boundary populations, next threshold/progress, final age, stable names/materials, determinism.
-- `core_city` total: **151 tests**.
-- `godot_ext`: **42 tests**; the scene smoke covers `progression_state`.
-- Workspace: **361 tests + 1 doctest**.
+- `core_city` total: **157 tests**; `core_structure` **18 tests + 1 doctest**.
+- `godot_ext`: **43 tests**; the scene smoke covers `progression_state` and structural limits.
+- Workspace: **390 tests + 2 doctests (392 passed)**.
 - Smoke marker includes `age=ok` and `render=ok`.
 
 ## 7. Limits
@@ -99,7 +99,7 @@ pub struct AgeState {
 
 ## 8. Next
 
-1. 4.2: material tiers and structural limits; reject a 4-story timber building with a clear reason.
-2. 4.3: research pool and data-driven tech tree.
+1. 4.3: research pool and data-driven tech tree.
+2. Move structural limits into content data for mods.
 3. Add age-aware blueprint metadata and library filters.
 4. Add a starter library that can sustain a town without player-authored blueprints.

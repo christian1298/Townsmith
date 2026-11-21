@@ -1149,6 +1149,25 @@ func _update_hud() -> void:
 	var blueprint_name := str(blueprint_info.get("name", "none"))
 	var rooms := int(blueprint_info.get("rooms", 0))
 	var capacity := int(blueprint_info.get("resident_capacity", 0))
+	var structure: Dictionary = blueprint_info.get("structure", {})
+	var structure_text := "—"
+	if not structure.is_empty() and bool(structure.get("present", false)):
+		if bool(structure.get("valid", false)):
+			structure_text = "%s  %d/%d stories · span %.1f/%.1f m · foundation %.1f/%.1f m" % [
+				str(structure.get("system_name", "?")),
+				int(structure.get("stories", 0)),
+				int(structure.get("effective_max_stories", 0)),
+				float(structure.get("max_span_m", 0.0)),
+				float(structure.get("effective_max_span_m", 0.0)),
+				float(structure.get("foundation_depth_m", 0.0)),
+				float(structure.get("required_foundation_m", 0.0)),
+			]
+		else:
+			structure_text = "%s  INVALID: %s (%s)" % [
+				str(structure.get("system_name", "?")),
+				str(structure.get("error", "")),
+				str(structure.get("error_code", "")),
+			]
 	var selected := _selected_placement()
 	var selected_line := "Selected: none"
 	if not selected.is_empty():
@@ -1179,13 +1198,19 @@ func _update_hud() -> void:
 		var utility_kinds_here: Array = utility_kinds.get(selected_id, [])
 		if utility_kinds_here.size() > 0:
 			selected_line += "  ·  utility " + ", ".join(utility_kinds_here)
+		var selected_structure: Dictionary = selected.get("structure", {})
+		if bool(selected_structure.get("present", false)):
+			selected_line += "  ·  %s %d stories" % [
+				str(selected_structure.get("system_name", "?")),
+				int(selected_structure.get("stories", 0)),
+			]
 	if mode == "architect":
-		hud.text = "Townsmith — Architect View (read-only)  (seed %d)\nBlueprint: %s\nFirst-person view at the selected door · M / Esc returns to Mayor" % [
-			SEED, blueprint_name,
+		hud.text = "Townsmith — Architect View (read-only)  (seed %d)\nBlueprint: %s\nStructure: %s\nFirst-person view at the selected door · M / Esc returns to Mayor" % [
+			SEED, blueprint_name, structure_text,
 		]
 	else:
-		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew on/off · I industry · U utility · T tax · L loan · F1 dashboard · V +10k materials · F5 save · F9 load" % [
-			SEED, blueprint_name, rooms, capacity,
+		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nStructure: %s\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew on/off · I industry · U utility · T tax · L loan · F1 dashboard · V +10k materials · F5 save · F9 load" % [
+			SEED, blueprint_name, rooms, capacity, structure_text,
 		]
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
 	var construction: Dictionary = core.construction_summary()
@@ -1985,6 +2010,7 @@ func _run_scene_smoke() -> void:
 	var build_ok := false
 	var build_done_ok := false
 	var render_ok := false
+	var structure_ok := false
 	var age_ok := false
 	var occupancy_before_ok := false
 	var occupancy_after_ok := false
@@ -2193,6 +2219,14 @@ func _run_scene_smoke() -> void:
 				status = "settlement_clear_failed"
 			load_ok = _load_world() and core.world_placement_count() == 1 and placed_root.get_child_count() == 1
 			if load_ok:
+				var loaded_placements: Dictionary = core.world_placements()
+				var loaded_placement_list: Array = loaded_placements.get("placements", [])
+				var loaded_structure: Dictionary = {}
+				if loaded_placement_list.size() == 1:
+					loaded_structure = loaded_placement_list[0].get("structure", {})
+				load_ok = bool(loaded_structure.get("present", false))
+				load_ok = load_ok and str(loaded_structure.get("system", "")) == "timber_frame"
+				load_ok = load_ok and int(loaded_structure.get("stories", 0)) == 2
 				var node := placed_root.get_child(0)
 				load_ok = absf(node.rotation_degrees.y - 90.0) < 0.001 and _foundation_matches_bounds(node)
 				load_ok = load_ok and core.terrain_delta_count() == 1
@@ -2250,6 +2284,20 @@ func _run_scene_smoke() -> void:
 					render_ok = render_ok and arrays.size() > Mesh.ARRAY_COLOR
 					if render_ok:
 						render_ok = (arrays[Mesh.ARRAY_COLOR] as PackedColorArray).size() > 0
+				var blueprint_structure: Dictionary = blueprint_info.get("structure", {})
+				structure_ok = bool(blueprint_structure.get("valid", false))
+				structure_ok = structure_ok and str(blueprint_structure.get("system", "")) == "timber_frame"
+				structure_ok = structure_ok and int(blueprint_structure.get("stories", 0)) == 2
+				structure_ok = structure_ok and int(blueprint_structure.get("effective_max_stories", 0)) == 3
+				var placement_state: Dictionary = core.world_placements()
+				var placement_list: Array = placement_state.get("placements", [])
+				if placement_list.size() == 1:
+					var placement_structure: Dictionary = placement_list[0].get("structure", {})
+					structure_ok = structure_ok and bool(placement_structure.get("present", false))
+					structure_ok = structure_ok and str(placement_structure.get("system", "")) == "timber_frame"
+					structure_ok = structure_ok and int(placement_structure.get("stories", 0)) == 2
+				else:
+					structure_ok = false
 				var pacing_ok: bool = core.population_set_rate(1.0)
 				core.population_clear()
 				_advance_construction(0.25)
@@ -2426,6 +2474,8 @@ func _run_scene_smoke() -> void:
 					status = "construction_complete_failed"
 				elif not render_ok:
 					status = "render_failed"
+				elif not structure_ok:
+					status = "structure_failed"
 				elif not age_ok:
 					status = "age_failed"
 				elif not (occupancy_before_ok and occupancy_after_ok):
@@ -2476,7 +2526,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s render=%s age=%s occupancy=%s industry=%s utilities=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s render=%s structure=%s age=%s occupancy=%s industry=%s utilities=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -2489,6 +2539,7 @@ func _run_scene_smoke() -> void:
 		"ok" if build_ok else "failed",
 		"ok" if build_done_ok else "failed",
 		"ok" if render_ok else "failed",
+		"ok" if structure_ok else "failed",
 		"ok" if age_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
