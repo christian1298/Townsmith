@@ -11,6 +11,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::trades::{Trade, TradeError, TradePool};
+
 /// Current construction save format.
 pub const CONSTRUCTION_FORMAT_VERSION: u16 = 1;
 
@@ -108,6 +110,19 @@ impl ConstructionPhase {
             Self::Finish => 0.12,
             Self::Inspection => 0.03,
             Self::Complete => 0.0,
+        }
+    }
+
+    /// Preferred trade for this phase.
+    #[must_use]
+    pub const fn preferred_trade(self) -> Trade {
+        match self {
+            Self::Survey => Trade::Laborer,
+            Self::Foundation => Trade::Mason,
+            Self::Structure | Self::Envelope | Self::Finish => Trade::Carpenter,
+            Self::Utilities => Trade::Electrician,
+            Self::Inspection => Trade::Engineer,
+            Self::Complete => Trade::Laborer,
         }
     }
 
@@ -261,6 +276,9 @@ pub struct ConstructionStore {
     pub crew_capacity: u16,
     /// Material litres available for delivery.
     pub materials_stock: u64,
+    /// Age-derived trade roster. Missing on legacy saves and the runner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trades: Option<TradePool>,
     /// Sites keyed by placement id.
     pub sites: BTreeMap<u64, ConstructionSite>,
 }
@@ -279,6 +297,7 @@ impl ConstructionStore {
             format_version: CONSTRUCTION_FORMAT_VERSION,
             crew_capacity,
             materials_stock,
+            trades: None,
             sites: BTreeMap::new(),
         }
     }
@@ -334,6 +353,32 @@ impl ConstructionStore {
         self.crew_capacity = crew_capacity;
     }
 
+    /// Replace the trade roster. `None` restores the legacy aggregate crew.
+    pub fn set_trades(&mut self, trades: Option<TradePool>) {
+        self.trades = trades;
+    }
+
+    /// Crew slots actually available after the trade roster cap.
+    #[must_use]
+    pub fn effective_crew_capacity(&self) -> u16 {
+        self.trades.as_ref().map_or(self.crew_capacity, |trades| {
+            self.crew_capacity.min(trades.total())
+        })
+    }
+
+    /// Preferred trade for the current phase, falling back to a laborer.
+    #[must_use]
+    pub fn site_trade(&self, placement_id: u64) -> Option<Trade> {
+        let site = self.sites.get(&placement_id)?;
+        let preferred = site.phase.preferred_trade();
+        Some(
+            self.trades
+                .as_ref()
+                .filter(|trades| trades.has(preferred))
+                .map_or(Trade::Laborer, |_| preferred),
+        )
+    }
+
     /// Add material litres to the stockpile.
     pub fn deliver_materials(&mut self, litres: u64) {
         self.materials_stock = self.materials_stock.saturating_add(litres);
@@ -356,7 +401,7 @@ impl ConstructionStore {
             return report;
         }
 
-        let mut remaining_crew = self.crew_capacity;
+        let mut remaining_crew = self.effective_crew_capacity();
         let mut remaining_materials = self.materials_stock;
 
         for site in self.sites.values_mut() {
@@ -498,6 +543,9 @@ impl ConstructionStore {
         if self.crew_capacity > 64 {
             return Err(ConstructionError::InvalidSite("crew capacity is too large"));
         }
+        if let Some(trades) = &self.trades {
+            trades.validate()?;
+        }
         if self.sites.len() > MAX_SITES {
             return Err(ConstructionError::TooManySites(self.sites.len()));
         }
@@ -556,6 +604,8 @@ pub enum ConstructionError {
     DuplicateSite(u64),
     /// Too many sites.
     TooManySites(usize),
+    /// Invalid trade roster.
+    Trade(TradeError),
 }
 
 impl fmt::Display for ConstructionError {
@@ -571,6 +621,7 @@ impl fmt::Display for ConstructionError {
             Self::InvalidSite(message) => write!(formatter, "invalid construction site: {message}"),
             Self::DuplicateSite(id) => write!(formatter, "placement {id} already has a site"),
             Self::TooManySites(count) => write!(formatter, "too many construction sites: {count}"),
+            Self::Trade(error) => write!(formatter, "invalid construction trades: {error}"),
         }
     }
 }
@@ -580,6 +631,12 @@ impl std::error::Error for ConstructionError {}
 impl From<serde_json::Error> for ConstructionError {
     fn from(error: serde_json::Error) -> Self {
         Self::Json(error)
+    }
+}
+
+impl From<TradeError> for ConstructionError {
+    fn from(error: TradeError) -> Self {
+        Self::Trade(error)
     }
 }
 
@@ -694,6 +751,51 @@ mod tests {
             Err(ConstructionError::DuplicateSite(1))
         ));
         assert!(store.add_site(0, 10_000).is_err());
+    }
+
+    #[test]
+    fn trade_roster_caps_the_effective_crew() {
+        let mut store = ConstructionStore::new(10, 1_000_000);
+        let mut trades = TradePool::new();
+        trades.set(Trade::Laborer, 3);
+        store.set_trades(Some(trades));
+        assert_eq!(store.effective_crew_capacity(), 3);
+        store.add_site(1, 10_000).expect("site");
+        let mutable = store.sites.get_mut(&1).expect("site");
+        mutable.phase = ConstructionPhase::Structure;
+        mutable.crew_required = 4;
+        store.tick(1.0);
+        let site = site(&store, 1);
+        assert_eq!(site.crew_assigned, 3);
+        assert_eq!(site.stall_reason.as_deref(), Some("crew"));
+    }
+
+    #[test]
+    fn trade_roster_round_trips_and_legacy_saves_stay_undefined() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_site(1, 10_000).expect("site");
+        store.set_trades(Some(TradePool::for_age(crate::progression::Age::Wood)));
+        let json = store.to_json_pretty().expect("json");
+        let decoded = ConstructionStore::from_json(&json).expect("decode");
+        assert_eq!(decoded.trades, store.trades);
+        assert_eq!(decoded.checksum(), store.checksum());
+
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("value");
+        value.as_object_mut().expect("object").remove("trades");
+        let legacy = ConstructionStore::from_json(&value.to_string()).expect("legacy");
+        assert!(legacy.trades.is_none());
+    }
+
+    #[test]
+    fn phase_trades_fall_back_when_specialists_are_missing() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.set_trades(Some(TradePool::for_age(crate::progression::Age::Wood)));
+        store.add_site(1, 10_000).expect("site");
+        assert_eq!(store.site_trade(1), Some(Trade::Laborer));
+        store.sites.get_mut(&1).expect("site").phase = ConstructionPhase::Foundation;
+        assert_eq!(store.site_trade(1), Some(Trade::Mason));
+        store.sites.get_mut(&1).expect("site").phase = ConstructionPhase::Utilities;
+        assert_eq!(store.site_trade(1), Some(Trade::Laborer));
     }
 
     #[test]

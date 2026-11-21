@@ -45,6 +45,7 @@ pub mod research;
 pub mod road;
 pub mod services;
 pub mod settlement;
+pub mod trades;
 pub mod traffic;
 pub mod utilities;
 
@@ -113,6 +114,7 @@ pub use settlement::{
     MAX_SETTLEMENT_ID, MAX_SETTLEMENT_NAME_CHARS, MAX_SETTLEMENT_OWNER_CHARS,
     MAX_SETTLEMENT_RADIUS_M, MIN_SETTLEMENT_RADIUS_M, SETTLEMENT_FORMAT_VERSION,
 };
+pub use trades::{Trade, TradeError, TradePool};
 pub use traffic::{
     FlowField, RoadGraph, RoadNode, TrafficError, TrafficStats, MAX_TRAFFIC_NODES,
     MAX_TRAFFIC_ROADS,

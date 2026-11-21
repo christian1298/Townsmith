@@ -22,8 +22,8 @@ tags:
 | **4.1** | Age state: population milestones, current/next age, progress, materials, HUD/dashboard | **Done** — PR #76 |
 | **4.2** | Material tiers and structural limits: stories, spans, foundations, composite construction | **Done** — PR #78, see [[60 - Structural Limits]] |
 | **4.3** | Research pool and data-driven tech tree | **Done** — PR #80, see [[61 - Research]] |
-| **4.4** | Starter content library, service tiers, age-specific construction trades | **Partial** — services #84, starter library #86; trades next |
-| **4.5** | Tutorial scenario and the wood-to-industrial balance pass | Planned |
+| **4.4** | Starter content library, service tiers, age-specific construction trades | **Done** — services #84, starter library #86, trades #87, see [[64 - Construction Trades]] |
+| **4.5** | Tutorial scenario and the wood-to-industrial balance pass | Next |
 
 ## 2. Ages
 
@@ -84,10 +84,10 @@ pub struct AgeState {
 ## 6. Tests
 
 - `core_city::progression`: 6 tests — thresholds, boundary populations, next threshold/progress, final age, stable names/materials, determinism, age-id aliases.
-- `core_city` total: **188 tests**; `core_structure` **19 tests + 1 doctest**.
+- `core_city` total: **195 tests**; `core_structure` **19 tests + 1 doctest**.
 - `godot_ext`: **49 tests**; the scene smoke covers `progression_state`, structural limits, research generation, and the HUD; structural age rejection is covered by the bridge helper and core placement tests.
-- Workspace: **429 tests + 2 doctests (431 passed)**.
-- Smoke marker includes `age=ok` and `research=ok`.
+- Workspace: **436 tests + 2 doctests (438 passed)**.
+- Smoke marker includes `age=ok`, `research=ok`, `starter=ok`, and `trades=ok`.
 
 ## 7. Limits
 
@@ -101,7 +101,7 @@ pub struct AgeState {
 
 ## 8. Next
 
-1. 4.4c: age-specific construction trades.
+1. 4.5: tutorial scenario and the wood-to-industrial balance pass.
 2. Add a starter-library panel with thumbnails and filters.
 3. Move structural limits and the tech tree into content data for mods.
 2. Move structural limits and the tech tree into content data for mods.

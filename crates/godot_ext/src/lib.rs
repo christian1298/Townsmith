@@ -32,8 +32,8 @@ use core_city::{
     Home, IndustryKind, IndustryStore, Lot, LotError, LotRequest, LotStore, Placement,
     PlacementError, PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph,
     RoadRequest, RoadSegment, RoadStore, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore,
-    ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree,
-    UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
+    ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree, Trade,
+    TradePool, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
     DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT,
     MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
@@ -2018,7 +2018,10 @@ impl TownsmithCore {
             .unwrap_or_else(|error| error.into_inner());
         let mut sites: Array<VarDictionary> = Array::new();
         for site in store.sites.values() {
-            sites.push(&construction_site_to_dictionary(site));
+            sites.push(&construction_site_to_dictionary(
+                site,
+                store.site_trade(site.placement_id),
+            ));
         }
         let mut result = VarDictionary::new();
         result.set("ok", true);
@@ -2055,6 +2058,21 @@ impl TownsmithCore {
         result.set("stalled", stalled as i64);
         result.set("complete", (store.site_count() - active) as i64);
         result.set("crew_capacity", i64::from(store.crew_capacity));
+        result.set("effective_crew", i64::from(store.effective_crew_capacity()));
+        let mut trades: Array<VarDictionary> = Array::new();
+        if let Some(pool) = &store.trades {
+            for trade in Trade::ALL {
+                let count = pool.get(trade);
+                if count > 0 {
+                    let mut item = VarDictionary::new();
+                    item.set("trade", &GString::from(trade.as_str()));
+                    item.set("name", &GString::from(trade.name()));
+                    item.set("count", i64::from(count));
+                    trades.push(&item);
+                }
+            }
+        }
+        result.set("trades", &trades.to_variant());
         result.set("materials_stock", store.materials_stock as i64);
         result.set(
             "checksum",
@@ -3614,6 +3632,35 @@ impl TownsmithCore {
         result.set("job_slots", i64::from(building.job_slots));
         result.set("material_cost", building.material_cost);
         result
+    }
+
+    /// Derive the age-specific trade roster and install it on the store.
+    #[func]
+    fn construction_set_trades(&self, seed: i64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(store) = world.as_ref() {
+                if store.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the placement store belongs to a different seed",
+                    );
+                }
+            }
+        }
+        let population = self
+            .city_summary()
+            .get("population")
+            .map_or(0, |value| value.to::<i64>()) as u64;
+        let age = AgeState::from_population(population).age;
+        self.construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .set_trades(Some(TradePool::for_age(age)));
+        self.construction_summary()
     }
 
     /// Set the shared crew pool. Values above 64 are rejected.
@@ -5759,7 +5806,7 @@ fn placement_to_dictionary(placement: &Placement) -> VarDictionary {
     result
 }
 
-fn construction_site_to_dictionary(site: &ConstructionSite) -> VarDictionary {
+fn construction_site_to_dictionary(site: &ConstructionSite, trade: Option<Trade>) -> VarDictionary {
     let mut result = VarDictionary::new();
     result.set("id", site.placement_id as i64);
     result.set("phase", &GString::from(site.phase.code()));
@@ -5772,6 +5819,10 @@ fn construction_site_to_dictionary(site: &ConstructionSite) -> VarDictionary {
     result.set("materials_delivered", site.materials_delivered as i64);
     result.set("crew_required", i64::from(site.crew_required));
     result.set("crew_assigned", i64::from(site.crew_assigned));
+    if let Some(trade) = trade {
+        result.set("trade", &GString::from(trade.as_str()));
+        result.set("trade_name", &GString::from(trade.name()));
+    }
     result.set("complete", site.is_complete());
     if let Some(reason) = &site.stall_reason {
         result.set("stall_reason", &GString::from(reason.as_str()));
