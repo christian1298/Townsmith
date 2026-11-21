@@ -13,7 +13,7 @@ tags:
 # 59 — Progression and Ages
 
 > [!info] What this note is
-> Phase 4.1 starts the long arc: a settlement's age is a deterministic function of its population. The state is shared by the HUD, dashboard, and future content library. Research points, tech unlocks, and structural limits come next.
+> Phase 4.1 starts the long arc: a settlement's age is a deterministic function of its population. The state is shared by the HUD, dashboard, and future content library. Research points, tech unlocks, and structural limits come next; 4.2 structural limits are implemented in [[60 - Structural Limits]].
 
 ## 1. Phase 4 slices
 
