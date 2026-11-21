@@ -1,0 +1,15 @@
+{
+  "id": "metropolis_gate_v1",
+  "description": "Deterministic 120 s metropolis-gate camera route: outside-in approach, low diagonal pass through the 250k-box city, climb-out. Warm-up is discarded.",
+  "duration_seconds": 120,
+  "warmup_seconds": 15,
+  "waypoints": [
+    { "t": 0.0, "position": [0, 800, 6200], "look_at": [0, 120, 0], "fov": 68 },
+    { "t": 0.15, "position": [2200, 560, 4200], "look_at": [0, 100, 0], "fov": 68 },
+    { "t": 0.32, "position": [3000, 220, 1800], "look_at": [0, 70, 0], "fov": 65 },
+    { "t": 0.48, "position": [1200, 95, 300], "look_at": [-500, 55, -500], "fov": 72 },
+    { "t": 0.62, "position": [-1200, 105, -1200], "look_at": [-1800, 50, -1800], "fov": 75 },
+    { "t": 0.78, "position": [-3200, 480, -2800], "look_at": [0, 120, 0], "fov": 68 },
+    { "t": 1.0, "position": [0, 820, -6200], "look_at": [0, 100, 0], "fov": 68 }
+  ]
+}
