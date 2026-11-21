@@ -272,7 +272,15 @@ Acceptance checks:
 
 ### Static gate
 
-`scripts/check_locale.sh` parses the `TABLES` const in `godot/editor_i18n.gd` and checks key parity, the 96-key floor, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. It prints `LOCALE_CHECK keys=96 status=ok`, supports `--self-test` with six failure cases, and runs in `scripts/check.sh` and the Rust CI job before the Godot locale smoke.
+`scripts/check_locale.sh` parses the `TABLES` const in both `godot/editor_i18n.gd` and `godot/world_i18n.gd` and checks key parity, per-file key floors, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. The floors ratchet independently: editor `96`, world `33`. Default mode prints one line per table plus a summary:
+
+```text
+LOCALE_CHECK file=godot/editor_i18n.gd keys=96 min=96 status=ok
+LOCALE_CHECK file=godot/world_i18n.gd keys=33 min=33 status=ok
+LOCALE_CHECK editor=96 world=33 status=ok
+```
+
+Single-file mode (`scripts/check_locale.sh [FILE]`) keeps the original `LOCALE_CHECK keys=N status=ok` marker and derives the floor from the file name (`world_i18n.gd` gets 33, anything else 96). `--self-test` covers nine cases: the six editor cases (valid, missing DE key, extra DE key, empty value, placeholder mismatch, too few keys) plus a world-style fixture pass, a too-few world table, and a world EN/DE placeholder mismatch. The gate runs in `scripts/check.sh` and the Rust CI job before the Godot locale smoke.
 
 `scripts/smoke_locale.sh` parses the last `LOCALE_SMOKE` line and requires:
 
@@ -280,7 +288,7 @@ Acceptance checks:
 if [[ -z "$KEYS" || "$KEYS" -lt 96 || "$STATUS" != "ok" ]]; then
 ```
 
-The exact `96` was a hand-edited constant in the runtime smoke. The static gate now enforces a floor (`MIN_KEYS=96`) plus EN/DE parity, empty values, and placeholder parity; `smoke_locale.sh` accepts `keys >= 96`. Adding keys is no longer a red build.
+The exact `96` was a hand-edited constant in the runtime smoke. The static gate now enforces independent floors (`EDITOR_MIN_KEYS=96`, `WORLD_MIN_KEYS=33`) plus EN/DE parity, empty values, and placeholder parity for both tables; `smoke_locale.sh` accepts editor `keys >= 96`. Adding keys is no longer a red build.
 
 ### Proposed contract
 
@@ -300,7 +308,7 @@ Add `scripts/check_locale_coverage.sh` and run it from `scripts/check.sh` / CI:
 
 ### Additional gates
 
-- **Parity/placeholder:** extend the existing editor check to all `base.*` tables, including plural families.
+- **Parity/placeholder:** the static gate covers `editor_i18n.gd` and `world_i18n.gd`; extend it to every `base.*` table once the shared content pipeline lands, including plural families.
 - **Pseudo-localization:** generate an accented, +30% length locale to catch clipping before German QA.
 - **German layout:** include HUD, dashboard, and one modal in the 100/125/150% width budgets.
 - **No hard-coded strings:** the coverage check above is the enforcement; review alone is not enough.

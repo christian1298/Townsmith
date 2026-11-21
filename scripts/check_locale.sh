@@ -1,18 +1,25 @@
 #!/usr/bin/env bash
-# Static EN/DE locale table gate for the Godot editor slice.
+# Static EN/DE locale table gate for the Godot slices.
 #
-# Parses `godot/editor_i18n.gd` (the runtime `TABLES` const) without Godot,
-# Python, or any third-party tool and asserts:
+# Parses the runtime `TABLES` const in `godot/editor_i18n.gd` and
+# `godot/world_i18n.gd` without Godot, Python, or any third-party tool and
+# asserts:
 #   1. EN and DE expose the same key set (no duplicates either).
-#   2. Each locale has at least MIN_KEYS keys (ratchet floor).
+#   2. Each locale meets its file's key floor (ratchet floor).
 #   3. No value is empty or whitespace-only.
 #   4. `{0}` / `{name}` placeholder sets match between EN and DE per key.
 #
 # Usage:
-#   scripts/check_locale.sh [FILE]   # defaults to godot/editor_i18n.gd
+#   scripts/check_locale.sh            # both tables, independent floors
+#   scripts/check_locale.sh [FILE]     # one table; world_i18n.gd gets world floor
 #   scripts/check_locale.sh --self-test
 #
-# Success prints one line:
+# Default success prints one line per table plus a summary:
+#   LOCALE_CHECK file=godot/editor_i18n.gd keys=96 min=96 status=ok
+#   LOCALE_CHECK file=godot/world_i18n.gd keys=33 min=33 status=ok
+#   LOCALE_CHECK editor=96 world=33 status=ok
+#
+# Single-file success keeps the original contract:
 #   LOCALE_CHECK keys=96 status=ok
 #
 # Failure prints `LOCALE_CHECK status=fail` plus file/key details and exits 1.
@@ -21,8 +28,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT/scripts/$(basename "${BASH_SOURCE[0]}")"
-DEFAULT_FILE="$ROOT/godot/editor_i18n.gd"
-MIN_KEYS=96
+EDITOR_FILE="$ROOT/godot/editor_i18n.gd"
+WORLD_FILE="$ROOT/godot/world_i18n.gd"
+EDITOR_MIN_KEYS=96
+WORLD_MIN_KEYS=33
 LOCALES=(en de)
 
 TMP="$(mktemp -d)"
@@ -80,9 +89,22 @@ missing_keys() {
 	LC_ALL=C comm -23 "$TMP/$1.keys" "$TMP/$2.keys"
 }
 
-check_file() {
-	local file="$1" locale keys_file count duplicates
+# Floor for a file: the world table ratchets independently from the editor.
+floor_for_file() {
+	local file="$1"
+	if [[ "$(basename "$file")" == "world_i18n.gd" ]]; then
+		printf '%s\n' "$WORLD_MIN_KEYS"
+	else
+		printf '%s\n' "$EDITOR_MIN_KEYS"
+	fi
+}
+
+# Validate one file. Issues land in "$TMP/issues"; the EN key count is left in
+# AUDIT_COUNT (0 when the table could not be read).
+audit_file() {
+	local file="$1" min="$2" locale keys_file count duplicates
 	: > "$TMP/issues"
+	AUDIT_COUNT=0
 
 	if [[ ! -f "$file" ]]; then
 		add_issue "file not found: $file"
@@ -95,8 +117,8 @@ check_file() {
 			cut -f1 "$TMP/$locale.tsv" | LC_ALL=C sort > "$keys_file"
 
 			count="$(wc -l < "$keys_file" | tr -d ' ')"
-			if (( count < MIN_KEYS )); then
-				add_issue "$locale has $count keys, minimum is $MIN_KEYS"
+			if (( count < min )); then
+				add_issue "$locale has $count keys, minimum is $min"
 			fi
 
 			duplicates="$(uniq -d "$keys_file" | head -n 5)"
@@ -106,6 +128,7 @@ check_file() {
 				done <<< "$duplicates"
 			fi
 		done
+		AUDIT_COUNT="$(wc -l < "$TMP/en.keys" | tr -d ' ')"
 	fi
 
 	if [[ -s "$TMP/en.tsv" && -s "$TMP/de.tsv" ]]; then
@@ -190,16 +213,64 @@ check_file() {
 		' "$TMP/en.tsv" "$TMP/de.tsv" >> "$TMP/issues"
 	fi
 
-	if [[ -s "$TMP/issues" ]]; then
-		{
-			echo "LOCALE_CHECK status=fail"
-			echo "  file: $file"
-			sed 's/^/  /' "$TMP/issues"
-		} >&2
+	[[ ! -s "$TMP/issues" ]]
+}
+
+report_issues() {
+	local file="$1"
+	{
+		echo "LOCALE_CHECK status=fail"
+		echo "  file: $file"
+		sed 's/^/  /' "$TMP/issues"
+	} >&2
+}
+
+# Legacy single-file mode: `LOCALE_CHECK keys=N status=ok`.
+check_file() {
+	local file="$1" min="${2:-}"
+	if [[ -z "$min" ]]; then
+		min="$(floor_for_file "$file")"
+	fi
+	if ! audit_file "$file" "$min"; then
+		report_issues "$file"
 		return 1
 	fi
+	echo "LOCALE_CHECK keys=$AUDIT_COUNT status=ok"
+}
 
-	echo "LOCALE_CHECK keys=$(wc -l < "$TMP/en.keys" | tr -d ' ') status=ok"
+relative_to_root() {
+	printf '%s\n' "${1#"$ROOT/"}"
+}
+
+# Default mode: both tables, independent floors, one deterministic line each.
+check_all() {
+	local failed=0 editor_count=0 world_count=0 status=ok
+
+	if audit_file "$EDITOR_FILE" "$EDITOR_MIN_KEYS"; then
+		editor_count="$AUDIT_COUNT"
+		echo "LOCALE_CHECK file=$(relative_to_root "$EDITOR_FILE") keys=$editor_count min=$EDITOR_MIN_KEYS status=ok"
+	else
+		failed=1
+		editor_count="$AUDIT_COUNT"
+		echo "LOCALE_CHECK file=$(relative_to_root "$EDITOR_FILE") keys=$editor_count min=$EDITOR_MIN_KEYS status=fail"
+		report_issues "$EDITOR_FILE"
+	fi
+
+	if audit_file "$WORLD_FILE" "$WORLD_MIN_KEYS"; then
+		world_count="$AUDIT_COUNT"
+		echo "LOCALE_CHECK file=$(relative_to_root "$WORLD_FILE") keys=$world_count min=$WORLD_MIN_KEYS status=ok"
+	else
+		failed=1
+		world_count="$AUDIT_COUNT"
+		echo "LOCALE_CHECK file=$(relative_to_root "$WORLD_FILE") keys=$world_count min=$WORLD_MIN_KEYS status=fail"
+		report_issues "$WORLD_FILE"
+	fi
+
+	if (( failed )); then
+		status=fail
+	fi
+	echo "LOCALE_CHECK editor=$editor_count world=$world_count status=$status"
+	(( ! failed ))
 }
 
 # --- self-test -------------------------------------------------------------
@@ -243,14 +314,14 @@ set_value() {
 }
 
 expect_pass() {
-	local name="$1" file="$2"
+	local name="$1" file="$2" min="$3"
 	local log="$TMP/self_$name.log"
 	if ! "$SCRIPT" "$file" > "$log" 2>&1; then
 		echo "LOCALE_SELF_TEST case=$name status=fail expected=pass" >&2
 		sed 's/^/  /' "$log" >&2
 		exit 1
 	fi
-	if ! grep -qx "LOCALE_CHECK keys=$MIN_KEYS status=ok" "$log"; then
+	if ! grep -qx "LOCALE_CHECK keys=$min status=ok" "$log"; then
 		echo "LOCALE_SELF_TEST case=$name status=fail reason=bad-marker" >&2
 		sed 's/^/  /' "$log" >&2
 		exit 1
@@ -259,7 +330,7 @@ expect_pass() {
 }
 
 expect_fail() {
-	local name="$1" file="$2" pattern="$3"
+	local name="$1" file="$2" min="$3" pattern="$4"
 	local log="$TMP/self_$name.log"
 	if "$SCRIPT" "$file" > "$log" 2>&1; then
 		echo "LOCALE_SELF_TEST case=$name status=fail expected=nonzero-exit" >&2
@@ -276,31 +347,51 @@ expect_fail() {
 }
 
 self_test() {
-	local dir="$TMP/fixtures" valid
+	local dir="$TMP/fixtures" valid world_valid
 	mkdir -p "$dir"
 	valid="$dir/valid.gd"
-	write_fixture "$valid" "$MIN_KEYS"
+	write_fixture "$valid" "$EDITOR_MIN_KEYS"
 
-	expect_pass valid "$valid"
+	expect_pass valid "$valid" "$EDITOR_MIN_KEYS"
 
 	remove_key "$valid" de base.test.key_096 > "$dir/missing_de.gd"
-	expect_fail missing_de "$dir/missing_de.gd" "missing in DE: base.test.key_096"
+	expect_fail missing_de "$dir/missing_de.gd" "$EDITOR_MIN_KEYS" \
+		"missing in DE: base.test.key_096"
 
 	awk '{ print } $0 == "\t\"de\": {" { print "\t\t\"base.test.extra\": \"Extra {0}\"," }' \
 		"$valid" > "$dir/extra_de.gd"
-	expect_fail extra_de "$dir/extra_de.gd" "missing in EN: base.test.extra"
+	expect_fail extra_de "$dir/extra_de.gd" "$EDITOR_MIN_KEYS" \
+		"missing in EN: base.test.extra"
 
 	set_value "$valid" de base.test.key_005 "" > "$dir/empty_value.gd"
-	expect_fail empty_value "$dir/empty_value.gd" "empty value: de base.test.key_005"
+	expect_fail empty_value "$dir/empty_value.gd" "$EDITOR_MIN_KEYS" \
+		"empty value: de base.test.key_005"
 
 	set_value "$valid" de base.test.key_007 "Wert 7 {1} {name}" > "$dir/bad_placeholder.gd"
-	expect_fail bad_placeholder "$dir/bad_placeholder.gd" \
+	expect_fail bad_placeholder "$dir/bad_placeholder.gd" "$EDITOR_MIN_KEYS" \
 		"placeholder mismatch: base.test.key_007"
 
-	write_fixture "$dir/too_few.gd" "$((MIN_KEYS - 1))"
-	expect_fail too_few "$dir/too_few.gd" "minimum is $MIN_KEYS"
+	write_fixture "$dir/too_few.gd" "$((EDITOR_MIN_KEYS - 1))"
+	expect_fail too_few "$dir/too_few.gd" "$EDITOR_MIN_KEYS" \
+		"minimum is $EDITOR_MIN_KEYS"
 
-	echo "LOCALE_SELF_TEST cases=6 status=ok"
+	# World table: same `TABLES` shape, independent lower floor. Every world
+	# fixture keeps the real basename so the derived world floor is exercised.
+	world_valid="$dir/world/world_i18n.gd"
+	mkdir -p "$dir/world" "$dir/world_bad_placeholder" "$dir/world_too_few"
+	write_fixture "$world_valid" "$WORLD_MIN_KEYS"
+	expect_pass world_valid "$world_valid" "$WORLD_MIN_KEYS"
+
+	set_value "$world_valid" de base.test.key_007 "Wert 7 {1} {name}" \
+		> "$dir/world_bad_placeholder/world_i18n.gd"
+	expect_fail world_bad_placeholder "$dir/world_bad_placeholder/world_i18n.gd" "$WORLD_MIN_KEYS" \
+		"placeholder mismatch: base.test.key_007"
+
+	write_fixture "$dir/world_too_few/world_i18n.gd" "$((WORLD_MIN_KEYS - 1))"
+	expect_fail world_too_few "$dir/world_too_few/world_i18n.gd" "$WORLD_MIN_KEYS" \
+		"minimum is $WORLD_MIN_KEYS"
+
+	echo "LOCALE_SELF_TEST cases=9 status=ok"
 }
 
 case "${1:-}" in
@@ -314,7 +405,7 @@ case "${1:-}" in
 		usage
 		;;
 	"")
-		check_file "$DEFAULT_FILE"
+		check_all
 		;;
 	*)
 		check_file "$1"
