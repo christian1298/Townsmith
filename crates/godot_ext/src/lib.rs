@@ -2537,6 +2537,28 @@ impl TownsmithCore {
         GString::from(&format!("{checksum:016x}"))
     }
 
+    fn utility_site_count_for_seed(&self, seed: u64) -> u64 {
+        let guard = self
+            .utilities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        guard
+            .as_ref()
+            .filter(|store| store.seed == seed)
+            .map_or(0, |store| store.site_count() as u64)
+    }
+
+    fn service_site_count_for_seed(&self, seed: u64) -> u64 {
+        let guard = self
+            .services
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        guard
+            .as_ref()
+            .filter(|store| store.seed == seed)
+            .map_or(0, |store| store.site_count() as u64)
+    }
+
     /// Return the treasury state.
     #[func]
     fn economy_state(&self) -> VarDictionary {
@@ -2548,6 +2570,18 @@ impl TownsmithCore {
         let buildings = summary
             .get("completed_buildings")
             .map_or(0, |value| value.to::<i64>()) as u64;
+        // Read the site counts before taking the economy lock: the lock order is
+        // world -> ... -> economy -> utilities/services.
+        let seed = {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            world.as_ref().map(|store| store.seed)
+        };
+        let (utility_sites, service_sites) = seed.map_or((0, 0), |seed| {
+            (
+                self.utility_site_count_for_seed(seed),
+                self.service_site_count_for_seed(seed),
+            )
+        });
         let guard = self
             .economy
             .lock()
@@ -2582,8 +2616,20 @@ impl TownsmithCore {
                 );
                 result.set(
                     "daily_net",
-                    economy.daily_net(population, employed, buildings),
+                    economy.daily_net_with_infrastructure(
+                        population,
+                        employed,
+                        buildings,
+                        utility_sites,
+                        service_sites,
+                    ),
                 );
+                result.set(
+                    "infrastructure_per_day",
+                    economy.infrastructure_upkeep_per_day(utility_sites, service_sites),
+                );
+                result.set("utility_sites", utility_sites as i64);
+                result.set("service_sites", service_sites as i64);
                 result.set("bankrupt", economy.bankrupt);
                 result.set(
                     "checksum",
@@ -2595,6 +2641,9 @@ impl TownsmithCore {
                 result.set("seed", 0);
                 result.set("balance", 0.0);
                 result.set("bankrupt", false);
+                result.set("infrastructure_per_day", 0.0);
+                result.set("utility_sites", 0);
+                result.set("service_sites", 0);
                 result.set("checksum", &GString::from("0000000000000000"));
             }
         }
@@ -2618,6 +2667,10 @@ impl TownsmithCore {
         let buildings = summary
             .get("completed_buildings")
             .map_or(0, |value| value.to::<i64>()) as u64;
+        // Read the site counts before taking the economy lock: the lock order is
+        // world -> ... -> economy -> utilities/services.
+        let utility_sites = self.utility_site_count_for_seed(seed);
+        let service_sites = self.service_site_count_for_seed(seed);
         let mut guard = self
             .economy
             .lock()
@@ -2629,11 +2682,21 @@ impl TownsmithCore {
             );
         }
         let economy = guard.get_or_insert_with(|| Economy::new(seed));
-        let tick = economy.tick(seconds, population, employed, buildings);
+        let tick = economy.tick_with_infrastructure(
+            seconds,
+            population,
+            employed,
+            buildings,
+            utility_sites,
+            service_sites,
+        );
         let mut result = VarDictionary::new();
         result.set("ok", true);
         result.set("income", tick.income);
         result.set("expenses", tick.expenses);
+        result.set("infrastructure", tick.infrastructure);
+        result.set("utility_sites", utility_sites as i64);
+        result.set("service_sites", service_sites as i64);
         result.set("balance", tick.balance);
         result.set("days_elapsed", tick.days_elapsed);
         result.set("loan_interest", tick.loan_interest);

@@ -77,7 +77,7 @@ bankrupt = balance <= −50,000
 
 Each loan's balance falls by its principal payment; interest is paid from the treasury and does not capitalize. A paid-off loan is removed.
 
-`tick()` keeps the legacy zero-infrastructure path so pinned city-loop checksums stay unchanged. The Industrial and Modern probes call `tick_with_infrastructure(...)`, which includes utility/service site upkeep and reports it as `infrastructure` in `EconomyTick`. `daily_net_with_infrastructure` includes the same cost. The bridge and world scene still use the legacy tick; wiring site counts into `economy_tick` is next.
+`tick()` keeps the legacy zero-infrastructure path so pinned city-loop checksums stay unchanged. The Industrial and Modern probes call `tick_with_infrastructure(...)`, which includes utility/service site upkeep and reports it as `infrastructure` in `EconomyTick`. `daily_net_with_infrastructure` includes the same cost. The bridge `economy_tick` now counts utility/service sites and applies the same infrastructure upkeep; `economy_state` exposes `infrastructure_per_day`, `utility_sites`, and `service_sites`. The scene HUD therefore reflects the charged cost.
 
 ## 4. Construction
 
@@ -146,7 +146,7 @@ City checksum: `623f39c61b71b68a`. Economy checksum: `1c213cc40278a13b`.
 | Method | Purpose |
 |---|---|
 | `economy_state()` | `open`, seed, balance, rates, construction spent, days, debt, loan count, interest/payment per day, daily net, bankrupt, can borrow, checksum |
-| `economy_tick(seed, seconds)` | Advance taxes, wages, building upkeep, and loan service (legacy path; no infrastructure counts yet) |
+| `economy_tick(seed, seconds)` | Advance taxes, wages, building + infrastructure upkeep, and loan service |
 | `economy_set_taxes(seed, resident, business)` | Set rates; creates the ledger if needed |
 | `economy_borrow(seed, amount)` | Borrow with the default rate and term |
 | `economy_checksum()` | Stable FNV checksum |

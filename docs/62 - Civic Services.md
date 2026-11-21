@@ -169,7 +169,7 @@ See [[63 - Starter Library]] for the age-gated building catalog and generated pa
 - Tiers do not auto-upgrade when the age changes.
 - Research is allocated greedily by site id; a new school may add no output until demand grows or the older school is removed.
 - Research is still a global pool; there is no per-school queue or university tier.
-- No funding, upkeep, staffing, or service quality.
+- Civic site upkeep is now charged by the bridge economy tick; staffing, funding policy, quality, and construction cost remain.
 - No district coverage overlay or response-time model.
 - The runner matrix does not add service sites, so its checksums are unchanged.
 
