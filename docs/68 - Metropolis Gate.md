@@ -402,6 +402,33 @@ Measured on the developer machine (Ryzen 9 7950X, Linux, release build, three ru
 > [!warning] What it does not prove
 > This is not the gate. It has no renderer, GPU, LOD, streaming, shadows, voxel meshes, pathfinding, schedules, needs, traffic, economy, save/load, or peak-memory measurement. It does not close G-02, G-04, G-05, G-07, or G-08, and it is not §8 gate evidence. It only proves the 1M cohort/agent/building data loop fits the CPU budget at this scale.
 
+### 7.5 CPU setup harness
+
+`godot/metropolis_render.gd` is a headless `SceneTree` harness for the Metropolis render scale. It builds **10k / 50k / 250k** box instances on a 10 m grid (4 m box), one `MultiMeshInstance3D` per tier, and reports setup time, buffer bytes, static-memory delta, and a deterministic layout checksum as one JSON line per tier plus a `METROPOLIS_RENDER` summary line.
+
+```bash
+GODOT=/path/to/godot ./scripts/smoke_metropolis_render.sh
+
+# Full 310k-instance setup pass (10k + 50k + 250k)
+"$GODOT" --headless --path godot --script res://metropolis_render.gd
+```
+
+The smoke mode builds 1k / 5k / 10k and asserts counts and checked-in checksums. The full pass builds every tier in one process and prints `METROPOLIS_RENDER tiers=3 instances=310000 checksum=... status=ok`.
+
+One local developer run (Ryzen 9 7950X, Linux, Godot 4.7.2 headless; timings are informational):
+
+| Tier | Instances | Grid | Setup ms | Buffer MB | Checksum |
+|---|---:|---|---:|---:|---|
+| small | 10,000 | 100 × 100 | 1.8 | 0.46 | `27593891` |
+| medium | 50,000 | 224 × 224 | 9.8 | 2.29 | `97532209` |
+| large | 250,000 | 500 × 500 | 43.4 | 11.44 | `793b0661` |
+| **total** | **310,000** | — | **55.0** | **14.19** | **`b516160a`** |
+
+**What it proves:** the bulk `MultiMesh.buffer` upload path can fill and attach 250k instances on the CPU in tens of milliseconds, the instance data is ~12 MB for 250k transform-only boxes, and the layout is deterministic across runs.
+
+> [!warning] This is setup evidence, not FPS evidence
+> It runs with a dummy renderer. It does **not** measure FPS, GPU time, draw calls, fill rate, LOD or impostors, streaming, culling, shadows, GI, real voxel buildings, or a 1M population. It does not close G-01, G-03, G-08, or any check in §8. The full pass only proves the CPU-side instance setup and memory shape at the gate's building count.
+
 ## 8. Pass/fail decision rules
 
 ### 8.1 Validity first
