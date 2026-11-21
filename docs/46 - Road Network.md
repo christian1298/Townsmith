@@ -159,8 +159,8 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 ## 8. Tests
 
 - `core_city::road`: 8 tests — geometry, width-edge water/rise rejection, extreme-coordinate overflow, JSON/checksum, duplicate/next-id rejection, remove/clear.
-- `core_city`: 218 tests.
-- Workspace: **470 tests + 2 doctests (472 passed)**.
+- `core_city`: 232 tests.
+- Workspace: **493 tests + 2 doctests (495 passed)**.
 - Godot: `WORLD_SCENE ... roads=ok ... status=ok`.
 
 ## 9. Limits

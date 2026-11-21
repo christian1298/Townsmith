@@ -368,8 +368,8 @@ The existing world JSON `population` object gets an optional sibling `named_citi
 | Slice | Deliverable | Acceptance |
 |---|---|---|
 | **N1 — Identity layer (derived)** | Deterministic ids, names, household slot sync, read-only bridge | **Done** — PR #98; 500-resident city produces stable names; `cargo test -p core_city named`; no save or checksum change; 4k identities generate in < 100 ms under the debug test guard |
-| **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | **Partial — follow camera and EN/DE card landed in PR #108; per-citizen job/age rows remain** |
-| **N3 — Materialization** | Active pool, hysteresis, route cache, fade, active cap | 2k active + 200 detailed in the benchmark route; ≤ 1 ms decision; no pop in the smoke; no route per citizen |
+| **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | **Partial — PR #108; follow camera and EN/DE card done; per-citizen job/age rows remain** |
+| **N3 — Materialization** | Active pool, hysteresis, route cache, fade, active cap | **Partial — PR #107; deterministic selection core done ([[73 - Materialization Core]]); bridge/UI/hysteresis/routes remain** |
 | **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | **Partial — PR #103**; persistence landed ([[70 - Named Persistence]]), lifecycle/aging/death next |
 | **N5 — Cohort bridge (later)** | Sample from cohorts, district stories, 1M identity store | 1M cohort benchmark unchanged; materialization near camera; no per-citizen tick |
 

@@ -376,7 +376,7 @@ Local gap IDs only; they are not ADRs or questions.
 
 The biggest gap is not a number. It is that **the current evidence is the easy part of the problem**: one mesh reused 21 times, or boxes with no LOD. The gate lives in the part that does not exist yet — a real 1M city with 250k distinct building records, LOD/impostors, streaming, shadows, and simulation.
 
-### 7.4 Data-scale harness
+### 7.4 Data-scale harness — PR #110
 
 `cargo run --release -p townsmith-bench --bin metropolis` builds the data side of the gate without rendering:
 
