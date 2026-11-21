@@ -2,7 +2,8 @@
 # Static EN/DE locale table gate for the Godot slices.
 #
 # Parses the runtime `TABLES` const in `godot/editor_i18n.gd` and
-# `godot/world_i18n.gd` without Godot, Python, or any third-party tool and
+# `godot/world_i18n.gd`, plus the `DISPLAY` const in
+# `godot/content_i18n.gd`, without Godot, Python, or any third-party tool and
 # asserts:
 #   1. EN and DE expose the same key set (no duplicates either).
 #   2. Each locale meets its file's key floor (ratchet floor).
@@ -17,7 +18,8 @@
 # Default success prints one line per table plus a summary:
 #   LOCALE_CHECK file=godot/editor_i18n.gd keys=96 min=96 status=ok
 #   LOCALE_CHECK file=godot/world_i18n.gd keys=33 min=33 status=ok
-#   LOCALE_CHECK editor=96 world=33 status=ok
+#   LOCALE_CHECK file=godot/content_i18n.gd keys=32 min=32 status=ok
+#   LOCALE_CHECK editor=96 world=33 content=32 status=ok
 #
 # Single-file success keeps the original contract:
 #   LOCALE_CHECK keys=96 status=ok
@@ -30,8 +32,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT/scripts/$(basename "${BASH_SOURCE[0]}")"
 EDITOR_FILE="$ROOT/godot/editor_i18n.gd"
 WORLD_FILE="$ROOT/godot/world_i18n.gd"
+CONTENT_FILE="$ROOT/godot/content_i18n.gd"
 EDITOR_MIN_KEYS=96
 WORLD_MIN_KEYS=33
+CONTENT_MIN_KEYS=32
 LOCALES=(en de)
 
 TMP="$(mktemp -d)"
@@ -44,13 +48,13 @@ usage() {
 
 # Print `key<TAB>value` for one locale block of the TABLES const.
 parse_locale() {
-	local locale="$1" file="$2"
-	awk -v locale="$locale" '
+	local locale="$1" file="$2" marker="$3"
+	awk -v locale="$locale" -v marker="$marker" '
 		function bad_line(message) {
 			printf "locale parse error: %s (line %d: %s)\n", message, NR, $0 > "/dev/stderr"
 			bad = 1
 		}
-		$0 == "const TABLES := {" { in_table = 1; next }
+		$0 == "const " marker " := {" { in_table = 1; next }
 		!in_table { next }
 		$0 == "\t\"" locale "\": {" { in_locale = 1; next }
 		in_locale && $0 == "\t}," { exit }
@@ -89,28 +93,39 @@ missing_keys() {
 	LC_ALL=C comm -23 "$TMP/$1.keys" "$TMP/$2.keys"
 }
 
-# Floor for a file: the world table ratchets independently from the editor.
+# Marker const for a file.
+marker_for_file() {
+	local file="$1"
+	if [[ "$(basename "$file")" == "content_i18n.gd" ]]; then
+		printf '%s\n' "DISPLAY"
+	else
+		printf '%s\n' "TABLES"
+	fi
+}
+
+# Floor for a file: world and content tables ratchet independently.
 floor_for_file() {
 	local file="$1"
-	if [[ "$(basename "$file")" == "world_i18n.gd" ]]; then
-		printf '%s\n' "$WORLD_MIN_KEYS"
-	else
-		printf '%s\n' "$EDITOR_MIN_KEYS"
-	fi
+	case "$(basename "$file")" in
+		world_i18n.gd) printf '%s\n' "$WORLD_MIN_KEYS" ;;
+		content_i18n.gd) printf '%s\n' "$CONTENT_MIN_KEYS" ;;
+		*) printf '%s\n' "$EDITOR_MIN_KEYS" ;;
+	esac
 }
 
 # Validate one file. Issues land in "$TMP/issues"; the EN key count is left in
 # AUDIT_COUNT (0 when the table could not be read).
 audit_file() {
-	local file="$1" min="$2" locale keys_file count duplicates
+	local file="$1" min="$2" locale keys_file count duplicates marker
 	: > "$TMP/issues"
 	AUDIT_COUNT=0
+	marker="$(marker_for_file "$file")"
 
 	if [[ ! -f "$file" ]]; then
 		add_issue "file not found: $file"
 	else
 		for locale in "${LOCALES[@]}"; do
-			if ! parse_locale "$locale" "$file" > "$TMP/$locale.tsv"; then
+			if ! parse_locale "$locale" "$file" "$marker" > "$TMP/$locale.tsv"; then
 				add_issue "could not parse the '$locale' table in $file"
 			fi
 			keys_file="$TMP/$locale.keys"
@@ -244,7 +259,7 @@ relative_to_root() {
 
 # Default mode: both tables, independent floors, one deterministic line each.
 check_all() {
-	local failed=0 editor_count=0 world_count=0 status=ok
+	local failed=0 editor_count=0 world_count=0 content_count=0 status=ok
 
 	if audit_file "$EDITOR_FILE" "$EDITOR_MIN_KEYS"; then
 		editor_count="$AUDIT_COUNT"
@@ -266,19 +281,29 @@ check_all() {
 		report_issues "$WORLD_FILE"
 	fi
 
+	if audit_file "$CONTENT_FILE" "$CONTENT_MIN_KEYS"; then
+		content_count="$AUDIT_COUNT"
+		echo "LOCALE_CHECK file=$(relative_to_root "$CONTENT_FILE") keys=$content_count min=$CONTENT_MIN_KEYS status=ok"
+	else
+		failed=1
+		content_count="$AUDIT_COUNT"
+		echo "LOCALE_CHECK file=$(relative_to_root "$CONTENT_FILE") keys=$content_count min=$CONTENT_MIN_KEYS status=fail"
+		report_issues "$CONTENT_FILE"
+	fi
+
 	if (( failed )); then
 		status=fail
 	fi
-	echo "LOCALE_CHECK editor=$editor_count world=$world_count status=$status"
+	echo "LOCALE_CHECK editor=$editor_count world=$world_count content=$content_count status=$status"
 	(( ! failed ))
 }
 
 # --- self-test -------------------------------------------------------------
 
 write_fixture() {
-	local path="$1" keys="$2" i
+	local path="$1" keys="$2" marker="${3:-TABLES}" i
 	{
-		printf 'const TABLES := {\n\t"en": {\n'
+		printf 'const %s := {\n\t"en": {\n' "$marker"
 		for ((i = 1; i <= keys; i++)); do
 			printf '\t\t"base.test.key_%03d": "Value %d {0} {name}",\n' "$i" "$i"
 		done
@@ -347,7 +372,7 @@ expect_fail() {
 }
 
 self_test() {
-	local dir="$TMP/fixtures" valid world_valid
+	local dir="$TMP/fixtures" valid world_valid content_valid
 	mkdir -p "$dir"
 	valid="$dir/valid.gd"
 	write_fixture "$valid" "$EDITOR_MIN_KEYS"
@@ -391,7 +416,22 @@ self_test() {
 	expect_fail world_too_few "$dir/world_too_few/world_i18n.gd" "$WORLD_MIN_KEYS" \
 		"minimum is $WORLD_MIN_KEYS"
 
-	echo "LOCALE_SELF_TEST cases=9 status=ok"
+	# Content table: `DISPLAY` marker, independent 32-key floor.
+	content_valid="$dir/content/content_i18n.gd"
+	mkdir -p "$dir/content" "$dir/content_bad_placeholder" "$dir/content_too_few"
+	write_fixture "$content_valid" "$CONTENT_MIN_KEYS" DISPLAY
+	expect_pass content_valid "$content_valid" "$CONTENT_MIN_KEYS"
+
+	set_value "$content_valid" de base.test.key_007 "Wert 7 {1} {name}" \
+		> "$dir/content_bad_placeholder/content_i18n.gd"
+	expect_fail content_bad_placeholder "$dir/content_bad_placeholder/content_i18n.gd" "$CONTENT_MIN_KEYS" \
+		"placeholder mismatch: base.test.key_007"
+
+	write_fixture "$dir/content_too_few/content_i18n.gd" "$((CONTENT_MIN_KEYS - 1))" DISPLAY
+	expect_fail content_too_few "$dir/content_too_few/content_i18n.gd" "$CONTENT_MIN_KEYS" \
+		"minimum is $CONTENT_MIN_KEYS"
+
+	echo "LOCALE_SELF_TEST cases=12 status=ok"
 }
 
 case "${1:-}" in
