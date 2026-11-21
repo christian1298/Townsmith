@@ -28,16 +28,17 @@ use core_blueprint::{
 };
 use core_city::named::{age_years, slot_is_employed};
 use core_city::{
-    advise, evaluate_tutorial, normalize_rotation, starter, summarize, AdvisorInput, AdvisorReport,
-    Age, AgeState, CityLayout, CityRuntime, CitySummary, CityTier, ConstructionSite,
-    ConstructionStore, Economy, Home, Household, IndustryKind, IndustryStore, Lot, LotError,
-    LotRequest, LotStore, MaterializationBudget, MaterializedCitizen, NamedCitizens, NamedSave,
-    Placement, PlacementError, PlacementRequest, PlacementStore, ResearchStore, RoadError,
-    RoadGraph, RoadRequest, RoadSegment, RoadStore, ServiceConsumer, ServiceKind, ServiceReport,
-    ServiceStore, ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore,
-    TechTree, Trade, TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport,
-    UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS,
-    MAX_TOTAL_DEBT, MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    advise, diff_selection, evaluate_tutorial, normalize_rotation, starter, summarize,
+    AdvisorInput, AdvisorReport, Age, AgeState, CityLayout, CityRuntime, CitySummary, CityTier,
+    ConstructionSite, ConstructionStore, Economy, Home, Household, IndustryKind, IndustryStore,
+    Lot, LotError, LotRequest, LotStore, MaterializationBudget, MaterializationSelection,
+    MaterializedCitizen, NamedCitizens, NamedSave, Placement, PlacementError, PlacementRequest,
+    PlacementStore, ResearchStore, RoadError, RoadGraph, RoadRequest, RoadSegment, RoadStore,
+    ServiceConsumer, ServiceKind, ServiceReport, ServiceStore, ServiceTier, Settlement,
+    SettlementError, SettlementRequest, SettlementStore, TechTree, Trade, TradePool, TutorialInput,
+    UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
+    DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT,
+    MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -541,6 +542,7 @@ struct TownsmithCore {
     settlements: Mutex<Option<SettlementStore>>,
     population: Mutex<Option<CityRuntime>>,
     named: Mutex<Option<NamedCitizens>>,
+    materialization: Mutex<Option<MaterializationSelection>>,
     economy: Mutex<Option<Economy>>,
     industry: Mutex<Option<IndustryStore>>,
     utilities: Mutex<Option<UtilityStore>>,
@@ -562,6 +564,7 @@ impl Default for TownsmithCore {
             settlements: Mutex::new(None),
             population: Mutex::new(None),
             named: Mutex::new(None),
+            materialization: Mutex::new(None),
             economy: Mutex::new(None),
             industry: Mutex::new(None),
             utilities: Mutex::new(None),
@@ -2531,6 +2534,176 @@ impl TownsmithCore {
             }
         };
         materialization_payload_to_dictionary(&payload)
+    }
+
+    /// Advance the stateful N3 materialization selection.
+    ///
+    /// Unlike `materialization_state`, this keeps the previous selection,
+    /// applies hysteresis, and returns a 64-change diff. The call is
+    /// deterministic and does not mutate the named pool or save state.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn materialization_step(
+        &self,
+        seed: i64,
+        center_x: f64,
+        center_z: f64,
+        inner_radius_m: f64,
+        outer_radius_m: f64,
+        detailed_radius_m: f64,
+        pinned_id: i64,
+    ) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        let center = [center_x as f32, center_z as f32];
+        if !center.iter().all(|value| value.is_finite()) {
+            return placement_simple_error(
+                "invalid_center",
+                "materialization center must be finite",
+            );
+        }
+        let max_radius = f64::from(MAX_WORLD_COORD_M);
+        for (label, value) in [
+            ("inner", inner_radius_m),
+            ("outer", outer_radius_m),
+            ("detailed", detailed_radius_m),
+        ] {
+            if !value.is_finite() || !(0.0..=max_radius).contains(&value) {
+                return placement_simple_error(
+                    "invalid_radius",
+                    format!("{label} radius must be finite and within 0..=1,000,000 m"),
+                );
+            }
+        }
+        if inner_radius_m > outer_radius_m {
+            return placement_simple_error("invalid_radius", "inner radius exceeds outer radius");
+        }
+        let pinned = if pinned_id == 0 {
+            None
+        } else {
+            match u64::try_from(pinned_id) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    return placement_simple_error("invalid_pin", "pinned id must be non-negative")
+                }
+            }
+        };
+
+        let placement_centers = {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            if world.as_ref().is_some_and(|store| store.seed != seed) {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the placement store belongs to a different seed",
+                );
+            }
+            let construction = self
+                .construction
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            world.as_ref().map_or_else(BTreeMap::new, |store| {
+                completed_homes(store, &construction)
+                    .into_iter()
+                    .map(|home| (home.id, home.center))
+                    .collect()
+            })
+        };
+        let population = self
+            .population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if population
+            .as_ref()
+            .is_some_and(|runtime| runtime.seed != seed)
+        {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the household runtime belongs to a different seed",
+            );
+        }
+        let named = self.named.lock().unwrap_or_else(|error| error.into_inner());
+        let mut step = self
+            .materialization
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let empty = BTreeMap::new();
+        let households = population
+            .as_ref()
+            .map_or(&empty, |runtime| &runtime.households);
+        let Some(pool) = named.as_ref().filter(|pool| pool.seed == seed) else {
+            return placement_simple_error("no_named_citizens", "named pool is not initialized");
+        };
+        let mut pool = pool.clone();
+        pool.sync(households);
+        let previous = step.as_ref();
+        let next = match pool.select_near_with_previous(
+            previous,
+            center,
+            &placement_centers,
+            MaterializationBudget::default(),
+            inner_radius_m as f32,
+            outer_radius_m as f32,
+            detailed_radius_m as f32,
+            pinned,
+        ) {
+            Ok(next) => next,
+            Err(error) => {
+                return placement_simple_error("materialization_failed", error.to_string())
+            }
+        };
+        let diff = diff_selection(previous, &next, 64);
+        *step = Some(next.clone());
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("seed", seed as i64);
+        result.set("center", &PackedFloat32Array::from(center));
+        let mut counts = VarDictionary::new();
+        counts.set("active", next.active.len() as i64);
+        counts.set("detailed", next.detailed.len() as i64);
+        result.set("counts", &counts);
+        let mut diff_counts = VarDictionary::new();
+        diff_counts.set("added", diff.added.len() as i64);
+        diff_counts.set("removed", diff.removed.len() as i64);
+        diff_counts.set("updated", diff.updated.len() as i64);
+        diff_counts.set("retained", diff.retained as i64);
+        diff_counts.set("changed", diff.changed as i64);
+        diff_counts.set("applied", diff.applied as i64);
+        diff_counts.set("truncated", diff.truncated);
+        result.set("diff", &diff_counts);
+        let mut changed: Array<VarDictionary> = Array::new();
+        for citizen in &diff.added {
+            let mut item = materialized_citizen_to_dictionary(citizen);
+            item.set("action", &GString::from("added"));
+            changed.push(&item);
+        }
+        for citizen in &diff.updated {
+            let mut item = materialized_citizen_to_dictionary(citizen);
+            item.set("action", &GString::from("updated"));
+            changed.push(&item);
+        }
+        for id in &diff.removed {
+            let mut item = VarDictionary::new();
+            item.set("action", &GString::from("removed"));
+            item.set("id", *id as i64);
+            changed.push(&item);
+        }
+        result.set("changed", &changed.to_variant());
+        result.set(
+            "checksum",
+            &GString::from(&format!("{:016x}", pool.checksum())),
+        );
+        result
+    }
+
+    /// Forget the stored materialization selection.
+    #[func]
+    fn materialization_clear(&self) -> bool {
+        *self
+            .materialization
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        true
     }
 
     /// Remove every household.
