@@ -27,15 +27,16 @@ use core_blueprint::{
     PropRecord, RoomRecord,
 };
 use core_city::{
-    advise, normalize_rotation, starter, summarize, AdvisorInput, AdvisorReport, Age, AgeState,
-    CityLayout, CityRuntime, CitySummary, CityTier, ConstructionSite, ConstructionStore, Economy,
-    Home, IndustryKind, IndustryStore, Lot, LotError, LotRequest, LotStore, Placement,
-    PlacementError, PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph,
-    RoadRequest, RoadSegment, RoadStore, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore,
-    ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree, Trade,
-    TradePool, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
-    DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT,
-    MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    advise, evaluate_tutorial, normalize_rotation, starter, summarize, AdvisorInput, AdvisorReport,
+    Age, AgeState, CityLayout, CityRuntime, CitySummary, CityTier, ConstructionSite,
+    ConstructionStore, Economy, Home, IndustryKind, IndustryStore, Lot, LotError, LotRequest,
+    LotStore, Placement, PlacementError, PlacementRequest, PlacementStore, ResearchStore,
+    RoadError, RoadGraph, RoadRequest, RoadSegment, RoadStore, ServiceConsumer, ServiceKind,
+    ServiceReport, ServiceStore, ServiceTier, Settlement, SettlementError, SettlementRequest,
+    SettlementStore, TechTree, Trade, TradePool, TutorialInput, UtilityConsumer, UtilityKind,
+    UtilityReport, UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY,
+    DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M,
+    RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -3661,6 +3662,116 @@ impl TownsmithCore {
             .unwrap_or_else(|error| error.into_inner())
             .set_trades(Some(TradePool::for_age(age)));
         self.construction_summary()
+    }
+
+    /// Derived tutorial checklist from the current city.
+    ///
+    /// This is not saved. It reads the existing industry, utility, service,
+    /// placement, and construction state, so a sandbox save can also be used
+    /// as a tutorial.
+    #[func]
+    fn tutorial_state(&self, seed: i64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        if seed > i64::MAX as u64 {
+            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
+        }
+        {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(store) = world.as_ref() {
+                if store.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the placement store belongs to a different seed",
+                    );
+                }
+            }
+        }
+        let houses = {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            let construction = self
+                .construction
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            world.as_ref().map_or(0, |store| {
+                completed_slots(store, &construction).len() as u64
+            })
+        };
+        let (lumberjacks, farms) = {
+            let industry = self
+                .industry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match industry.as_ref().filter(|store| store.seed == seed) {
+                Some(store) => (
+                    store
+                        .sites
+                        .values()
+                        .filter(|site| site.kind == IndustryKind::Lumberjack)
+                        .count() as u64,
+                    store
+                        .sites
+                        .values()
+                        .filter(|site| site.kind == IndustryKind::Farm)
+                        .count() as u64,
+                ),
+                None => (0, 0),
+            }
+        };
+        let wells = {
+            let utilities = self
+                .utilities
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            utilities
+                .as_ref()
+                .filter(|store| store.seed == seed)
+                .map_or(0, |store| store.count_of(UtilityKind::Water) as u64)
+        };
+        let schools = {
+            let services = self
+                .services
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            services
+                .as_ref()
+                .filter(|store| store.seed == seed)
+                .map_or(0, |store| store.count_of(ServiceKind::School) as u64)
+        };
+        let report = evaluate_tutorial(TutorialInput {
+            lumberjacks,
+            farms,
+            wells,
+            houses,
+            schools,
+        });
+        let mut steps: Array<VarDictionary> = Array::new();
+        for step in &report.steps {
+            let mut item = VarDictionary::new();
+            item.set("id", &GString::from(step.step.as_str()));
+            item.set("title", &GString::from(step.step.title()));
+            item.set("hint", &GString::from(step.step.hint()));
+            item.set("done", step.done);
+            item.set("current", step.current);
+            steps.push(&item);
+        }
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("seed", seed as i64);
+        result.set("completed", report.completed as i64);
+        result.set("total", report.total as i64);
+        result.set("complete", report.complete);
+        result.set(
+            "current",
+            &GString::from(report.current.map_or("", |step| step.as_str())),
+        );
+        result.set(
+            "current_title",
+            &GString::from(report.current.map_or("", |step| step.title())),
+        );
+        result.set("steps", &steps.to_variant());
+        result
     }
 
     /// Set the shared crew pool. Values above 64 are rejected.
