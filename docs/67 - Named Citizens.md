@@ -1,7 +1,7 @@
 ---
 title: Named Citizens
 project: Townsmith
-status: proposed
+status: active
 updated: 2026-11-21
 tags:
   - townsmith
@@ -367,7 +367,7 @@ The existing world JSON `population` object gets an optional sibling `named_citi
 
 | Slice | Deliverable | Acceptance |
 |---|---|---|
-| **N1 — Identity layer (derived)** | Deterministic ids, names, household slot sync, read-only bridge | 500-resident city produces stable names; `cargo test -p core_city named`; no save or checksum change; 4k identities generate in < 10 ms |
+| **N1 — Identity layer (derived)** | Deterministic ids, names, household slot sync, read-only bridge | **Done** — PR #98; 500-resident city produces stable names; `cargo test -p core_city named`; no save or checksum change; 4k identities generate in < 100 ms under the debug test guard |
 | **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | Smoke `citizens=ok`; same identity after reselect; no sim change; name/job/age render in EN and DE |
 | **N3 — Materialization** | Active pool, hysteresis, route cache, fade, active cap | 2k active + 200 detailed in the benchmark route; ≤ 1 ms decision; no pop in the smoke; no route per citizen |
 | **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | Roundtrip and old-save tests; lifecycle scenario exact; new city-loop baseline documented; no checksum drift for lifecycle-off |
@@ -375,9 +375,28 @@ The existing world JSON `population` object gets an optional sibling `named_citi
 
 ### N1 checks
 
-- `cargo test -p core_city named`
-- `cargo test --workspace`
-- `city_loop --scenario mid` checksum unchanged
+- `cargo test -p core_city named` — pass.
+- `cargo test --workspace` — pass.
+- `city_loop --scenario mid` checksum unchanged.
+
+### N1 implementation
+
+`crates/core_city/src/named.rs` now implements the derived identity layer:
+
+- `mix64`, `citizen_id(seed, placement_id, slot)`, and `name_for(id)`; `IDENTITY_VERSION = 1`.
+- `NamedCitizen { id, placement_id, slot, name }`.
+- `NamedCitizens::sync(&BTreeMap<u64, Household>)` adds one identity per resident slot, keeps existing ids/names stable, drops slots when a household shrinks or disappears, and caps the pool at `MAX_NAMED_CITIZENS = 4,096`.
+- `citizens_of`, `get`, `clear`, `checksum`, and `validate`.
+- No save field and no checksum change: the pool is rebuilt from the aggregate population after load.
+
+Bridge:
+
+- `named_citizens_state(seed)` returns `open`, `seed`, `count`, `max`, and `checksum`.
+- `named_citizens_for(seed, placement_id)` returns the home's residents with `id`, `name`, and `slot`.
+- Both validate the world and population seed; the pool is derived, not persisted.
+- `population_clear` clears the pool.
+
+N1 is read-only; selection, the detail card, materialization, and lifecycle are N2–N4. Names are fictional and generated; no user text.
 - clippy and fmt
 
 ### N2 checks

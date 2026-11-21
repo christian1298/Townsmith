@@ -38,6 +38,7 @@ pub mod industry;
 pub mod library;
 pub mod lot;
 pub mod metrics;
+pub mod named;
 pub mod placement;
 pub mod population;
 pub mod progression;
@@ -83,6 +84,9 @@ pub use lot::{
     MAX_LOT_AREA_M2, MAX_LOT_SIDE_M, MAX_LOT_SLOPE_M, MIN_LOT_AREA_M2, MIN_LOT_SIDE_M,
 };
 pub use metrics::{summarize, CitySummary};
+pub use named::{
+    citizen_id, mix64, name_for, NamedCitizen, NamedCitizens, IDENTITY_VERSION, MAX_NAMED_CITIZENS,
+};
 pub use placement::{
     footprint_for, normalize_rotation, validate_placement, Placement, PlacementError,
     PlacementPlan, PlacementRequest, PlacementStore, MAX_BUILDING_HEIGHT_M, MAX_FOOTPRINT_M,
