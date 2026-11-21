@@ -129,9 +129,9 @@ Foundation · Mason 42%
 
 - `core_city::trades`: 4 tests — Wood roster, later-age specialists, aliases, clamping/validation.
 - `core_city::construction`: 3 new tests — roster cap and crew stall, JSON/legacy roundtrip, phase fallback.
-- `core_city`: **214 tests**.
-- `godot_ext`: **50 tests** (the scene smoke covers the bridge path).
-- Workspace: **458 tests + 2 doctests (460 passed)**.
+- `core_city`: **218 tests**.
+- `godot_ext`: **52 tests** (the scene smoke covers the bridge path).
+- Workspace: **470 tests + 2 doctests (472 passed)**.
 
 ## 8. Limits
 
