@@ -2,7 +2,7 @@
 title: Materials and Structure
 project: Townsmith
 status: proposed
-updated: 2026-11-19
+updated: 2026-11-21
 tags:
   - townsmith
   - building
@@ -15,6 +15,8 @@ tags:
 
 > [!decision] D-024 — Material-based structural limits and composite construction
 > Every material and structural system has a readable maximum height, span, and load. Buildings can mix systems — a stone ground floor with timber above — but the weakest support in the load path sets the limit. Glass facades are cladding, not structure.
+>
+> **Implementation:** Phase 4.2 ships the first readable subset in [[60 - Structural Limits]]: system tiers, story/height/span/foundation checks, and a stone-ground + timber-upper bonus. Full load-path and service-gate analysis remains future work.
 
 ## 1. Goals
 

@@ -39,6 +39,7 @@ use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
     RoomMaterials, RoomStats, FLOOR_BAND_M,
 };
+use core_structure::{StructuralSystem, StructureSpec};
 use core_voxel::coords::{MaterialId, AIR, CHUNK_SIZE, VOXEL_SIZE_M};
 use core_voxel::demo;
 use core_voxel::mesh::{greedy_mesh, MeshBuffers};
@@ -181,6 +182,7 @@ fn blueprint_from_editor_volume(
     name: String,
     volume: VoxelVolume,
     props: &[EditorProp],
+    structure: StructuralSystem,
 ) -> Blueprint {
     let inputs = editor_props_input(props);
     let stats = detect_rooms(&volume, &editor_room_materials(), &inputs);
@@ -206,6 +208,14 @@ fn blueprint_from_editor_volume(
         class: stats.class.clone(),
         material_cost: slice_material_cost(&stats.materials),
     };
+    let bounds_m = volume.config().bounds_m();
+    let stories = stats
+        .rooms
+        .iter()
+        .map(|room| u16::try_from(room.floor.saturating_add(1)).unwrap_or(u16::MAX))
+        .max()
+        .unwrap_or_else(|| (bounds_m[1] / 3.2).ceil().max(1.0) as u16);
+    metadata.structure = Some(StructureSpec::new(structure, stories, bounds_m[1], 0.0));
     let mut ordered: Vec<&EditorProp> = props.iter().collect();
     ordered.sort_by_key(|prop| (prop.cell[1], prop.cell[2], prop.cell[0]));
     metadata.props = ordered
@@ -463,6 +473,7 @@ struct EditorProp {
 struct EditorState {
     volume: VoxelVolume,
     props: Vec<EditorProp>,
+    structure: StructuralSystem,
     mesh_builds: u64,
     mesh_dirty: bool,
     last_mesh_quads: usize,
@@ -476,6 +487,7 @@ impl EditorState {
         Self {
             volume,
             props: Vec::new(),
+            structure: StructuralSystem::TimberFrame,
             mesh_builds: 0,
             // A newly created volume has no mesh yet, so consumers that act on
             // the dirty flag must build the initial surface.
@@ -867,6 +879,14 @@ impl TownsmithCore {
                     "bounds",
                     &PackedFloat32Array::from(request.bounds_m.to_vec()).to_variant(),
                 );
+                result.set(
+                    "structure",
+                    &request
+                        .structure
+                        .as_ref()
+                        .map_or_else(VarDictionary::new, structure_payload)
+                        .to_variant(),
+                );
                 result
             }
             Err(error) => placement_error_result(&error),
@@ -920,6 +940,14 @@ impl TownsmithCore {
         );
         result.set("job_slots", i64::from(blueprint.metadata.stats.job_slots));
         result.set("material_cost", material_cost);
+        let structure = structure_spec_for_blueprint(&blueprint);
+        result.set(
+            "structure",
+            &structure
+                .as_ref()
+                .map_or_else(VarDictionary::new, structure_payload)
+                .to_variant(),
+        );
         result
     }
 
@@ -3614,11 +3642,15 @@ impl TownsmithCore {
                 );
             }
             solid_by_id.insert(placement.id, package.metadata.solid_voxels);
+            let package_structure = structure_spec_for_blueprint(&package);
             if package.metadata.id != placement.blueprint_id
                 || package.metadata.name != placement.name
                 || package.metadata.bounds_m != placement.bounds_m
                 || package.metadata.stats.resident_capacity != placement.resident_capacity
                 || package.metadata.stats.job_slots != placement.job_slots
+                || placement
+                    .structure
+                    .is_some_and(|structure| package_structure != Some(structure))
             {
                 return placement_simple_error(
                     "blueprint_metadata_mismatch",
@@ -4263,6 +4295,60 @@ impl TownsmithCore {
         mesh
     }
 
+    /// Return the editor's current structural system and derived limits.
+    #[func]
+    fn editor_structure_state(&self) -> VarDictionary {
+        let guard = self
+            .editor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(state) = guard.as_ref() else {
+            let mut result = VarDictionary::new();
+            result.set("ok", false);
+            result.set("error", "no editor volume is open");
+            return result;
+        };
+        let bounds_m = state.volume.config().bounds_m();
+        let inputs = editor_props_input(&state.props);
+        let stats = detect_rooms(&state.volume, &editor_room_materials(), &inputs);
+        let stories = stats
+            .rooms
+            .iter()
+            .map(|room| u16::try_from(room.floor.saturating_add(1)).unwrap_or(u16::MAX))
+            .max()
+            .unwrap_or_else(|| (bounds_m[1] / 3.2).ceil().max(1.0) as u16);
+        let spec = StructureSpec::new(state.structure, stories, bounds_m[1], 0.0);
+        let mut result = structure_payload(&spec);
+        result.set("ok", true);
+        result.set("created", true);
+        result
+    }
+
+    /// Select the editor's structural system by id or alias.
+    #[func]
+    fn editor_set_structure(&self, kind: GString) -> VarDictionary {
+        let Some(system) = StructuralSystem::parse(&kind.to_string()) else {
+            let mut result = VarDictionary::new();
+            result.set("ok", false);
+            result.set("error", "unknown structural system");
+            return result;
+        };
+        {
+            let mut guard = self
+                .editor
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let Some(state) = guard.as_mut() else {
+                let mut result = VarDictionary::new();
+                result.set("ok", false);
+                result.set("error", "no editor volume is open");
+                return result;
+            };
+            state.structure = system;
+        }
+        self.editor_structure_state()
+    }
+
     /// Current editor volume and mesh statistics.
     ///
     /// Returns `created` (`bool`), the configuration keys from
@@ -4475,7 +4561,7 @@ impl TownsmithCore {
             return result;
         }
 
-        let (volume, props) = {
+        let (volume, props, structure) = {
             let guard = self
                 .editor
                 .lock()
@@ -4485,10 +4571,10 @@ impl TownsmithCore {
                 result.set("error", "no editor volume is open");
                 return result;
             };
-            (state.volume.clone(), state.props.clone())
+            (state.volume.clone(), state.props.clone(), state.structure)
         };
 
-        let blueprint = blueprint_from_editor_volume(id, name, volume, &props);
+        let blueprint = blueprint_from_editor_volume(id, name, volume, &props, structure);
         let hash = match save_tsbp_with_hash(&path, &blueprint) {
             Ok(hash) => hash,
             Err(error) => {
@@ -4509,6 +4595,9 @@ impl TownsmithCore {
         );
         result.set("rooms", blueprint.metadata.rooms.len() as i64);
         result.set("props", props.len() as i64);
+        if let Some(structure) = blueprint.metadata.structure.as_ref() {
+            result.set("structure", &structure_payload(structure).to_variant());
+        }
         result
     }
 
@@ -4557,7 +4646,13 @@ impl TownsmithCore {
         let name = blueprint.metadata.name.clone();
         let id = blueprint.metadata.id.clone();
 
+        let loaded_structure = blueprint
+            .metadata
+            .structure
+            .map_or(StructuralSystem::TimberFrame, |structure| structure.system);
         let mut state = EditorState::new(blueprint.volume);
+        state.structure = loaded_structure;
+        let structure_payload_value = blueprint.metadata.structure.as_ref().map(structure_payload);
         let dims = state.volume.config().voxels();
         state.props = blueprint
             .metadata
@@ -4604,6 +4699,9 @@ impl TownsmithCore {
         result.set("props", loaded_props as i64);
         result.set("name", name);
         result.set("id", id);
+        if let Some(structure) = structure_payload_value {
+            result.set("structure", &structure.to_variant());
+        }
         result
     }
 
@@ -4857,6 +4955,14 @@ fn placement_to_dictionary(placement: &Placement) -> VarDictionary {
     result.set("solid_voxels", placement.solid_voxels as i64);
     result.set("resident_capacity", i64::from(placement.resident_capacity));
     result.set("job_slots", i64::from(placement.job_slots));
+    result.set(
+        "structure",
+        &placement
+            .structure
+            .as_ref()
+            .map_or_else(VarDictionary::new, structure_payload)
+            .to_variant(),
+    );
     result
 }
 
@@ -4930,7 +5036,88 @@ fn placement_request_from_blueprint(
         resident_capacity: blueprint.metadata.stats.resident_capacity,
         job_slots: blueprint.metadata.stats.job_slots,
         solid_voxels: blueprint.metadata.solid_voxels,
+        structure: structure_spec_for_blueprint(blueprint),
     }
+}
+
+/// Return the blueprint structure or derive a conservative timber frame.
+fn structure_spec_for_blueprint(blueprint: &Blueprint) -> Option<StructureSpec> {
+    if let Some(structure) = blueprint.metadata.structure {
+        return Some(structure);
+    }
+    let bounds_m = blueprint.metadata.bounds_m;
+    let fallback =
+        StructureSpec::derive_from_bounds(StructuralSystem::TimberFrame, bounds_m).ok()?;
+    let stories = blueprint
+        .metadata
+        .rooms
+        .iter()
+        .map(|room| u16::try_from(room.floor.saturating_add(1)).unwrap_or(u16::MAX))
+        .max()
+        .unwrap_or(fallback.stories);
+    Some(StructureSpec::new(
+        StructuralSystem::TimberFrame,
+        stories,
+        fallback.height_m,
+        0.0,
+    ))
+}
+
+fn structure_payload(spec: &StructureSpec) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("present", true);
+    result.set("system", &GString::from(spec.system.id()));
+    result.set("system_name", &GString::from(spec.system.name()));
+    result.set("stories", i64::from(spec.stories));
+    result.set("height_m", f64::from(spec.height_m));
+    result.set("max_span_m", f64::from(spec.max_span_m));
+    result.set("foundation_depth_m", f64::from(spec.foundation_depth_m));
+    result.set(
+        "required_foundation_m",
+        f64::from(core_structure::recommended_foundation_m(spec.stories)),
+    );
+    result.set(
+        "ground_system",
+        &spec
+            .ground_system
+            .map_or_else(|| GString::from(""), |system| GString::from(system.id())),
+    );
+    match spec.summary() {
+        Ok(summary) => {
+            result.set("valid", true);
+            result.set("error", &GString::from(""));
+            result.set("error_code", &GString::from(""));
+            result.set(
+                "effective_max_stories",
+                i64::from(summary.effective_max_stories),
+            );
+            result.set(
+                "effective_max_height_m",
+                f64::from(summary.effective_max_height_m),
+            );
+            result.set(
+                "effective_max_span_m",
+                f64::from(summary.effective_max_span_m),
+            );
+            result.set("composite_bonus", summary.composite_bonus);
+        }
+        Err(error) => {
+            result.set("valid", false);
+            result.set("error", &GString::from(error.to_string().as_str()));
+            result.set("error_code", &GString::from(error.code()));
+            result.set(
+                "effective_max_stories",
+                i64::from(spec.system.max_stories()),
+            );
+            result.set(
+                "effective_max_height_m",
+                f64::from(spec.system.max_height_m()),
+            );
+            result.set("effective_max_span_m", f64::from(spec.system.max_span_m()));
+            result.set("composite_bonus", false);
+        }
+    }
+    result
 }
 
 /// Drop staffing entries that no longer point at a completed workplace and
@@ -6358,6 +6545,7 @@ mod tests {
             "Test Room".to_string(),
             volume,
             &props,
+            StructuralSystem::TimberFrame,
         );
         assert_eq!(blueprint.metadata.rooms.len(), 1);
         let room = &blueprint.metadata.rooms[0];

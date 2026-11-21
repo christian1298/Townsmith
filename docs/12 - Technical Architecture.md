@@ -2,7 +2,7 @@
 title: Technical Architecture
 project: Townsmith
 status: proposed
-updated: 2026-11-19
+updated: 2026-11-21
 tags:
   - townsmith
   - architecture
@@ -107,7 +107,7 @@ seed + generator version
 | `core_region` | Region activation, dormant snapshots, catch-up | `Region`, `RegionState`, `CatchUp` |
 | `core_content` | Content registry, schemas, mod manifests, hashes | `ContentId`, `Registry`, `ModManifest` |
 | `core_i18n` | Translation tables, locale fallback, key/placeholder validation, language packs | `Locale`, `TranslationKey`, `TranslationTable` |
-| `core_structure` | Material properties, structural systems, load paths, story/span/bracing validation | `MaterialSpec`, `StructuralSystem`, `StructureCheck` |
+| `core_structure` | Material properties, structural systems, story/height/span/foundation validation | `StructuralSystem`, `StructureSpec`, `StructureSummary`, `StructureError` |
 | `core_city` | Settlements, districts, buildings, construction sites, sub-ground levels, lots, roads, zoning, utilities | `Settlement`, `District`, `BuildingInstance`, `ConstructionSite`, `ConstructionPhase`, `SubgradeLevel`, `RoadGraph` |
 | `core_sim` | ECS, cohorts, citizens, households, jobs, needs, production, time state | `Cohort`, `Citizen`, `Household`, `Job`, `Need`, `TimeState`, `TimeVote` |
 | `core_living` | Trees, fields, livestock, wildlife populations | `Tree`, `Field`, `WildlifePopulation` |

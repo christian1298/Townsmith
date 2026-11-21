@@ -22,7 +22,7 @@ tags:
 
 | Method | Returns | Purpose |
 |---|---|---|
-| `world_validate_placement(seed, path, x, z, rotation)` | `Dictionary` | Load and validate a `.tsbp` site without mutating; `ok`, `center`, `foundation_m`, `footprint`, `rotation_deg`, `bounds`, `blueprint_hash` |
+| `world_validate_placement(seed, path, x, z, rotation)` | `Dictionary` | Load and validate a `.tsbp` site without mutating; `ok`, `center`, `foundation_m`, `footprint`, `rotation_deg`, `bounds`, `blueprint_hash`, `structure` |
 | `progression_state(seed)` | `Dictionary` | Derived population age: `age`, `next_age`, `next_threshold`, `progress`, `materials` |
 | `world_blueprint_info(path)` | `Dictionary` | Metadata for the ghost/HUD: id, name, hash, bounds, rooms, capacity, jobs, cost |
 | `world_place_blueprint(seed, path, x, z, rotation)` | `Dictionary` | Validate and append; `ok`, `seed`, `count`, `checksum`, `placement` |
@@ -180,16 +180,17 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 - The world save references **absolute package paths**. It is valid on the same machine but is not portable; a content-addressed local library is a follow-up.
 - Placement creates a phased construction site; the v0 state machine and visuals are in [[45 - Construction Sites]].
 - Terrain edits use the 2B delta fields in the same JSON; see [[43 - Terrain Edits]].
-- `world_load` re-verifies package hashes and metadata (id, name, bounds, capacity, jobs) but does not re-run slope/water sampling. Terrain edits can invalidate an old site; the gameplay layer will revalidate before construction.
+- `world_load` re-verifies package hashes and metadata (id, name, bounds, capacity, jobs, structure) but does not re-run slope/water sampling. Terrain edits can invalidate an old site; the gameplay layer will revalidate before construction.
 - No collision, road access, utility access, or lot ownership yet.
 - The acceptance house's bounds are the whole 16 × 9.6 × 16 m volume, not a tight mesh bound, so its placed footprint is 16 × 16 m.
 - The world-placement scene is a developer shell. Its HUD is English-only until the Phase 2 HUD localization pass; D-022's key-based EN/DE requirement still applies to shipping UI.
 
 ## 7. Tests
 
-- `core_city`: placement persistence, construction, roads, lots, settlements, households, treasury/loans, industry, utilities, traffic, and the advisor; **151 tests**.
+- `core_city`: placement persistence, construction, roads, lots, settlements, households, treasury/loans, industry, utilities, traffic, the advisor, and structural placement limits; **156 tests**.
+- `core_structure`: **18 tests + 1 doctest** for system tiers, story/height/span/foundation rules, and composite grounds.
 - `godot_ext`: **42 tests** total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
-- Workspace: **361 tests + 1 doctest**.
+- Workspace: **387 tests + 2 doctests**.
 - Godot headless: `WORLD_PLACEMENT ... status=ok` and `WORLD_SCENE ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use core_structure::StructureSpec;
 use serde::{Deserialize, Serialize};
 
 /// Current `.tsbp` metadata/package format.
@@ -132,6 +133,9 @@ pub struct BlueprintMetadata {
     pub props: Vec<PropRecord>,
     /// Derived stats.
     pub stats: BlueprintStats,
+    /// Optional structural system and declared limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structure: Option<StructureSpec>,
     /// Content dependencies.
     pub dependencies: Dependencies,
     /// Canonical content hash, `blake3:<hex>`.
@@ -155,6 +159,7 @@ impl BlueprintMetadata {
             rooms: Vec::new(),
             props: Vec::new(),
             stats: BlueprintStats::default(),
+            structure: None,
             dependencies: Dependencies::default(),
             content_hash: String::new(),
         }

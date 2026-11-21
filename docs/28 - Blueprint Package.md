@@ -2,7 +2,7 @@
 title: Blueprint Package
 project: Townsmith
 status: active
-updated: 2026-11-20
+updated: 2026-11-21
 tags:
   - townsmith
   - vertical-slice
@@ -46,6 +46,12 @@ Fields:
   "rooms": [],
   "props": [],
   "stats": { "resident_capacity": 4, "job_slots": 0, "class": "lower_middle", "material_cost": 1234.5 },
+  "structure": {
+    "system": "timber_frame",
+    "stories": 2,
+    "height_m": 6.4,
+    "foundation_depth_m": 0.5
+  },
   "dependencies": { "game": ">=0.1.0", "mods": [], "resource_packs": [] },
   "content_hash": "blake3:..."
 }
@@ -56,6 +62,7 @@ Fields:
 - `rooms` is filled by editor save-time room detection; `props` is written from the editor prop list and restored on load.
 - `materials` is a provisional key → count map until the content registry lands.
 - `dependencies` is parsed; non-empty mod/resource-pack lists produce a readable `MissingDependency` error in v1 (no resolver yet). The game constraint is not enforced by the current semantic check.
+- `structure` is optional. When present it declares the structural system, stories, height, optional span, ground system, and foundation depth; see [[60 - Structural Limits]]. Default metadata omits it, so packages written before Phase 4.2 keep their content hash. Invalid specs are rejected on save/load.
 
 ## 3. `voxels.bin` v1
 

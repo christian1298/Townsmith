@@ -243,6 +243,11 @@ fn validate_metadata(metadata: &BlueprintMetadata) -> Result<(), BlueprintError>
             "stats.material_cost must be finite and non-negative".to_string(),
         ));
     }
+    if let Some(structure) = &metadata.structure {
+        structure
+            .validate()
+            .map_err(|error| BlueprintError::Format(format!("structure: {error}")))?;
+    }
     Ok(())
 }
 

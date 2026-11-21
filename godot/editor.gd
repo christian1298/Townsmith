@@ -38,6 +38,13 @@ const PAD_COLOR := Color(0.34, 0.36, 0.33)
 const SURROUND_COLOR := Color(0.20, 0.22, 0.20)
 const VOXEL_COLOR := Color(0.78, 0.73, 0.62)
 
+const STRUCTURES := [
+	"timber_frame",
+	"load_bearing_stone",
+	"load_bearing_brick",
+	"reinforced_concrete",
+	"steel_frame",
+]
 const MATERIALS := [
 	{"id": 1, "name": "timber"},
 	{"id": 2, "name": "stone"},
@@ -182,6 +189,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 		if key == KEY_R:
 			_toggle_room_overlay()
+			return
+		if key == KEY_H:
+			_cycle_structure()
 			return
 		if event.keycode == KEY_BRACKETLEFT and not event.ctrl_pressed and not event.alt_pressed:
 			_cycle_room(-1)
@@ -978,6 +988,19 @@ func _select_prop(kind: int) -> void:
 	print("Editor prop: %d %s" % [kind, name])
 	_status("base.editor.status.prop_selected", [name])
 
+func _cycle_structure() -> void:
+	var state: Dictionary = _core.editor_structure_state()
+	var current := str(state.get("system", "timber_frame"))
+	var index := STRUCTURES.find(current)
+	var next_index := (index + 1) % STRUCTURES.size()
+	var selected: Dictionary = _core.editor_set_structure(STRUCTURES[next_index])
+	if not bool(selected.get("ok", false)):
+		_status("base.editor.generic.unknown_error", [str(selected.get("error", "structure"))])
+		return
+	_update_palette_label()
+	_refresh_stats_label()
+	print("Editor structure: %s" % str(selected.get("system_name", "?")))
+
 func _update_palette_label() -> void:
 	if _palette_label == null:
 		return
@@ -986,6 +1009,14 @@ func _update_palette_label() -> void:
 		var id := int(entry["id"])
 		var marker := ">" if id == _active_material and _active_prop < 0 else " "
 		lines.append("%s %d  %s" % [marker, id, _material_name(id)])
+	var structure: Dictionary = _core.editor_structure_state()
+	if bool(structure.get("ok", false)):
+		var limit := int(structure.get("effective_max_stories", 0))
+		lines.append("H  structure: %s (%d/%d stories)" % [
+			str(structure.get("system_name", "?")),
+			int(structure.get("stories", 0)),
+			limit,
+		])
 	lines.append(_i18n.t("base.editor.palette.props"))
 	for index in PROPS.size():
 		var entry: Dictionary = PROPS[index]
@@ -1793,6 +1824,14 @@ func _run_editor_smoke() -> void:
 		status = "pad_cell"
 	elif status == "ok" and pad_hit.get("place") != Vector3i(40, 0, 40):
 		status = "pad_place"
+
+	var structure: Dictionary = _core.editor_structure_state()
+	if status == "ok" and (
+		not bool(structure.get("ok", false))
+		or not bool(structure.get("valid", false))
+		or str(structure.get("system", "")) != "timber_frame"
+	):
+		status = "structure_mismatch"
 
 	print("EDITOR_SMOKE solid=%d quads=%d surfaces=%d status=%s" % [solid, quads, surfaces, status])
 	get_tree().quit(0 if status == "ok" else 1)
