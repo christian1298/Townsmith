@@ -132,11 +132,10 @@ This is a scripted recovery, not a balanced default. The standard 8/4 policy los
 
 - `city_loop` bin: five houses complete, fill 50 residents, staff their sites, produce food/wood, and record construction spending and debt in one simulated day.
 - `city_loop` bin: 15 houses produce a non-zero road commute.
-- Workspace: **344 tests + 1 doctest**.
+- Workspace: **353 tests + 1 doctest**.
 
 ## 7. Next
 
-1. 3.8: dashboard and advisor with traffic, utilities, housing, jobs, and budget.
-2. 3.9: scenario matrix (early town, mid city, late city) and committed baselines under `benchmarks/results/`.
+1. 3.9: runner matrix (early town, mid city, late city) and committed baselines under `benchmarks/results/`.
 3. Tune industry rates against the treasury and the headless baseline.
 4. Add utility-outage and road-disconnection scenarios and pin the degraded results.

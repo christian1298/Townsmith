@@ -27,13 +27,13 @@ use core_blueprint::{
     PropRecord, RoomRecord,
 };
 use core_city::{
-    normalize_rotation, summarize, CityLayout, CityRuntime, CitySummary, CityTier,
-    ConstructionSite, ConstructionStore, Economy, Home, IndustryKind, IndustryStore, Lot, LotError,
-    LotRequest, LotStore, Placement, PlacementError, PlacementRequest, PlacementStore, RoadError,
-    RoadGraph, RoadRequest, RoadSegment, RoadStore, Settlement, SettlementError, SettlementRequest,
-    SettlementStore, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
-    DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT,
-    MAX_WORLD_COORD_M, STARTING_BALANCE,
+    advise, normalize_rotation, summarize, AdvisorInput, AdvisorReport, CityLayout, CityRuntime,
+    CitySummary, CityTier, ConstructionSite, ConstructionStore, Economy, Home, IndustryKind,
+    IndustryStore, Lot, LotError, LotRequest, LotStore, Placement, PlacementError,
+    PlacementRequest, PlacementStore, RoadError, RoadGraph, RoadRequest, RoadSegment, RoadStore,
+    Settlement, SettlementError, SettlementRequest, SettlementStore, UtilityConsumer, UtilityKind,
+    UtilityReport, UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY,
+    DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -2327,6 +2327,9 @@ impl TownsmithCore {
         let Ok(seed) = u64::try_from(seed) else {
             return placement_simple_error("invalid_seed", "world seed must be non-negative");
         };
+        if seed > i64::MAX as u64 {
+            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
+        }
         {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             if let Some(store) = world.as_ref() {
@@ -2898,6 +2901,72 @@ impl TownsmithCore {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         completed_utility_consumers(world.as_ref(), &construction, population.as_ref())
+    }
+
+    /// Deterministic dashboard advice from the current city snapshot.
+    #[func]
+    fn city_advisor(&self, seed: i64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        if seed > i64::MAX as u64 {
+            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
+        }
+        {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(store) = world.as_ref() {
+                if store.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the placement store belongs to a different seed",
+                    );
+                }
+            }
+        }
+        let city = self.city_summary();
+        let utilities = self.utilities_state();
+        let industry = self.industry_state();
+        let economy = self.economy_state();
+        let traffic = self.traffic_state(seed as i64);
+        let construction = self.construction_summary();
+        let mut input = AdvisorInput {
+            population: variant_u64(&city, "population"),
+            housing_capacity: variant_u64(&city, "housing_capacity"),
+            vacancies: variant_u64(&city, "vacancies"),
+            jobs: variant_u64(&city, "jobs"),
+            employed: variant_u64(&city, "employed"),
+            unemployed: variant_u64(&city, "unemployed"),
+            happiness: variant_f32(&city, "happiness"),
+            food: variant_f32(&city, "food"),
+            water: variant_f32(&city, "water"),
+            rest: variant_f32(&city, "rest"),
+            average_commute_m: variant_f32(&city, "average_commute_m"),
+            active_sites: variant_usize(&construction, "active"),
+            stalled_sites: variant_usize(&construction, "stalled"),
+            completed_buildings: variant_usize(&city, "completed_buildings"),
+            ..AdvisorInput::default()
+        };
+        if variant_bool(&utilities, "open") {
+            input.water_supply = Some(variant_f32(&utilities, "water_supply"));
+            input.power_supply = Some(variant_f32(&utilities, "power_supply"));
+        }
+        if variant_bool(&industry, "open") {
+            input.food_supply = Some(variant_f32(&industry, "food_supply"));
+            input.food_stock = variant_f64(&industry, "food");
+            input.wood_stock = variant_f64(&industry, "wood");
+        }
+        if variant_bool(&economy, "open") {
+            input.balance = Some(variant_f64(&economy, "balance"));
+            input.daily_net = Some(variant_f64(&economy, "daily_net"));
+            input.debt = Some(variant_f64(&economy, "debt"));
+            input.bankrupt = variant_bool(&economy, "bankrupt");
+        }
+        if variant_bool(&traffic, "open") {
+            input.traffic_components = Some(variant_usize(&traffic, "components"));
+            input.traffic_nodes = Some(variant_usize(&traffic, "nodes"));
+        }
+        let report = advise(&input);
+        advisor_payload(seed, &report)
     }
 
     /// Set the shared crew pool. Values above 64 are rejected.
@@ -5122,6 +5191,51 @@ fn settlements_from_world_json(
         .validate_loaded()
         .map_err(|error| ("invalid_settlements", error.to_string()))?;
     Ok(Some(store))
+}
+
+fn variant_i64(dictionary: &VarDictionary, key: &str) -> i64 {
+    dictionary.get(key).map_or(0, |value| value.to::<i64>())
+}
+
+fn variant_u64(dictionary: &VarDictionary, key: &str) -> u64 {
+    u64::try_from(variant_i64(dictionary, key)).unwrap_or(0)
+}
+
+fn variant_usize(dictionary: &VarDictionary, key: &str) -> usize {
+    usize::try_from(variant_i64(dictionary, key)).unwrap_or(0)
+}
+
+fn variant_f64(dictionary: &VarDictionary, key: &str) -> f64 {
+    dictionary.get(key).map_or(0.0, |value| value.to::<f64>())
+}
+
+fn variant_f32(dictionary: &VarDictionary, key: &str) -> f32 {
+    variant_f64(dictionary, key) as f32
+}
+
+fn variant_bool(dictionary: &VarDictionary, key: &str) -> bool {
+    dictionary.get(key).is_some_and(|value| value.to::<bool>())
+}
+
+fn advisor_payload(seed: u64, report: &AdvisorReport) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set("seed", seed as i64);
+    result.set("critical", report.critical() as i64);
+    result.set("warnings", report.warnings() as i64);
+    result.set("infos", report.infos() as i64);
+    result.set("healthy", report.healthy());
+    let mut messages: Array<VarDictionary> = Array::new();
+    for message in &report.messages {
+        let mut item = VarDictionary::new();
+        item.set("code", &GString::from(&message.code));
+        item.set("severity", &GString::from(message.severity.as_str()));
+        item.set("title", &GString::from(&message.title));
+        item.set("detail", &GString::from(&message.detail));
+        messages.push(&item);
+    }
+    result.set("messages", &messages.to_variant());
+    result
 }
 
 fn attach_economy(json: &str, economy: &Economy) -> Result<String, String> {

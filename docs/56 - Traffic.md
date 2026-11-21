@@ -176,7 +176,7 @@ The pair-query path runs Dijkstra per call. The flow field is roughly **75× fas
 - `core_city::population`: road commute and disconnected fallback.
 - `townsmith-bench`: 2 city-loop tests (small city and a multi-row commute) and 1 traffic-grid test.
 - World scene smoke: `traffic=ok`, graph stats, one car, movement, save/load rebuild.
-- Workspace: **344 tests + 1 doctest**; core_city **137**, bridge **41**.
+- Workspace: **353 tests + 1 doctest**; core_city **146**, bridge **41**.
 
 ## 8. Limits
 
@@ -190,7 +190,6 @@ The pair-query path runs Dijkstra per call. The flow field is roughly **75× fas
 
 ## 9. Next
 
-1. 3.8: dashboard and advisor with traffic, utilities, housing, jobs, and budget.
-2. 3.9: runner matrix (early town, mid city, late city) and committed baselines.
-3. Add a spatial index and incremental graph updates before the 1M gate.
-4. Feed actual commute flows into visual car density and congestion later.
+1. 3.9: runner matrix (early town, mid city, late city) and committed baselines.
+2. Add a spatial index and incremental graph updates before the 1M gate.
+3. Feed actual commute flows into visual car density and congestion later.

@@ -219,7 +219,7 @@ Food now reaches the city and stays at 100%; [[55 - Utilities]] keeps water and 
 - `core_city::population`: 3 new tests — per-workplace staffing, food replenishment, old saves without staffing.
 - `godot_ext`: 4 new tests — industry JSON roundtrip/old save, unknown kind/invalid stock, staffing roundtrip, stale-staffing sanitize.
 - `city_loop`: the five-house test asserts sites, food stock, wood production, full supply, and happiness > 0.6; the 15-house test covers a road commute.
-- Workspace: **344 tests + 1 doctest** (52 voxel, 62 world, 26 simulation, 137 city, 11 blueprint, 12 rooms, 41 bridge, 2 city-loop tests, and 1 traffic-grid test).
+- Workspace: **353 tests + 1 doctest** (52 voxel, 62 world, 26 simulation, 146 city, 11 blueprint, 12 rooms, 41 bridge, 2 city-loop tests, and 1 traffic-grid test).
 
 ## 8. Limits
 
@@ -236,7 +236,7 @@ Food now reaches the city and stays at 100%; [[55 - Utilities]] keeps water and 
 
 ## 9. Next
 
-1. 3.7: road graph and traffic.
+1. 3.8: dashboard and advisor with food/wood/hide context.
 2. Replace the O(H × W) assignment with a spatial index before scaling.
 3. Add a wood consumer for construction materials and a hide consumer (crafting/trade).
 4. Tune industry rates against the treasury and the headless runner.
