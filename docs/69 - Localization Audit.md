@@ -28,7 +28,7 @@ tags:
 | Advisor titles and details | Rust `core_city::advisor` | 0 | 0 | n/a | none |
 | Tutorial titles and hints | Rust payload read by `world_placement.gd` | 0 | 0 | n/a | none |
 | Starter, industry, service, tax names | Rust payload + `kind.capitalize()` | 0 | 0 | n/a | none |
-| Content display names (table only) | `godot/content_i18n.gd` | 32 | 32 | complete | not wired; no gate |
+| Content display names (table only) | `godot/content_i18n.gd` | 32 | 32 | complete | static gate; not wired to scene |
 | Player-visible error modals | GDScript literals + `error_code` | 0 | 0 | n/a | none |
 
 Facts about the current table:
@@ -283,15 +283,16 @@ Acceptance checks:
 
 ### Static gate
 
-`scripts/check_locale.sh` parses the `TABLES` const in both `godot/editor_i18n.gd` and `godot/world_i18n.gd` and checks key parity, per-file key floors, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. The floors ratchet independently: editor `96`, world `33` (currently 54 keys). Default mode prints one line per table plus a summary:
+`scripts/check_locale.sh` parses the `TABLES` const in `godot/editor_i18n.gd` and `godot/world_i18n.gd`, plus the `DISPLAY` const in `godot/content_i18n.gd`, and checks key parity, per-file key floors, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. The floors ratchet independently: editor `96`, world `33` (currently 54 keys), content `32`. Default mode prints one line per table plus a summary:
 
 ```text
 LOCALE_CHECK file=godot/editor_i18n.gd keys=96 min=96 status=ok
 LOCALE_CHECK file=godot/world_i18n.gd keys=54 min=33 status=ok
-LOCALE_CHECK editor=96 world=33 status=ok
+LOCALE_CHECK file=godot/content_i18n.gd keys=32 min=32 status=ok
+LOCALE_CHECK editor=96 world=54 content=32 status=ok
 ```
 
-Single-file mode (`scripts/check_locale.sh [FILE]`) keeps the original `LOCALE_CHECK keys=N status=ok` marker and derives the floor from the file name (`world_i18n.gd` gets 33, anything else 96). `--self-test` covers nine cases: the six editor cases (valid, missing DE key, extra DE key, empty value, placeholder mismatch, too few keys) plus a world-style fixture pass, a too-few world table, and a world EN/DE placeholder mismatch. The gate runs in `scripts/check.sh` and the Rust CI job before the Godot locale smoke.
+Single-file mode (`scripts/check_locale.sh [FILE]`) keeps the original `LOCALE_CHECK keys=N status=ok` marker and derives the floor from the file name (`world_i18n.gd` gets 33, `content_i18n.gd` gets 32, anything else 96). `--self-test` covers twelve cases: the six editor cases (valid, missing DE key, extra DE key, empty value, placeholder mismatch, too few keys), a world-style fixture pass, a too-few world table, a world EN/DE placeholder mismatch, and the same three checks for the `DISPLAY` content table. The gate runs in `scripts/check.sh` and the Rust CI job before the Godot locale smoke.
 
 `scripts/smoke_locale.sh` parses the last `LOCALE_SMOKE` line and requires:
 
@@ -299,7 +300,7 @@ Single-file mode (`scripts/check_locale.sh [FILE]`) keeps the original `LOCALE_C
 if [[ -z "$KEYS" || "$KEYS" -lt 96 || "$STATUS" != "ok" ]]; then
 ```
 
-The exact `96` was a hand-edited constant in the runtime smoke. The static gate now enforces independent floors (`EDITOR_MIN_KEYS=96`, `WORLD_MIN_KEYS=33`) plus EN/DE parity, empty values, and placeholder parity for both tables; `smoke_locale.sh` accepts editor `keys >= 96`. Adding keys is no longer a red build.
+The exact `96` was a hand-edited constant in the runtime smoke. The static gate now enforces independent floors (`EDITOR_MIN_KEYS=96`, `WORLD_MIN_KEYS=33`, `CONTENT_MIN_KEYS=32`) plus EN/DE parity, empty values, and placeholder parity for all three tables; `smoke_locale.sh` accepts editor `keys >= 96`. Adding keys is no longer a red build.
 
 ### Proposed contract
 
@@ -319,7 +320,7 @@ Add `scripts/check_locale_coverage.sh` and run it from `scripts/check.sh` / CI:
 
 ### Additional gates
 
-- **Parity/placeholder:** the static gate covers `editor_i18n.gd` and `world_i18n.gd`; extend it to every `base.*` table once the shared content pipeline lands, including plural families.
+- **Parity/placeholder:** the static gate covers `editor_i18n.gd`, `world_i18n.gd`, and `content_i18n.gd`; extend it to every `base.*` table once the shared content pipeline lands, including plural families.
 - **Pseudo-localization:** generate an accented, +30% length locale to catch clipping before German QA.
 - **German layout:** include HUD, dashboard, and one modal in the 100/125/150% width budgets.
 - **No hard-coded strings:** the coverage check above is the enforcement; review alone is not enough.
