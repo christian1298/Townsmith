@@ -230,3 +230,6 @@ The city now stays healthy at full service and the 30-day run is financially rec
 2. Utility upkeep is charged by the bridge economy tick; add service funding and construction cost.
 3. 3.8: dashboard and advisor with utility shortage notifications ([[57 - Dashboard and Advisor]]).
 4. 3.9: runner matrix and committed baselines.
+
+
+See [[77 - Infrastructure Costs]] for utility/civic construction and upkeep tables.

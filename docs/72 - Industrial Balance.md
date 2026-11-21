@@ -102,3 +102,6 @@ The 30-day batch cadence is a planning assumption, not a measured crew rate. Fas
 3. Add a bankruptcy happiness/service penalty.
 4. Scale traffic with a grid/flow-field cache before adding roads here.
 5. Add an early/late Industrial grid and a 150,000-resident Modern probe.
+
+
+See [[77 - Infrastructure Costs]] for utility/civic construction and upkeep tables.

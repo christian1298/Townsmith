@@ -46,6 +46,18 @@ pub const POWER_PER_WORKER: f64 = 1.0;
 /// Power demand per resident for lighting, heating, and appliances.
 pub const POWER_PER_RESIDENT: f64 = 0.25;
 
+/// Construction cost of one water site.
+pub const WATER_CONSTRUCTION_COST: f64 = 2_500.0;
+
+/// Construction cost of one power site.
+pub const POWER_CONSTRUCTION_COST: f64 = 5_000.0;
+
+/// Operating upkeep of one water site per game day.
+pub const WATER_UPKEEP_PER_DAY: f64 = 2.0;
+
+/// Operating upkeep of one power site per game day.
+pub const POWER_UPKEEP_PER_DAY: f64 = 3.0;
+
 /// One utility kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -76,6 +88,30 @@ impl UtilityKind {
             "water" | "well" | "pump" | "water_tower" => Some(Self::Water),
             "power" | "grid" | "plant" | "power_plant" => Some(Self::Power),
             _ => None,
+        }
+    }
+
+    /// Construction cost of one default site of this kind.
+    ///
+    /// Water is 2,500; power is 5,000. These are data-only catalog values and
+    /// are not charged by the live economy yet.
+    #[must_use]
+    pub fn construction_cost(self) -> f64 {
+        match self {
+            Self::Water => WATER_CONSTRUCTION_COST,
+            Self::Power => POWER_CONSTRUCTION_COST,
+        }
+    }
+
+    /// Operating upkeep of one site of this kind per game day.
+    ///
+    /// Water is 2/day; power is 3/day. These are data-only catalog values and
+    /// are not charged by the live economy yet.
+    #[must_use]
+    pub fn upkeep_per_day(self) -> f64 {
+        match self {
+            Self::Water => WATER_UPKEEP_PER_DAY,
+            Self::Power => POWER_UPKEEP_PER_DAY,
         }
     }
 }
@@ -200,6 +236,36 @@ impl UtilityStore {
     #[must_use]
     pub fn count_of(&self, kind: UtilityKind) -> usize {
         self.sites(kind).len()
+    }
+
+    /// Construction cost of every site of one kind.
+    #[must_use]
+    pub fn construction_cost_of(&self, kind: UtilityKind) -> f64 {
+        self.count_of(kind) as f64 * kind.construction_cost()
+    }
+
+    /// Operating upkeep of every site of one kind per game day.
+    #[must_use]
+    pub fn upkeep_per_day_of(&self, kind: UtilityKind) -> f64 {
+        self.count_of(kind) as f64 * kind.upkeep_per_day()
+    }
+
+    /// Construction cost of every water and power site.
+    #[must_use]
+    pub fn total_construction_cost(&self) -> f64 {
+        UtilityKind::ALL
+            .iter()
+            .map(|&kind| self.construction_cost_of(kind))
+            .sum()
+    }
+
+    /// Operating upkeep of every water and power site per game day.
+    #[must_use]
+    pub fn total_upkeep_per_day(&self) -> f64 {
+        UtilityKind::ALL
+            .iter()
+            .map(|&kind| self.upkeep_per_day_of(kind))
+            .sum()
     }
 
     /// Add or replace a utility site. Replacing keeps other sites.
@@ -621,6 +687,25 @@ mod tests {
         let report = store.refresh(&[]);
         assert_eq!(report.water_supply, 1.0);
         assert_eq!(report.power_supply, 0.0);
+    }
+
+    #[test]
+    fn utility_costs_are_stable() {
+        assert_eq!(UtilityKind::Water.construction_cost(), 2_500.0);
+        assert_eq!(UtilityKind::Power.construction_cost(), 5_000.0);
+        assert_eq!(UtilityKind::Water.upkeep_per_day(), 2.0);
+        assert_eq!(UtilityKind::Power.upkeep_per_day(), 3.0);
+        let mut store = UtilityStore::new(2026);
+        store
+            .add_site(1, UtilityKind::Water, [1.0, 2.0, 3.0])
+            .expect("water");
+        store
+            .add_site(2, UtilityKind::Power, [4.0, 5.0, 6.0])
+            .expect("power");
+        assert_eq!(store.total_construction_cost(), 7_500.0);
+        assert_eq!(store.total_upkeep_per_day(), 5.0);
+        assert_eq!(store.construction_cost_of(UtilityKind::Water), 2_500.0);
+        assert_eq!(store.upkeep_per_day_of(UtilityKind::Power), 3.0);
     }
 
     #[test]

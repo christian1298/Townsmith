@@ -180,3 +180,6 @@ See [[63 - Starter Library]] for the age-gated building catalog and generated pa
 3. Health/safety effects on happiness, illness, and fire risk.
 4. District service coverage overlays and funding policy.
 5. University/hospital content and research multipliers.
+
+
+See [[77 - Infrastructure Costs]] for utility/civic construction and upkeep tables.

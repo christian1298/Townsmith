@@ -205,6 +205,7 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 | [[39 - Slice House Benchmark]] | 21-house MultiMesh benchmark, post-winding results, limits | You measure the slice render path |
 | [[40 - Slice Acceptance Results]] | Acceptance matrix, commands, cost model, open playtest | You close Phase 1 or plan Phase 2 |
 | [[66 - Playtest Kit]] | 30-minute route, observer checklist, ratings, Q-101 recording | You run or record the human playtest |
+| [[77 - Infrastructure Costs]] | Utility/civic construction and upkeep tables | You tune infrastructure economics |
 | [[67 - Named Citizens]] | Identity layer, materialization budget, persistence, staged slices | You work on named citizens or agents |
 | [[68 - Metropolis Gate]] | 1M/RTX 3060 scenes, thresholds, protocol, pass/fail | You measure or plan the Phase 5 gate |
 | [[69 - Localization Audit]] | EN/DE coverage, hard-coded strings, phased localization plan | You localize UI or content |

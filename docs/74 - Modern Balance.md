@@ -105,3 +105,6 @@ The shipping cap, not tax revenue at 20/4, is the binding constraint: at no poin
 3. Add a bankruptcy happiness/service penalty; 0.984 happiness during insolvency is not a credible signal.
 4. Scale traffic with a grid/flow-field cache before adding roads here.
 5. Tune the tax curve so the default policy can at least approach break-even at 150,000 residents.
+
+
+See [[77 - Infrastructure Costs]] for utility/civic construction and upkeep tables.

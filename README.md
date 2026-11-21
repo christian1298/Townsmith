@@ -87,6 +87,9 @@ cargo run --release -p townsmith-bench --bin jobs
 # Core save/load stress harness (120 placements, 60 cycles)
 cargo run --release -p townsmith-bench --bin save_stress -- --smoke
 
+# Utility/civic construction and upkeep cost report
+cargo run --release -p townsmith-bench --bin infra_cost -- --smoke
+
 # 1M data-scale harness (not the render gate)
 cargo run --release -p townsmith-bench --bin metropolis -- --smoke
 
