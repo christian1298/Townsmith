@@ -368,7 +368,7 @@ The existing world JSON `population` object gets an optional sibling `named_citi
 | Slice | Deliverable | Acceptance |
 |---|---|---|
 | **N1 — Identity layer (derived)** | Deterministic ids, names, household slot sync, read-only bridge | **Done** — PR #98; 500-resident city produces stable names; `cargo test -p core_city named`; no save or checksum change; 4k identities generate in < 100 ms under the debug test guard |
-| **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | **Partial — PR #100**; selected HUD line shows stable names and the smoke verifies reselect; separate panel/follow camera and EN/DE card are next |
+| **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | **Partial — PR #101**; selected HUD line and F2 citizen panel show stable names and household stats; follow camera and EN/DE card are next |
 | **N3 — Materialization** | Active pool, hysteresis, route cache, fade, active cap | 2k active + 200 detailed in the benchmark route; ≤ 1 ms decision; no pop in the smoke; no route per citizen |
 | **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | Roundtrip and old-save tests; lifecycle scenario exact; new city-loop baseline documented; no checksum drift for lifecycle-off |
 | **N5 — Cohort bridge (later)** | Sample from cohorts, district stories, 1M identity store | 1M cohort benchmark unchanged; materialization near camera; no per-citizen tick |
@@ -398,16 +398,26 @@ Bridge:
 
 N1 is read-only; selection, the detail card, materialization, and lifecycle are N2–N4. Names are fictional and generated; no user text.
 
-### N2 partial implementation
+### N2 implementation
 
-The selected-building HUD line now appends `· residents <names>` for the selected home, read from `named_citizens_for`. The scene smoke verifies that the completed two-resident house has two non-empty names and that a second query returns the same ids. Marker: `named=ok`.
+The selected-building HUD line appends `· residents <names>` for the selected home, read from `named_citizens_for`. The scene smoke verifies that the completed two-resident house has two non-empty names and that a second query returns the same ids. Marker: `named=ok`.
 
-Not yet implemented: a separate citizen card or panel, follow camera, household list, job/age rows, and the EN/DE card. The HUD line is English-only developer text until the localization phase.
-- clippy and fmt
+N2 also adds a **Citizen** panel (`F2`, bottom-left):
+
+- named residents with their resident slot;
+- household residents/capacity, employed count, commute, income/day, and food/water/rest;
+- explicit empty states for no selection, unavailable placement, and a vacant/unnamed home;
+- a 0.5 s refresh while visible, matching the dashboard cadence;
+- `Esc` closes the citizen panel before the dashboard, and entering Architect closes it.
+
+The smoke opens the panel with no selection, checks the empty state, selects the occupied house, verifies a known name plus `2 / 2 residents` and `40/day`, then closes it. Marker: `citizens=ok`.
+
+Not yet implemented: follow camera, a full household list, job/age rows, and the EN/DE card. Panel text is English-only developer text until the localization phase.
 
 ### N2 checks
 
 - `smoke_world_scene.sh` marker `citizens=ok`
+- `smoke_world_scene.sh` still reports `status=ok`
 - Select, open card, follow, and return; identity stable
 - Screenshot and EN/DE width check
 

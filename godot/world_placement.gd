@@ -84,6 +84,10 @@ var dashboard_panel: PanelContainer
 var dashboard_text: RichTextLabel
 var dashboard_visible := false
 var dashboard_refresh_accum := 0.0
+var citizen_panel: PanelContainer
+var citizen_text: RichTextLabel
+var citizen_visible := false
+var citizen_refresh_accum := 0.0
 
 var blueprint_path := ""
 var save_path := ""
@@ -140,6 +144,13 @@ func _process(delta: float) -> void:
 			_update_dashboard()
 	else:
 		dashboard_refresh_accum = 0.0
+	if citizen_visible:
+		citizen_refresh_accum += delta
+		if citizen_refresh_accum >= DASHBOARD_REFRESH_SECONDS:
+			citizen_refresh_accum = 0.0
+			_update_citizen_panel()
+	else:
+		citizen_refresh_accum = 0.0
 	construction_tick_accum += delta
 	var steps := 0
 	while construction_tick_accum >= 0.25 and steps < 8:
@@ -196,7 +207,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			_return_to_mayor()
 			return
 		if event.physical_keycode == KEY_ESCAPE:
-			if dashboard_visible:
+			if citizen_visible:
+				_close_citizen_panel()
+			elif dashboard_visible:
 				_toggle_dashboard()
 			elif mode == "architect":
 				_return_to_mayor()
@@ -239,6 +252,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					_cycle_service()
 				KEY_F1:
 					_toggle_dashboard()
+				KEY_F2:
+					_toggle_citizen_panel()
 				KEY_T:
 					_cycle_tax_policy()
 				KEY_L:
@@ -442,6 +457,27 @@ func _setup_ui() -> void:
 	dashboard_hint.text = "F1 or Esc to close"
 	dashboard_hint.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
 	dashboard_box.add_child(dashboard_hint)
+
+	citizen_panel = PanelContainer.new()
+	citizen_panel.name = "CitizenPanel"
+	citizen_panel.anchor_left = 0.0
+	citizen_panel.anchor_right = 0.0
+	citizen_panel.anchor_top = 1.0
+	citizen_panel.anchor_bottom = 1.0
+	citizen_panel.offset_left = 16.0
+	citizen_panel.offset_right = 436.0
+	citizen_panel.offset_top = -320.0
+	citizen_panel.offset_bottom = -16.0
+	citizen_panel.visible = false
+	layer.add_child(citizen_panel)
+	citizen_text = RichTextLabel.new()
+	citizen_text.name = "CitizenText"
+	citizen_text.bbcode_enabled = true
+	citizen_text.fit_content = false
+	citizen_text.scroll_active = true
+	citizen_text.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	citizen_text.custom_minimum_size = Vector2(380.0, 280.0)
+	citizen_panel.add_child(citizen_text)
 
 func _setup_ghost() -> void:
 	ghost = Node3D.new()
@@ -1412,7 +1448,7 @@ func _update_hud() -> void:
 			SEED, blueprint_name, structure_text,
 		]
 	else:
-		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nStructure: %s\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew · I industry · U utility · K services · B starter · T tax · L loan · Y research · F1 dashboard · V +10k · F5 save · F9 load" % [
+		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nStructure: %s\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew · I industry · U utility · K services · B starter · T tax · L loan · Y research · F1 dashboard · F2 citizens · V +10k · F5 save · F9 load" % [
 			SEED, blueprint_name, rooms, capacity, structure_text,
 		]
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
@@ -1553,6 +1589,80 @@ func _update_hud() -> void:
 		int(construction.get("materials_stock", 0)),
 		save_path,
 	]
+
+func _toggle_citizen_panel() -> bool:
+	citizen_visible = not citizen_visible
+	if citizen_panel != null:
+		citizen_panel.visible = citizen_visible
+	citizen_refresh_accum = 0.0
+	if citizen_visible:
+		_update_citizen_panel()
+	return citizen_visible
+
+func _close_citizen_panel() -> void:
+	citizen_visible = false
+	if citizen_panel != null:
+		citizen_panel.visible = false
+	citizen_refresh_accum = 0.0
+
+func _household_for(placement_id: int) -> Dictionary:
+	var state: Dictionary = core.population_state()
+	for household in state.get("households", []):
+		if int(household.get("placement_id", -1)) == placement_id:
+			return household
+	return {}
+
+func _update_citizen_panel() -> void:
+	if citizen_text == null:
+		return
+	var lines: Array[String] = []
+	lines.append("[b]Citizens[/b]  (F2 or Esc to close)")
+	if selected_id < 0:
+		lines.append("")
+		lines.append("No home selected.")
+		lines.append("Right-click a completed home to inspect its residents.")
+		citizen_text.text = "\n".join(lines)
+		return
+	var selected := _selected_placement()
+	if selected.is_empty():
+		lines.append("")
+		lines.append("The selected placement is no longer available.")
+		citizen_text.text = "\n".join(lines)
+		return
+	lines.append("")
+	lines.append("[b]#%d  %s[/b]" % [selected_id, str(selected.get("name", "?"))])
+	var named: Dictionary = core.named_citizens_for(SEED, selected_id)
+	var citizens: Array = named.get("citizens", [])
+	if citizens.is_empty():
+		lines.append("No named residents (vacant home or not yet synced).")
+	else:
+		for citizen in citizens:
+			lines.append("· %s  (resident slot %d)" % [
+				str(citizen.get("name", "?")),
+				int(citizen.get("slot", 0)) + 1,
+			])
+	var household := _household_for(selected_id)
+	if household.is_empty():
+		lines.append("")
+		lines.append("Household runtime is not available yet.")
+	else:
+		lines.append("")
+		lines.append("[b]Household[/b]")
+		lines.append("%d / %d residents · %d employed" % [
+			int(household.get("residents", 0)),
+			int(household.get("capacity", 0)),
+			int(household.get("workers", 0)),
+		])
+		lines.append("Commute %.0f m · income %.0f/day" % [
+			float(household.get("commute_m", 0.0)),
+			float(household.get("income_per_day", 0.0)),
+		])
+		lines.append("Food %.0f%% · water %.0f%% · rest %.0f%%" % [
+			float(household.get("food", 0.0)) * 100.0,
+			float(household.get("water", 0.0)) * 100.0,
+			float(household.get("rest", 0.0)) * 100.0,
+		])
+	citizen_text.text = "\n".join(lines)
 
 func _toggle_dashboard() -> bool:
 	dashboard_visible = not dashboard_visible
@@ -1749,6 +1859,8 @@ func _select_placement(id: int) -> bool:
 	)
 	selection_box.visible = true
 	_update_hud()
+	if citizen_visible:
+		_update_citizen_panel()
 	return true
 
 func _clear_selection() -> void:
@@ -1756,6 +1868,8 @@ func _clear_selection() -> void:
 	if selection_box != null:
 		selection_box.visible = false
 	_update_hud()
+	if citizen_visible:
+		_update_citizen_panel()
 
 func _pick_placement_at(screen: Vector2) -> int:
 	if camera == null:
@@ -1828,6 +1942,8 @@ func _door_position(placement: Dictionary) -> Vector3:
 func _enter_architect() -> bool:
 	if mode != "mayor":
 		return false
+	if citizen_visible:
+		_close_citizen_panel()
 	if dashboard_visible:
 		_toggle_dashboard()
 	var placement := _selected_placement()
@@ -2313,6 +2429,7 @@ func _run_scene_smoke() -> void:
 	var build_done_ok := false
 	var trades_ok := false
 	var named_ok := false
+	var citizens_ok := false
 	var render_ok := false
 	var structure_ok := false
 	var age_ok := false
@@ -2645,6 +2762,23 @@ func _run_scene_smoke() -> void:
 				for citizen in named_again.get("citizens", []):
 					again_ids.append(int(citizen.get("id", 0)))
 				named_ok = named_ok and named_ids == again_ids
+				var known_name := ""
+				if not named_home.get("citizens", []).is_empty():
+					known_name = str(named_home.get("citizens", [])[0].get("name", ""))
+				_clear_selection()
+				_toggle_citizen_panel()
+				citizens_ok = citizen_panel.visible
+				citizens_ok = citizens_ok and citizen_text.text.contains("No home selected")
+				_close_citizen_panel()
+				citizens_ok = citizens_ok and not citizen_panel.visible
+				citizens_ok = citizens_ok and _select_placement(1)
+				_toggle_citizen_panel()
+				citizens_ok = citizens_ok and citizen_panel.visible
+				citizens_ok = citizens_ok and known_name != "" and citizen_text.text.contains(known_name)
+				citizens_ok = citizens_ok and citizen_text.text.contains("2 / 2 residents")
+				citizens_ok = citizens_ok and citizen_text.text.contains("40/day")
+				_close_citizen_panel()
+				citizens_ok = citizens_ok and not citizen_panel.visible
 				var progression_after: Dictionary = core.progression_state(SEED)
 				age_ok = bool(progression_after.get("ok", false))
 				age_ok = age_ok and str(progression_after.get("age", "")) == "wood"
@@ -2910,6 +3044,8 @@ func _run_scene_smoke() -> void:
 					status = "occupancy_failed"
 				elif not named_ok:
 					status = "named_failed"
+				elif not citizens_ok:
+					status = "citizens_failed"
 				elif not industry_ok:
 					status = "industry_failed"
 				elif not utility_ok:
@@ -2963,7 +3099,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -2983,6 +3119,7 @@ func _run_scene_smoke() -> void:
 		"ok" if tutorial_ok else "failed",
 		"ok" if starter_ok else "failed",
 		"ok" if named_ok else "failed",
+		"ok" if citizens_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",
