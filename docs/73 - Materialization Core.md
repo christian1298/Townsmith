@@ -72,7 +72,19 @@ pub struct MaterializationSelection {
 
 No route, path, or per-citizen simulation state is allocated. The result is deterministic and does not mutate the identity pool or its checksum.
 
-## 4. Tests
+## 4. Bridge
+
+`TownsmithCore.materialization_state(seed, center_x, center_z, active_radius_m, detailed_radius_m)`:
+
+- validates the seed, world seed, household seed, finite centre, and radii in `0..=MAX_WORLD_COORD_M`;
+- builds completed-home centres and syncs a local copy of the named pool;
+- calls `select_near` with the default 2,000/200 budget;
+- returns `{ok, seed, center:[x,z], counts:{active,detailed}, active:[...], detailed:[...]}`;
+- each citizen has `id`, `name`, `placement_id`, `slot`, `distance_m`, and `home:[x,z]`.
+
+The call is read-only: it does not mutate the live named pool, population, save state, or checksums. Detailed is a prefix of active. The bridge test checks ordering, counts, names, and the prefix invariant.
+
+## 5. Tests
 
 `core_city::named` covers:
 
@@ -89,13 +101,12 @@ No route, path, or per-citizen simulation state is allocated. The result is dete
 - Home positions are an input map; there is no live spatial index yet.
 - No hysteresis/dwell, pinned selection, priority for the selected citizen, or fade state.
 - No route cache; N3 movement can use this selection but must add its own bounded route cache.
-- No bridge or Godot rendering yet.
+- No world-space agents or visuals yet; the bridge is read-only.
 - No save field: the selected set is derived on demand.
 - Selection is city-wide in N3; per-client interest filtering is later.
 
 ## 6. Next
 
-1. Bridge `named_materialization` calls and a deterministic candidate refresh.
-2. Add hysteresis and pinned/selected priority.
-3. Add fade/pop handling and a bounded route cache.
-4. Wire the active/detailed sets into the world scene and benchmark route.
+1. Add hysteresis, pinned/selected priority, fade/pop handling, and a bounded route cache.
+2. Wire the active/detailed sets into the world scene and benchmark route.
+3. Add a materialization decision benchmark and a 2k-active/200-detailed route.
