@@ -3363,6 +3363,7 @@ impl TownsmithCore {
         }
         let city = self.city_summary();
         let utilities = self.utilities_state();
+        let services = self.services_state();
         let industry = self.industry_state();
         let economy = self.economy_state();
         let traffic = self.traffic_state(seed as i64);
@@ -3387,6 +3388,12 @@ impl TownsmithCore {
         if variant_bool(&utilities, "open") {
             input.water_supply = Some(variant_f32(&utilities, "water_supply"));
             input.power_supply = Some(variant_f32(&utilities, "power_supply"));
+        }
+        if variant_bool(&services, "open") {
+            input.school_supply = Some(variant_f32(&services, "school_supply"));
+            input.clinic_supply = Some(variant_f32(&services, "clinic_supply"));
+            input.fire_supply = Some(variant_f32(&services, "fire_supply"));
+            input.police_supply = Some(variant_f32(&services, "police_supply"));
         }
         if variant_bool(&industry, "open") {
             input.food_supply = Some(variant_f32(&industry, "food_supply"));
