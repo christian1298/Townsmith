@@ -192,6 +192,7 @@ The palette shows `structure: timber frame (3/3 stories)`. Loading a package res
 - Bracing, openings, cantilevers, wall thickness, and soil/water tables are not modeled.
 - Only masonry-ground + timber-upper composite receives a bonus.
 - Structural limits are not age-gated yet; a Wood-age city can select concrete in the editor.
+- Structure selection changes metadata and rules, not the voxel palette; brick/concrete art arrives with the 4.4 content library.
 - Age-specific material costs, fire risk, and trades arrive in 4.3/4.4.
 - A very wide building can declare span 0 and pass; this is intentional until beam analysis exists.
 
