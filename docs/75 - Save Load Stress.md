@@ -83,6 +83,12 @@ compose and parse the optional world layers:
 This matrix does not run the Godot `VarDictionary` `world_save`/`world_load`
 paths or disk atomicity.
 
+A deterministic 200-case mutation sweep then picks a layer and applies one of:
+remove the layer, set `format_version=99`, set a foreign seed, null a field,
+truncate the JSON, or clear an array field. Each case is wrapped in
+`catch_unwind`; every layer parser must return `Ok` or a stable error without
+panicking. This is a bounded envelope fuzz, not a schema-aware generator.
+
 ## 6. Limits
 
 - Core stores only; it does not exercise the Godot `world_save`/`world_load` wrapper, `VarDictionary` payloads, terrain deltas, or disk atomicity.
