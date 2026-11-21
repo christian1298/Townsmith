@@ -51,6 +51,26 @@ Both runs:
 
 Checksums: default tax `3eda7a8a22e8d4c3`, high tax `ef5fae9505c5bc53`, placements `a10e0f747f4b73dd`, population `5e7d4a5b8244e4d9`, construction `a6e21d4e26520769`, industry `cfd008eac3ecdafc`, utilities `9805fb8c30be7826`, services `edf672dc7077fc64`, economy `7dbc370945953a6a`.
 
+### 2.1 Phased financing projection
+
+```bash
+cargo run --release -p townsmith-bench --bin financing
+```
+
+The same model as [[72 - Industrial Balance#2.1 Phased financing projection|the Industrial projection]]: 50-building batches, one batch every 30 game days, paid up front from 100,000 cash plus a working-capital loan, with taxes and upkeep accruing from completed batches only. Fixed 20/4 policy, no inflation, full occupancy, no service/utility construction cost, zero interest on the hypothetical facility.
+
+| Plan | Batches | First batch | Peak debt | Construction | Debt-free |
+|---|---:|---:|---:|---:|---:|
+| Shipping cap (100k + 500k) | 0 / 375 | 4,500,000 | 0 | — | **not feasible** |
+| Hypothetical no-cap facility | 375 / 375 | 4,500,000 | **259,129,482** | 30.8 years | 18.6 years |
+
+- The 600,000 of available financing buys **6 buildings** at the 90,000 notional cost (0.036% of the city). The first 50-building batch needs 4,500,000 — 3,900,000 short, and 7.5× the entire available financing.
+- At completion the operating net is 501,285/day before loan service (the probe's 500,485/day includes 800/day). The assumed spend rate is 150,000/day (4,500,000 per batch / 30 days), so under this cadence the city out-earns construction from roughly 30% completion and clears construction debt at 18.6 years, before the last batch completes at 30.8 years.
+- Peak debt is cadence-sensitive: a faster build raises it toward the 1,687,500,000 notional cost. At the modeled peak, the no-cap plan already needs 432× the 600,000 available financing and 518× the 500,000 debt cap.
+- Repaying the notional cost from the completed net takes 3,366 days (9.22 years) before interest. At the game's 0.05%/day rate, interest on peak debt would be 129,565/day — 26% of the operating surplus, before any principal.
+
+The shipping cap, not tax revenue at 20/4, is the binding constraint: at no point in the model can the city fund a 50-building batch from the 600,000 available.
+
 ## 3. Problems found
 
 1. **Default taxes cannot run a Modern city.** Wages alone are 3,000,000/day; building upkeep is 93,750/day; utility/service site upkeep is **4,965/day**; loan service is 800/day. Resident + business taxes at 8/4 produce 1,800,000/day, a **1,299,515/day** deficit. The city crosses the −50,000 bankruptcy threshold after **8 game hours**.

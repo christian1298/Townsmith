@@ -51,6 +51,25 @@ Both runs:
 
 Checksums: default tax `cc5b20eafd7cec3a`, industrial tax `52ba291838c576dc`, placements `e845ea60c408486c`, population `a7fd50ab6aee7ca7`, construction `e9d5661d66aa4c03`, industry `eaf918af6336029d`, utilities `6937605744003ab4`, services `03031f1783e944af`, economy `7840fc77cd92a043`.
 
+### 2.1 Phased financing projection
+
+```bash
+cargo run --release -p townsmith-bench --bin financing
+```
+
+The balance probe imports a finished city, so it cannot show whether a phased build could pay for itself. The financing harness models one: 50-building batches, one batch every 30 game days, paid up front from 100,000 cash plus a working-capital loan, with taxes and upkeep accruing from completed batches only. It uses the 20/4 policy, no inflation, full occupancy of completed capacity, no service/utility construction cost, and zero interest on the hypothetical facility.
+
+| Plan | Batches | First batch | Peak debt | Construction | Debt-free |
+|---|---:|---:|---:|---:|---:|
+| Shipping cap (100k + 500k) | 0 / 59 | 3,348,000 | 0 | — | **not feasible** |
+| Hypothetical no-cap facility | 59 / 59 | 3,348,000 | **140,972,531** | 4.85 years | 10.72 years |
+
+- The 600,000 of available financing buys **8 buildings** at the 66,858 average notional cost (0.31% of the city). The first 50-building batch needs 3,348,000, a 2,748,000 shortfall, so the shipping model cannot start.
+- At completion the operating net is 64,418/day before loan service (the probe's 63,618/day includes 800/day of working-capital loan service). The assumed build spends 110,183/day (3,305,492 per batch / 30 days), so the Industrial operating margin never catches the construction spend rate; even the no-cap plan borrows through completion.
+- Repaying the notional 195,024,000 from the completed city's operating net takes 3,027 days (8.29 years) before interest. At the game's 0.05%/day loan rate, peak debt alone would cost 70,486/day of interest — more than the city's entire operating surplus.
+
+The 30-day batch cadence is a planning assumption, not a measured crew rate. Faster construction increases peak debt; the 600,000 cap is the binding constraint at every plausible cadence. The harness prints stable JSON with a checksum; `--smoke` re-runs it and checks determinism and the headline invariants.
+
 ## 3. Problems found
 
 1. **Default taxes cannot run an Industrial city.** Wages alone are 400,000/day; resident + business taxes at 8/4 produce 224,000/day before upkeep. Utility/service site upkeep adds **997/day**. The city is bankrupt in ~2.3 days.
