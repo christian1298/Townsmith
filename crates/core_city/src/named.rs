@@ -12,6 +12,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::population::Household;
+use crate::traffic::RoadGraph;
 
 /// Identity function version. Changing this intentionally renames everyone.
 pub const IDENTITY_VERSION: u64 = 1;
@@ -24,6 +25,12 @@ pub const MAX_NAMED_CITIZENS: usize = 4_096;
 
 /// Maximum display-name length in bytes.
 pub const MAX_NAMED_NAME_BYTES: usize = 64;
+
+/// Hard cap for the city-wide active materialization set.
+pub const MAX_ACTIVE_CITIZENS: usize = 2_000;
+
+/// Hard cap for the per-client detailed materialization set.
+pub const MAX_DETAILED_CITIZENS: usize = 200;
 
 const FIRST_NAMES: [&str; 32] = [
     "Ada", "Bram", "Corin", "Dara", "Ewan", "Faye", "Geth", "Hana", "Ivo", "Jori", "Kael", "Lena",
@@ -75,6 +82,80 @@ pub struct NamedCitizen {
     pub slot: u32,
     /// Generated display name.
     pub name: String,
+}
+
+/// Caps for one materialization selection pass.
+///
+/// The defaults match the accepted N3 budget: 2,000 city-wide active citizens
+/// and 200 detailed citizens per client. Both caps may be lowered, but
+/// [`MaterializationBudget::validate`] rejects values above the hard caps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaterializationBudget {
+    /// Maximum citizens in the active set.
+    pub active_max: usize,
+    /// Maximum citizens in the detailed set.
+    pub detailed_max: usize,
+}
+
+impl Default for MaterializationBudget {
+    fn default() -> Self {
+        Self {
+            active_max: MAX_ACTIVE_CITIZENS,
+            detailed_max: MAX_DETAILED_CITIZENS,
+        }
+    }
+}
+
+impl MaterializationBudget {
+    /// Validate both caps against each other and the documented hard caps.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NamedError`] when the active cap is zero or above
+    /// [`MAX_ACTIVE_CITIZENS`], the detailed cap is above
+    /// [`MAX_DETAILED_CITIZENS`], or the detailed cap exceeds the active cap.
+    pub fn validate(&self) -> Result<(), NamedError> {
+        if self.active_max == 0 || self.active_max > MAX_ACTIVE_CITIZENS {
+            return Err(NamedError::Invalid("active materialization budget"));
+        }
+        if self.detailed_max > MAX_DETAILED_CITIZENS {
+            return Err(NamedError::Invalid("detailed materialization budget"));
+        }
+        if self.detailed_max > self.active_max {
+            return Err(NamedError::Invalid("detailed budget exceeds active budget"));
+        }
+        Ok(())
+    }
+}
+
+/// One named citizen selected for materialization.
+///
+/// This is a presentation view. It is derived on each selection pass, is not
+/// saved, and carries no route or motion state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MaterializedCitizen {
+    /// Stable 63-bit identity.
+    pub id: u64,
+    /// Home placement id.
+    pub placement_id: u64,
+    /// Resident slot inside the aggregate household.
+    pub slot: u32,
+    /// Generated display name.
+    pub name: String,
+    /// Home position in metres.
+    pub home: [f32; 2],
+    /// Straight-line distance from the selection centre to the home, in metres.
+    pub distance: f32,
+}
+
+/// Result of one deterministic materialization selection pass.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MaterializationSelection {
+    /// Nearest citizens inside the active radius, capped by the active budget.
+    pub active: Vec<MaterializedCitizen>,
+    /// Nearest citizens inside the detailed radius, capped by the detailed
+    /// budget. Every detailed citizen is also present in `active`.
+    pub detailed: Vec<MaterializedCitizen>,
 }
 
 /// Derived named-citizen pool for one city.
@@ -232,6 +313,82 @@ impl NamedCitizens {
     #[must_use]
     pub fn get(&self, placement_id: u64, slot: u32) -> Option<&NamedCitizen> {
         self.citizens.get(&(placement_id, slot))
+    }
+
+    /// Select named citizens for materialization around a camera centre.
+    ///
+    /// Candidates are the named homes within `active_radius_m` of `center`,
+    /// using straight-line metres only: this method never builds, caches, or
+    /// allocates a route. Results are ordered by `(distance, id)`, and each
+    /// identity appears at most once. `active` is capped by
+    /// [`MaterializationBudget::active_max`]; `detailed` is the prefix of
+    /// `active` within `detailed_radius_m`, capped by
+    /// [`MaterializationBudget::detailed_max`]. A detailed radius larger than
+    /// the active radius does not widen the candidate set.
+    ///
+    /// Identities without a finite placement centre are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NamedError`] if the budget is invalid, the centre is not
+    /// finite, or a radius is negative or not finite.
+    pub fn select_near(
+        &self,
+        center: [f32; 2],
+        placement_centers: &BTreeMap<u64, [f32; 2]>,
+        budget: MaterializationBudget,
+        active_radius_m: f32,
+        detailed_radius_m: f32,
+    ) -> Result<MaterializationSelection, NamedError> {
+        budget.validate()?;
+        if !center.iter().all(|value| value.is_finite()) {
+            return Err(NamedError::Invalid("materialization center"));
+        }
+        if !active_radius_m.is_finite() || active_radius_m < 0.0 {
+            return Err(NamedError::Invalid("active materialization radius"));
+        }
+        if !detailed_radius_m.is_finite() || detailed_radius_m < 0.0 {
+            return Err(NamedError::Invalid("detailed materialization radius"));
+        }
+
+        let mut candidates = Vec::new();
+        for citizen in self.citizens.values() {
+            let Some(&home) = placement_centers.get(&citizen.placement_id) else {
+                continue;
+            };
+            if !home.iter().all(|value| value.is_finite()) {
+                continue;
+            }
+            let distance = RoadGraph::straight_line_m(center, home);
+            if distance > active_radius_m {
+                continue;
+            }
+            candidates.push(MaterializedCitizen {
+                id: citizen.id,
+                placement_id: citizen.placement_id,
+                slot: citizen.slot,
+                name: citizen.name.clone(),
+                home,
+                distance,
+            });
+        }
+        candidates.sort_by(|left, right| {
+            left.distance
+                .total_cmp(&right.distance)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let mut seen = BTreeSet::new();
+        candidates.retain(|citizen| seen.insert(citizen.id));
+
+        let active: Vec<MaterializedCitizen> =
+            candidates.into_iter().take(budget.active_max).collect();
+        let detailed = active
+            .iter()
+            .filter(|citizen| citizen.distance <= detailed_radius_m)
+            .take(budget.detailed_max)
+            .cloned()
+            .collect();
+        Ok(MaterializationSelection { active, detailed })
     }
 
     /// Build the deterministic save object.
@@ -564,5 +721,283 @@ mod tests {
         let pool = NamedCitizens::from_save(save).expect("empty pool");
         assert!(pool.is_empty());
         assert_eq!(pool.seed, 2026);
+    }
+
+    fn identity(id: u64, placement_id: u64, slot: u32) -> NamedCitizen {
+        NamedCitizen {
+            id,
+            placement_id,
+            slot,
+            name: name_for(id),
+        }
+    }
+
+    fn pool_with(identities: &[(u64, u64, u32)]) -> NamedCitizens {
+        let mut named = NamedCitizens::new(2026);
+        for &(id, placement_id, slot) in identities {
+            named
+                .citizens
+                .insert((placement_id, slot), identity(id, placement_id, slot));
+        }
+        named
+    }
+
+    fn center_map(entries: &[(u64, [f32; 2])]) -> BTreeMap<u64, [f32; 2]> {
+        entries.iter().copied().collect()
+    }
+
+    fn selected_ids(citizens: &[MaterializedCitizen]) -> Vec<u64> {
+        citizens.iter().map(|citizen| citizen.id).collect()
+    }
+
+    #[test]
+    fn select_near_orders_by_distance_then_id() {
+        let named = pool_with(&[(11, 101, 0), (12, 102, 0), (13, 103, 0)]);
+        let centers = center_map(&[(101, [30.0, 0.0]), (102, [10.0, 0.0]), (103, [20.0, 0.0])]);
+        let selection = named
+            .select_near(
+                [0.0, 0.0],
+                &centers,
+                MaterializationBudget::default(),
+                100.0,
+                0.0,
+            )
+            .expect("select");
+        let distances: Vec<f32> = selection
+            .active
+            .iter()
+            .map(|citizen| citizen.distance)
+            .collect();
+        assert_eq!(distances, vec![10.0, 20.0, 30.0]);
+        assert_eq!(selected_ids(&selection.active), vec![12, 13, 11]);
+        assert!(selection.detailed.is_empty());
+
+        let nearest = &selection.active[0];
+        assert_eq!(nearest.placement_id, 102);
+        assert_eq!(nearest.slot, 0);
+        assert_eq!(nearest.home, [10.0, 0.0]);
+        assert_eq!(nearest.name, name_for(12));
+    }
+
+    #[test]
+    fn select_near_breaks_ties_by_identity_id() {
+        let named = pool_with(&[(9, 1, 0), (3, 2, 0), (5, 3, 0)]);
+        let centers = center_map(&[(1, [10.0, 0.0]), (2, [-10.0, 0.0]), (3, [0.0, 10.0])]);
+        let selection = named
+            .select_near(
+                [0.0, 0.0],
+                &centers,
+                MaterializationBudget::default(),
+                10.0,
+                10.0,
+            )
+            .expect("select");
+        assert_eq!(selected_ids(&selection.active), vec![3, 5, 9]);
+        assert!(selection
+            .active
+            .iter()
+            .all(|citizen| citizen.distance == 10.0));
+        assert_eq!(selected_ids(&selection.detailed), vec![3, 5, 9]);
+    }
+
+    #[test]
+    fn select_near_applies_active_and_detailed_caps() {
+        let named = pool_with(&[(1, 1, 0), (2, 2, 0), (3, 3, 0), (4, 4, 0)]);
+        let centers = center_map(&[
+            (1, [1.0, 0.0]),
+            (2, [2.0, 0.0]),
+            (3, [3.0, 0.0]),
+            (4, [4.0, 0.0]),
+        ]);
+        let budget = MaterializationBudget {
+            active_max: 2,
+            detailed_max: 1,
+        };
+        let selection = named
+            .select_near([0.0, 0.0], &centers, budget, 100.0, 100.0)
+            .expect("select");
+        assert_eq!(selected_ids(&selection.active), vec![1, 2]);
+        assert_eq!(selected_ids(&selection.detailed), vec![1]);
+        assert_eq!(selection.detailed[0], selection.active[0]);
+
+        let selection = named
+            .select_near(
+                [0.0, 0.0],
+                &centers,
+                MaterializationBudget {
+                    active_max: 4,
+                    detailed_max: 4,
+                },
+                100.0,
+                1.5,
+            )
+            .expect("select");
+        assert_eq!(selected_ids(&selection.active), vec![1, 2, 3, 4]);
+        assert_eq!(selected_ids(&selection.detailed), vec![1]);
+    }
+
+    #[test]
+    fn select_near_excludes_out_of_range_and_unknown_homes() {
+        let named = pool_with(&[(1, 1, 0), (2, 2, 0), (3, 3, 0), (4, 4, 0), (5, 5, 0)]);
+        let centers = center_map(&[
+            (1, [99.0, 0.0]),
+            (2, [100.0, 0.0]),
+            (3, [101.0, 0.0]),
+            (4, [f32::NAN, 0.0]),
+        ]);
+        let selection = named
+            .select_near(
+                [0.0, 0.0],
+                &centers,
+                MaterializationBudget::default(),
+                100.0,
+                100.0,
+            )
+            .expect("select");
+        assert_eq!(selected_ids(&selection.active), vec![1, 2]);
+        assert_eq!(selected_ids(&selection.detailed), vec![1, 2]);
+    }
+
+    #[test]
+    fn select_near_handles_empty_inputs() {
+        let budget = MaterializationBudget::default();
+        let empty_pool = NamedCitizens::new(2026);
+        let centers = center_map(&[(1, [1.0, 0.0])]);
+        let selection = empty_pool
+            .select_near([0.0, 0.0], &centers, budget, 80.0, 40.0)
+            .expect("select");
+        assert!(selection.active.is_empty());
+        assert!(selection.detailed.is_empty());
+
+        let named = pool_with(&[(1, 1, 0)]);
+        let empty_centers = BTreeMap::new();
+        let selection = named
+            .select_near([0.0, 0.0], &empty_centers, budget, 80.0, 40.0)
+            .expect("select");
+        assert!(selection.active.is_empty());
+        assert!(selection.detailed.is_empty());
+    }
+
+    #[test]
+    fn select_near_is_deterministic_and_does_not_mutate_identity() {
+        let named = pool_with(&[(5, 1, 0), (2, 2, 0), (9, 3, 0)]);
+        let centers = center_map(&[(1, [10.0, 0.0]), (2, [0.0, 10.0]), (3, [-10.0, 0.0])]);
+        let before = named.checksum();
+        let budget = MaterializationBudget::default();
+        let first = named
+            .select_near([0.0, 0.0], &centers, budget, 80.0, 40.0)
+            .expect("select");
+        let second = named
+            .select_near([0.0, 0.0], &centers, budget, 80.0, 40.0)
+            .expect("select");
+        let reversed = center_map(&[(3, [-10.0, 0.0]), (2, [0.0, 10.0]), (1, [10.0, 0.0])]);
+        let third = named
+            .select_near([0.0, 0.0], &reversed, budget, 80.0, 40.0)
+            .expect("select");
+        assert_eq!(first, second);
+        assert_eq!(first, third);
+        assert_eq!(selected_ids(&first.active), vec![2, 5, 9]);
+        assert_eq!(named.checksum(), before);
+    }
+
+    #[test]
+    fn select_near_deduplicates_identity_ids() {
+        let named = pool_with(&[(7, 1, 0), (7, 2, 0), (8, 3, 0)]);
+        let centers = center_map(&[(1, [10.0, 0.0]), (2, [5.0, 0.0]), (3, [20.0, 0.0])]);
+        let selection = named
+            .select_near(
+                [0.0, 0.0],
+                &centers,
+                MaterializationBudget::default(),
+                100.0,
+                100.0,
+            )
+            .expect("select");
+        assert_eq!(selected_ids(&selection.active), vec![7, 8]);
+        assert_eq!(selection.active[0].placement_id, 2);
+        assert_eq!(selection.active[0].distance, 5.0);
+        assert_eq!(selected_ids(&selection.detailed), vec![7, 8]);
+    }
+
+    #[test]
+    fn materialization_budget_defaults_validate_and_enforce_hard_caps() {
+        assert_eq!(MAX_ACTIVE_CITIZENS, 2_000);
+        assert_eq!(MAX_DETAILED_CITIZENS, 200);
+
+        let budget = MaterializationBudget::default();
+        assert_eq!(budget.active_max, MAX_ACTIVE_CITIZENS);
+        assert_eq!(budget.detailed_max, MAX_DETAILED_CITIZENS);
+        assert!(budget.validate().is_ok());
+
+        assert_eq!(
+            MaterializationBudget {
+                active_max: 0,
+                ..budget
+            }
+            .validate(),
+            Err(NamedError::Invalid("active materialization budget"))
+        );
+        assert_eq!(
+            MaterializationBudget {
+                active_max: MAX_ACTIVE_CITIZENS + 1,
+                ..budget
+            }
+            .validate(),
+            Err(NamedError::Invalid("active materialization budget"))
+        );
+        assert_eq!(
+            MaterializationBudget {
+                detailed_max: MAX_DETAILED_CITIZENS + 1,
+                ..budget
+            }
+            .validate(),
+            Err(NamedError::Invalid("detailed materialization budget"))
+        );
+        assert_eq!(
+            MaterializationBudget {
+                active_max: 100,
+                detailed_max: 200,
+            }
+            .validate(),
+            Err(NamedError::Invalid("detailed budget exceeds active budget"))
+        );
+        assert!(MaterializationBudget {
+            active_max: 1,
+            detailed_max: 0,
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn select_near_rejects_invalid_arguments() {
+        let named = NamedCitizens::new(2026);
+        let centers = BTreeMap::new();
+        let budget = MaterializationBudget::default();
+        assert_eq!(
+            named.select_near([f32::NAN, 0.0], &centers, budget, 80.0, 40.0),
+            Err(NamedError::Invalid("materialization center"))
+        );
+        assert_eq!(
+            named.select_near([0.0, 0.0], &centers, budget, -1.0, 40.0),
+            Err(NamedError::Invalid("active materialization radius"))
+        );
+        assert_eq!(
+            named.select_near([0.0, 0.0], &centers, budget, 80.0, f32::INFINITY),
+            Err(NamedError::Invalid("detailed materialization radius"))
+        );
+        assert_eq!(
+            named.select_near(
+                [0.0, 0.0],
+                &centers,
+                MaterializationBudget {
+                    active_max: 0,
+                    detailed_max: 0,
+                },
+                80.0,
+                40.0,
+            ),
+            Err(NamedError::Invalid("active materialization budget"))
+        );
     }
 }
