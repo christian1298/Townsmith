@@ -2,7 +2,7 @@
 title: Localization
 project: Townsmith
 status: proposed
-updated: 2026-11-19
+updated: 2026-11-21
 tags:
   - townsmith
   - localization
@@ -14,6 +14,9 @@ tags:
 
 > [!decision] D-022 — English + German at launch, moddable language packs
 > Every user-facing string is externalized from the first implementation. English is the source language; German ships at launch. Additional languages are added through language packs, including community/mod packs later.
+
+> [!info] Coverage audit
+> [[69 - Localization Audit]] inventories the remaining hard-coded strings (HUD, dashboard shell and body, tutorial, content names, advisor, errors), separates player-facing from developer-only text, proposes key names and interpolation rules, and defines the phased migration and smoke/CI gate. It reflects the current inline 96-key table in `godot/editor_i18n.gd`; there is no `godot/locale/` at this commit.
 
 ## 1. Goals
 
