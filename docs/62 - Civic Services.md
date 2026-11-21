@@ -160,7 +160,7 @@ See [[63 - Starter Library]] for the age-gated building catalog and generated pa
 - `core_city::services`: 13 tests — empty, school coverage/research, clinic/fire/police, capacity shortage, out-of-range, overlapping research, tier-stat validation, zero demand, tiers/aliases, remove/clear, JSON/checksum, invalid ranges.
 - `core_city`: **239 tests**.
 - `godot_ext`: 3 new tests — service JSON roundtrip/old save, invalid sites, civic research rate; **49 tests**.
-- Workspace: **502 tests + 2 doctests (504 passed)**.
+- Workspace: **510 tests + 2 doctests (512 passed)**.
 
 ## 10. Limits
 

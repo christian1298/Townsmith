@@ -131,7 +131,7 @@ Foundation · Mason 42%
 - `core_city::construction`: 3 new tests — roster cap and crew stall, JSON/legacy roundtrip, phase fallback.
 - `core_city`: **239 tests**.
 - `godot_ext`: **53 tests** (the scene smoke covers the bridge path).
-- Workspace: **502 tests + 2 doctests (504 passed)**.
+- Workspace: **510 tests + 2 doctests (512 passed)**.
 
 ## 8. Limits
 

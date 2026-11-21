@@ -96,29 +96,22 @@ The call is read-only: it does not mutate the live named pool, population, save 
 - duplicate-id deduplication;
 - budget defaults, validation, hard caps, and invalid arguments.
 
-## 5. Limits
+## 6. Limits
 
 - Home positions are an input map; there is no live spatial index yet.
 - No hysteresis/dwell, pinned selection, priority for the selected citizen, or fade state.
 - No route cache; N3 movement can use this selection but must add its own bounded route cache.
-- No world-space agents or visuals yet; the bridge is read-only.
+- The world scene has debug markers only; there are no materialized agents, movement, or route visuals yet.
 - No save field: the selected set is derived on demand.
 - Selection is city-wide in N3; per-client interest filtering is later.
 
-## 6. World-scene overlay
+## 7. World-scene overlay
 
 `F4` toggles a read-only overlay at the selected home/camera target. It calls `materialization_state` with a 250 m active / 120 m detailed radius and renders one blue marker per active citizen plus larger amber markers for detailed citizens. The overlay rebuilds on selection change or every 0.5 s while visible and frees its nodes when hidden. It does not persist or move agents.
 
 Limits: no hysteresis, fade, pinned selection, route cache, or movement; markers are debug geometry.
 
-## 7. Next
-
-1. Add hysteresis, pinned/selected priority, fade/pop handling, and a bounded route cache.
-2. Add hysteresis/pinned selection and a bounded route cache; then move markers into a materialized-agent route.
-3. Add a materialization decision benchmark and a 2k-active/200-detailed route.
-   The selection half is done (section 7); the render route is still open.
-
-## 7. Benchmark
+## 8. Benchmark
 
 ```bash
 cargo run --release -p townsmith-bench --bin materialization
@@ -163,3 +156,8 @@ Limits: the benchmark times the current city-wide scan, not a spatial index;
 it reports selection only (no routes, agents, or rendering), and the timing is
 not a CI gate.
 
+## 9. Next
+
+1. Add hysteresis, pinned/selected priority, fade/pop handling, and a bounded route cache.
+2. Move markers into a materialized-agent route and add the 2k-active/200-detailed render route.
+3. Add per-client interest filtering.
