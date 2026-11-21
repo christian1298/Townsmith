@@ -3336,7 +3336,26 @@ impl TownsmithCore {
             }
             placement.center
         };
-        {
+        let cost = kind.construction_cost();
+        let mut economy = self
+            .economy
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(economy) = economy.as_ref() {
+            if economy.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the treasury belongs to a different seed",
+                );
+            }
+            if !economy.can_afford(cost) {
+                return placement_simple_error(
+                    "insufficient_funds",
+                    format!("utility site costs {cost} and the treasury cannot cover it"),
+                );
+            }
+        }
+        let charged = {
             let mut guard = self
                 .utilities
                 .lock()
@@ -3354,10 +3373,25 @@ impl TownsmithCore {
             if let Err(error) = utilities.add_site(placement_id, kind, center) {
                 return placement_simple_error("utility_failed", error.to_string());
             }
-        }
+            if let Some(economy) = economy.as_mut() {
+                if !economy.try_charge_construction(cost) {
+                    utilities.remove_placement(placement_id);
+                    return placement_simple_error(
+                        "insufficient_funds",
+                        format!("utility site costs {cost} and the treasury cannot cover it"),
+                    );
+                }
+                true
+            } else {
+                false
+            }
+        };
+        drop(economy);
         let mut result = self.utilities_refresh(seed as i64);
         result.set("placement_id", placement_id as i64);
         result.set("kind", &GString::from(kind.as_str()));
+        result.set("construction_cost", cost);
+        result.set("charged", charged);
         result
     }
 
@@ -3535,7 +3569,26 @@ impl TownsmithCore {
             }
             placement.center
         };
-        {
+        let cost = kind.construction_cost(tier);
+        let mut economy = self
+            .economy
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(economy) = economy.as_ref() {
+            if economy.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the treasury belongs to a different seed",
+                );
+            }
+            if !economy.can_afford(cost) {
+                return placement_simple_error(
+                    "insufficient_funds",
+                    format!("service site costs {cost} and the treasury cannot cover it"),
+                );
+            }
+        }
+        let charged = {
             let mut guard = self
                 .services
                 .lock()
@@ -3550,11 +3603,26 @@ impl TownsmithCore {
             if let Err(error) = services.add_site(placement_id, kind, tier, center) {
                 return placement_simple_error("service_failed", error.to_string());
             }
-        }
+            if let Some(economy) = economy.as_mut() {
+                if !economy.try_charge_construction(cost) {
+                    services.remove_placement(placement_id);
+                    return placement_simple_error(
+                        "insufficient_funds",
+                        format!("service site costs {cost} and the treasury cannot cover it"),
+                    );
+                }
+                true
+            } else {
+                false
+            }
+        };
+        drop(economy);
         let mut result = self.services_refresh(seed as i64);
         result.set("placement_id", placement_id as i64);
         result.set("kind", &GString::from(kind.as_str()));
         result.set("tier", &GString::from(tier.as_str()));
+        result.set("construction_cost", cost);
+        result.set("charged", charged);
         result
     }
 
