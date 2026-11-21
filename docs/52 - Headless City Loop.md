@@ -21,6 +21,7 @@ tags:
 cargo run --release -p townsmith-bench --bin city_loop
 cargo run --release -p townsmith-bench --bin city_loop -- --scenario late
 cargo run --release -p townsmith-bench --bin city_loop -- --matrix
+cargo run --release -p townsmith-bench --bin city_loop -- --balance
 cargo run --release -p townsmith-bench --bin city_loop -- --scenario late --days 10 --step 60
 ```
 
@@ -34,6 +35,7 @@ Arguments:
 | `--houses` | 50 | Custom houses; ignored with a scenario unless overridden |
 | `--workplaces` | 5 | Custom workshops; ignored with a scenario unless overridden |
 | `--matrix` | off | Run all three scenarios in one JSON document |
+| `--balance` | off | Run all three scenarios and print the balance/sustainability report |
 
 The default profile is **mid: 50 houses + 5 workshops = 55 buildings**. The early and late profiles are **10 + 1** and **100 + 10**; see [[58 - Runner Matrix]] for the full table. Houses start at `(128, 128)`, 20 m apart; workshops sit at `x = 116` on the five house rows. The cap is 111 houses (116 buildings total) so the starting balance plus the maximum loan can cover the flat 3,000-per-building cost.
 
@@ -109,6 +111,26 @@ Secondary values are pinned:
 
 All three complete construction, reach full water/power/food supply, and stay above bankruptcy. The late profile switches to the 20/4 recovery tax on day 5; early and mid switch on day 15. Full results, baseline details, and the regression command are in [[58 - Runner Matrix]].
 
+## 2c. Balance pass
+
+`--balance` runs the same three scenarios and projects the growth metrics:
+
+| Scenario | Population | Jobs | Age | Daily net | Minimum balance (day) | Final balance | Debt | Recovery day | Sustainable |
+|---|---:|---:|---|---:|---:|---:|---:|---:|---|
+| early | 100 | 110 | wood | +185 | +101,749 (15.0) | 104,517 | 45,890 | 15 | yes |
+| mid | 500 | 500 | masonry | +1,357 | −19,712 (15.0) | 623 | 105,548 | 15 | yes |
+| late | 1,000 | 1,000 | masonry | +2,650 | −26,795 (5.0) | 39,356 | 229,452 | 5 | yes |
+
+A scenario is **sustainable** when its final balance is non-negative and the treasury is not bankrupt. The report reuses the matrix simulation and echoes each scenario checksum, so the balance numbers cannot drift from the regression baseline. It adds no economy defaults, events, or dynamic policy: recovery day is still the scripted tax switch per scenario. `--days` and `--step` apply, but the report always uses the three presets; `--scenario`, `--houses`, and `--workplaces` do not change it.
+
+Evidence from the first pass:
+
+- All three growth points end solvent and above the bankruptcy threshold after 30 days.
+- Early is comfortably positive; its minimum balance is also positive.
+- Mid ends with only **623** of headroom, roughly half a day of net income, so the day-15 recovery tax is load-bearing.
+- Late has more final headroom but the deepest dip (**−26,795**) before its earlier day-5 recovery.
+- Mid and late are **Masonry**; early is **Wood**. The 20,000-resident Industrial threshold is 20× the late runner, so this pass cannot exercise Industrial growth.
+
 ## 3. What it proves
 
 - Fixed-step construction completes all 55 sites within 30 days.
@@ -122,6 +144,7 @@ All three complete construction, reach full water/power/food supply, and stay ab
 - Wages, loan service, and the city ledger aggregate consistently.
 - Construction draw-down charges the full placement cost.
 - The city dips below zero, stays above the bankruptcy threshold, and recovers after a tax change.
+- The `--balance` report shows all three growth points ending sustainable, with the mid city's thin 623 margin and the late city's deeper dip visible.
 - Repeated runs produce the same checksums.
 - The five-house test completes, staffs its sites, adds utilities, and reaches full service in one simulated day.
 - A 15-house test proves houses beyond the first row use non-zero road commutes.
@@ -151,8 +174,9 @@ This is a scripted recovery, not a balanced default. The standard 8/4 policy los
 - `city_loop` bin: 15 houses produce a non-zero road commute.
 - `city_loop` bin: scenario presets have the expected sizes.
 - `city_loop` bin: the early profile completes, fills, and reaches full service.
+- `city_loop` bin: the balance report has a stable shape and produces identical JSON on repeated runs.
 - `scripts/bench_city_loop.sh` compares the early/mid/late checksums with `benchmarks/baselines/phase3_city_loop.json`.
-- Workspace: **441 tests + 2 doctests**.
+- Workspace: **442 tests + 2 doctests (444 passed)**.
 
 ## 7. Next
 

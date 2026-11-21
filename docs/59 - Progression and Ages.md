@@ -23,7 +23,7 @@ tags:
 | **4.2** | Material tiers and structural limits: stories, spans, foundations, composite construction | **Done** — PR #78, see [[60 - Structural Limits]] |
 | **4.3** | Research pool and data-driven tech tree | **Done** — PR #80, see [[61 - Research]] |
 | **4.4** | Starter content library, service tiers, age-specific construction trades | **Done** — services #84, starter library #86, trades #87, see [[64 - Construction Trades]] |
-| **4.5** | Tutorial scenario and the wood-to-industrial balance pass | **Partial** — tutorial #88; balance next |
+| **4.5** | Tutorial scenario and the wood-to-industrial balance pass | **Partial** — tutorial #88; first balance report landed, Industrial-scale tuning still open |
 
 ## 2. Ages
 
@@ -73,12 +73,29 @@ pub struct AgeState {
 - The dashboard adds an **Age** section before Work.
 - The scene smoke checks `age=ok` after the acceptance house is occupied: wood, next masonry, threshold 250.
 
+## 4b. Balance report
+
+```bash
+cargo run --release -p townsmith-bench --bin city_loop -- --balance
+```
+
+The report runs the early/mid/late matrix and shows where each city lands on the age curve:
+
+| Scenario | Population | Jobs | Age | Daily net | Minimum balance (day) | Final balance | Debt | Recovery day | Sustainable |
+|---|---:|---:|---|---:|---:|---:|---:|---:|---|
+| early | 100 | 110 | wood | +185 | +101,749 (15.0) | 104,517 | 45,890 | 15 | yes |
+| mid | 500 | 500 | masonry | +1,357 | −19,712 (15.0) | 623 | 105,548 | 15 | yes |
+| late | 1,000 | 1,000 | masonry | +2,650 | −26,795 (5.0) | 39,356 | 229,452 | 5 | yes |
+
+A row is **sustainable** when the final balance is non-negative and the treasury is not bankrupt. All three current points pass. The pass proves that the Wood → Masonry step is affordable at the runner's scale: the 100-resident town stays comfortably positive, and the 500- and 1,000-resident cities recover from their construction dip. It does not prove the Masonry → Industrial step: **20,000 residents is 20× the late scenario**, so the runner never reaches Industrial and the age table's industrial costs remain untested by this harness.
+
 ## 5. What it proves
 
 - Population milestones produce a deterministic age without a save migration.
 - The HUD and dashboard read the same state as the core.
 - The next age and progress are visible before the player reaches it.
 - The 100-resident early scenario remains Wood; the 500- and 1,000-resident runner cities are Masonry.
+- The `--balance` report confirms the Wood and Masonry runner points end solvent, while explicitly leaving Industrial untested at 20,000 residents.
 - Future research and content gates can consume `AgeState` without reimplementing thresholds.
 
 ## 6. Tests
@@ -86,7 +103,8 @@ pub struct AgeState {
 - `core_city::progression`: 6 tests — thresholds, boundary populations, next threshold/progress, final age, stable names/materials, determinism, age-id aliases.
 - `core_city` total: **200 tests**; `core_structure` **19 tests + 1 doctest**.
 - `godot_ext`: **50 tests**; the scene smoke covers `progression_state`, structural limits, research generation, the tutorial checklist, and the HUD; structural age rejection is covered by the bridge helper and core placement tests.
-- Workspace: **441 tests + 2 doctests (443 passed)**.
+- `city_loop` bin: 5 tests, including the deterministic balance report that maps the runner populations to Wood and Masonry.
+- Workspace: **442 tests + 2 doctests (444 passed)**.
 - Smoke marker includes `age=ok`, `research=ok`, `tutorial=ok`, `starter=ok`, and `trades=ok`.
 
 ## 7. Limits
@@ -95,13 +113,14 @@ pub struct AgeState {
 - The population-derived age gates structural systems; research nodes record unlocks but do not gate placement yet. Materials, props, and blueprint libraries are not gated.
 - A Wood-age city can still author a concrete blueprint; placement rejects it with `age_locked`. Legacy blueprints without structural metadata bypass this gate.
 - Trade rosters affect the aggregate construction crew; there are no per-trade queues, wages, training, or trade offices. No age-specific art, roofs, lights, or vehicles.
-- The 1,000-resident late scenario is still Masonry; Industrial is a 20,000-resident target.
+- The 1,000-resident late scenario is still Masonry; Industrial is a 20,000-resident target, 20× the runner's largest point.
+- The balance pass is a report over the fixed matrix, not a dynamic policy or a tuned campaign curve.
 - Research generation is a bridge tick in this slice, not yet part of the authoritative server loop.
 - The age table is draft balance, not a tuned campaign curve.
 
 ## 8. Next
 
-1. 4.5b: the wood-to-industrial balance pass.
+1. Extend the balance report to a 20,000-resident Industrial point (or a cohort-scale city) before calling the wood-to-industrial pass complete.
 2. Add a starter-library panel with thumbnails and filters.
 3. Move structural limits and the tech tree into content data for mods.
 4. Add age-aware blueprint metadata and library filters.

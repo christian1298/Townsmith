@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 
 use core_city::{
-    summarize, CityRuntime, ConstructionStore, Economy, Home, IndustryKind, IndustryStore,
+    summarize, Age, CityRuntime, ConstructionStore, Economy, Home, IndustryKind, IndustryStore,
     Placement, PlacementPlan, PlacementRequest, PlacementStore, RoadGraph, RoadSegment, RoadStore,
     UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, MAX_LOAN,
 };
@@ -78,9 +78,10 @@ fn main() {
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(DEFAULT_STEP_SECONDS);
     let matrix = std::env::args().any(|arg| arg == "--matrix");
+    let balance = std::env::args().any(|arg| arg == "--balance");
     if days == 0 || !step.is_finite() || step <= 0.0 {
         eprintln!(
-            "usage: city_loop [--scenario early|mid|late] [--days N] [--houses N] [--workplaces N] [--step SECONDS] [--matrix]"
+            "usage: city_loop [--scenario early|mid|late] [--days N] [--houses N] [--workplaces N] [--step SECONDS] [--matrix] [--balance]"
         );
         std::process::exit(2);
     }
@@ -99,6 +100,15 @@ fn main() {
         println!(
             "{}",
             serde_json::to_string_pretty(&output).expect("pretty json")
+        );
+        return;
+    }
+
+    if balance {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&balance_report(&SCENARIOS, days, step))
+                .expect("pretty json")
         );
         return;
     }
@@ -456,6 +466,41 @@ fn simulate(scenario: &Scenario, days: u64, step: f64) -> serde_json::Value {
     result
 }
 
+fn balance_report(scenarios: &[Scenario], days: u64, step: f64) -> serde_json::Value {
+    let scenarios: Vec<serde_json::Value> = scenarios
+        .iter()
+        .map(|scenario| balance_entry(scenario, days, step))
+        .collect();
+    serde_json::json!({
+        "scene": "city_loop_balance",
+        "days": days,
+        "step_seconds": step,
+        "scenarios": scenarios,
+    })
+}
+
+fn balance_entry(scenario: &Scenario, days: u64, step: f64) -> serde_json::Value {
+    let result = simulate(scenario, days, step);
+    let population = result["population"].as_u64().expect("population");
+    let final_balance = result["balance"].as_f64().expect("balance");
+    let bankrupt = result["bankrupt"].as_bool().expect("bankrupt");
+    serde_json::json!({
+        "scenario": scenario.name,
+        "population": population,
+        "jobs": result["jobs"],
+        "age": Age::from_population(population).name(),
+        "daily_net": result["daily_net"],
+        "min_balance": result["min_balance"],
+        "min_balance_day": result["min_balance_day"],
+        "final_balance": final_balance,
+        "debt": result["debt"],
+        "recovery_day": result["recovery_day"],
+        "bankrupt": bankrupt,
+        "sustainable": final_balance >= 0.0 && !bankrupt,
+        "checksum": result["checksum"],
+    })
+}
+
 fn even_ids(span: u64, count: u64) -> BTreeSet<u64> {
     if span == 0 || count == 0 {
         return BTreeSet::new();
@@ -581,5 +626,35 @@ mod tests {
         assert!(result["power_supply"].as_f64().expect("power") > 0.99);
         assert!(result["food_supply"].as_f64().expect("food") > 0.99);
         assert_eq!(result["checksum"], simulate(&early, 30, 300.0)["checksum"]);
+    }
+
+    #[test]
+    fn balance_report_has_a_stable_shape() {
+        let scenarios = [test_scenario(5, 5)];
+        let first = balance_report(&scenarios, 1, 60.0);
+        let second = balance_report(&scenarios, 1, 60.0);
+        assert_eq!(first, second);
+        assert_eq!(first["scene"], "city_loop_balance");
+        assert_eq!(first["days"], 1);
+        assert_eq!(first["step_seconds"], 60.0);
+
+        let entry = &first["scenarios"][0];
+        assert_eq!(entry["scenario"], "test");
+        assert_eq!(entry["population"], 50);
+        assert_eq!(entry["jobs"], 450);
+        assert_eq!(entry["age"], "wood");
+        assert!(entry["daily_net"].is_f64());
+        assert!(entry["min_balance"].is_f64());
+        assert!(entry["min_balance_day"].is_f64());
+        assert!(entry["final_balance"].is_f64());
+        assert!(entry["debt"].is_f64());
+        assert_eq!(entry["recovery_day"], 1.0);
+        assert_eq!(entry["bankrupt"], false);
+        assert_eq!(
+            entry["sustainable"],
+            entry["final_balance"].as_f64().expect("balance") >= 0.0
+                && !entry["bankrupt"].as_bool().expect("bankrupt")
+        );
+        assert!(entry["checksum"].is_string());
     }
 }
