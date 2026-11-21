@@ -2,7 +2,7 @@
 title: Phase 3 Slice Plan
 project: Townsmith
 status: draft
-updated: 2026-11-20
+updated: 2026-11-21
 tags:
   - townsmith
   - phase-3
@@ -38,8 +38,8 @@ The full feature list is in [[08 - Roadmap]]. This plan cuts it into reviewable 
 | **3.4** | Primary industries: lumberjack, farmer, hunter with visible loops and storage | **Done** — PR #64, see [[54 - Primary Industries]] |
 | **3.5** | Utilities: water or power first, coverage, shortages, happiness/production effects | **Done** — PR #65, see [[55 - Utilities]] |
 | **3.6** | Economy: taxes, upkeep, construction draw-down, loans, bankruptcy | **Done** — PR #67, see [[53 - Treasury and Taxes]] |
-| **3.7** | Traffic: road graph, flow fields, visual vehicles | Planned |
-| **3.8** | Dashboard and advisor: city metrics, district panel, notifications | Planned |
+| **3.7** | Traffic: road graph, flow fields, visual vehicles | **This PR** — see [[56 - Traffic]] |
+| **3.8** | Dashboard and advisor: city metrics, district panel, notifications | Next |
 | **3.9** | Headless 30-day runner and regression metrics | **Partial** — PR #61, city-loop runner; see [[52 - Headless City Loop]] |
 
 Each stage is a separate branch, worktree, and PR. Keep simulation deterministic and headless-testable.
@@ -202,7 +202,7 @@ See [[54 - Primary Industries]] for rates, structs, tick order, persistence, HUD
 - `cargo test -p core_city` — industry, staffing, and food-replenishment tests.
 - `cargo test --workspace`.
 - `smoke_world_scene.sh` — industry site, production, supply, beacon, save/clear/load; marker `industry=ok` (checked by the script).
-- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `1d78a3cac4fb0f22`.
+- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `9578bd64586b2240`.
 - clippy and fmt.
 
 ## 6e. Stage 3.5 scope
@@ -232,9 +232,9 @@ See [[55 - Utilities]] for rates, formulas, tick order, persistence, HUD, tests,
 ### Verification
 
 - `cargo test -p core_city` — utilities, population service, industry power tests.
-- `cargo test --workspace` — **330 tests + 1 doctest (331 passed)**.
+- `cargo test --workspace` — **344 tests + 1 doctest (345 passed)**.
 - `smoke_world_scene.sh` — water/power service, needs recovery, production, persistence, beacons; marker `utilities=ok` (checked by the script).
-- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `1d78a3cac4fb0f22`.
+- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `9578bd64586b2240`.
 - clippy and fmt.
 
 ## 6f. Stage 3.6 scope
@@ -265,14 +265,48 @@ See [[53 - Treasury and Taxes]] for the ledger, loan model, formulas, controls, 
 ### Verification
 
 - `cargo test -p core_city` — economy construction, loan, bankruptcy, and old-save tests.
-- `cargo test --workspace` — **330 tests + 1 doctest (331 passed)**.
+- `cargo test --workspace` — **344 tests + 1 doctest (345 passed)**.
 - `smoke_world_scene.sh` — placement charge, loan, tax recovery, save/load; marker `economy=ok` (checked by the script).
-- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `1d78a3cac4fb0f22`.
+- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `9578bd64586b2240`.
+- clippy and fmt.
+
+## 6g. Stage 3.7 scope
+
+### In
+
+- `core_city::traffic`: derived `RoadGraph` with endpoint/T-junction/crossing splits and deduplicated edges.
+- Integer-metre Dijkstra and `FlowField`, one field per workplace and reused by every home.
+- Road-distance commute in `tick_with_supplies_and_roads`; straight-line fallback for disconnected points.
+- Bridge `traffic_state(seed)` with nodes, edges, components, length, and checksum.
+- HUD traffic line and one visible car per road segment with deterministic motion.
+- World-scene smoke: graph stats, car movement, save/load rebuild; marker `traffic=ok`.
+- 30-day runner with five workplaces and a road grid, producing a non-zero average commute.
+- `townsmith-bench --bin traffic` grid benchmark comparing pair queries with flow-field batches.
+
+### Out
+
+- Lanes, one-way roads, signals, intersection capacity, congestion, or travel time.
+- Transit, parking, accidents, sidewalk/pedestrian graphs, or per-agent pathfinding.
+- Incremental graph updates, worker-thread pathfinding, or a spatial index.
+- Road cost, upkeep, maintenance, or traffic-driven car density.
+
+### Data
+
+See [[56 - Traffic]] for the graph model, flow fields, commute integration, 30-day result, benchmark, tests, and limits.
+
+### Verification
+
+- `cargo test -p core_city` — traffic graph, flow field, and road-commute tests.
+- `cargo test --workspace` — **344 tests + 1 doctest (345 passed)**.
+- `smoke_world_scene.sh` — graph stats, cars, movement, save/load; marker `traffic=ok` (checked by the script).
+- `cargo run --release -p townsmith-bench --bin city_loop` — checksum `9578bd64586b2240`.
+- `cargo run --release -p townsmith-bench --bin traffic` — graph and flow-field benchmark.
 - clippy and fmt.
 
 ## 7. Next
 
-1. 3.7: road graph and traffic.
-3. 3.8: dashboard and advisor, including utility shortages.
-4. Materialize a few named citizens for selection and stories.
+1. 3.8: dashboard and advisor, including traffic, utility, housing, jobs, and budget summaries.
+2. 3.9: runner matrix (early town, mid city, late city) and committed baselines.
+3. Materialize a few named citizens for selection and stories.
+4. Add a spatial index and incremental traffic graph updates before the 1M gate.
 5. Keep the 500-citizen/50-building 60 FPS gate visible from the first slice.

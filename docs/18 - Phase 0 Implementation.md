@@ -2,7 +2,7 @@
 title: Phase 0 Implementation
 project: Townsmith
 status: active
-updated: 2026-11-20
+updated: 2026-11-21
 tags:
   - townsmith
   - implementation
@@ -22,7 +22,7 @@ tags:
 | `crates/core_voxel` | 32³ chunk, palette/RLE, greedy mesher, chunked volume + cross-chunk meshing | Working, 52 tests |
 | `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming, terrain mesh + LOD + seam skirts | Working, 62 tests |
 | `crates/core_sim` | 1M-scale cohort simulation plus deterministic 2,000 active agents | Working, 26 tests |
-| `crates/core_city` | Deterministic synthetic city layouts, placement, construction, roads, lots, settlements, households, treasury/loans, primary industries, and water/power utilities | Working, 125 tests |
+| `crates/core_city` | Deterministic synthetic city layouts, placement, construction, roads, lots, settlements, households, treasury/loans, primary industries, water/power utilities, and traffic | Working, 137 tests |
 | `crates/core_blueprint` | `.tsbp` v1 package: zip, metadata, RLE voxel stream, BLAKE3 hash | Working, 11 tests |
 | `crates/core_rooms` | Room detection, props, capacity/jobs, material stats, shared acceptance fixture, room bounds | Working, 12 tests + 1 doctest |
 | `crates/server` | Headless cohort tick harness (no GPU, no socket yet) | Working |
@@ -161,8 +161,9 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 | Terrain mesh, 256 m chunk | 65,536 cells | — | 83,994 quads | ~1.41 ms |
 | Terrain LOD 2, 256 m chunk | 65,536 cells | — | 25,327 quads | ~0.39 ms |
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
+| Traffic graph, 32 × 32 grid | 64 roads | 1,024 nodes | 1,984 edges | ~0.44 ms build; 1.3 ms / 1,000 flow queries |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, and agent paths and a baseline for regressions. The workspace has **330 tests + 1 doctest**: 52 voxel, 62 world, 26 simulation, 125 city, 11 blueprint, 12 rooms, 41 bridge, and 1 city-loop test.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, agent, and traffic paths and a baseline for regressions. The workspace has **344 tests + 1 doctest**: 52 voxel, 62 world, 26 simulation, 137 city, 11 blueprint, 12 rooms, 41 bridge, 2 city-loop tests, and 1 traffic-grid test.
 
 ### Vertical slice acceptance
 
@@ -221,6 +222,7 @@ cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort
 cargo run --release -p townsmith-bench --bin city_layout
 cargo run --release -p townsmith-bench --bin city_loop
+cargo run --release -p townsmith-bench --bin traffic
 cargo run --release -p townsmith-bench --bin agents
 cargo run --release -p townsmith-bench --bin terrain
 cargo run --release -p townsmith-bench --bin volume

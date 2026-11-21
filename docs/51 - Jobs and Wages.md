@@ -2,7 +2,7 @@
 title: Jobs and Wages
 project: Townsmith
 status: active
-updated: 2026-11-20
+updated: 2026-11-21
 tags:
   - townsmith
   - phase-3
@@ -120,22 +120,22 @@ The non-zero commute and split-assignment cases are covered by the core tests, b
 ## 6. Tests
 
 - `core_city`: 7 new tests — global nearest-slot order, id-order independence, split assignment, shortage, commute happiness, JSON roundtrip, old-save defaults.
-- `core_city` total: **125 tests**.
+- `core_city` total: **137 tests**.
 - `godot_ext`: **40 tests** total; the scene smoke covers the bridge path.
-- Workspace: **330 tests + 1 doctest**.
+- Workspace: **344 tests + 1 doctest**.
 
 ## 7. Limits
 
 - Assignment materializes every household/workplace pair, sorts by distance, and greedily consumes the closest slots: O(H × W) memory and O(H × W log(H × W)) time. Fine for the slice, not for 100k buildings. A spatial index is required before the 1M gate.
 - A household can split workers across workplaces, but only the weighted average commute is stored.
 - Wages are fixed and gross; no trade/skill differences.
-- Commute is straight-line metres, not road distance or time.
+- Commute was straight-line metres in 3.3; [[56 - Traffic]] now uses road distance when the graph is connected, with a straight-line fallback.
 - No named workers, shifts, attendance, or unemployment benefits.
 - The runtime is still one aggregate household per completed residential building.
 
 ## 8. Next
 
-1. 3.7: road graph, traffic, and road-distance commute.
+1. 3.7: road graph and traffic ([[56 - Traffic]]).
 2. Replace the O(H×W) assignment with a spatial grid before scaling.
-3. Add road-distance commute when the traffic graph arrives (3.7).
+3. Add travel time and congestion when the traffic graph matures.
 4. Add wages to the budget/treasury in 3.6.

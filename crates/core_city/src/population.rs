@@ -11,6 +11,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::traffic::RoadGraph;
+
 /// Current household save format.
 pub const POPULATION_FORMAT_VERSION: u16 = 1;
 
@@ -300,6 +302,33 @@ impl CityRuntime {
         water_supply: f32,
         power_supply: f32,
     ) -> PopulationReport {
+        self.tick_with_supplies_and_roads(
+            dt_s,
+            homes,
+            workplaces,
+            food_supply,
+            water_supply,
+            power_supply,
+            None,
+        )
+    }
+
+    /// Advance with service shares and an optional road graph.
+    ///
+    /// When a graph is supplied, commute distances follow the road network;
+    /// otherwise they are straight-line metres. Unreachable pairs fall back to
+    /// straight-line distance so a disconnected network cannot strand jobs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tick_with_supplies_and_roads(
+        &mut self,
+        dt_s: f64,
+        homes: &[Home],
+        workplaces: &[Workplace],
+        food_supply: f32,
+        water_supply: f32,
+        power_supply: f32,
+        roads: Option<&RoadGraph>,
+    ) -> PopulationReport {
         self.sync_homes(homes);
         let food = normalize_supply(food_supply);
         let water = normalize_supply(water_supply);
@@ -331,6 +360,14 @@ impl CityRuntime {
         self.move_in_carry = (desired - target as f32).clamp(0.0, 0.999_999);
 
         let mut remaining: Vec<u32> = workplaces.iter().map(|work| work.slots).collect();
+        let flows = roads
+            .map(|graph| {
+                workplaces
+                    .iter()
+                    .map(|work| graph.flow_to(work.center))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let mut need: BTreeMap<u64, u32> = self
             .households
             .iter()
@@ -346,9 +383,15 @@ impl CityRuntime {
                 if work.slots == 0 {
                     continue;
                 }
-                let dx = work.center[0] - household.home[0];
-                let dz = work.center[1] - household.home[1];
-                pairs.push((dx * dx + dz * dz, id, index));
+                let distance = roads
+                    .and_then(|graph| {
+                        flows
+                            .get(index)
+                            .and_then(Option::as_ref)
+                            .and_then(|flow| graph.flow_distance_m(household.home, flow))
+                    })
+                    .unwrap_or_else(|| RoadGraph::straight_line_m(household.home, work.center));
+                pairs.push((distance, id, index));
             }
         }
         pairs.sort_by(|left, right| {
@@ -359,7 +402,7 @@ impl CityRuntime {
         });
         let mut assignments: BTreeMap<u64, (u32, f32)> = BTreeMap::new();
         let mut staffing_out: BTreeMap<u64, u32> = BTreeMap::new();
-        for (distance_sq, id, index) in pairs {
+        for (distance, id, index) in pairs {
             if remaining[index] == 0 {
                 continue;
             }
@@ -374,7 +417,7 @@ impl CityRuntime {
             *left -= take;
             let entry = assignments.entry(id).or_insert((0, 0.0));
             entry.0 += take;
-            entry.1 += distance_sq.sqrt() * take as f32;
+            entry.1 += distance * take as f32;
             let workplace_id = workplaces[index].id;
             let staffed = staffing_out.entry(workplace_id).or_insert(0);
             *staffed = staffed.saturating_add(take);
@@ -767,6 +810,54 @@ mod tests {
         assert!((runtime.households[&2].commute_m - 10.0).abs() < 0.001);
         assert!((runtime.daily_wages() - 40.0).abs() < 0.001);
         assert!((runtime.average_commute_m() - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn road_commute_follows_the_network_and_falls_back_when_disconnected() {
+        fn road(id: u64, start: [i32; 2], end: [i32; 2]) -> crate::road::RoadSegment {
+            crate::road::RoadSegment {
+                id,
+                start,
+                end,
+                width_m: 8,
+            }
+        }
+        let graph = RoadGraph::build(&[
+            road(1, [0, 0], [0, 20]),
+            road(2, [0, 20], [20, 20]),
+            road(3, [20, 20], [20, 0]),
+        ])
+        .expect("graph");
+        let homes = [Home {
+            id: 1,
+            capacity: 1,
+            center: [0.0, 0.0],
+        }];
+        let workplaces = [Workplace {
+            id: 10,
+            slots: 1,
+            center: [20.0, 0.0],
+        }];
+        let mut runtime = CityRuntime::new(2026);
+        runtime.set_move_in_per_second(2.0);
+        runtime.tick_with_supplies_and_roads(1.0, &homes, &workplaces, 1.0, 1.0, 1.0, Some(&graph));
+        assert!((runtime.households[&1].commute_m - 60.0).abs() < 0.001);
+
+        let disconnected =
+            RoadGraph::build(&[road(1, [0, 0], [0, 10]), road(2, [20, 0], [20, 10])])
+                .expect("graph");
+        let mut runtime = CityRuntime::new(2026);
+        runtime.set_move_in_per_second(2.0);
+        runtime.tick_with_supplies_and_roads(
+            1.0,
+            &homes,
+            &workplaces,
+            1.0,
+            1.0,
+            1.0,
+            Some(&disconnected),
+        );
+        assert!((runtime.households[&1].commute_m - 20.0).abs() < 0.001);
     }
 
     #[test]

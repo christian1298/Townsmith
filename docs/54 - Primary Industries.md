@@ -2,7 +2,7 @@
 title: Primary Industries
 project: Townsmith
 status: active
-updated: 2026-11-20
+updated: 2026-11-21
 tags:
   - townsmith
   - phase-3
@@ -191,22 +191,23 @@ All fifty buildings have ten residents and ten job slots. Each household fills i
 | Stock after 30 days | wood ~7,199 · food ~4,799 · hides ~1,800 |
 | Food supply | 100% |
 | Food / water / rest | 100% / 100% / 100% |
-| Happiness | 1.000 |
+| Happiness | 0.896 |
+| Average commute | 136.4 m |
 | Utility sites | 5 (2 water, 3 power) |
 | Water / power supply | 100% / 100% |
-| Construction cost | 150,000 |
-| Loan | 100,000 |
-| Minimum balance | −18,610 at day 15 |
-| Treasury after 30 days | 2,822 |
-| Debt after 30 days | 91,781 |
-| Daily net | +1,430 |
+| Construction cost | 165,000 |
+| Loan | 115,000 |
+| Minimum balance | −19,712 at day 15 |
+| Treasury after 30 days | 623 |
+| Debt after 30 days | 105,548 |
+| Daily net | +1,357 |
 
 Checksums:
 
-- city loop: `1d78a3cac4fb0f22`
-- population runtime: `c0d28b58ce38145a`
-- construction: `aa3e36ad3cc1e717`
-- treasury: `f57d4378435f03ee`
+- city loop: `9578bd64586b2240`
+- population runtime: `696784824ff74555`
+- construction: `5ce06d0d9af1739e`
+- treasury: `1c213cc40278a13b`
 - industry: `1b536bce524f0c76`
 - utilities: `44e47a38faeb0edb`
 
@@ -217,8 +218,8 @@ Food now reaches the city and stays at 100%; [[55 - Utilities]] keeps water and 
 - `core_city::industry`: 13 tests — empty store, per-kind output, time/worker scaling, consumption, full and partial supply, power scaling/outage, remove/clear, JSON/checksum, invalid stock, kind parsing.
 - `core_city::population`: 3 new tests — per-workplace staffing, food replenishment, old saves without staffing.
 - `godot_ext`: 4 new tests — industry JSON roundtrip/old save, unknown kind/invalid stock, staffing roundtrip, stale-staffing sanitize.
-- `city_loop`: the five-house test asserts sites, food stock, wood production, full supply, and happiness > 0.6.
-- Workspace: **330 tests + 1 doctest** (52 voxel, 62 world, 26 simulation, 125 city, 11 blueprint, 12 rooms, 41 bridge, 1 city-loop).
+- `city_loop`: the five-house test asserts sites, food stock, wood production, full supply, and happiness > 0.6; the 15-house test covers a road commute.
+- Workspace: **344 tests + 1 doctest** (52 voxel, 62 world, 26 simulation, 137 city, 11 blueprint, 12 rooms, 41 bridge, 2 city-loop tests, and 1 traffic-grid test).
 
 ## 8. Limits
 
