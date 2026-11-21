@@ -97,6 +97,18 @@ A pinned citizen outside the active cap replaces the furthest non-pinned citizen
 
 The call is read-only: it does not mutate the live named pool, population, save state, or checksums. Detailed is a prefix of active. The bridge test checks ordering, counts, names, and the prefix invariant.
 
+### Stateful bridge scheduler
+
+`materialization_step(seed, center_x, center_z, inner_radius_m, outer_radius_m, detailed_radius_m, pinned_id)` keeps the previous selection in `TownsmithCore.materialization`:
+
+- validates seed/world/population, finite centre, radii, `inner <= outer`, and pin;
+- syncs a local named-pool clone and calls `select_near_with_previous`;
+- computes `diff_selection(previous, next, 64)`;
+- stores the new selection only on success and returns counts, diff counts, `changed` entries (`added`/`updated`/`removed`), and a named checksum;
+- `materialization_clear()` drops the stored selection.
+
+The call is read-only for the named pool and save. The scene still uses `materialization_state` and the F4 overlay; wiring the scheduler into the overlay and adding fade/route state is next.
+
 ## 6. Change budget
 
 `MAX_MATERIALIZATION_CHANGES = 64`.
