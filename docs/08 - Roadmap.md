@@ -208,6 +208,9 @@ The staged cut is in [[49 - Phase 3 Slice Plan]]: city ledger, households/needs,
 
 ### Phase 5 — Metropolis scale (6–8 weeks)
 
+> [!info] Gate plan
+> The measurable gate — reference hardware, required scenes, thresholds, 3-run protocol, pass/fail rules, and fallbacks — is in [[68 - Metropolis Gate]]. **The 1M / RTX 3060 gate is not yet passed.** The 21-house 6,195 FPS result is an RTX 4080 data point for the slice, not the gate.
+
 **Goals**
 - Prove 1M+ population on 8-core/16-thread + RTX 3060-class hardware.
 - Make the city readable and manageable at district scale.
