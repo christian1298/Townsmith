@@ -150,33 +150,39 @@ Checksums:
 
 ```bash
 cargo run --release -p townsmith-bench --bin traffic
-cargo run --release -p townsmith-bench --bin traffic -- --grid 64 --queries 5000
+cargo run --release -p townsmith-bench --bin traffic -- --grid 32 --queries 1000
+cargo run --release -p townsmith-bench --bin traffic -- --grid 64 --queries 5000 --goals 64
 ```
 
-Default 32 × 32 grid, 16 m spacing, 1,000 queries:
+Default 64 × 64 grid, 16 m spacing, 1,000 queries, 64 goal fields, four cache passes:
 
 | Metric | Result |
 |---|---:|
-| Roads | 64 |
-| Graph nodes / edges | 1,024 / 1,984 |
+| Roads | 128 |
+| Graph nodes / edges | 4,096 / 8,064 |
 | Components | 1 |
-| Road length | 31,744 m |
-| Graph build | ~0.44 ms |
-| 1,000 pair queries | ~94 ms |
-| 1,000 flow-field queries | ~1.3 ms |
-| Flow-field build | ~0.15 ms |
-| Average pair distance | 341.5 m |
-| Average flow distance | 505.2 m |
+| Road length | 129,024 m |
+| Graph build | ~1.9 ms |
+| 1,000 pair queries | ~449 ms |
+| 1,000 flow-field queries | ~4.8 ms |
+| Single flow-field build | ~0.64 ms |
+| 64 goal builds, uncached | ~60 ms |
+| 64 goal builds, cache | ~59 ms (1,192 hits / 64 misses over four passes) |
+| 1,000 goal-flow queries | ~5.5 ms |
+| Average pair distance | 672.4 m |
+| Average flow distance | 1,017.3 m |
 
-The pair-query path runs Dijkstra per call. The flow field is roughly **75× faster** for batched origins and is the path the game loop uses.
+The pair-query path runs Dijkstra per call and includes the linear nearest-node scan. Flow fields are much faster for batched origins. The `FlowFieldCache` is a bounded, deterministic FIFO keyed by exact goal; it is benchmark-only until the road graph has a change version, because a stale cached field after a road edit would be a correctness hazard. The grid checksum is `4ba17cb887e8d9c5`; the flow checksum is `bad91013922d1e27`.
+
+These are microbenchmarks on one machine, not the 1M/60 FPS gate.
 
 ## 7. Tests
 
-- `core_city::traffic`: 11 tests — empty graph, single segment, L shape, crossing split, T-junction, disconnected components, walking legs, duplicate edges, invalid points, flow fields, checksum stability.
+- `core_city::traffic`: 15 tests — empty graph, single segment, L shape, crossing split, T-junction, disconnected components, walking legs, duplicate edges, invalid points, flow fields, checksum stability, cache reuse/FIFO, invalid goals, flow-field checksums.
 - `core_city::population`: road commute and disconnected fallback.
 - `townsmith-bench`: 4 city-loop tests (small city and a multi-row commute) and 1 traffic-grid test.
 - World scene smoke: `traffic=ok`, graph stats, one car, movement, save/load rebuild.
-- Workspace: **441 tests + 2 doctests**; core_city **200**, core_structure **19**, bridge **50**.
+- Workspace after the balance report merges: **448 tests + 2 doctests (450 passed)**; core_city **204**, core_structure **19**, bridge **50**.
 
 ## 8. Limits
 

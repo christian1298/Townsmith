@@ -117,7 +117,7 @@ pub use settlement::{
 };
 pub use trades::{Trade, TradeError, TradePool};
 pub use traffic::{
-    FlowField, RoadGraph, RoadNode, TrafficError, TrafficStats, MAX_TRAFFIC_NODES,
+    FlowField, FlowFieldCache, RoadGraph, RoadNode, TrafficError, TrafficStats, MAX_TRAFFIC_NODES,
     MAX_TRAFFIC_ROADS,
 };
 pub use tutorial::{
