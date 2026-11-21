@@ -209,7 +209,7 @@ func _unhandled_input(event: InputEvent) -> void:
 					_cycle_industry()
 				KEY_U:
 					_cycle_utility()
-				KEY_D:
+				KEY_F1:
 					_toggle_dashboard()
 				KEY_T:
 					_cycle_tax_policy()
@@ -409,7 +409,7 @@ func _setup_ui() -> void:
 	dashboard_text.custom_minimum_size = Vector2(0.0, 420.0)
 	dashboard_box.add_child(dashboard_text)
 	var dashboard_hint := Label.new()
-	dashboard_hint.text = "D or Esc to close"
+	dashboard_hint.text = "F1 or Esc to close"
 	dashboard_hint.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
 	dashboard_box.add_child(dashboard_hint)
 
@@ -1184,7 +1184,7 @@ func _update_hud() -> void:
 			SEED, blueprint_name,
 		]
 	else:
-		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew on/off · I industry · U utility · T tax · L loan · D dashboard · V +10k materials · F5 save · F9 load" % [
+		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew on/off · I industry · U utility · T tax · L loan · F1 dashboard · V +10k materials · F5 save · F9 load" % [
 			SEED, blueprint_name, rooms, capacity,
 		]
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error

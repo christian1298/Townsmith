@@ -39,7 +39,7 @@ The full feature list is in [[08 - Roadmap]]. This plan cuts it into reviewable 
 | **3.5** | Utilities: water or power first, coverage, shortages, happiness/production effects | **Done** — PR #65, see [[55 - Utilities]] |
 | **3.6** | Economy: taxes, upkeep, construction draw-down, loans, bankruptcy | **Done** — PR #67, see [[53 - Treasury and Taxes]] |
 | **3.7** | Traffic: road graph, flow fields, visual vehicles | **Done** — PR #69, see [[56 - Traffic]] |
-| **3.8** | Dashboard and advisor: city metrics, district panel, notifications | **This PR** — see [[57 - Dashboard and Advisor]] |
+| **3.8** | Dashboard and advisor: city metrics, district panel, notifications | **Done** — PR #71, see [[57 - Dashboard and Advisor]] |
 | **3.9** | Headless 30-day runner and regression metrics | Next — city-loop runner exists (PR #61); see [[52 - Headless City Loop]] |
 
 Each stage is a separate branch, worktree, and PR. Keep simulation deterministic and headless-testable.
