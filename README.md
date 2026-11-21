@@ -70,6 +70,8 @@ GODOT=/path/to/godot ./scripts/smoke_layout.sh
 GODOT=/path/to/godot ./scripts/smoke_world_placement.sh
 GODOT=/path/to/godot ./scripts/smoke_world_scene.sh
 GODOT=/path/to/godot ./scripts/smoke_slice.sh
+# Headless MultiMesh setup harness for 10k/50k/250k boxes (not FPS)
+GODOT=/path/to/godot ./scripts/smoke_metropolis_render.sh
 cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort

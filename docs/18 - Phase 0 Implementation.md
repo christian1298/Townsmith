@@ -207,6 +207,8 @@ GODOT=/path/to/godot ./scripts/smoke_godot.sh
 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_streaming_flyover.json
 CITY_TIER=late GODOT=/path/to/godot ./scripts/bench_godot.sh 1 5 benchmarks/routes/phase0_city_late.json
 GODOT=/path/to/godot ./scripts/smoke_city.sh
+# Headless MultiMesh setup harness for 10k/50k/250k boxes (not FPS evidence)
+GODOT=/path/to/godot ./scripts/smoke_metropolis_render.sh
 VOXEL_INSTANCES=200 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_voxel_instances.json
 GODOT=/path/to/godot ./scripts/smoke_voxel.sh
 GODOT=/path/to/godot ./scripts/smoke_volume.sh
