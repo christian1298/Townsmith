@@ -93,6 +93,8 @@ var modal_label: Label
 var dashboard_panel: PanelContainer
 var dashboard_text: RichTextLabel
 var dashboard_visible := false
+var dashboard_title: Label
+var dashboard_hint: Label
 var dashboard_refresh_accum := 0.0
 var citizen_panel: PanelContainer
 var citizen_text: RichTextLabel
@@ -457,8 +459,8 @@ func _setup_ui() -> void:
 	var dashboard_box := VBoxContainer.new()
 	dashboard_box.add_theme_constant_override("separation", 6)
 	dashboard_panel.add_child(dashboard_box)
-	var dashboard_title := Label.new()
-	dashboard_title.text = "City Dashboard"
+	dashboard_title = Label.new()
+	dashboard_title.text = i18n.t("base.ui.dashboard.title")
 	dashboard_title.add_theme_font_size_override("font_size", 20)
 	dashboard_box.add_child(dashboard_title)
 	dashboard_text = RichTextLabel.new()
@@ -469,8 +471,8 @@ func _setup_ui() -> void:
 	dashboard_text.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	dashboard_text.custom_minimum_size = Vector2(0.0, 420.0)
 	dashboard_box.add_child(dashboard_text)
-	var dashboard_hint := Label.new()
-	dashboard_hint.text = "F1 or Esc to close"
+	dashboard_hint = Label.new()
+	dashboard_hint.text = i18n.t("base.ui.dashboard.close_hint")
 	dashboard_hint.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
 	dashboard_box.add_child(dashboard_hint)
 
@@ -1759,6 +1761,10 @@ func _toggle_dashboard() -> bool:
 func _update_dashboard() -> void:
 	if dashboard_text == null:
 		return
+	if dashboard_title != null:
+		dashboard_title.text = i18n.t("base.ui.dashboard.title")
+	if dashboard_hint != null:
+		dashboard_hint.text = i18n.t("base.ui.dashboard.close_hint")
 	var city: Dictionary = core.city_summary()
 	var economy: Dictionary = core.economy_state()
 	var industry: Dictionary = core.industry_state()
@@ -1812,7 +1818,8 @@ func _update_dashboard() -> void:
 			float(traffic.get("total_length_m", 0.0)),
 			int(traffic.get("components", 0)),
 		]
-	var text := "[b]Population[/b]\n%d residents · %d / %d housing · %d vacant\n" % [
+	var text := "[b]%s[/b]\n%d residents · %d / %d housing · %d vacant\n" % [
+		i18n.t("base.ui.dashboard.section.population"),
 		population,
 		population,
 		int(city.get("housing_capacity", 0)),
@@ -1830,7 +1837,7 @@ func _update_dashboard() -> void:
 				int(progression.get("next_threshold", 0)),
 				roundi(float(progression.get("progress", 0.0)) * 100.0),
 			]
-	text += "[b]Age[/b]\n%s\n" % age_line
+	text += "[b]%s[/b]\n%s\n" % [i18n.t("base.ui.dashboard.section.age"), age_line]
 	var research_line := "—"
 	if bool(research.get("open", false)):
 		research_line = "%d points · +%.1f/day · %d / %d technologies" % [
@@ -1839,7 +1846,7 @@ func _update_dashboard() -> void:
 			int(research.get("completed_count", 0)),
 			int(research.get("node_count", 0)),
 		]
-	text += "[b]Research[/b]\n%s\n" % research_line
+	text += "[b]%s[/b]\n%s\n" % [i18n.t("base.ui.dashboard.section.research"), research_line]
 	var tutorial: Dictionary = core.tutorial_state(SEED)
 	var tutorial_line := "—"
 	if bool(tutorial.get("ok", false)):
@@ -1854,29 +1861,36 @@ func _update_dashboard() -> void:
 				int(tutorial.get("total", 0)),
 				str(tutorial.get("current_title", "?")),
 			]
-	text += "[b]Tutorial[/b]\n%s\n" % tutorial_line
-	text += "[b]Work[/b]\n%d / %d jobs filled · %d unemployed · commute %.0f m\n" % [
+	text += "[b]%s[/b]\n%s\n" % [i18n.t("base.ui.dashboard.section.tutorial"), tutorial_line]
+	text += "[b]%s[/b]\n%d / %d jobs filled · %d unemployed · commute %.0f m\n" % [
+		i18n.t("base.ui.dashboard.section.work"),
 		int(city.get("employed", 0)),
 		int(city.get("jobs", 0)),
 		int(city.get("unemployed", 0)),
 		float(city.get("average_commute_m", 0.0)),
 	]
-	text += "[b]Wellbeing[/b]\nhappiness %s\nneeds %s\n" % [happiness, needs]
-	text += "[b]Utilities[/b]\n%s\n[b]Civic services[/b]\n%s\n[b]Treasury[/b]\n%s\n[b]Industry[/b]\nwood %.0f · food %.0f · hides %.0f\n" % [
+	text += "[b]%s[/b]\nhappiness %s\nneeds %s\n" % [i18n.t("base.ui.dashboard.section.wellbeing"), happiness, needs]
+	text += "[b]%s[/b]\n%s\n[b]%s[/b]\n%s\n[b]%s[/b]\n%s\n[b]%s[/b]\nwood %.0f · food %.0f · hides %.0f\n" % [
+		i18n.t("base.ui.dashboard.section.utilities"),
 		utilities_line,
+		i18n.t("base.ui.dashboard.section.civic"),
 		civic_line,
+		i18n.t("base.ui.dashboard.section.treasury"),
 		treasury,
+		i18n.t("base.ui.dashboard.section.industry"),
 		float(industry.get("wood", 0.0)),
 		float(industry.get("food", 0.0)),
 		float(industry.get("hides", 0.0)),
 	]
-	text += "[b]Roads[/b]\n%s\n[b]Construction[/b]\n%d active · %d stalled · %d completed\n" % [
+	text += "[b]%s[/b]\n%s\n[b]%s[/b]\n%d active · %d stalled · %d completed\n" % [
+		i18n.t("base.ui.dashboard.section.roads"),
+		i18n.t("base.ui.dashboard.section.construction"),
 		roads,
 		int(construction.get("active", 0)),
 		int(construction.get("stalled", 0)),
 		int(city.get("completed_buildings", 0)),
 	]
-	text += "\n[b]Advisor[/b]\n"
+	text += "\n[b]%s[/b]\n" % i18n.t("base.ui.dashboard.section.advisor")
 	var messages: Array = advice.get("messages", [])
 	if messages.is_empty():
 		text += "No advice available."
@@ -2532,6 +2546,7 @@ func _run_scene_smoke() -> void:
 	var starter_ok := false
 	var economy_ok := false
 	var dashboard_ok := false
+	var hud_i18n_ok := false
 	var save_ok := false
 	var clear_ok := false
 	var load_ok := false
@@ -3017,6 +3032,13 @@ func _run_scene_smoke() -> void:
 				dashboard_ok = dashboard_ok and dashboard_text.text.contains("deficit")
 				_toggle_dashboard()
 				dashboard_ok = dashboard_ok and not dashboard_panel.visible
+				i18n.set_locale("de")
+				_update_dashboard()
+				hud_i18n_ok = dashboard_title.text.contains("Stadt") and dashboard_text.text.contains("Bevölkerung")
+				i18n.set_locale("en")
+				_update_dashboard()
+				hud_i18n_ok = hud_i18n_ok and dashboard_title.text.contains("City Dashboard") and dashboard_text.text.contains("Population")
+				dashboard_ok = dashboard_ok and hud_i18n_ok
 				var balance_before_loan := float(economy_after.get("balance", 0.0))
 				var loan_state: Dictionary = core.economy_borrow(SEED, LOAN_AMOUNT)
 				var tax_state: Dictionary = core.economy_set_taxes(SEED, 100.0, 8.0)
@@ -3222,7 +3244,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s follow=%s citizen_i18n=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s follow=%s citizen_i18n=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -3251,6 +3273,7 @@ func _run_scene_smoke() -> void:
 		"ok" if service_ok else "failed",
 		"ok" if economy_ok else "failed",
 		"ok" if dashboard_ok else "failed",
+		"ok" if hud_i18n_ok else "failed",
 		"ok" if traffic_ok else "failed",
 		"ok" if select_ok else "failed",
 		"ok" if enter_ok else "failed",
