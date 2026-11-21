@@ -29,7 +29,7 @@ In:
 
 Out:
 
-- Per-building research output. Schools, libraries, and universities add explicit output with the 4.4 content library.
+- Per-building research output beyond schools. Basic/improved/advanced schools now add 8/20/50 points/day ([[62 - Civic Services]]); universities and libraries are still content work.
 - A graph-panel UI with branches and search. The dashboard lists the pool; `Y` unlocks the cheapest available node.
 - Research speed modifiers, policies, scholars, tech trading, or modded tree loading at runtime.
 - Full content gating for materials, props, and blueprints. Only structural systems are gated in this slice.
@@ -103,7 +103,7 @@ A success subtracts the cost and adds the node to `completed`. The pool is not t
 | Information | `services.university` | 8,000 | school | university |
 | Information | `construction.composite` | 9,000 | steel | composite core |
 
-The costs are a draft curve. They are intentionally reachable at the population thresholds: a 500-resident Masonry city generates 25 points/day, so a 100-point node takes four days before civic output.
+The costs are a draft curve. They are intentionally reachable at the population thresholds: a 500-resident Masonry city generates 25 points/day, so a 100-point node takes four days before civic output. A school adds 8–50 points/day on top ([[62 - Civic Services]]).
 
 ## 4. Age gates
 
@@ -167,12 +167,12 @@ The scene smoke:
 - `core_city::research`: 14 tests — default tree and ages, starting pool, generation, unlock/spend, duplicate/unknown, age/prerequisite gates, insufficient points, availability flags, JSON/checksum, invalid state, prerequisite closure and spend consistency, invalid/cyclic trees, invalid costs.
 - `core_city::progression`: 6 tests including age id aliases.
 - `core_structure`: 19 tests + 1 doctest, including minimum-age mapping.
-- `godot_ext`: 46 tests, including research JSON roundtrip/old save, unknown completed nodes, and structure age helpers.
-- Workspace: **409 tests + 2 doctests (411 passed)**.
+- `godot_ext`: 49 tests, including research JSON roundtrip/old save, unknown completed nodes, and structure age helpers.
+- Workspace: **425 tests + 2 doctests (427 passed)**.
 
 ## 9. Limits
 
-- Research generation is population-only; civic buildings do not add output yet.
+- Research generation is population plus covered school output; universities and libraries do not add output yet.
 - The default tree is compiled in; runtime modded trees are not loaded.
 - Only structural systems are gated by age; materials, props, and blueprint libraries are not.
 - `Y` always chooses the cheapest available node; there is no branch UI or queue.
@@ -186,7 +186,7 @@ The scene smoke:
 
 ## 10. Next
 
-1. 4.4: starter content, civic buildings with research output, service tiers, and age-specific trades.
+1. 4.4: starter content and age-specific trades; civic school output and service tiers are in [[62 - Civic Services]].
 2. Load a tree from a resource pack and expose branch/search UI.
 3. Gate materials and blueprint libraries by age, not only structure systems.
 4. Add research policies and speed modifiers.

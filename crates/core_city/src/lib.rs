@@ -42,6 +42,7 @@ pub mod population;
 pub mod progression;
 pub mod research;
 pub mod road;
+pub mod services;
 pub mod settlement;
 pub mod traffic;
 pub mod utilities;
@@ -97,6 +98,11 @@ pub use research::{
 pub use road::{
     RoadError, RoadRequest, RoadSegment, RoadStore, MAX_ROADS, MAX_ROAD_LENGTH_M, MAX_ROAD_SLOPE_M,
     MAX_ROAD_WIDTH_M, MIN_ROAD_WIDTH_M, ROAD_FORMAT_VERSION,
+};
+pub use services::{
+    ServiceConsumer, ServiceError, ServiceKind, ServiceReport, ServiceSite, ServiceStore,
+    ServiceTier, MAX_SERVICE_CAPACITY, MAX_SERVICE_RADIUS_M, MAX_SERVICE_RESEARCH_PER_DAY,
+    MAX_SERVICE_SITES, SCHOOL_DEMAND_PER_RESIDENT, SERVICES_FORMAT_VERSION, WORKER_SERVICE_DEMAND,
 };
 pub use settlement::{
     Settlement, SettlementError, SettlementRequest, SettlementStore, MAX_SETTLEMENTS,
