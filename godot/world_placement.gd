@@ -34,6 +34,17 @@ const MATERIALIZATION_REFRESH_SECONDS := 0.5
 const MATERIALIZATION_INNER_RADIUS_M := 250.0
 const MATERIALIZATION_OUTER_RADIUS_M := 350.0
 const MATERIALIZATION_DETAILED_RADIUS_M := 120.0
+# Added and updated markers fade in over this window; removed markers fade out
+# over it before their node is freed. It is shorter than the refresh cadence so
+# a slow camera leaves only a brief cross-fade between two selections.
+const MATERIALIZATION_FADE_SECONDS := 0.25
+# Safety deadline for a removed node: even if its alpha never reaches zero, it
+# is freed after this many seconds.
+const MATERIALIZATION_FADE_MAX_SECONDS := 1.0
+# The bridge returns at most this many diff entries per step. The overlay
+# applies at most this many node changes per refresh, including any fallback
+# reconciliation left over from a truncated diff.
+const MATERIALIZATION_CHANGE_BUDGET := 64
 # Follow pulls the Mayor target toward the selected home with an exponential
 # ease. The epsilon is the arrival radius and also the pan detector: a larger
 # target move between follow steps means the player panned and takes over.
@@ -79,6 +90,11 @@ var materialization_visible := false
 var materialization_refresh_accum := 0.0
 var materialization_selected_key := -1
 var materialization_counts := Vector2i.ZERO
+# Live markers keyed by citizen id. Retained citizens keep their node across
+# refreshes; only the bounded diff touches nodes.
+var materialization_nodes: Dictionary = {}
+# Removed markers finish their fade outside the id map, then are freed.
+var materialization_fading: Array[MeshInstance3D] = []
 var industry_root: Node3D
 var industry_nodes: Dictionary = {}
 var industry_kinds: Dictionary = {}
@@ -183,7 +199,8 @@ func _process(delta: float) -> void:
 		materialization_refresh_accum += delta
 		if materialization_refresh_accum >= MATERIALIZATION_REFRESH_SECONDS:
 			materialization_refresh_accum = 0.0
-			_rebuild_materialization()
+			_step_materialization()
+		_advance_materialization_fades(delta)
 	else:
 		materialization_refresh_accum = 0.0
 	if citizen_visible:
@@ -850,9 +867,240 @@ func _toggle_materialization() -> bool:
 func _clear_materialization_nodes() -> void:
 	if materialization_root == null:
 		return
-	for node in materialization_root.get_children():
-		node.free()
+	for node in materialization_nodes.values():
+		if is_instance_valid(node):
+			node.free()
+	materialization_nodes.clear()
+	for node in materialization_fading:
+		if is_instance_valid(node):
+			node.free()
+	materialization_fading.clear()
+	for child in materialization_root.get_children():
+		if is_instance_valid(child):
+			child.free()
 	materialization_counts = Vector2i.ZERO
+
+func _materialization_marker_material(detailed_here: bool, alpha: float) -> StandardMaterial3D:
+	var base: StandardMaterial3D = materialization_detailed_material if detailed_here else materialization_active_material
+	var material := base.duplicate() as StandardMaterial3D
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	var color := base.albedo_color
+	color.a = clampf(alpha, 0.0, 1.0)
+	material.albedo_color = color
+	return material
+
+func _set_materialization_marker_alpha(node: MeshInstance3D, alpha: float) -> void:
+	var material := node.material_override as StandardMaterial3D
+	if material == null:
+		return
+	var clamped := clampf(alpha, 0.0, 1.0)
+	var color := material.albedo_color
+	color.a = clamped
+	material.albedo_color = color
+	node.set_meta("materialization_alpha", clamped)
+
+func _style_materialization_marker(node: MeshInstance3D, detailed_here: bool) -> void:
+	node.mesh = materialization_detailed_mesh if detailed_here else materialization_active_mesh
+	var base: StandardMaterial3D = materialization_detailed_material if detailed_here else materialization_active_material
+	var material := node.material_override as StandardMaterial3D
+	if material != null:
+		var alpha := material.albedo_color.a
+		material.albedo_color = Color(
+			base.albedo_color.r, base.albedo_color.g, base.albedo_color.b, alpha
+		)
+	node.set_meta("materialization_detailed", detailed_here)
+
+func _place_materialization_marker(node: MeshInstance3D, home: PackedFloat32Array) -> void:
+	if home.size() != 2:
+		return
+	var ground: float = core.world_height_at(SEED, home[0], home[1])
+	if ground < 0.0:
+		return
+	var mesh: BoxMesh = node.mesh as BoxMesh
+	var height := mesh.size.y if mesh != null else 0.0
+	node.position = Vector3(home[0], ground + height * 0.5, home[1])
+
+func _create_materialization_marker(citizen: Dictionary, detailed_here: bool, fade_in: bool) -> MeshInstance3D:
+	var home: PackedFloat32Array = citizen.get("home", PackedFloat32Array())
+	if home.size() != 2:
+		return null
+	var ground: float = core.world_height_at(SEED, home[0], home[1])
+	if ground < 0.0:
+		return null
+	var mesh: BoxMesh = materialization_detailed_mesh if detailed_here else materialization_active_mesh
+	var alpha := 0.0 if fade_in else 1.0
+	var node := MeshInstance3D.new()
+	node.mesh = mesh
+	node.material_override = _materialization_marker_material(detailed_here, alpha)
+	node.position = Vector3(home[0], ground + mesh.size.y * 0.5, home[1])
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	node.set_meta("materialization_id", int(citizen.get("id", -1)))
+	node.set_meta("materialization_detailed", detailed_here)
+	node.set_meta("materialization_alpha", alpha)
+	materialization_root.add_child(node)
+	return node
+
+func _reclaim_fading_marker(id: int) -> void:
+	# A citizen that is re-added before its fade-out finishes replaces the old
+	# marker instead of leaving two nodes for one id.
+	for index in range(materialization_fading.size() - 1, -1, -1):
+		var node: MeshInstance3D = materialization_fading[index]
+		if not is_instance_valid(node):
+			materialization_fading.remove_at(index)
+		elif int(node.get_meta("materialization_id", -1)) == id:
+			materialization_fading.remove_at(index)
+			node.free()
+
+func _upsert_materialization_marker(
+	id: int, citizen: Dictionary, detailed_here: bool, fade_in: bool
+) -> bool:
+	var node: MeshInstance3D = materialization_nodes.get(id)
+	if is_instance_valid(node):
+		var home: PackedFloat32Array = citizen.get("home", PackedFloat32Array())
+		_style_materialization_marker(node, detailed_here)
+		_place_materialization_marker(node, home)
+		if fade_in:
+			_set_materialization_marker_alpha(node, 0.0)
+		return true
+	_reclaim_fading_marker(id)
+	node = _create_materialization_marker(citizen, detailed_here, fade_in)
+	if node == null:
+		return false
+	materialization_nodes[id] = node
+	return true
+
+func _retire_materialization_marker(id: int) -> void:
+	var node: MeshInstance3D = materialization_nodes.get(id)
+	if not is_instance_valid(node):
+		materialization_nodes.erase(id)
+		return
+	materialization_nodes.erase(id)
+	var alpha := float(node.get_meta("materialization_alpha", 1.0))
+	if alpha <= 0.001:
+		node.free()
+		return
+	node.set_meta("materialization_fade_from", alpha)
+	node.set_meta("materialization_fade_out", 0.0)
+	materialization_fading.append(node)
+
+func _advance_materialization_fades(delta: float) -> void:
+	if delta <= 0.0 or materialization_root == null:
+		return
+	var fade_step := delta / MATERIALIZATION_FADE_SECONDS
+	for id in materialization_nodes.keys():
+		var node: MeshInstance3D = materialization_nodes[id]
+		if not is_instance_valid(node):
+			materialization_nodes.erase(id)
+			continue
+		var alpha := float(node.get_meta("materialization_alpha", 1.0))
+		if alpha < 1.0:
+			_set_materialization_marker_alpha(node, minf(1.0, alpha + fade_step))
+	var index := materialization_fading.size() - 1
+	while index >= 0:
+		var node := materialization_fading[index]
+		if not is_instance_valid(node):
+			materialization_fading.remove_at(index)
+		else:
+			var elapsed := float(node.get_meta("materialization_fade_out", 0.0)) + delta
+			node.set_meta("materialization_fade_out", elapsed)
+			var fade_from := float(node.get_meta("materialization_fade_from", 1.0))
+			var remaining := clampf(1.0 - elapsed / MATERIALIZATION_FADE_SECONDS, 0.0, 1.0)
+			_set_materialization_marker_alpha(node, fade_from * remaining)
+			if remaining <= 0.0 or elapsed >= MATERIALIZATION_FADE_MAX_SECONDS:
+				materialization_fading.remove_at(index)
+				node.free()
+		index -= 1
+
+func _reconcile_materialization_markers(
+	active_by_id: Dictionary, detailed_ids: Dictionary, budget: int
+) -> int:
+	# The bridge caps a diff at 64 changes, but it has already stored the full
+	# new selection, so entries deferred by a truncated diff are never sent
+	# again. Reconcile only the budget the diff left unused, so a truncated
+	# step converges over later refreshes without exceeding 64 node changes.
+	var changed := 0
+	for id in materialization_nodes.keys():
+		if changed >= budget:
+			return changed
+		if not active_by_id.has(id):
+			_retire_materialization_marker(id)
+			changed += 1
+	for id in active_by_id.keys():
+		if changed >= budget:
+			return changed
+		if not materialization_nodes.has(id):
+			var citizen: Dictionary = active_by_id[id]
+			if _upsert_materialization_marker(id, citizen, detailed_ids.has(id), true):
+				changed += 1
+	return changed
+
+func _apply_materialization_state(state: Dictionary) -> void:
+	var counts: Dictionary = state.get("counts", {})
+	var active_count := int(counts.get("active", 0))
+	var detailed_count := int(counts.get("detailed", 0))
+	var active: Array = state.get("active", [])
+	var detailed: Array = state.get("detailed", [])
+	var detailed_ids := {}
+	for index in mini(detailed_count, detailed.size()):
+		var detailed_id := int(detailed[index].get("id", -1))
+		if detailed_id >= 0:
+			detailed_ids[detailed_id] = true
+	var active_by_id := {}
+	for index in mini(active_count, active.size()):
+		var citizen: Dictionary = active[index]
+		var id := int(citizen.get("id", -1))
+		if id >= 0:
+			active_by_id[id] = citizen
+	var changed: Array = state.get("changed", [])
+	var applied := 0
+	for entry in changed:
+		if applied >= MATERIALIZATION_CHANGE_BUDGET:
+			break
+		var id := int(entry.get("id", -1))
+		if id < 0:
+			continue
+		match str(entry.get("action", "")):
+			"removed":
+				_retire_materialization_marker(id)
+			"added", "updated":
+				_upsert_materialization_marker(id, entry, detailed_ids.has(id), true)
+			_:
+				continue
+		applied += 1
+	if applied < MATERIALIZATION_CHANGE_BUDGET:
+		applied += _reconcile_materialization_markers(
+			active_by_id, detailed_ids, MATERIALIZATION_CHANGE_BUDGET - applied
+		)
+	# Detailed membership is not an identity/home change, so refresh retained
+	# markers without touching their nodes or fade timers.
+	for id in materialization_nodes.keys():
+		var node: MeshInstance3D = materialization_nodes.get(id)
+		if not is_instance_valid(node):
+			continue
+		var detailed_here := detailed_ids.has(id)
+		if bool(node.get_meta("materialization_detailed", false)) != detailed_here:
+			_style_materialization_marker(node, detailed_here)
+			var citizen: Dictionary = active_by_id.get(id, {})
+			if not citizen.is_empty():
+				_place_materialization_marker(node, citizen.get("home", PackedFloat32Array()))
+
+func _step_materialization() -> void:
+	if not materialization_visible or core == null:
+		return
+	var previous_counts := materialization_counts
+	var center := _materialization_center()
+	var state: Dictionary = core.materialization_step(
+		SEED, center.x, center.z,
+		MATERIALIZATION_INNER_RADIUS_M, MATERIALIZATION_OUTER_RADIUS_M,
+		MATERIALIZATION_DETAILED_RADIUS_M, _materialization_pin()
+	)
+	if not bool(state.get("ok", false)):
+		return
+	_apply_materialization_state(state)
+	var counts: Dictionary = state.get("counts", {})
+	materialization_counts = Vector2i(int(counts.get("active", 0)), int(counts.get("detailed", 0)))
+	if materialization_counts != previous_counts:
+		_update_hud()
 
 func _rebuild_materialization() -> void:
 	var previous_counts := materialization_counts
@@ -875,25 +1123,17 @@ func _rebuild_materialization() -> void:
 	var detailed: Array = state.get("detailed", [])
 	var detailed_ids := {}
 	for index in mini(detailed_count, detailed.size()):
-		detailed_ids[int(detailed[index].get("id", -1))] = true
-	var created := 0
+		var detailed_id := int(detailed[index].get("id", -1))
+		if detailed_id >= 0:
+			detailed_ids[detailed_id] = true
+	# A selection/state reset recreates the full selection once. Steady-state
+	# refreshes go through _step_materialization and stay within the budget.
 	for index in mini(active_count, active.size()):
 		var citizen: Dictionary = active[index]
-		var home: PackedFloat32Array = citizen.get("home", PackedFloat32Array())
-		if home.size() != 2:
+		var id := int(citizen.get("id", -1))
+		if id < 0:
 			continue
-		var ground: float = core.world_height_at(SEED, home[0], home[1])
-		if ground < 0.0:
-			continue
-		var detailed_here := detailed_ids.has(int(citizen.get("id", -1)))
-		var mesh := materialization_detailed_mesh if detailed_here else materialization_active_mesh
-		var node := MeshInstance3D.new()
-		node.mesh = mesh
-		node.material_override = materialization_detailed_material if detailed_here else materialization_active_material
-		node.position = Vector3(home[0], ground + mesh.size.y * 0.5, home[1])
-		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		materialization_root.add_child(node)
-		created += 1
+		_upsert_materialization_marker(id, citizen, detailed_ids.has(id), true)
 	materialization_counts = Vector2i(active_count, detailed_count)
 	if materialization_counts != previous_counts:
 		_update_hud()
@@ -2752,6 +2992,7 @@ func _run_scene_smoke() -> void:
 	var content_i18n_ok := false
 	var materialization_ok := false
 	var materialization_step_ok := false
+	var materialization_fade_ok := false
 	var follow_ok := false
 	var render_ok := false
 	var structure_ok := false
@@ -3171,6 +3412,58 @@ func _run_scene_smoke() -> void:
 				materialization_ok = materialization_ok and status_label.text.contains(
 					"Citizens near: %d active · %d detailed" % [expected_active, expected_detailed]
 				)
+				# Added markers fade in: a clear resets the bridge selection so
+				# the next step is an all-added diff against the same node map.
+				_advance_materialization_fades(MATERIALIZATION_FADE_SECONDS + 0.05)
+				var settled_alpha_ok := materialization_root.get_child_count() > 0
+				for child in materialization_root.get_children():
+					if is_instance_valid(child) and child.material_override is StandardMaterial3D:
+						settled_alpha_ok = settled_alpha_ok and (
+							(child.material_override as StandardMaterial3D).albedo_color.a >= 0.999
+						)
+				materialization_fade_ok = settled_alpha_ok
+				core.materialization_clear()
+				var marker_count := materialization_root.get_child_count()
+				_step_materialization()
+				var added_fading_ok := false
+				for child in materialization_root.get_children():
+					if is_instance_valid(child) and child.material_override is StandardMaterial3D:
+						if (child.material_override as StandardMaterial3D).albedo_color.a < 0.999:
+							added_fading_ok = true
+				materialization_fade_ok = materialization_fade_ok and added_fading_ok
+				materialization_fade_ok = materialization_fade_ok and materialization_root.get_child_count() == marker_count
+				_advance_materialization_fades(MATERIALIZATION_FADE_SECONDS + 0.05)
+				var added_settled_ok := materialization_root.get_child_count() > 0
+				for child in materialization_root.get_children():
+					if is_instance_valid(child) and child.material_override is StandardMaterial3D:
+						added_settled_ok = added_settled_ok and (
+							(child.material_override as StandardMaterial3D).albedo_color.a >= 0.999
+						)
+				materialization_fade_ok = materialization_fade_ok and added_settled_ok
+				# Removed markers stay mounted while their alpha falls, then are
+				# freed at the fade deadline. Move the fallback camera target far
+				# enough that hysteresis drops the whole selection.
+				_clear_selection()
+				var materialization_target: Vector3 = mayor_camera.target
+				mayor_camera.target = materialization_target + Vector3(5000.0, 0.0, 0.0)
+				var fade_marker_count := materialization_root.get_child_count()
+				_step_materialization()
+				materialization_fade_ok = materialization_fade_ok and materialization_nodes.is_empty()
+				materialization_fade_ok = materialization_fade_ok and materialization_root.get_child_count() == fade_marker_count
+				_advance_materialization_fades(0.05)
+				var removed_fading_ok := false
+				for child in materialization_root.get_children():
+					if is_instance_valid(child) and child.material_override is StandardMaterial3D:
+						if (child.material_override as StandardMaterial3D).albedo_color.a < 0.999:
+							removed_fading_ok = true
+				materialization_fade_ok = materialization_fade_ok and removed_fading_ok
+				_advance_materialization_fades(MATERIALIZATION_FADE_SECONDS + 0.05)
+				materialization_fade_ok = materialization_fade_ok and materialization_root.get_child_count() == 0
+				mayor_camera.target = materialization_target
+				materialization_ok = materialization_ok and _select_placement(1)
+				_rebuild_materialization()
+				_advance_materialization_fades(MATERIALIZATION_FADE_SECONDS + 0.05)
+				materialization_ok = materialization_ok and materialization_counts == Vector2i(expected_active, expected_detailed)
 				materialization_ok = materialization_ok and not _toggle_materialization()
 				materialization_ok = materialization_ok and materialization_root.get_child_count() == 0
 				# A small camera move must run through the stored selection and
@@ -3502,6 +3795,8 @@ func _run_scene_smoke() -> void:
 					status = "citizen_i18n_failed"
 				elif not materialization_ok:
 					status = "materialization_failed"
+				elif not materialization_fade_ok:
+					status = "materialization_fade_failed"
 				elif not industry_ok:
 					status = "industry_failed"
 				elif not utility_ok:
@@ -3555,7 +3850,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -3582,6 +3877,7 @@ func _run_scene_smoke() -> void:
 		"ok" if citizen_i18n_ok else "failed",
 		"ok" if materialization_ok else "failed",
 		"ok" if materialization_step_ok else "failed",
+		"ok" if materialization_fade_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",

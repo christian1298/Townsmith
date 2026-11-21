@@ -28,9 +28,10 @@ In:
 
 Out:
 
-- bridge/UI candidate calls, fade-in/out, or world-space agents;
+- materialized agents, movement, or route visuals;
 - applying the change diff incrementally, dwell time, anti-starvation, or a saved materialized set; the bridge computes the bounded diff, but the scene rebuilds markers from the selection;
 - route caching, pathfinding, traffic, schedules, or needs simulation;
+- final art or per-citizen crowd animation;
 - per-client network filtering.
 
 ## 2. Budget
@@ -107,7 +108,7 @@ The call is read-only: it does not mutate the live named pool, population, save 
 - stores the new selection only on success and returns counts, diff counts, `changed` entries (`added`/`updated`/`removed`), and a named checksum;
 - `materialization_clear()` drops the stored selection.
 
-The call is read-only for the named pool and save. The world scene uses `materialization_step` for the F4 overlay, so hysteresis and one pinned placement are live there. Fade-in/out and route state are still pending.
+The call is read-only for the named pool and save. The world scene uses `materialization_step` for the F4 overlay: hysteresis, one pinned placement, the 64-change diff budget, and marker fade-in/out are live. Route state and real agents are still pending.
 
 ## 6. Change budget
 
@@ -157,7 +158,9 @@ pub struct MaterializationDiff {
 - The scene rebuilds markers from `active`/`detailed`; it does not yet apply `changed` incrementally.
 - One pinned id is supported; the full selection/story priority list and dwell time are later.
 - No route cache; N3 movement can use this selection but must add its own bounded route cache.
-- The world scene has debug markers only; there are no materialized agents, movement, or route visuals yet.
+- The world scene has fading debug markers only; there are no materialized agents, movement, or route visuals yet.
+- Fade materials are per-node duplicates; a 2k-active route needs shared materials or a pooling strategy.
+- Removed markers free after a bounded fade deadline; the node map is keyed by citizen id.
 - No save field: the selected set is derived on demand.
 - Selection is city-wide in N3; per-client interest filtering is later.
 
@@ -167,7 +170,7 @@ pub struct MaterializationDiff {
 
 The HUD and dashboard `Citizens near` lines read the step counts (`active`/`detailed`). The `--scene-smoke` route calls the step, moves the centre by 1 m, calls it again, and checks that `diff`, `checksum`, and bounded `changed`/`truncated` fields are present.
 
-Limits: the overlay discards the diff after checking its shape; it does not apply add/remove/update incrementally. No fade, route cache, or movement; markers are debug geometry and the selection is derived on demand.
+Limits: the overlay applies added/updated/removed entries from the 64-change diff, fades markers, and reconciles deferred entries under the same budget. It keeps only debug markers; no route cache, agents, or movement yet.
 
 ## 10. Benchmark
 
@@ -216,6 +219,7 @@ not a CI gate.
 
 ## 11. Next
 
-1. Wire `select_near_with_previous` into the bridge and overlay, then add fade/pop handling and the 64-changes-per-tick budget.
-2. Move markers into a materialized-agent route and add the 2k-active/200-detailed render route.
+1. Add a bounded home-work route cache and per-citizen movement.
+2. Replace debug markers with pooled materialized agents and add the 2k-active/200-detailed render route.
+3. Add crowd LOD and fade pooling to avoid per-node material duplicates.
 3. Add per-client interest filtering.
