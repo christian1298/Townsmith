@@ -25,7 +25,7 @@ In:
 - rules for food, water, power, jobs, vacancies, happiness, commute, roads, construction, debt, and bankruptcy;
 - a `City Dashboard` overlay with population, work, wellbeing, services, treasury, industry, roads, and construction sections;
 - `F1` toggles the dashboard; `Esc` closes it; entering Architect Mode closes it;
-- a world-scene smoke that checks the advisor warning and the dashboard text;
+- a world-scene smoke that checks the advisor warning, dashboard text, and localized advisor titles;
 - marker `dashboard=ok`, enforced by `scripts/smoke_world_scene.sh`.
 
 Out:
@@ -34,7 +34,7 @@ Out:
 - clickable advice that selects or centres a building;
 - acknowledged, dismissed, or persisted notifications;
 - charts, history, trend lines, or time-series;
-- localization (English-only developer UI until the localization pass);
+- localization beyond advisor titles and the dashboard shell (details and rare modals remain English);
 - automated pause, advisor actions, or policy changes;
 - per-citizen or per-household advice.
 
@@ -168,11 +168,12 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 - English-only developer UI.
 - `city.food_shortage`, `city.water_shortage`, `city.power_shortage`, and `city.unhappy` use one code for both critical and warning levels; the severity field distinguishes them.
 - The advisor reports debt as information even when the daily net is positive.
+- Advisor titles are localized by code (`base.advisor.<code>.title`); details remain English until the Rust protocol carries code+params.
 
 ## 9. Next
 
 1. 3.9: runner matrix (early town, mid city, late city) and committed baselines.
 2. Make advice clickable to select the relevant building or district.
 3. Add persisted acknowledgement and a notification history.
-4. Localize advisor titles, details, and dashboard labels.
+4. Localize advisor details/params, remaining modals, and content names.
 5. Add district/settlement panels once per-settlement budgets exist.

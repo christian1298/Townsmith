@@ -2104,9 +2104,13 @@ func _update_dashboard() -> void:
 				color = "#ffb454"
 			elif severity == "info":
 				color = "#9fe6a0"
+			var title: String = i18n.advisor_title(
+				str(message.get("code", "")),
+				str(message.get("title", advisor_fallback)),
+			)
 			text += "[color=%s]■[/color] [b]%s[/b]\n%s\n" % [
 				color,
-				str(message.get("title", advisor_fallback)),
+				title,
 				str(message.get("detail", "")),
 			]
 	dashboard_text.text = text
@@ -2762,6 +2766,7 @@ func _run_scene_smoke() -> void:
 	var starter_ok := false
 	var economy_ok := false
 	var dashboard_ok := false
+	var advisor_i18n_ok := false
 	var hud_i18n_ok := false
 	var hud_body_i18n_ok := false
 	var hud_status_i18n_ok := false
@@ -3312,6 +3317,8 @@ func _run_scene_smoke() -> void:
 				dashboard_body_i18n_ok = dashboard_body_i18n_ok and dashboard_text.text.contains("Arbeitsplätze")
 				dashboard_body_i18n_ok = dashboard_body_i18n_ok and dashboard_text.text.contains("Zufriedenheit")
 				dashboard_body_i18n_ok = dashboard_body_i18n_ok and not dashboard_text.text.contains("!base.ui.")
+				advisor_i18n_ok = dashboard_text.text.contains("Haushaltsdefizit")
+				advisor_i18n_ok = advisor_i18n_ok and i18n.advisor_title("city.unknown", "Fallback") == "Fallback"
 				hud_body_i18n_ok = hud.text.contains("Bürgermeistermodus")
 				hud_body_i18n_ok = hud_body_i18n_ok and status_label.text.contains("Platzierungen:")
 				hud_body_i18n_ok = hud_body_i18n_ok and not hud.text.contains("!base.ui.")
@@ -3329,6 +3336,7 @@ func _run_scene_smoke() -> void:
 				dashboard_body_i18n_ok = dashboard_body_i18n_ok and dashboard_text.text.contains("jobs filled")
 				dashboard_body_i18n_ok = dashboard_body_i18n_ok and dashboard_text.text.contains("happiness")
 				dashboard_body_i18n_ok = dashboard_body_i18n_ok and not dashboard_text.text.contains("!base.ui.")
+				advisor_i18n_ok = advisor_i18n_ok and dashboard_text.text.contains("The city is running a deficit")
 				hud_body_i18n_ok = hud_body_i18n_ok and hud.text.contains("Mayor Mode")
 				hud_body_i18n_ok = hud_body_i18n_ok and status_label.text.contains("Placements:")
 				hud_body_i18n_ok = hud_body_i18n_ok and not hud.text.contains("!base.ui.")
@@ -3547,7 +3555,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -3584,6 +3592,7 @@ func _run_scene_smoke() -> void:
 		"ok" if hud_body_i18n_ok else "failed",
 		"ok" if hud_status_i18n_ok else "failed",
 		"ok" if dashboard_body_i18n_ok else "failed",
+		"ok" if advisor_i18n_ok else "failed",
 		"ok" if traffic_ok else "failed",
 		"ok" if select_ok else "failed",
 		"ok" if enter_ok else "failed",

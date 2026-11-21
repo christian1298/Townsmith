@@ -23,9 +23,9 @@ tags:
 | Surface | Runtime source | EN keys | DE keys | Parity | Gate |
 |---|---|---:|---:|---|---|
 | First-person volume editor | `godot/editor_i18n.gd` | 96 | 96 | complete | `check_locale.sh` + `smoke_locale.sh` |
-| World-placement HUD, status, help | `godot/world_placement.gd` | 121 world keys | 0 | `world_i18n.gd` | dashboard shell/body, HUD shell/status, and common modals keyed; rare modals/content raw |
+| World-placement HUD, status, help | `godot/world_placement.gd` | 143 world keys | 0 | `world_i18n.gd` | dashboard shell/body, HUD shell/status, common modals, and advisor titles keyed; rare modals/content/details raw |
 | Dashboard shell and body | `world_placement.gd` + Rust `core_city` payload | 0 | 0 | n/a | none |
-| Advisor titles and details | Rust `core_city::advisor` | 0 | 0 | n/a | none |
+| Advisor titles | Rust `core_city::advisor` | 22 code titles | 0 | `world_i18n.gd` | titles keyed by code; details remain English |
 | Tutorial titles and hints | Rust payload read by `world_placement.gd` | 0 | 0 | n/a | none |
 | Starter, industry, service, tax names | Rust payload + `kind.capitalize()` | 0 | 0 | n/a | none |
 | Content display names (table only) | `godot/content_i18n.gd` | 32 | 32 | complete | static gate; not wired to scene |
@@ -87,7 +87,7 @@ The dashboard body is produced by `core_city` and passed through the bridge. Its
 |---|---|---|
 | `code` | Developer-only | Stable key; never translate |
 | `severity` | Developer-only enum | Maps to color/icon, not text |
-| `title` | Player-facing, English literal | Needs `base.advisor.<code>.title` |
+| `title` | Player-facing, English literal | `base.advisor.<code>.title` (EN/DE); bridge title fallback |
 | `detail` | Player-facing, English literal | Needs `base.advisor.<code>.detail` with params |
 
 The protocol should send the code plus parameters; each client resolves the title and detail in its own locale, per D-022.
@@ -223,9 +223,9 @@ The current German editor uses a neutral infinitive/imperative style (“Klicken
 
 | Phase | Scope | Approx. keys | Exit criterion |
 |---|---|---:|---|
-| 1. HUD + dashboard shell/body | `_update_hud`, `_setup_ui`, dashboard title/hint/body | **partial** — 121 world keys | HUD shell/status and dashboard shell/body keyed; common modals keyed; rare modals/content remain |
+| 1. HUD + dashboard shell/body | `_update_hud`, `_setup_ui`, dashboard title/hint/body | **partial** — 143 world keys | HUD shell/status, dashboard shell/body, common modals, and advisor titles keyed; rare modals/content/details remain |
 | 2. Tutorial + content names | Tutorial titles/hints, starter/industry/service/tax names, `capitalize()` removal, structure names | 60–90 | No `capitalize()` or raw content ID reaches a player label |
-| 3. Advisor + errors | Rust advisor title/detail keys, dashboard body labels, modal prefixes, error mapping | 40–60 | Advisor and dashboard render from keys+params; error codes are developer-only |
+| 3. Advisor + errors | Rust advisor title/detail keys, dashboard body labels, modal prefixes, error mapping | **partial** — 22 code titles | Advisor titles localized; details/params and errors remain |
 
 ### Phase 1 — HUD and dashboard shell (recommended first slice)
 
@@ -275,7 +275,7 @@ Acceptance checks:
 - The bridge payload contains no pre-localized English title/detail.
 - A German client and an English client see different advisor text from the same server message.
 - Unknown advisor/error codes show a generic localized fallback plus the code in developer mode.
-- `smoke_world_scene.sh` asserts the advisor and dashboard in both locales.
+- `smoke_world_scene.sh` asserts localized advisor titles in both locales.
 
 ## 6. Smoke and CI gate
 
@@ -283,16 +283,16 @@ Acceptance checks:
 
 ### Static gate
 
-`scripts/check_locale.sh` parses the `TABLES` const in `godot/editor_i18n.gd` and `godot/world_i18n.gd`, plus the `DISPLAY` const in `godot/content_i18n.gd`, and checks key parity, per-file key floors, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. The floors ratchet independently: editor `96`, world `121` (currently 121 keys), content `32`. Default mode prints one line per table plus a summary:
+`scripts/check_locale.sh` parses the `TABLES` const in `godot/editor_i18n.gd` and `godot/world_i18n.gd`, plus the `DISPLAY` const in `godot/content_i18n.gd`, and checks key parity, per-file key floors, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. The floors ratchet independently: editor `96`, world `143` (currently 143 keys), content `32`. Default mode prints one line per table plus a summary:
 
 ```text
 LOCALE_CHECK file=godot/editor_i18n.gd keys=96 min=96 status=ok
-LOCALE_CHECK file=godot/world_i18n.gd keys=121 min=121 status=ok
+LOCALE_CHECK file=godot/world_i18n.gd keys=143 min=143 status=ok
 LOCALE_CHECK file=godot/content_i18n.gd keys=32 min=32 status=ok
-LOCALE_CHECK editor=96 world=121 content=32 status=ok
+LOCALE_CHECK editor=96 world=143 content=32 status=ok
 ```
 
-Single-file mode (`scripts/check_locale.sh [FILE]`) keeps the original `LOCALE_CHECK keys=N status=ok` marker and derives the floor from the file name (`world_i18n.gd` gets 121, `content_i18n.gd` gets 32, anything else 96). `--self-test` covers twelve cases: the six editor cases (valid, missing DE key, extra DE key, empty value, placeholder mismatch, too few keys), a world-style fixture pass, a too-few world table, a world EN/DE placeholder mismatch, and the same three checks for the `DISPLAY` content table. The gate runs in `scripts/check.sh` and the Rust CI job before the Godot locale smoke.
+Single-file mode (`scripts/check_locale.sh [FILE]`) keeps the original `LOCALE_CHECK keys=N status=ok` marker and derives the floor from the file name (`world_i18n.gd` gets 143, `content_i18n.gd` gets 32, anything else 96). `--self-test` covers twelve cases: the six editor cases (valid, missing DE key, extra DE key, empty value, placeholder mismatch, too few keys), a world-style fixture pass, a too-few world table, a world EN/DE placeholder mismatch, and the same three checks for the `DISPLAY` content table. The gate runs in `scripts/check.sh` and the Rust CI job before the Godot locale smoke.
 
 `scripts/smoke_locale.sh` parses the last `LOCALE_SMOKE` line and requires:
 
@@ -300,7 +300,7 @@ Single-file mode (`scripts/check_locale.sh [FILE]`) keeps the original `LOCALE_C
 if [[ -z "$KEYS" || "$KEYS" -lt 96 || "$STATUS" != "ok" ]]; then
 ```
 
-The exact `96` was a hand-edited constant in the runtime smoke. The static gate now enforces independent floors (`EDITOR_MIN_KEYS=96`, `WORLD_MIN_KEYS=121`, `CONTENT_MIN_KEYS=32`) plus EN/DE parity, empty values, and placeholder parity for all three tables; `smoke_locale.sh` accepts editor `keys >= 96`. Adding keys is no longer a red build.
+The exact `96` was a hand-edited constant in the runtime smoke. The static gate now enforces independent floors (`EDITOR_MIN_KEYS=96`, `WORLD_MIN_KEYS=143`, `CONTENT_MIN_KEYS=32`) plus EN/DE parity, empty values, and placeholder parity for all three tables; `smoke_locale.sh` accepts editor `keys >= 96`. Adding keys is no longer a red build.
 
 ### Proposed contract
 

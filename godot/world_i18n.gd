@@ -2,11 +2,12 @@ extends RefCounted
 
 ## Slice-local world UI string table and runtime lookup.
 ##
-## The citizen panel, the Mayor/Architect HUD, and the dashboard shell plus
-## body are behind keys. The plan in `docs/16 - Localization.md` compiles
-## content tables into this format; this file is the single-table slice
-## stand-in until the shared `base.ui.*` pipeline lands. Citizen names stay
-## proper nouns and never pass through here.
+## The citizen panel, the Mayor/Architect HUD, the dashboard shell plus body,
+## and advisor titles are behind keys. The plan in
+## `docs/16 - Localization.md` compiles content tables into this format; this
+## file is the single-table slice stand-in until the shared `base.ui.*`
+## pipeline lands. Citizen names stay proper nouns and never pass through here.
+## Advisor details stay raw English until the bridge sends code+params.
 ##
 ## Lookup rules:
 ## - the locale comes from `OS.get_locale()` unless one is passed explicitly;
@@ -149,6 +150,32 @@ const TABLES := {
 		"base.ui.dashboard.body.no_advice": "No advice available.",
 		"base.ui.dashboard.body.advisor_fallback": "Advisor",
 
+		# Advisor titles, keyed by the stable code from `core_city::advisor`.
+		# One title per code; the Rust detail stays English until the protocol
+		# carries code+params. Unknown codes fall back to the bridge title.
+		"base.advisor.city.bankrupt.title": "Treasury bankrupt",
+		"base.advisor.city.food_shortage.title": "Food shortage",
+		"base.advisor.city.water_shortage.title": "Water shortage",
+		"base.advisor.city.power_shortage.title": "Power shortage",
+		"base.advisor.city.school_shortage.title": "School shortage",
+		"base.advisor.city.clinic_shortage.title": "Clinic shortage",
+		"base.advisor.city.fire_shortage.title": "Fire coverage is low",
+		"base.advisor.city.police_shortage.title": "Police coverage is low",
+		"base.advisor.city.unemployment.title": "Residents are unemployed",
+		"base.advisor.city.vacant_homes.title": "Homes are standing empty",
+		"base.advisor.city.unhappy.title": "Residents are unhappy",
+		"base.advisor.city.long_commutes.title": "Commutes are long",
+		"base.advisor.city.no_residents.title": "No residents yet",
+		"base.advisor.city.budget_deficit.title": "The city is running a deficit",
+		"base.advisor.city.debt.title": "Outstanding loans",
+		"base.advisor.city.traffic_disconnected.title": "Road network is disconnected",
+		"base.advisor.city.no_roads.title": "No roads",
+		"base.advisor.city.construction_stalled.title": "Construction is stalled",
+		"base.advisor.city.construction_active.title": "Construction is in progress",
+		"base.advisor.city.healthy.title": "The city is healthy",
+		"base.advisor.city.services_healthy.title": "Services are healthy",
+		"base.advisor.city.quiet.title": "No urgent issues",
+
 		# Follow camera.
 		"base.ui.citizen.follow_hint": "F3 follows the selected home · Esc stops",
 		"base.ui.citizen.following": "Following home #{id} · Esc stops",
@@ -286,6 +313,31 @@ const TABLES := {
 		"base.ui.dashboard.body.no_advice": "Keine Ratschläge verfügbar.",
 		"base.ui.dashboard.body.advisor_fallback": "Berater",
 
+		# Beratertitel, nach dem stabilen Code aus `core_city::advisor`.
+		# Ein Titel pro Code; der Rust-Detailtext bleibt vorerst englisch.
+		"base.advisor.city.bankrupt.title": "Staatskasse bankrott",
+		"base.advisor.city.food_shortage.title": "Nahrungsmangel",
+		"base.advisor.city.water_shortage.title": "Wassermangel",
+		"base.advisor.city.power_shortage.title": "Strommangel",
+		"base.advisor.city.school_shortage.title": "Schulmangel",
+		"base.advisor.city.clinic_shortage.title": "Klinikmangel",
+		"base.advisor.city.fire_shortage.title": "Feuerwehr unterversorgt",
+		"base.advisor.city.police_shortage.title": "Polizei unterversorgt",
+		"base.advisor.city.unemployment.title": "Arbeitslosigkeit",
+		"base.advisor.city.vacant_homes.title": "Leerstehende Wohnungen",
+		"base.advisor.city.unhappy.title": "Unzufriedene Bewohner",
+		"base.advisor.city.long_commutes.title": "Lange Arbeitswege",
+		"base.advisor.city.no_residents.title": "Noch keine Bewohner",
+		"base.advisor.city.budget_deficit.title": "Haushaltsdefizit",
+		"base.advisor.city.debt.title": "Offene Kredite",
+		"base.advisor.city.traffic_disconnected.title": "Straßennetz getrennt",
+		"base.advisor.city.no_roads.title": "Keine Straßen",
+		"base.advisor.city.construction_stalled.title": "Bau stockt",
+		"base.advisor.city.construction_active.title": "Bau läuft",
+		"base.advisor.city.healthy.title": "Stadt ist gesund",
+		"base.advisor.city.services_healthy.title": "Dienste sind gesund",
+		"base.advisor.city.quiet.title": "Keine dringenden Probleme",
+
 		# Folgekamera.
 		"base.ui.citizen.follow_hint": "F3 folgt dem ausgewählten Zuhause · Esc beendet",
 		"base.ui.citizen.following": "Folgt Zuhause #{id} · Esc beendet",
@@ -334,6 +386,16 @@ func has_key(key: String, locale: String = "") -> bool:
 	var code := locale if not locale.is_empty() else _locale
 	var table: Dictionary = TABLES.get(code, {})
 	return table.has(key)
+
+
+## Localized advisor title for a stable code such as `city.budget_deficit`.
+## Unknown codes, and codes without a DE key, keep the bridge title in English
+## until the Rust protocol carries code+params.
+func advisor_title(code: String, fallback: String) -> String:
+	var key := "base.advisor.%s.title" % code
+	if has_key(key) or has_key(key, DEFAULT_LOCALE):
+		return t(key)
+	return fallback
 
 
 func keys(locale: String = "") -> PackedStringArray:
