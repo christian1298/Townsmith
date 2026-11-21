@@ -111,7 +111,7 @@ The advisor is intentionally conservative: one clear message per problem, with a
 4. builds `AdvisorInput` and calls `advise`;
 5. returns `{ ok, seed, critical, warnings, infos, healthy, messages[] }`.
 
-Each message is `{ code, severity, title, detail }`. The call is derived state: no save field, no checksum, no mutation. It takes each store lock separately and holds none while calling the next summary.
+Each message is `{ code, severity, title, detail }`. The call is derived state: no save field, no checksum, and no change to placements, households, or the treasury. It may refresh the derived utility supply, as `utilities_state()` does. It takes each store lock separately and holds none while calling the next summary.
 
 ## 5. Dashboard
 
