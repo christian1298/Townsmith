@@ -207,6 +207,21 @@ impl StructuralSystem {
         matches!(self, Self::TimberFrame)
     }
 
+    /// Age id that first unlocks this system.
+    ///
+    /// This is a stable string rather than an `Age` value so `core_structure`
+    /// stays independent of `core_city`; the bridge compares it with the
+    /// city's age rank.
+    #[must_use]
+    pub const fn min_age(self) -> &'static str {
+        match self {
+            Self::Tent | Self::TimberShed | Self::TimberFrame => "wood",
+            Self::LoadBearingStone | Self::HalfTimber | Self::LoadBearingBrick => "masonry",
+            Self::ReinforcedConcrete | Self::SteelFrame => "industrial",
+            Self::CompositeCore => "information",
+        }
+    }
+
     /// Whether this system is masonry that can support a timber upper floor.
     #[must_use]
     pub const fn is_masonry(self) -> bool {
@@ -934,6 +949,16 @@ mod tests {
             }
         );
         assert_eq!(error.code(), "structure_height");
+    }
+
+    #[test]
+    fn systems_have_age_requirements() {
+        assert_eq!(StructuralSystem::Tent.min_age(), "wood");
+        assert_eq!(StructuralSystem::TimberFrame.min_age(), "wood");
+        assert_eq!(StructuralSystem::LoadBearingBrick.min_age(), "masonry");
+        assert_eq!(StructuralSystem::ReinforcedConcrete.min_age(), "industrial");
+        assert_eq!(StructuralSystem::SteelFrame.min_age(), "industrial");
+        assert_eq!(StructuralSystem::CompositeCore.min_age(), "information");
     }
 
     #[test]

@@ -108,7 +108,7 @@ seed + generator version
 | `core_content` | Content registry, schemas, mod manifests, hashes | `ContentId`, `Registry`, `ModManifest` |
 | `core_i18n` | Translation tables, locale fallback, key/placeholder validation, language packs | `Locale`, `TranslationKey`, `TranslationTable` |
 | `core_structure` | Material properties, structural systems, story/height/span/foundation validation | `StructuralSystem`, `StructureSpec`, `StructureSummary`, `StructureError` |
-| `core_city` | Settlements, districts, buildings, construction sites, sub-ground levels, lots, roads, zoning, utilities | `Settlement`, `District`, `BuildingInstance`, `ConstructionSite`, `ConstructionPhase`, `SubgradeLevel`, `RoadGraph` |
+| `core_city` | Settlements, districts, buildings, construction sites, sub-ground levels, lots, roads, zoning, utilities, progression, research | `Settlement`, `District`, `BuildingInstance`, `ConstructionSite`, `ConstructionPhase`, `SubgradeLevel`, `RoadGraph`, `Age`, `TechTree`, `ResearchStore` |
 | `core_sim` | ECS, cohorts, citizens, households, jobs, needs, production, time state | `Cohort`, `Citizen`, `Household`, `Job`, `Need`, `TimeState`, `TimeVote` |
 | `core_living` | Trees, fields, livestock, wildlife populations | `Tree`, `Field`, `WildlifePopulation` |
 | `core_econ` | Treasury, taxes, prices, trade, loans | `Treasury`, `Market`, `Loan` |

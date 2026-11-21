@@ -81,6 +81,34 @@ impl Age {
         }
     }
 
+    /// Parse an age id or alias.
+    ///
+    /// Matching trims, lowercases, and treats spaces and hyphens as
+    /// underscores.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        let normalized: String = value
+            .trim()
+            .to_ascii_lowercase()
+            .chars()
+            .map(|ch| {
+                if ch.is_whitespace() || ch == '-' {
+                    '_'
+                } else {
+                    ch
+                }
+            })
+            .collect();
+        match normalized.as_str() {
+            "wood" | "timber" => Some(Self::Wood),
+            "masonry" | "stone" => Some(Self::Masonry),
+            "industrial" | "industry" => Some(Self::Industrial),
+            "modern" => Some(Self::Modern),
+            "information" | "info" => Some(Self::Information),
+            _ => None,
+        }
+    }
+
     /// The age for a population, using the highest threshold reached.
     #[must_use]
     pub fn from_population(population: u64) -> Self {
@@ -197,6 +225,16 @@ mod tests {
                 assert!(next.min_population() > age.min_population());
             }
         }
+    }
+
+    #[test]
+    fn age_ids_and_aliases_parse() {
+        assert_eq!(Age::parse("wood"), Some(Age::Wood));
+        assert_eq!(Age::parse(" Timber "), Some(Age::Wood));
+        assert_eq!(Age::parse("MASONRY"), Some(Age::Masonry));
+        assert_eq!(Age::parse("stone"), Some(Age::Masonry));
+        assert_eq!(Age::parse("information"), Some(Age::Information));
+        assert_eq!(Age::parse("future"), None);
     }
 
     #[test]
