@@ -37,6 +37,25 @@ pub const SCHOOL_DEMAND_PER_RESIDENT: f64 = 0.25;
 /// Workers count as half a resident for clinic, fire, and police demand.
 pub const WORKER_SERVICE_DEMAND: f64 = 0.5;
 
+/// School construction cost by tier: basic, improved, advanced.
+pub const SCHOOL_CONSTRUCTION_COST_PER_TIER: [f64; 3] = [4_000.0, 6_000.0, 10_000.0];
+
+/// Clinic construction cost by tier: basic, improved, advanced.
+pub const CLINIC_CONSTRUCTION_COST_PER_TIER: [f64; 3] = [3_000.0, 5_000.0, 8_000.0];
+
+/// Fire and police construction cost by tier: basic, improved, advanced.
+pub const FIRE_POLICE_CONSTRUCTION_COST_PER_TIER: [f64; 3] = [2_500.0, 4_000.0, 6_000.0];
+
+/// School operating upkeep per game day by tier: basic, improved, advanced.
+pub const SCHOOL_UPKEEP_PER_DAY_PER_TIER: [f64; 3] = [3.0, 5.0, 8.0];
+
+/// Clinic operating upkeep per game day by tier: basic, improved, advanced.
+pub const CLINIC_UPKEEP_PER_DAY_PER_TIER: [f64; 3] = [2.0, 4.0, 6.0];
+
+/// Fire and police operating upkeep per game day by tier: basic, improved,
+/// advanced.
+pub const FIRE_POLICE_UPKEEP_PER_DAY_PER_TIER: [f64; 3] = [1.5, 3.0, 5.0];
+
 /// One civic service kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -93,6 +112,48 @@ impl ServiceKind {
     #[must_use]
     pub fn produces_research(self) -> bool {
         self == Self::School
+    }
+
+    /// Construction cost of one site of this kind at a tier.
+    ///
+    /// | Kind | Basic | Improved | Advanced |
+    /// |---|---:|---:|---:|
+    /// | School | 4,000 | 6,000 | 10,000 |
+    /// | Clinic | 3,000 | 5,000 | 8,000 |
+    /// | Fire | 2,500 | 4,000 | 6,000 |
+    /// | Police | 2,500 | 4,000 | 6,000 |
+    ///
+    /// These are data-only catalog values and are not charged by the live
+    /// economy yet.
+    #[must_use]
+    pub fn construction_cost(self, tier: ServiceTier) -> f64 {
+        let costs = match self {
+            Self::School => SCHOOL_CONSTRUCTION_COST_PER_TIER,
+            Self::Clinic => CLINIC_CONSTRUCTION_COST_PER_TIER,
+            Self::Fire | Self::Police => FIRE_POLICE_CONSTRUCTION_COST_PER_TIER,
+        };
+        costs[tier.cost_index()]
+    }
+
+    /// Operating upkeep of one site of this kind per game day at a tier.
+    ///
+    /// | Kind | Basic | Improved | Advanced |
+    /// |---|---:|---:|---:|
+    /// | School | 3 | 5 | 8 |
+    /// | Clinic | 2 | 4 | 6 |
+    /// | Fire | 1.5 | 3 | 5 |
+    /// | Police | 1.5 | 3 | 5 |
+    ///
+    /// These are data-only catalog values and are not charged by the live
+    /// economy yet.
+    #[must_use]
+    pub fn upkeep_per_day(self, tier: ServiceTier) -> f64 {
+        let upkeep = match self {
+            Self::School => SCHOOL_UPKEEP_PER_DAY_PER_TIER,
+            Self::Clinic => CLINIC_UPKEEP_PER_DAY_PER_TIER,
+            Self::Fire | Self::Police => FIRE_POLICE_UPKEEP_PER_DAY_PER_TIER,
+        };
+        upkeep[tier.cost_index()]
     }
 }
 
@@ -152,6 +213,15 @@ impl ServiceTier {
             Self::Advanced => 50.0,
         }
     }
+
+    /// Index into a per-tier cost table, in display order.
+    fn cost_index(self) -> usize {
+        match self {
+            Self::Basic => 0,
+            Self::Improved => 1,
+            Self::Advanced => 2,
+        }
+    }
 }
 
 /// One installed civic service site.
@@ -203,6 +273,18 @@ impl ServiceSite {
             capacity,
             research_per_day,
         }
+    }
+
+    /// Construction cost of this site from its kind and tier.
+    #[must_use]
+    pub fn construction_cost(&self) -> f64 {
+        self.kind.construction_cost(self.tier)
+    }
+
+    /// Operating upkeep of this site per game day from its kind and tier.
+    #[must_use]
+    pub fn upkeep_per_day(&self) -> f64 {
+        self.kind.upkeep_per_day(self.tier)
     }
 }
 
@@ -301,6 +383,37 @@ impl ServiceStore {
     /// Sites of one kind.
     pub fn sites_of(&self, kind: ServiceKind) -> impl Iterator<Item = (&u64, &ServiceSite)> {
         self.sites.iter().filter(move |(_, site)| site.kind == kind)
+    }
+
+    /// Construction cost of every site of one kind.
+    #[must_use]
+    pub fn construction_cost_of(&self, kind: ServiceKind) -> f64 {
+        self.sites_of(kind)
+            .map(|(_, site)| site.construction_cost())
+            .sum()
+    }
+
+    /// Operating upkeep of every site of one kind per game day.
+    #[must_use]
+    pub fn upkeep_per_day_of(&self, kind: ServiceKind) -> f64 {
+        self.sites_of(kind)
+            .map(|(_, site)| site.upkeep_per_day())
+            .sum()
+    }
+
+    /// Construction cost of every civic service site.
+    #[must_use]
+    pub fn total_construction_cost(&self) -> f64 {
+        self.sites
+            .values()
+            .map(ServiceSite::construction_cost)
+            .sum()
+    }
+
+    /// Operating upkeep of every civic service site per game day.
+    #[must_use]
+    pub fn total_upkeep_per_day(&self) -> f64 {
+        self.sites.values().map(ServiceSite::upkeep_per_day).sum()
     }
 
     /// Add or replace one service site.
@@ -827,6 +940,50 @@ mod tests {
         store.clear();
         assert_eq!(store.site_count(), 0);
         assert_eq!(store.research_per_day, 0.0);
+    }
+
+    #[test]
+    fn service_costs_scale_with_tier() {
+        assert_eq!(
+            ServiceKind::School.construction_cost(ServiceTier::Basic),
+            4_000.0
+        );
+        assert_eq!(
+            ServiceKind::School.construction_cost(ServiceTier::Advanced),
+            10_000.0
+        );
+        assert_eq!(
+            ServiceKind::Clinic.upkeep_per_day(ServiceTier::Improved),
+            4.0
+        );
+        assert_eq!(
+            ServiceKind::Fire.construction_cost(ServiceTier::Basic),
+            2_500.0
+        );
+        assert_eq!(
+            ServiceKind::Police.upkeep_per_day(ServiceTier::Advanced),
+            5.0
+        );
+    }
+
+    #[test]
+    fn service_store_totals_include_every_site() {
+        let mut store = ServiceStore::new(2026);
+        store
+            .add_site(1, ServiceKind::School, ServiceTier::Basic, [0.0, 0.0, 0.0])
+            .expect("school");
+        store
+            .add_site(
+                2,
+                ServiceKind::Clinic,
+                ServiceTier::Advanced,
+                [0.0, 0.0, 0.0],
+            )
+            .expect("clinic");
+        assert_eq!(store.total_construction_cost(), 4_000.0 + 8_000.0);
+        assert_eq!(store.total_upkeep_per_day(), 3.0 + 6.0);
+        assert_eq!(store.construction_cost_of(ServiceKind::School), 4_000.0);
+        assert_eq!(store.upkeep_per_day_of(ServiceKind::Clinic), 6.0);
     }
 
     #[test]
