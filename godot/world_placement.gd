@@ -56,6 +56,10 @@ var utility_root: Node3D
 var utility_nodes: Dictionary = {}
 var utility_kinds: Dictionary = {}
 var utility_time := 0.0
+var service_root: Node3D
+var service_nodes: Dictionary = {}
+var service_kinds: Dictionary = {}
+var service_time := 0.0
 var lot_zone := "residential"
 var selection_box: MeshInstance3D
 var selected_id := -1
@@ -107,6 +111,7 @@ func _ready() -> void:
 	_setup_settlements()
 	_setup_industry()
 	_setup_utilities()
+	_setup_services()
 	if _ensure_blueprint():
 		_refresh_preview(true)
 	else:
@@ -144,6 +149,11 @@ func _process(delta: float) -> void:
 		if is_instance_valid(node):
 			var base_y := float(node.get_meta("base_y", 0.0))
 			node.position.y = base_y + sin(utility_time * 1.6) * 0.08
+	service_time += delta
+	for node in service_nodes.values():
+		if is_instance_valid(node):
+			var base_y := float(node.get_meta("base_y", 0.0))
+			node.position.y = base_y + sin(service_time * 1.4) * 0.06
 	_update_traffic(delta)
 	if mode == "mayor" and mayor_camera != null:
 		var ground: float = core.world_height_at(
@@ -208,6 +218,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					_cycle_industry()
 				KEY_U:
 					_cycle_utility()
+				KEY_K:
+					_cycle_service()
 				KEY_F1:
 					_toggle_dashboard()
 				KEY_T:
@@ -804,6 +816,133 @@ func _setup_utilities() -> void:
 	utility_root.name = "Utilities"
 	add_child(utility_root)
 
+func _setup_services() -> void:
+	service_root = Node3D.new()
+	service_root.name = "CivicServices"
+	add_child(service_root)
+
+func _service_color(kind: String) -> Color:
+	match kind:
+		"school":
+			return Color(0.35, 0.65, 0.95)
+		"clinic":
+			return Color(0.35, 0.85, 0.55)
+		"fire":
+			return Color(0.95, 0.35, 0.25)
+		"police":
+			return Color(0.35, 0.45, 0.85)
+		_:
+			return Color(0.8, 0.8, 0.8)
+
+func _service_offset(kind: String) -> Vector2:
+	match kind:
+		"school":
+			return Vector2(-1.8, -1.8)
+		"clinic":
+			return Vector2(1.8, -1.8)
+		"fire":
+			return Vector2(-1.8, 1.8)
+		"police":
+			return Vector2(1.8, 1.8)
+		_:
+			return Vector2.ZERO
+
+func _refresh_service_visuals() -> void:
+	if service_root == null:
+		return
+	for node in service_nodes.values():
+		if is_instance_valid(node):
+			node.free()
+	service_nodes.clear()
+	service_kinds.clear()
+	if core == null:
+		return
+	var state: Dictionary = core.services_state()
+	for site in state.get("sites", []):
+		var id := int(site.get("placement_id", -1))
+		if id < 0:
+			continue
+		var kind := str(site.get("kind", ""))
+		if not ["school", "clinic", "fire", "police"].has(kind):
+			continue
+		service_kinds[id] = kind
+		var pivot := Node3D.new()
+		pivot.name = "%s%d" % [kind.capitalize(), id]
+		var base_y := float(site.get("center_y", 40.0))
+		var offset := _service_offset(kind)
+		pivot.position = Vector3(
+			float(site.get("center_x", 0.0)) + offset.x,
+			base_y,
+			float(site.get("center_z", 0.0)) + offset.y
+		)
+		pivot.set_meta("base_y", base_y)
+		var color := _service_color(kind)
+		var base := MeshInstance3D.new()
+		var base_box := BoxMesh.new()
+		base_box.size = Vector3(1.8, 0.24, 1.8)
+		base.mesh = base_box
+		base.position.y = 0.12
+		var base_material := StandardMaterial3D.new()
+		base_material.albedo_color = color
+		base_material.emission_enabled = true
+		base_material.emission = color * 0.25
+		base.material_override = base_material
+		pivot.add_child(base)
+		var column := MeshInstance3D.new()
+		var column_box := BoxMesh.new()
+		column_box.size = Vector3(0.9, 2.2, 0.9)
+		column.mesh = column_box
+		column.position.y = 1.35
+		var column_material := StandardMaterial3D.new()
+		column_material.albedo_color = color
+		column.material_override = column_material
+		pivot.add_child(column)
+		var label := Label3D.new()
+		label.text = kind.capitalize()
+		label.font_size = 34
+		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		label.position.y = 3.1
+		label.modulate = color
+		pivot.add_child(label)
+		service_root.add_child(pivot)
+		service_nodes["%s:%d" % [kind, id]] = pivot
+
+func _cycle_service() -> void:
+	if selected_id < 0:
+		_set_modal("Select a building first (RMB)", true)
+		return
+	var selected := _selected_placement()
+	if int(selected.get("job_slots", 0)) <= 0:
+		_set_modal("This building has no job slots", true)
+		return
+	var current := str(service_kinds.get(selected_id, ""))
+	var next := ""
+	match current:
+		"":
+			next = "school"
+		"school":
+			next = "clinic"
+		"clinic":
+			next = "fire"
+		"fire":
+			next = "police"
+		"police":
+			next = ""
+	if next == "":
+		core.service_remove_site(SEED, selected_id)
+		_set_modal("Civic service removed", false)
+	else:
+		var result: Dictionary = core.service_add_site(SEED, selected_id, next)
+		if not bool(result.get("ok", false)):
+			_set_modal(
+				"Civic service failed: " + str(result.get("error_code", result.get("error", ""))),
+				true
+			)
+			return
+		_set_modal("Civic service: " + next, false)
+	_refresh_service_visuals()
+	_update_hud()
+
 func _utility_color(kind: String) -> Color:
 	if kind == "power":
 		return Color(0.95, 0.8, 0.25)
@@ -1200,6 +1339,9 @@ func _update_hud() -> void:
 		var utility_kinds_here: Array = utility_kinds.get(selected_id, [])
 		if utility_kinds_here.size() > 0:
 			selected_line += "  ·  utility " + ", ".join(utility_kinds_here)
+		var service_kind := str(service_kinds.get(selected_id, ""))
+		if service_kind != "":
+			selected_line += "  ·  service " + service_kind
 		var selected_structure: Dictionary = selected.get("structure", {})
 		if bool(selected_structure.get("present", false)):
 			selected_line += "  ·  %s %d stories" % [
@@ -1211,7 +1353,7 @@ func _update_hud() -> void:
 			SEED, blueprint_name, structure_text,
 		]
 	else:
-		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nStructure: %s\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew · I industry · U utility · T tax · L loan · Y research · F1 dashboard · V +10k · F5 save · F9 load" % [
+		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nStructure: %s\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew · I industry · U utility · K services · T tax · L loan · Y research · F1 dashboard · V +10k · F5 save · F9 load" % [
 			SEED, blueprint_name, rooms, capacity, structure_text,
 		]
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
@@ -1272,6 +1414,16 @@ func _update_hud() -> void:
 			float(utilities.get("power_supply", 0.0)) * 100.0,
 			int(utilities.get("power_sites", 0)),
 		]
+	var services: Dictionary = core.services_state()
+	var service_text := "—"
+	if bool(services.get("open", false)):
+		service_text = "school %.0f%% · clinic %.0f%% · fire %.0f%% · police %.0f%% · +%.1f research/day" % [
+			float(services.get("school_supply", 0.0)) * 100.0,
+			float(services.get("clinic_supply", 0.0)) * 100.0,
+			float(services.get("fire_supply", 0.0)) * 100.0,
+			float(services.get("police_supply", 0.0)) * 100.0,
+			float(services.get("research_per_day", 0.0)),
+		]
 	var traffic: Dictionary = traffic_stats
 	if traffic.is_empty():
 		traffic = core.traffic_state(SEED)
@@ -1292,7 +1444,7 @@ func _update_hud() -> void:
 			float(city.get("water", 0.0)) * 100.0,
 			float(city.get("rest", 0.0)) * 100.0,
 		]
-	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nAge: %s\nResearch: %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nIndustry: %s\nUtilities: %s\nTraffic: %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
+	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nAge: %s\nResearch: %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nIndustry: %s\nUtilities: %s\nCivic: %s\nTraffic: %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
 		selected_line,
 		int(target_x),
 		int(target_z),
@@ -1317,6 +1469,7 @@ func _update_hud() -> void:
 		treasury_text,
 		industry_text,
 		utilities_text,
+		service_text,
 		traffic_text,
 		int(construction.get("active", 0)),
 		int(construction.get("stalled", 0)),
@@ -1342,6 +1495,7 @@ func _update_dashboard() -> void:
 	var economy: Dictionary = core.economy_state()
 	var industry: Dictionary = core.industry_state()
 	var utilities: Dictionary = core.utilities_state()
+	var services: Dictionary = core.services_state()
 	var construction: Dictionary = core.construction_summary()
 	var traffic: Dictionary = core.traffic_state(SEED)
 	var progression: Dictionary = core.progression_state(SEED)
@@ -1366,12 +1520,21 @@ func _update_dashboard() -> void:
 		]
 		if bool(economy.get("bankrupt", false)):
 			treasury = "BANKRUPT · " + treasury
-	var services := "food — · water — · power —"
+	var utilities_line := "food — · water — · power —"
 	if bool(industry.get("open", false)) or bool(utilities.get("open", false)):
-		services = "food %.0f%% · water %.0f%% · power %.0f%%" % [
+		utilities_line = "food %.0f%% · water %.0f%% · power %.0f%%" % [
 			float(industry.get("food_supply", 0.0)) * 100.0,
 			float(utilities.get("water_supply", 0.0)) * 100.0,
 			float(utilities.get("power_supply", 0.0)) * 100.0,
+		]
+	var civic_line := "school — · clinic — · fire — · police —"
+	if bool(services.get("open", false)):
+		civic_line = "school %.0f%% · clinic %.0f%% · fire %.0f%% · police %.0f%% · +%.1f research/day" % [
+			float(services.get("school_supply", 0.0)) * 100.0,
+			float(services.get("clinic_supply", 0.0)) * 100.0,
+			float(services.get("fire_supply", 0.0)) * 100.0,
+			float(services.get("police_supply", 0.0)) * 100.0,
+			float(services.get("research_per_day", 0.0)),
 		]
 	var roads := "no road store"
 	if bool(traffic.get("open", false)):
@@ -1416,8 +1579,9 @@ func _update_dashboard() -> void:
 		float(city.get("average_commute_m", 0.0)),
 	]
 	text += "[b]Wellbeing[/b]\nhappiness %s\nneeds %s\n" % [happiness, needs]
-	text += "[b]Services[/b]\n%s\n[b]Treasury[/b]\n%s\n[b]Industry[/b]\nwood %.0f · food %.0f · hides %.0f\n" % [
-		services,
+	text += "[b]Utilities[/b]\n%s\n[b]Civic services[/b]\n%s\n[b]Treasury[/b]\n%s\n[b]Industry[/b]\nwood %.0f · food %.0f · hides %.0f\n" % [
+		utilities_line,
+		civic_line,
 		treasury,
 		float(industry.get("wood", 0.0)),
 		float(industry.get("food", 0.0)),
@@ -1931,6 +2095,7 @@ func _advance_construction(seconds: float) -> Dictionary:
 		return {}
 	var report: Dictionary = core.construction_tick(seconds)
 	core.utilities_refresh(SEED)
+	core.services_refresh(SEED)
 	core.industry_tick(SEED, seconds)
 	core.population_tick(SEED, seconds)
 	core.research_tick(SEED, seconds)
@@ -1960,6 +2125,7 @@ func _clear_placements() -> void:
 	core.world_clear_placements()
 	_refresh_industry_visuals()
 	_refresh_utility_visuals()
+	_refresh_service_visuals()
 	_set_modal("", false)
 	_refresh_preview(true)
 	_update_hud()
@@ -1991,6 +2157,7 @@ func _load_world() -> bool:
 	_rebuild_settlements()
 	_refresh_industry_visuals()
 	_refresh_utility_visuals()
+	_refresh_service_visuals()
 	streamer.invalidate_all()
 	var state: Dictionary = core.world_placements()
 	var construction_index := _construction_index()
@@ -2059,6 +2226,7 @@ func _run_scene_smoke() -> void:
 	var occupancy_after_ok := false
 	var industry_ok := false
 	var utility_ok := false
+	var service_ok := false
 	var economy_ok := false
 	var dashboard_ok := false
 	var save_ok := false
@@ -2425,6 +2593,34 @@ func _run_scene_smoke() -> void:
 				industry_ok = industry_ok and int(industry_after.get("site_count", 0)) == 1
 				industry_ok = industry_ok and float(industry_after.get("food", 0.0)) > 0.0
 				occupancy_after_ok = occupancy_after_ok and industry_ok
+				service_ok = true
+				for service_kind in ["school", "clinic", "fire", "police"]:
+					var service_added: Dictionary = core.service_add_site(SEED, 1, service_kind)
+					service_ok = service_ok and bool(service_added.get("ok", false))
+					service_ok = service_ok and str(service_added.get("tier", "")) == "basic"
+					_refresh_service_visuals()
+					service_ok = service_ok and service_nodes.size() == 1
+					service_ok = service_ok and str(service_kinds.get(1, "")) == service_kind
+					var service_report: Dictionary = core.services_refresh(SEED)
+					service_ok = service_ok and bool(service_report.get("open", false))
+					service_ok = service_ok and int(service_report.get("site_count", 0)) == 1
+					match service_kind:
+						"school":
+							service_ok = service_ok and float(service_report.get("school_supply", 0.0)) > 0.99
+							service_ok = service_ok and float(service_report.get("research_per_day", 0.0)) > 7.9
+						"clinic":
+							service_ok = service_ok and float(service_report.get("clinic_supply", 0.0)) > 0.99
+						"fire":
+							service_ok = service_ok and float(service_report.get("fire_supply", 0.0)) > 0.99
+						"police":
+							service_ok = service_ok and float(service_report.get("police_supply", 0.0)) > 0.99
+				var final_school: Dictionary = core.service_add_site(SEED, 1, "school")
+				service_ok = service_ok and bool(final_school.get("ok", false))
+				_refresh_service_visuals()
+				var final_service: Dictionary = core.services_refresh(SEED)
+				service_ok = service_ok and float(final_service.get("research_per_day", 0.0)) > 7.9
+				service_ok = service_ok and float(core.research_state(SEED).get("rate_per_day", 0.0)) > 8.0
+				occupancy_after_ok = occupancy_after_ok and service_ok
 				var economy_after: Dictionary = core.economy_state()
 				occupancy_after_ok = occupancy_after_ok and bool(economy_after.get("open", false))
 				occupancy_after_ok = occupancy_after_ok and float(economy_after.get("balance", 100000.0)) < 100000.0
@@ -2465,7 +2661,7 @@ func _run_scene_smoke() -> void:
 				var research_checksum: String = str(core.research_checksum())
 				var research_points := float(research_before.get("points", 0.0))
 				research_ok = bool(research_generation.get("ok", false))
-				research_ok = research_ok and float(research_generation.get("gained", 0.0)) > 0.0
+				research_ok = research_ok and float(research_generation.get("gained", 0.0)) > 8.0
 				research_ok = research_ok and bool(research_before.get("ok", false))
 				research_ok = research_ok and int(research_before.get("node_count", 0)) >= 14
 				research_ok = research_ok and str(research_before.get("age", "")) == "wood"
@@ -2492,11 +2688,16 @@ func _run_scene_smoke() -> void:
 					var utility_state_before: Dictionary = core.utilities_state()
 					var utility_water := float(utility_state_before.get("water_supply", 0.0))
 					var utility_power := float(utility_state_before.get("power_supply", 0.0))
+					var service_checksum: String = str(core.services_checksum())
+					var service_state_before: Dictionary = core.services_state()
+					var service_school := float(service_state_before.get("school_supply", 0.0))
+					var service_research := float(service_state_before.get("research_per_day", 0.0))
 					var populated := _save_world()
 					core.population_clear()
 					core.economy_clear()
 					core.industry_clear()
 					core.utilities_clear()
+					core.services_clear()
 					core.research_clear()
 					var reloaded := _load_world()
 					var city_persisted: Dictionary = core.city_summary()
@@ -2537,6 +2738,15 @@ func _run_scene_smoke() -> void:
 					utility_persisted_ok = utility_persisted_ok and str(utility_persisted.get("checksum", "")) == str(core.utilities_checksum())
 					utility_persisted_ok = utility_persisted_ok and utility_nodes.size() == 2
 					utility_ok = utility_ok and utility_persisted_ok
+					var service_persisted: Dictionary = core.services_state()
+					var service_persisted_ok := bool(service_persisted.get("open", false))
+					service_persisted_ok = service_persisted_ok and int(service_persisted.get("site_count", 0)) == 1
+					service_persisted_ok = service_persisted_ok and int(service_persisted.get("school_sites", 0)) == 1
+					service_persisted_ok = service_persisted_ok and absf(float(service_persisted.get("school_supply", 0.0)) - service_school) < 0.01
+					service_persisted_ok = service_persisted_ok and absf(float(service_persisted.get("research_per_day", 0.0)) - service_research) < 0.01
+					service_persisted_ok = service_persisted_ok and str(core.services_checksum()) == service_checksum
+					service_persisted_ok = service_persisted_ok and service_nodes.size() == 1
+					service_ok = service_ok and service_persisted_ok
 					var research_persisted: Dictionary = core.research_state(SEED)
 					research_ok = research_ok and bool(research_persisted.get("open", false))
 					research_ok = research_ok and int(research_persisted.get("completed_count", -1)) == 1
@@ -2558,6 +2768,8 @@ func _run_scene_smoke() -> void:
 					status = "industry_failed"
 				elif not utility_ok:
 					status = "utility_failed"
+				elif not service_ok:
+					status = "service_failed"
 				elif not dashboard_ok:
 					status = "dashboard_failed"
 			if not load_ok:
@@ -2575,6 +2787,7 @@ func _run_scene_smoke() -> void:
 		var before_failed_economy: String = str(core.economy_checksum())
 		var before_failed_industry: String = str(core.industry_checksum())
 		var before_failed_utility: String = str(core.utilities_checksum())
+		var before_failed_service: String = str(core.services_checksum())
 		var blueprint_backup := blueprint_path + ".bak"
 		if DirAccess.rename_absolute(blueprint_path, blueprint_backup) != OK:
 			status = "load_guard_backup_failed"
@@ -2590,6 +2803,8 @@ func _run_scene_smoke() -> void:
 				status = "load_failure_changed_industry"
 			elif str(core.utilities_checksum()) != before_failed_utility:
 				status = "load_failure_changed_utility"
+			elif str(core.services_checksum()) != before_failed_service:
+				status = "load_failure_changed_service"
 			elif core.lot_count() != before_failed_lots or str(core.lot_checksum()) != before_failed_lot_checksum:
 				status = "load_failure_changed_lots"
 			elif core.settlement_count() != before_failed_settlements or str(core.settlement_checksum()) != before_failed_settlement_checksum:
@@ -2600,7 +2815,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s render=%s structure=%s age=%s research=%s occupancy=%s industry=%s utilities=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s render=%s structure=%s age=%s research=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -2619,6 +2834,7 @@ func _run_scene_smoke() -> void:
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",
+		"ok" if service_ok else "failed",
 		"ok" if economy_ok else "failed",
 		"ok" if dashboard_ok else "failed",
 		"ok" if traffic_ok else "failed",

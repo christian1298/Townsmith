@@ -31,10 +31,11 @@ use core_city::{
     CityRuntime, CitySummary, CityTier, ConstructionSite, ConstructionStore, Economy, Home,
     IndustryKind, IndustryStore, Lot, LotError, LotRequest, LotStore, Placement, PlacementError,
     PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph, RoadRequest,
-    RoadSegment, RoadStore, Settlement, SettlementError, SettlementRequest, SettlementStore,
-    TechTree, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
-    DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT,
-    MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    RoadSegment, RoadStore, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore, ServiceTier,
+    Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree, UtilityConsumer,
+    UtilityKind, UtilityReport, UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY,
+    DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M,
+    RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -540,6 +541,7 @@ struct TownsmithCore {
     economy: Mutex<Option<Economy>>,
     industry: Mutex<Option<IndustryStore>>,
     utilities: Mutex<Option<UtilityStore>>,
+    services: Mutex<Option<ServiceStore>>,
     research: Mutex<Option<ResearchStore>>,
     terrain_deltas: Arc<RwLock<DeltaStore>>,
     terrain_seed: Mutex<Option<u64>>,
@@ -559,6 +561,7 @@ impl Default for TownsmithCore {
             economy: Mutex::new(None),
             industry: Mutex::new(None),
             utilities: Mutex::new(None),
+            services: Mutex::new(None),
             research: Mutex::new(None),
             terrain_deltas: Arc::new(RwLock::new(DeltaStore::new())),
             terrain_seed: Mutex::new(None),
@@ -1913,6 +1916,11 @@ impl TownsmithCore {
             .unwrap_or_else(|error| error.into_inner())
             .as_mut()
             .map(UtilityStore::clear);
+        self.services
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_mut()
+            .map(ServiceStore::clear);
         true
     }
 
@@ -1952,6 +1960,14 @@ impl TownsmithCore {
                 .as_mut()
             {
                 utilities.remove_placement(id);
+            }
+            if let Some(services) = self
+                .services
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_mut()
+            {
+                services.remove_placement(id);
             }
         }
         removed
@@ -2986,6 +3002,222 @@ impl TownsmithCore {
         true
     }
 
+    /// Add or replace a civic service site on a completed job building.
+    ///
+    /// The tier is derived from the city's current age: Wood is basic,
+    /// Masonry/Industrial improved, Modern/Information advanced.
+    #[func]
+    fn service_add_site(&self, seed: i64, placement_id: i64, kind: GString) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        if seed > i64::MAX as u64 {
+            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
+        }
+        let Ok(placement_id) = u64::try_from(placement_id) else {
+            return placement_simple_error(
+                "invalid_placement",
+                "placement id must be non-negative",
+            );
+        };
+        let Some(kind) = ServiceKind::parse(&kind.to_string()) else {
+            return placement_simple_error(
+                "invalid_service",
+                "service kind must be school, clinic, fire, or police",
+            );
+        };
+        let city = self.city_summary();
+        let age = AgeState::from_population(variant_u64(&city, "population")).age;
+        let tier = ServiceTier::from_age(age);
+        let center = {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(store) = world.as_ref() else {
+                return placement_simple_error("no_world", "no world placement store is open");
+            };
+            if store.seed != seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the placement store belongs to a different seed",
+                );
+            }
+            let Some(placement) = store.placements.iter().find(|item| item.id == placement_id)
+            else {
+                return placement_simple_error("unknown_placement", "no placement has that id");
+            };
+            if placement.job_slots == 0 {
+                return placement_simple_error(
+                    "no_jobs",
+                    "a civic service site needs at least one job slot",
+                );
+            }
+            let construction = self
+                .construction
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !construction
+                .site(placement_id)
+                .is_some_and(|site| site.is_complete())
+            {
+                return placement_simple_error(
+                    "not_complete",
+                    "a civic service site needs a completed building",
+                );
+            }
+            placement.center
+        };
+        {
+            let mut guard = self
+                .services
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if guard.as_ref().is_some_and(|services| services.seed != seed) {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    "the services store belongs to a different seed",
+                );
+            }
+            let services = guard.get_or_insert_with(|| ServiceStore::new(seed));
+            if let Err(error) = services.add_site(placement_id, kind, tier, center) {
+                return placement_simple_error("service_failed", error.to_string());
+            }
+        }
+        let mut result = self.services_refresh(seed as i64);
+        result.set("placement_id", placement_id as i64);
+        result.set("kind", &GString::from(kind.as_str()));
+        result.set("tier", &GString::from(tier.as_str()));
+        result
+    }
+
+    /// Remove a civic service site and refresh service.
+    #[func]
+    fn service_remove_site(&self, seed: i64, placement_id: i64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        let Ok(placement_id) = u64::try_from(placement_id) else {
+            return placement_simple_error(
+                "invalid_placement",
+                "placement id must be non-negative",
+            );
+        };
+        {
+            let mut guard = self
+                .services
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(services) = guard.as_mut() {
+                if services.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the services store belongs to a different seed",
+                    );
+                }
+                services.remove_site(placement_id);
+            }
+        }
+        self.services_refresh(seed as i64)
+    }
+
+    /// Return civic service sites, coverage, demand, and research output.
+    #[func]
+    fn services_state(&self) -> VarDictionary {
+        let consumers = self.collect_service_consumers();
+        let mut guard = self
+            .services
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match guard.as_mut() {
+            Some(store) => {
+                let report = store.refresh(&consumers);
+                service_payload(store, &report)
+            }
+            None => service_closed_payload(consumers.len()),
+        }
+    }
+
+    /// Recompute civic service from completed buildings and households.
+    #[func]
+    fn services_refresh(&self, seed: i64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(store) = world.as_ref() {
+                if store.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the placement store belongs to a different seed",
+                    );
+                }
+            }
+        }
+        let consumers = self.collect_service_consumers();
+        let mut guard = self
+            .services
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match guard.as_mut() {
+            Some(store) => {
+                if store.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the services store belongs to a different seed",
+                    );
+                }
+                let report = store.refresh(&consumers);
+                service_payload(store, &report)
+            }
+            None => service_closed_payload(consumers.len()),
+        }
+    }
+
+    /// Stable civic service checksum.
+    #[func]
+    fn services_checksum(&self) -> GString {
+        let guard = self
+            .services
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checksum = guard.as_ref().map_or(0, ServiceStore::checksum);
+        GString::from(&format!("{checksum:016x}"))
+    }
+
+    /// Close the civic service store.
+    #[func]
+    fn services_clear(&self) -> bool {
+        *self
+            .services
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        true
+    }
+
+    fn collect_service_consumers(&self) -> Vec<ServiceConsumer> {
+        let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        let construction = self
+            .construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let population = self
+            .population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        completed_service_consumers(world.as_ref(), &construction, population.as_ref())
+    }
+
+    fn civic_research_per_day(&self, seed: u64) -> f64 {
+        let consumers = self.collect_service_consumers();
+        let mut guard = self
+            .services
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match guard.as_mut() {
+            Some(store) if store.seed == seed => store.refresh(&consumers).research_per_day,
+            _ => 0.0,
+        }
+    }
+
     fn collect_utility_consumers(&self) -> Vec<UtilityConsumer> {
         let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
         let construction = self
@@ -3092,6 +3324,7 @@ impl TownsmithCore {
         let city = self.city_summary();
         let population = variant_u64(&city, "population");
         let age = AgeState::from_population(population).age;
+        let rate = research_rate_per_day(population, self.civic_research_per_day(seed));
         let guard = self
             .research
             .lock()
@@ -3107,7 +3340,7 @@ impl TownsmithCore {
             Some(store) => (store, true),
             None => (&fallback, false),
         };
-        research_payload(store, default_tech_tree(), age, population, open)
+        research_payload(store, default_tech_tree(), age, population, rate, open)
     }
 
     /// Advance the research pool by `seconds` at the current population rate.
@@ -3137,6 +3370,7 @@ impl TownsmithCore {
         let city = self.city_summary();
         let population = variant_u64(&city, "population");
         let age = AgeState::from_population(population).age;
+        let rate = research_rate_per_day(population, self.civic_research_per_day(seed));
         let mut guard = self
             .research
             .lock()
@@ -3148,8 +3382,8 @@ impl TownsmithCore {
             );
         }
         let store = guard.get_or_insert_with(|| ResearchStore::new(seed));
-        let tick = store.tick(seconds, research_rate_per_day(population));
-        let mut result = research_payload(store, default_tech_tree(), age, population, true);
+        let tick = store.tick(seconds, rate);
+        let mut result = research_payload(store, default_tech_tree(), age, population, rate, true);
         result.set("gained", tick.gained);
         result
     }
@@ -3178,6 +3412,7 @@ impl TownsmithCore {
         let city = self.city_summary();
         let population = variant_u64(&city, "population");
         let age = AgeState::from_population(population).age;
+        let rate = research_rate_per_day(population, self.civic_research_per_day(seed));
         let mut guard = self
             .research
             .lock()
@@ -3192,7 +3427,7 @@ impl TownsmithCore {
         match store.unlock(&node, default_tech_tree(), age) {
             Ok(unlock) => {
                 let mut result =
-                    research_payload(store, default_tech_tree(), age, population, true);
+                    research_payload(store, default_tech_tree(), age, population, rate, true);
                 result.set("spent", unlock.spent);
                 result.set("node", &GString::from(unlock.node.id.as_str()));
                 result.set("name", &GString::from(unlock.node.name.as_str()));
@@ -3338,6 +3573,7 @@ impl TownsmithCore {
             mut population,
             economy,
             mut utilities,
+            mut services,
             industry,
             research,
         ) = {
@@ -3364,6 +3600,10 @@ impl TownsmithCore {
                 .utilities
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
+            let services = self
+                .services
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let industry = self
                 .industry
                 .lock()
@@ -3381,6 +3621,7 @@ impl TownsmithCore {
                 population.as_ref().cloned(),
                 economy.as_ref().cloned(),
                 utilities.as_ref().cloned(),
+                services.as_ref().cloned(),
                 industry.as_ref().cloned(),
                 research.as_ref().cloned(),
             )
@@ -3425,6 +3666,26 @@ impl TownsmithCore {
             utilities.refresh(&consumers);
             if let Err(error) = utilities.validate() {
                 return placement_simple_error("invalid_utilities", error.to_string());
+            }
+        }
+        if let Some(services) = services.as_mut() {
+            services.sites.retain(|id, site| {
+                let Some(placement) = store.placements.iter().find(|item| item.id == *id) else {
+                    return false;
+                };
+                placement.job_slots > 0
+                    && construction
+                        .site(*id)
+                        .is_some_and(|site| site.is_complete())
+                    && (site.center[0] - placement.center[0]).abs() <= 0.001
+                    && (site.center[1] - placement.center[1]).abs() <= 0.001
+                    && (site.center[2] - placement.center[2]).abs() <= 0.001
+            });
+            let consumers =
+                completed_service_consumers(Some(&store), &construction, population.as_ref());
+            services.refresh(&consumers);
+            if let Err(error) = services.validate() {
+                return placement_simple_error("invalid_services", error.to_string());
             }
         }
         let json = match store.to_json_pretty() {
@@ -3552,6 +3813,21 @@ impl TownsmithCore {
             }
             None => json,
         };
+        let json = match services.as_ref() {
+            Some(services) => {
+                if services.seed != store.seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the services store belongs to a different seed",
+                    );
+                }
+                match attach_services(&json, services) {
+                    Ok(json) => json,
+                    Err(error) => return placement_simple_error("save_failed", error),
+                }
+            }
+            None => json,
+        };
         let json = match industry.as_ref() {
             Some(industry) => {
                 if industry.seed != store.seed {
@@ -3595,6 +3871,18 @@ impl TownsmithCore {
                 .is_some_and(|live| live.seed == utilities.seed)
             {
                 *guard = Some(utilities.clone());
+            }
+        }
+        if let Some(services) = services.as_ref() {
+            let mut guard = self
+                .services
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if guard
+                .as_ref()
+                .is_some_and(|live| live.seed == services.seed)
+            {
+                *guard = Some(services.clone());
             }
         }
         if json.len() > MAX_WORLD_SAVE_BYTES as usize {
@@ -3688,6 +3976,17 @@ impl TownsmithCore {
             &GString::from(&format!(
                 "{:016x}",
                 utilities.as_ref().map_or(0, UtilityStore::checksum)
+            )),
+        );
+        result.set(
+            "service_sites",
+            services.as_ref().map_or(0, ServiceStore::site_count) as i64,
+        );
+        result.set(
+            "service_checksum",
+            &GString::from(&format!(
+                "{:016x}",
+                services.as_ref().map_or(0, ServiceStore::checksum)
             )),
         );
         result.set(
@@ -3858,6 +4157,21 @@ impl TownsmithCore {
                 );
             }
         }
+        let services = match services_from_world_json(&json) {
+            Ok(services) => services,
+            Err((code, error)) => return placement_simple_error(code, error),
+        };
+        if let Some(services) = services.as_ref() {
+            if services.seed != expected_seed {
+                return placement_simple_error(
+                    "seed_mismatch",
+                    format!(
+                        "the services store uses seed {} but this world is {expected_seed}",
+                        services.seed
+                    ),
+                );
+            }
+        }
         let research = match research_from_world_json(&json) {
             Ok(Some(research)) => research,
             Ok(None) => ResearchStore::new(expected_seed),
@@ -4017,6 +4331,37 @@ impl TownsmithCore {
                 }
             }
         }
+        if let Some(services) = services.as_ref() {
+            for (&id, site) in &services.sites {
+                let Some(placement) = store.placements.iter().find(|item| item.id == id) else {
+                    return placement_simple_error(
+                        "service_orphan",
+                        format!("service site {id} has no placement"),
+                    );
+                };
+                if placement.job_slots == 0 {
+                    return placement_simple_error(
+                        "service_no_jobs",
+                        format!("service site {id} has no job slots"),
+                    );
+                }
+                if !construction.site(id).is_some_and(|site| site.is_complete()) {
+                    return placement_simple_error(
+                        "service_not_complete",
+                        format!("service site {id} is not complete"),
+                    );
+                }
+                if (site.center[0] - placement.center[0]).abs() > 0.001
+                    || (site.center[1] - placement.center[1]).abs() > 0.001
+                    || (site.center[2] - placement.center[2]).abs() > 0.001
+                {
+                    return placement_simple_error(
+                        "service_center_mismatch",
+                        format!("service site {id} does not match its placement centre"),
+                    );
+                }
+            }
+        }
         population.sync(&completed_slots(&store, &construction));
         sanitize_staffing(&mut population, &store, &construction);
         if let Err(error) = population.validate() {
@@ -4029,6 +4374,15 @@ impl TownsmithCore {
             utilities.refresh(&consumers);
             if let Err(error) = utilities.validate() {
                 return placement_simple_error("invalid_utilities", error.to_string());
+            }
+        }
+        let mut services = services;
+        if let Some(services) = services.as_mut() {
+            let consumers =
+                completed_service_consumers(Some(&store), &construction, Some(&population));
+            services.refresh(&consumers);
+            if let Err(error) = services.validate() {
+                return placement_simple_error("invalid_services", error.to_string());
             }
         }
         let population_count = population.population();
@@ -4048,6 +4402,8 @@ impl TownsmithCore {
         let industry_checksum = industry.as_ref().map_or(0, IndustryStore::checksum);
         let utility_count = utilities.as_ref().map_or(0, UtilityStore::site_count);
         let utility_checksum = utilities.as_ref().map_or(0, UtilityStore::checksum);
+        let service_count = services.as_ref().map_or(0, ServiceStore::site_count);
+        let service_checksum = services.as_ref().map_or(0, ServiceStore::checksum);
         let deltas_count = deltas.edit_count();
         let deltas_checksum = deltas.checksum();
         let mut guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
@@ -4081,6 +4437,10 @@ impl TownsmithCore {
             .utilities
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let mut services_guard = self
+            .services
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut industry_guard = self
             .industry
             .lock()
@@ -4101,6 +4461,7 @@ impl TownsmithCore {
         *population_guard = Some(population);
         *economy_guard = economy;
         *utilities_guard = utilities;
+        *services_guard = services;
         *industry_guard = industry;
         *research_guard = Some(research);
         *deltas_guard = deltas;
@@ -4154,6 +4515,11 @@ impl TownsmithCore {
         result.set(
             "utility_checksum",
             &GString::from(&format!("{utility_checksum:016x}")),
+        );
+        result.set("service_sites", service_count as i64);
+        result.set(
+            "service_checksum",
+            &GString::from(&format!("{service_checksum:016x}")),
         );
         result.set("research_points", research_points);
         result.set("research_completed", research_completed as i64);
@@ -5361,8 +5727,8 @@ fn default_tech_tree() -> &'static TechTree {
     TREE.get_or_init(TechTree::default_tree)
 }
 
-fn research_rate_per_day(population: u64) -> f64 {
-    population as f64 * RESEARCH_PER_RESIDENT_PER_DAY
+fn research_rate_per_day(population: u64, civic_research: f64) -> f64 {
+    population as f64 * RESEARCH_PER_RESIDENT_PER_DAY + civic_research.max(0.0)
 }
 
 fn age_rank(age: Age) -> usize {
@@ -5408,6 +5774,7 @@ fn research_payload(
     tree: &TechTree,
     age: Age,
     population: u64,
+    rate_per_day: f64,
     open: bool,
 ) -> VarDictionary {
     let mut result = VarDictionary::new();
@@ -5419,7 +5786,7 @@ fn research_payload(
     result.set("population", population as i64);
     result.set("points", store.points);
     result.set("lifetime_points", store.lifetime_points);
-    result.set("rate_per_day", research_rate_per_day(population));
+    result.set("rate_per_day", rate_per_day);
     result.set("completed_count", store.completed_count() as i64);
     result.set("node_count", tree.len() as i64);
 
@@ -5677,6 +6044,128 @@ fn completed_utility_consumers(
                 .unwrap_or(0),
         })
         .collect()
+}
+
+fn completed_service_consumers(
+    placements: Option<&PlacementStore>,
+    construction: &ConstructionStore,
+    population: Option<&CityRuntime>,
+) -> Vec<ServiceConsumer> {
+    let Some(placements) = placements else {
+        return Vec::new();
+    };
+    placements
+        .placements
+        .iter()
+        .filter(|placement| {
+            construction
+                .site(placement.id)
+                .is_some_and(|site| site.is_complete())
+        })
+        .map(|placement| ServiceConsumer {
+            id: placement.id,
+            center: [placement.center[0], placement.center[2]],
+            residents: population
+                .and_then(|runtime| runtime.households.get(&placement.id))
+                .map_or(0, |household| household.residents),
+            workers: population
+                .and_then(|runtime| runtime.staffing.get(&placement.id))
+                .copied()
+                .unwrap_or(0),
+        })
+        .collect()
+}
+
+fn service_closed_payload(consumers: usize) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set("open", false);
+    result.set("seed", 0);
+    result.set("site_count", 0);
+    result.set("school_sites", 0);
+    result.set("clinic_sites", 0);
+    result.set("fire_sites", 0);
+    result.set("police_sites", 0);
+    result.set("school_supply", 0.0);
+    result.set("clinic_supply", 0.0);
+    result.set("fire_supply", 0.0);
+    result.set("police_supply", 0.0);
+    result.set("school_demand", 0.0);
+    result.set("clinic_demand", 0.0);
+    result.set("fire_demand", 0.0);
+    result.set("police_demand", 0.0);
+    result.set("school_served", 0.0);
+    result.set("clinic_served", 0.0);
+    result.set("fire_served", 0.0);
+    result.set("police_served", 0.0);
+    result.set("school_capacity", 0.0);
+    result.set("clinic_capacity", 0.0);
+    result.set("fire_capacity", 0.0);
+    result.set("police_capacity", 0.0);
+    result.set("school_coverage", 0.0);
+    result.set("clinic_coverage", 0.0);
+    result.set("fire_coverage", 0.0);
+    result.set("police_coverage", 0.0);
+    result.set("research_per_day", 0.0);
+    result.set("consumers", consumers as i64);
+    result.set("sites", &Array::<VarDictionary>::new().to_variant());
+    result.set("checksum", &GString::from("0000000000000000"));
+    result
+}
+
+fn service_payload(store: &ServiceStore, report: &ServiceReport) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set("open", true);
+    result.set("seed", store.seed as i64);
+    result.set("site_count", store.site_count() as i64);
+    result.set("school_sites", store.count_of(ServiceKind::School) as i64);
+    result.set("clinic_sites", store.count_of(ServiceKind::Clinic) as i64);
+    result.set("fire_sites", store.count_of(ServiceKind::Fire) as i64);
+    result.set("police_sites", store.count_of(ServiceKind::Police) as i64);
+    result.set("school_supply", f64::from(report.school_supply));
+    result.set("clinic_supply", f64::from(report.clinic_supply));
+    result.set("fire_supply", f64::from(report.fire_supply));
+    result.set("police_supply", f64::from(report.police_supply));
+    result.set("school_demand", report.school_demand);
+    result.set("clinic_demand", report.clinic_demand);
+    result.set("fire_demand", report.fire_demand);
+    result.set("police_demand", report.police_demand);
+    result.set("school_served", report.school_served);
+    result.set("clinic_served", report.clinic_served);
+    result.set("fire_served", report.fire_served);
+    result.set("police_served", report.police_served);
+    result.set("school_capacity", report.school_capacity);
+    result.set("clinic_capacity", report.clinic_capacity);
+    result.set("fire_capacity", report.fire_capacity);
+    result.set("police_capacity", report.police_capacity);
+    result.set("school_coverage", f64::from(report.school_coverage));
+    result.set("clinic_coverage", f64::from(report.clinic_coverage));
+    result.set("fire_coverage", f64::from(report.fire_coverage));
+    result.set("police_coverage", f64::from(report.police_coverage));
+    result.set("research_per_day", report.research_per_day);
+    result.set("consumers", report.consumers as i64);
+    let mut sites: Array<VarDictionary> = Array::new();
+    for (&id, site) in &store.sites {
+        let mut item = VarDictionary::new();
+        item.set("placement_id", id as i64);
+        item.set("kind", &GString::from(site.kind.as_str()));
+        item.set("kind_name", &GString::from(site.kind.name()));
+        item.set("tier", &GString::from(site.tier.as_str()));
+        item.set("radius_m", f64::from(site.radius_m));
+        item.set("capacity", site.capacity);
+        item.set("research_per_day", site.research_per_day);
+        item.set("center_x", f64::from(site.center[0]));
+        item.set("center_y", f64::from(site.center[1]));
+        item.set("center_z", f64::from(site.center[2]));
+        sites.push(&item);
+    }
+    result.set("sites", &sites.to_variant());
+    result.set(
+        "checksum",
+        &GString::from(&format!("{:016x}", store.checksum())),
+    );
+    result
 }
 
 fn utility_closed_payload(consumers: usize) -> VarDictionary {
@@ -5971,6 +6460,27 @@ fn industry_from_world_json(json: &str) -> Result<Option<IndustryStore>, (&'stat
     store
         .validate()
         .map_err(|error| ("invalid_industry", error.to_string()))?;
+    Ok(Some(store))
+}
+
+fn attach_services(json: &str, store: &ServiceStore) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    value["services"] = serde_json::to_value(store).map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+}
+
+fn services_from_world_json(json: &str) -> Result<Option<ServiceStore>, (&'static str, String)> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| ("invalid_json", error.to_string()))?;
+    let Some(raw) = value.get("services") else {
+        return Ok(None);
+    };
+    let store: ServiceStore = serde_json::from_value(raw.clone())
+        .map_err(|error| ("invalid_services", error.to_string()))?;
+    store
+        .validate()
+        .map_err(|error| ("invalid_services", error.to_string()))?;
     Ok(Some(store))
 }
 
@@ -6930,6 +7440,50 @@ mod tests {
         let json = serde_json::to_string(&serde_json::json!({"utilities": store})).expect("json");
         let error = utilities_from_world_json(&json).expect_err("reject");
         assert_eq!(error.0, "invalid_utilities");
+    }
+
+    #[test]
+    fn service_world_json_round_trips_and_old_saves_are_closed() {
+        let mut store = ServiceStore::new(2026);
+        store
+            .add_site(
+                1,
+                ServiceKind::School,
+                ServiceTier::Improved,
+                [10.0, 40.0, 20.0],
+            )
+            .expect("school");
+        store.refresh(&[ServiceConsumer {
+            id: 1,
+            center: [10.0, 20.0],
+            residents: 2,
+            workers: 2,
+        }]);
+        let json = attach_services("{}", &store).expect("attach");
+        let decoded = services_from_world_json(&json)
+            .expect("parse")
+            .expect("present");
+        assert_eq!(decoded, store);
+        assert!(services_from_world_json("{}").expect("old save").is_none());
+    }
+
+    #[test]
+    fn service_world_json_rejects_invalid_sites() {
+        let mut store = ServiceStore::new(2026);
+        store
+            .add_site(1, ServiceKind::Clinic, ServiceTier::Basic, [0.0, 0.0, 0.0])
+            .expect("clinic");
+        store.sites.get_mut(&1).expect("site").capacity = -1.0;
+        let json = serde_json::to_string(&serde_json::json!({"services": store})).expect("json");
+        let error = services_from_world_json(&json).expect_err("reject");
+        assert_eq!(error.0, "invalid_services");
+    }
+
+    #[test]
+    fn civic_research_adds_to_the_population_rate() {
+        assert_eq!(research_rate_per_day(500, 0.0), 25.0);
+        assert_eq!(research_rate_per_day(500, 20.0), 45.0);
+        assert_eq!(research_rate_per_day(0, 8.0), 8.0);
     }
 
     #[test]

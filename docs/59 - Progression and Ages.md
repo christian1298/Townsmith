@@ -22,7 +22,7 @@ tags:
 | **4.1** | Age state: population milestones, current/next age, progress, materials, HUD/dashboard | **Done** — PR #76 |
 | **4.2** | Material tiers and structural limits: stories, spans, foundations, composite construction | **Done** — PR #78, see [[60 - Structural Limits]] |
 | **4.3** | Research pool and data-driven tech tree | **Done** — PR #80, see [[61 - Research]] |
-| **4.4** | Starter content library, service tiers, age-specific construction trades | Next |
+| **4.4** | Starter content library, service tiers, age-specific construction trades | **Partial** — civic services, PR #84; library/trades next |
 | **4.5** | Tutorial scenario and the wood-to-industrial balance pass | Planned |
 
 ## 2. Ages
@@ -35,7 +35,7 @@ tags:
 | **Modern** | 150,000 | reinforced concrete, steel, glass, aluminum | apartment block, office tower, hospital, subway |
 | **Information** | 750,000 | composites, electronics, solar, glass | data center, solar farm, university, supertall |
 
-These thresholds are draft values from [[02 - Game Design]] and [[17 - Materials and Structure]]. Structural systems are gated by age (4.3); materials, props, and the content library are not gated yet.
+These thresholds are draft values from [[02 - Game Design]] and [[17 - Materials and Structure]]. Structural systems are gated by age (4.3); civic service tiers derive from age (4.4, [[62 - Civic Services]]); materials, props, and the content library are not gated yet.
 
 ## 3. Model
 
@@ -84,9 +84,9 @@ pub struct AgeState {
 ## 6. Tests
 
 - `core_city::progression`: 6 tests — thresholds, boundary populations, next threshold/progress, final age, stable names/materials, determinism, age-id aliases.
-- `core_city` total: **172 tests**; `core_structure` **19 tests + 1 doctest**.
-- `godot_ext`: **46 tests**; the scene smoke covers `progression_state`, structural limits, research generation, and the HUD; structural age rejection is covered by the bridge helper and core placement tests.
-- Workspace: **409 tests + 2 doctests (411 passed)**.
+- `core_city` total: **183 tests**; `core_structure` **19 tests + 1 doctest**.
+- `godot_ext`: **49 tests**; the scene smoke covers `progression_state`, structural limits, research generation, and the HUD; structural age rejection is covered by the bridge helper and core placement tests.
+- Workspace: **425 tests + 2 doctests (427 passed)**.
 - Smoke marker includes `age=ok` and `research=ok`.
 
 ## 7. Limits
@@ -101,7 +101,7 @@ pub struct AgeState {
 
 ## 8. Next
 
-1. 4.4: starter content, civic research output, service tiers, and age-specific trades.
+1. 4.4: starter content library and age-specific construction trades (civic services are in [[62 - Civic Services]]).
 2. Move structural limits and the tech tree into content data for mods.
 3. Add age-aware blueprint metadata and library filters.
 4. Add a starter library that can sustain a town without player-authored blueprints.
