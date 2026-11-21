@@ -32,6 +32,12 @@ pub const MAX_ACTIVE_CITIZENS: usize = 2_000;
 /// Hard cap for the per-client detailed materialization set.
 pub const MAX_DETAILED_CITIZENS: usize = 200;
 
+/// Maximum materialization changes applied in one server tick.
+///
+/// One added, removed, or updated citizen counts as one change. The budget is
+/// enforced by [`diff_selection`]; unchanged retained citizens do not count.
+pub const MAX_MATERIALIZATION_CHANGES: usize = 64;
+
 const FIRST_NAMES: [&str; 32] = [
     "Ada", "Bram", "Corin", "Dara", "Ewan", "Faye", "Geth", "Hana", "Ivo", "Jori", "Kael", "Lena",
     "Mira", "Nilo", "Orla", "Pia", "Quin", "Rhea", "Sol", "Tamsin", "Ulric", "Vera", "Wren", "Xan",
@@ -180,6 +186,181 @@ pub struct MaterializationSelection {
     /// Nearest citizens inside the detailed radius, capped by the detailed
     /// budget. Every detailed citizen is also present in `active`.
     pub detailed: Vec<MaterializedCitizen>,
+}
+
+/// Deterministic delta between two active materialization selections.
+///
+/// The diff compares [`MaterializationSelection::active`] only. It carries no
+/// route, motion, or fade state, and applying it is the caller's job. `added`,
+/// `updated`, and `removed` are ordered by id ascending.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MaterializationDiff {
+    /// Active citizens present in `next` but not in `previous`.
+    pub added: Vec<MaterializedCitizen>,
+    /// Ids present in `previous` but not in `next`, ascending.
+    pub removed: Vec<u64>,
+    /// Citizens present in both whose identity or home changed.
+    ///
+    /// A change in [`MaterializedCitizen::distance`] alone is not an update:
+    /// distance is derived from the camera and refreshes every selection pass.
+    pub updated: Vec<MaterializedCitizen>,
+    /// Number of ids present in both `previous` and `next`.
+    pub retained: usize,
+    /// Number of candidate changes before applying `max_changes`.
+    pub changed: usize,
+    /// Number of changes kept in this diff, at most `max_changes`.
+    pub applied: usize,
+    /// Whether some candidate changes were deferred to a later tick.
+    pub truncated: bool,
+}
+
+impl MaterializationDiff {
+    /// Whether this diff contains no changes to apply.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.applied == 0
+    }
+}
+
+/// Diff two active selections under a per-tick change budget.
+///
+/// The rules are:
+///
+/// - `removed`: ids in `previous.active` that are absent from `next.active`;
+/// - `added`: ids in `next.active` that were absent from `previous.active`;
+/// - `retained`: ids present in both, whether or not their data changed;
+/// - `updated`: retained ids whose [`MaterializedCitizen`] data changed, except
+///   for [`distance`](MaterializedCitizen::distance), which is derived from the
+///   camera and refreshes without a materialization change.
+///
+/// `previous` is optional; `None` is an empty previous selection. Duplicate ids
+/// inside one selection are deduplicated deterministically (the last record in
+/// the vector wins), so inputs from older or custom callers are tolerated.
+///
+/// # Budget
+///
+/// One added, removed, or updated citizen is one change. If the candidate count
+/// is at most `max_changes`, every change is returned and `truncated` is
+/// `false`. Otherwise the nearest changes are kept: candidates are ordered by
+/// `(distance, id)` using the distance from `next` for added/updated citizens
+/// and from `previous` for removed citizens. This is a deterministic tie-break
+/// by id, not the full N3 priority list: pinned/story selection and
+/// anti-starvation are deliberately not assumed here.
+///
+/// Truncation is not a scheduler: it does not enforce
+/// [`MaterializationBudget::active_max`], balance additions against removals,
+/// or track dwell time. A caller applying the diff must keep its own active
+/// cap and defer the remainder of [`changed`](Self::changed) to later ticks.
+///
+/// This function is pure: it allocates the diff and does not mutate either
+/// selection or the named pool.
+#[must_use]
+pub fn diff_selection(
+    previous: Option<&MaterializationSelection>,
+    next: &MaterializationSelection,
+    max_changes: usize,
+) -> MaterializationDiff {
+    let previous_by_id: BTreeMap<u64, &MaterializedCitizen> = previous
+        .map(|selection| {
+            selection
+                .active
+                .iter()
+                .map(|citizen| (citizen.id, citizen))
+                .collect()
+        })
+        .unwrap_or_default();
+    let next_by_id: BTreeMap<u64, &MaterializedCitizen> = next
+        .active
+        .iter()
+        .map(|citizen| (citizen.id, citizen))
+        .collect();
+
+    let removed: Vec<&MaterializedCitizen> = previous_by_id
+        .iter()
+        .filter(|(id, _)| !next_by_id.contains_key(id))
+        .map(|(_, citizen)| *citizen)
+        .collect();
+    let added: Vec<&MaterializedCitizen> = next_by_id
+        .iter()
+        .filter(|(id, _)| !previous_by_id.contains_key(id))
+        .map(|(_, citizen)| *citizen)
+        .collect();
+    let updated: Vec<&MaterializedCitizen> = next_by_id
+        .iter()
+        .filter_map(|(id, citizen)| {
+            previous_by_id
+                .get(id)
+                .filter(|previous| !same_materialization(previous, citizen))
+                .map(|_| *citizen)
+        })
+        .collect();
+    let retained = next_by_id
+        .keys()
+        .filter(|id| previous_by_id.contains_key(id))
+        .count();
+    let changed = removed.len() + added.len() + updated.len();
+
+    if changed <= max_changes {
+        return MaterializationDiff {
+            added: added.into_iter().cloned().collect(),
+            removed: removed.iter().map(|citizen| citizen.id).collect(),
+            updated: updated.into_iter().cloned().collect(),
+            retained,
+            changed,
+            applied: changed,
+            truncated: false,
+        };
+    }
+
+    let mut candidates: Vec<(f32, u64)> = Vec::with_capacity(changed);
+    candidates.extend(removed.iter().map(|citizen| (citizen.distance, citizen.id)));
+    candidates.extend(added.iter().map(|citizen| (citizen.distance, citizen.id)));
+    candidates.extend(updated.iter().map(|citizen| (citizen.distance, citizen.id)));
+    candidates.sort_by(|left, right| {
+        left.0
+            .total_cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    let kept: BTreeSet<u64> = candidates
+        .into_iter()
+        .take(max_changes)
+        .map(|(_, id)| id)
+        .collect();
+
+    MaterializationDiff {
+        added: added
+            .iter()
+            .filter(|citizen| kept.contains(&citizen.id))
+            .map(|citizen| (*citizen).clone())
+            .collect(),
+        removed: removed
+            .iter()
+            .filter(|citizen| kept.contains(&citizen.id))
+            .map(|citizen| citizen.id)
+            .collect(),
+        updated: updated
+            .iter()
+            .filter(|citizen| kept.contains(&citizen.id))
+            .map(|citizen| (*citizen).clone())
+            .collect(),
+        retained,
+        changed,
+        applied: kept.len(),
+        truncated: true,
+    }
+}
+
+/// Whether two records describe the same materialization.
+///
+/// [`MaterializedCitizen::distance`] is excluded on purpose: moving the camera
+/// recomputes every distance and must not consume the change budget.
+fn same_materialization(left: &MaterializedCitizen, right: &MaterializedCitizen) -> bool {
+    left.id == right.id
+        && left.placement_id == right.placement_id
+        && left.slot == right.slot
+        && left.name == right.name
+        && left.home[0].to_bits() == right.home[0].to_bits()
+        && left.home[1].to_bits() == right.home[1].to_bits()
 }
 
 /// Derived named-citizen pool for one city.
@@ -932,6 +1113,27 @@ mod tests {
         citizens.iter().map(|citizen| citizen.id).collect()
     }
 
+    fn materialized(id: u64, distance: f32) -> MaterializedCitizen {
+        MaterializedCitizen {
+            id,
+            placement_id: id,
+            slot: 0,
+            name: name_for(id),
+            home: [distance, 0.0],
+            distance,
+        }
+    }
+
+    fn selection_with(citizens: &[(u64, f32)]) -> MaterializationSelection {
+        MaterializationSelection {
+            active: citizens
+                .iter()
+                .map(|&(id, distance)| materialized(id, distance))
+                .collect(),
+            detailed: Vec::new(),
+        }
+    }
+
     #[test]
     fn select_near_orders_by_distance_then_id() {
         let named = pool_with(&[(11, 101, 0), (12, 102, 0), (13, 103, 0)]);
@@ -1393,5 +1595,112 @@ mod tests {
             ),
             Err(NamedError::Invalid("active materialization budget"))
         );
+    }
+
+    #[test]
+    fn diff_selection_reports_no_change() {
+        let previous = selection_with(&[(3, 10.0), (5, 20.0)]);
+        let diff = diff_selection(Some(&previous), &previous, MAX_MATERIALIZATION_CHANGES);
+        assert!(diff.is_empty());
+        assert_eq!(diff.retained, 2);
+        assert_eq!(diff.changed, 0);
+        assert_eq!(diff.applied, 0);
+        assert!(!diff.truncated);
+        assert_eq!(MAX_MATERIALIZATION_CHANGES, 64);
+    }
+
+    #[test]
+    fn diff_selection_ignores_distance_only_refresh() {
+        let mut previous = selection_with(&[(3, 10.0), (5, 20.0)]);
+        let mut next = selection_with(&[(3, 12.5), (5, 24.0)]);
+        for citizen in &mut previous.active {
+            citizen.home = [0.0, 0.0];
+        }
+        for citizen in &mut next.active {
+            citizen.home = [0.0, 0.0];
+        }
+        let diff = diff_selection(Some(&previous), &next, MAX_MATERIALIZATION_CHANGES);
+        assert!(diff.is_empty());
+        assert!(diff.updated.is_empty());
+        assert_eq!(diff.retained, 2);
+        assert_eq!(diff.changed, 0);
+        assert!(!diff.truncated);
+    }
+
+    #[test]
+    fn diff_selection_adds_removes_updates_and_retains() {
+        let previous = selection_with(&[(1, 10.0), (2, 20.0), (3, 30.0)]);
+        let mut next = selection_with(&[(2, 20.0), (4, 40.0), (5, 50.0)]);
+        next.active[0].home = [99.0, 0.0];
+
+        let diff = diff_selection(Some(&previous), &next, MAX_MATERIALIZATION_CHANGES);
+        assert_eq!(diff.removed, vec![1, 3]);
+        assert_eq!(selected_ids(&diff.added), vec![4, 5]);
+        assert_eq!(selected_ids(&diff.updated), vec![2]);
+        assert_eq!(diff.updated[0].home, [99.0, 0.0]);
+        assert_eq!(diff.retained, 1);
+        assert_eq!(diff.changed, 5);
+        assert_eq!(diff.applied, 5);
+        assert!(!diff.truncated);
+    }
+
+    #[test]
+    fn diff_selection_caps_to_nearest_changes() {
+        let previous = selection_with(&[(1, 1.0), (2, 500.0)]);
+        let next = selection_with(&[(1, 1.0), (3, 50.0)]);
+
+        let diff = diff_selection(Some(&previous), &next, 1);
+        assert_eq!(selected_ids(&diff.added), vec![3]);
+        assert!(diff.removed.is_empty());
+        assert_eq!(diff.retained, 1);
+        assert_eq!(diff.changed, 2);
+        assert_eq!(diff.applied, 1);
+        assert!(diff.truncated);
+
+        let none = diff_selection(Some(&previous), &next, 0);
+        assert!(none.is_empty());
+        assert!(none.truncated);
+        assert_eq!(none.changed, 2);
+        assert_eq!(none.applied, 0);
+    }
+
+    #[test]
+    fn diff_selection_ties_break_by_id_and_ignore_input_order() {
+        let previous = MaterializationSelection::default();
+        let next = selection_with(&[(9, 10.0), (3, 10.0), (5, 10.0)]);
+        let reversed = selection_with(&[(5, 10.0), (9, 10.0), (3, 10.0)]);
+
+        let diff = diff_selection(Some(&previous), &next, 2);
+        assert_eq!(selected_ids(&diff.added), vec![3, 5]);
+        assert_eq!(diff.applied, 2);
+        assert!(diff.truncated);
+        assert_eq!(diff, diff_selection(Some(&previous), &next, 2));
+        assert_eq!(diff, diff_selection(Some(&previous), &reversed, 2));
+    }
+
+    #[test]
+    fn diff_selection_handles_empty_and_missing_previous() {
+        let empty = MaterializationSelection::default();
+        let diff = diff_selection(None, &empty, MAX_MATERIALIZATION_CHANGES);
+        assert!(diff.is_empty());
+        assert_eq!(diff.retained, 0);
+        assert_eq!(diff.changed, 0);
+        assert!(!diff.truncated);
+
+        let next = selection_with(&[(4, 5.0), (2, 6.0)]);
+        let diff = diff_selection(None, &next, MAX_MATERIALIZATION_CHANGES);
+        assert_eq!(selected_ids(&diff.added), vec![2, 4]);
+        assert_eq!(diff.retained, 0);
+        assert_eq!(diff.changed, 2);
+        assert_eq!(diff.applied, 2);
+        assert!(!diff.truncated);
+
+        let previous = selection_with(&[(3, 7.0), (1, 8.0)]);
+        let diff = diff_selection(Some(&previous), &empty, MAX_MATERIALIZATION_CHANGES);
+        assert_eq!(diff.removed, vec![1, 3]);
+        assert_eq!(diff.retained, 0);
+        assert_eq!(diff.changed, 2);
+        assert_eq!(diff.applied, 2);
+        assert!(!diff.truncated);
     }
 }

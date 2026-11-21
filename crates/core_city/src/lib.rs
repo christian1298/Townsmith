@@ -87,10 +87,10 @@ pub use lot::{
 };
 pub use metrics::{summarize, CitySummary};
 pub use named::{
-    citizen_id, mix64, name_for, MaterializationBudget, MaterializationSelection,
-    MaterializedCitizen, NamedCitizen, NamedCitizens, NamedError, NamedSave, IDENTITY_VERSION,
-    MAX_ACTIVE_CITIZENS, MAX_DETAILED_CITIZENS, MAX_NAMED_CITIZENS, MAX_NAMED_NAME_BYTES,
-    NAMED_FORMAT_VERSION,
+    citizen_id, diff_selection, mix64, name_for, MaterializationBudget, MaterializationDiff,
+    MaterializationSelection, MaterializedCitizen, NamedCitizen, NamedCitizens, NamedError,
+    NamedSave, IDENTITY_VERSION, MAX_ACTIVE_CITIZENS, MAX_DETAILED_CITIZENS,
+    MAX_MATERIALIZATION_CHANGES, MAX_NAMED_CITIZENS, MAX_NAMED_NAME_BYTES, NAMED_FORMAT_VERSION,
 };
 pub use placement::{
     footprint_for, normalize_rotation, validate_placement, Placement, PlacementError,

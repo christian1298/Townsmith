@@ -29,7 +29,7 @@ In:
 Out:
 
 - bridge/UI candidate calls, fade-in/out, or world-space agents;
-- dwell time, the 64-changes-per-tick budget, multi-citizen priority, or a saved materialized set;
+- dwell time, a scheduler, anti-starvation, or a saved materialized set; the diff cap is modeled, not enforced by the scene yet;
 - route caching, pathfinding, traffic, schedules, or needs simulation;
 - per-client network filtering.
 
@@ -97,7 +97,31 @@ A pinned citizen outside the active cap replaces the furthest non-pinned citizen
 
 The call is read-only: it does not mutate the live named pool, population, save state, or checksums. Detailed is a prefix of active. The bridge test checks ordering, counts, names, and the prefix invariant.
 
-## 6. Tests
+## 6. Change budget
+
+`MAX_MATERIALIZATION_CHANGES = 64`.
+
+`diff_selection(previous, next, max_changes)` returns:
+
+```rust
+pub struct MaterializationDiff {
+    pub added: Vec<MaterializedCitizen>,
+    pub removed: Vec<u64>,
+    pub updated: Vec<MaterializedCitizen>,
+    pub retained: usize,
+    pub changed: usize,
+    pub applied: usize,
+    pub truncated: bool,
+}
+```
+
+- `removed` is previous-active ids absent from next-active.
+- `added` is next-active ids absent from previous.
+- `updated` is common ids whose identity or home changed; distance-only camera refreshes are ignored.
+- Candidates are truncated nearest-first by `(distance, id)` when `changed > max_changes`; outputs stay id-sorted.
+- The diff is pure and does not mutate the selection or enforce a scheduler. Pinned/story priority, dwell time, anti-starvation, and the active cap remain caller policy.
+
+## 7. Tests
 
 `core_city::named` covers:
 
@@ -110,9 +134,10 @@ The call is read-only: it does not mutate the live named pool, population, save 
 - budget defaults, validation, hard caps, and invalid arguments;
 - hysteresis: keeping a previous citizen between the inner and outer radii, dropping one beyond the outer radius, and adding a new one inside the inner radius;
 - pinned survival outside the outer radius and under a binding active cap, including absent and invalid-home pins;
-- caps, the detailed prefix, and invalid hysteresis radii.
+- caps, the detailed prefix, and invalid hysteresis radii;
+- change diff: no change, distance-only refresh, add/remove/update, cap truncation, id tie-break, empty/missing previous.
 
-## 7. Limits
+## 8. Limits
 
 - Home positions are an input map; there is no live spatial index yet.
 - Hysteresis needs the caller to pass the previous selection; the core stores no materialized set.
@@ -122,13 +147,13 @@ The call is read-only: it does not mutate the live named pool, population, save 
 - No save field: the selected set is derived on demand.
 - Selection is city-wide in N3; per-client interest filtering is later.
 
-## 8. World-scene overlay
+## 9. World-scene overlay
 
 `F4` toggles a read-only overlay at the selected home/camera target. It calls `materialization_state` with a 250 m active / 120 m detailed radius and renders one blue marker per active citizen plus larger amber markers for detailed citizens. The overlay rebuilds on selection change or every 0.5 s while visible and frees its nodes when hidden. It does not persist or move agents.
 
 Limits: the overlay still calls stateless `select_near`; no hysteresis, fade, pin, route cache, or movement; markers are debug geometry.
 
-## 9. Benchmark
+## 10. Benchmark
 
 ```bash
 cargo run --release -p townsmith-bench --bin materialization
@@ -173,7 +198,7 @@ Limits: the benchmark times the current city-wide scan, not a spatial index;
 it reports selection only (no routes, agents, or rendering), and the timing is
 not a CI gate.
 
-## 10. Next
+## 11. Next
 
 1. Wire `select_near_with_previous` into the bridge and overlay, then add fade/pop handling and the 64-changes-per-tick budget.
 2. Move markers into a materialized-agent route and add the 2k-active/200-detailed render route.
