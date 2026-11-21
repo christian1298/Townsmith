@@ -2964,6 +2964,10 @@ impl TownsmithCore {
         if variant_bool(&traffic, "open") {
             input.traffic_components = Some(variant_usize(&traffic, "components"));
             input.traffic_nodes = Some(variant_usize(&traffic, "nodes"));
+        } else {
+            // A closed road store means the city has no roads to route over.
+            input.traffic_components = Some(0);
+            input.traffic_nodes = Some(0);
         }
         let report = advise(&input);
         advisor_payload(seed, &report)

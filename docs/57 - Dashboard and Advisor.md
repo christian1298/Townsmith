@@ -24,7 +24,7 @@ In:
 - a pure `core_city::advisor` module with stable message codes, severity, title, and detail;
 - rules for food, water, power, jobs, vacancies, happiness, commute, roads, construction, debt, and bankruptcy;
 - a `City Dashboard` overlay with population, work, wellbeing, services, treasury, industry, roads, and construction sections;
-- `D` toggles the dashboard; `Esc` closes it; entering Architect Mode closes it;
+- `F1` toggles the dashboard; `Esc` closes it; entering Architect Mode closes it;
 - a world-scene smoke that checks the advisor warning and the dashboard text;
 - marker `dashboard=ok`, enforced by `scripts/smoke_world_scene.sh`.
 
@@ -74,7 +74,7 @@ pub struct AdvisorInput {
 
 `advise(&input)` returns at most `MAX_ADVISOR_MESSAGES` (12) messages. Messages sort by severity (critical, warning, info) and then by stable code, so repeated snapshots produce identical reports.
 
-A missing service store is treated as zero supply when residents exist: no industry, water, or power is a real shortage, not an unknown.
+A missing service store is treated as zero supply when residents exist: no industry, water, or power is a real shortage, not an unknown. A closed road store is treated as zero road nodes.
 
 ## 3. Rules
 
@@ -115,7 +115,7 @@ Each message is `{ code, severity, title, detail }`. The call is derived state: 
 
 ## 5. Dashboard
 
-`D` toggles a right-side panel. It shows:
+`F1` toggles a right-side panel. It shows:
 
 ```text
 Population   2 residents / 2 housing (0 vacant)
@@ -140,7 +140,7 @@ Colors: critical red, warning amber, info green. `Esc` closes the panel before o
 - the advisor opens with the current seed;
 - after house completion and standard taxes, it reports at least one warning and `city.budget_deficit`;
 - the report is not marked healthy while the deficit exists;
-- the dashboard panel starts hidden, opens with `D`/`_toggle_dashboard`, contains `Advisor` and `deficit`, then closes;
+- the dashboard panel starts hidden, opens with `F1`/`_toggle_dashboard`, contains `Advisor` and `deficit`, then closes;
 - marker includes `dashboard=ok`; the script requires it.
 
 Final marker:
