@@ -30,13 +30,13 @@ use core_city::{
     advise, evaluate_tutorial, normalize_rotation, starter, summarize, AdvisorInput, AdvisorReport,
     Age, AgeState, CityLayout, CityRuntime, CitySummary, CityTier, ConstructionSite,
     ConstructionStore, Economy, Home, IndustryKind, IndustryStore, Lot, LotError, LotRequest,
-    LotStore, NamedCitizens, Placement, PlacementError, PlacementRequest, PlacementStore,
-    ResearchStore, RoadError, RoadGraph, RoadRequest, RoadSegment, RoadStore, ServiceConsumer,
-    ServiceKind, ServiceReport, ServiceStore, ServiceTier, Settlement, SettlementError,
-    SettlementRequest, SettlementStore, TechTree, Trade, TradePool, TutorialInput, UtilityConsumer,
-    UtilityKind, UtilityReport, UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY,
-    DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M,
-    RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    LotStore, NamedCitizens, NamedSave, Placement, PlacementError, PlacementRequest,
+    PlacementStore, ResearchStore, RoadError, RoadGraph, RoadRequest, RoadSegment, RoadStore,
+    ServiceConsumer, ServiceKind, ServiceReport, ServiceStore, ServiceTier, Settlement,
+    SettlementError, SettlementRequest, SettlementStore, TechTree, Trade, TradePool, TutorialInput,
+    UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
+    DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT,
+    MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -3918,6 +3918,7 @@ impl TownsmithCore {
             lots,
             settlements,
             mut population,
+            named,
             economy,
             mut utilities,
             mut services,
@@ -3939,6 +3940,7 @@ impl TownsmithCore {
                 .population
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
+            let named = self.named.lock().unwrap_or_else(|error| error.into_inner());
             let economy = self
                 .economy
                 .lock()
@@ -3966,6 +3968,7 @@ impl TownsmithCore {
                 lots.as_ref().cloned(),
                 settlements.as_ref().cloned(),
                 population.as_ref().cloned(),
+                named.as_ref().cloned(),
                 economy.as_ref().cloned(),
                 utilities.as_ref().cloned(),
                 services.as_ref().cloned(),
@@ -3983,6 +3986,10 @@ impl TownsmithCore {
                 return placement_simple_error("invalid_population", error.to_string());
             }
         }
+        let named = match named_pool_for_save(named, population.as_ref(), store.seed) {
+            Ok(named) => named,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
         if let Some(utilities) = utilities.as_mut() {
             utilities.water_sites.retain(|id, site| {
                 let Some(placement) = store.placements.iter().find(|item| item.id == *id) else {
@@ -4083,6 +4090,13 @@ impl TownsmithCore {
                     Err(error) => return placement_simple_error("save_failed", error),
                 }
             }
+            None => json,
+        };
+        let json = match named.as_ref() {
+            Some(named) => match attach_named_citizens(&json, &named.to_save()) {
+                Ok(json) => json,
+                Err(error) => return placement_simple_error("save_failed", error),
+            },
             None => json,
         };
         let json = match roads.as_ref() {
@@ -4247,6 +4261,12 @@ impl TownsmithCore {
                 *guard = Some(services.clone());
             }
         }
+        if let Some(named) = named.as_ref() {
+            let mut guard = self.named.lock().unwrap_or_else(|error| error.into_inner());
+            if guard.as_ref().is_none_or(|live| live.seed == named.seed) {
+                *guard = Some(named.clone());
+            }
+        }
         let mut result = VarDictionary::new();
         result.set("ok", true);
         result.set("path", &GString::from(path.to_string_lossy().as_ref()));
@@ -4283,6 +4303,18 @@ impl TownsmithCore {
             &GString::from(&format!(
                 "{:016x}",
                 population.as_ref().map_or(0, CityRuntime::checksum)
+            )),
+        );
+        result.set("named", named.as_ref().map_or(0, NamedCitizens::len) as i64);
+        result.set(
+            "named_max",
+            named.as_ref().map_or(0, |pool| pool.max) as i64,
+        );
+        result.set(
+            "named_checksum",
+            &GString::from(&format!(
+                "{:016x}",
+                named.as_ref().map_or(0, NamedCitizens::checksum)
             )),
         );
         result.set(
@@ -4414,6 +4446,11 @@ impl TownsmithCore {
                 ),
             );
         }
+        let mut named = match named_from_world_json(&json, expected_seed) {
+            Ok(Some(pool)) => pool,
+            Ok(None) => NamedCitizens::new(expected_seed),
+            Err((code, error)) => return placement_simple_error(code, error),
+        };
         let roads = match roads_from_world_json(&json) {
             Ok(Some(store)) => Some(store),
             Ok(None) => None,
@@ -4717,6 +4754,10 @@ impl TownsmithCore {
         if let Err(error) = population.validate() {
             return placement_simple_error("invalid_population", error.to_string());
         }
+        named.sync(&population.households);
+        if let Err(error) = named.validate() {
+            return placement_simple_error("invalid_named_citizens", error.to_string());
+        }
         let mut utilities = utilities;
         if let Some(utilities) = utilities.as_mut() {
             let consumers =
@@ -4737,6 +4778,9 @@ impl TownsmithCore {
         }
         let population_count = population.population();
         let population_checksum = population.checksum();
+        let named_count = named.len();
+        let named_max = named.max;
+        let named_checksum = named.checksum();
         let seed = store.seed;
         let count = store.placements.len() as i64;
         let checksum = store.checksum();
@@ -4779,6 +4823,7 @@ impl TownsmithCore {
             .population
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let mut named_guard = self.named.lock().unwrap_or_else(|error| error.into_inner());
         let mut economy_guard = self
             .economy
             .lock()
@@ -4809,6 +4854,7 @@ impl TownsmithCore {
         *settlements_guard = settlements;
         *guard = Some(store);
         *population_guard = Some(population);
+        *named_guard = Some(named);
         *economy_guard = economy;
         *utilities_guard = utilities;
         *services_guard = services;
@@ -4843,6 +4889,12 @@ impl TownsmithCore {
         result.set(
             "population_checksum",
             &GString::from(&format!("{population_checksum:016x}")),
+        );
+        result.set("named", named_count as i64);
+        result.set("named_max", named_max as i64);
+        result.set(
+            "named_checksum",
+            &GString::from(&format!("{named_checksum:016x}")),
         );
         result.set(
             "road_checksum",
@@ -6645,6 +6697,62 @@ fn population_from_world_json(json: &str) -> Result<Option<CityRuntime>, (&'stat
     Ok(Some(runtime))
 }
 
+fn attach_named_citizens(json: &str, save: &NamedSave) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    value["named_citizens"] = serde_json::to_value(save).map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+}
+
+fn named_from_world_json(
+    json: &str,
+    expected_seed: u64,
+) -> Result<Option<NamedCitizens>, (&'static str, String)> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| ("invalid_json", error.to_string()))?;
+    let Some(raw) = value.get("named_citizens") else {
+        return Ok(None);
+    };
+    let save: NamedSave = serde_json::from_value(raw.clone())
+        .map_err(|error| ("invalid_named_citizens", error.to_string()))?;
+    if save.seed != expected_seed {
+        return Err((
+            "seed_mismatch",
+            format!(
+                "named citizens use seed {} but this world is {expected_seed}",
+                save.seed
+            ),
+        ));
+    }
+    let pool = NamedCitizens::from_save(save)
+        .map_err(|error| ("invalid_named_citizens", error.to_string()))?;
+    Ok(Some(pool))
+}
+
+fn named_pool_for_save(
+    named: Option<NamedCitizens>,
+    population: Option<&CityRuntime>,
+    seed: u64,
+) -> Result<Option<NamedCitizens>, (&'static str, String)> {
+    let Some(mut pool) = named.or_else(|| population.map(|_| NamedCitizens::new(seed))) else {
+        return Ok(None);
+    };
+    if pool.seed != seed {
+        return Err((
+            "seed_mismatch",
+            format!(
+                "named citizens use seed {} but this world is {seed}",
+                pool.seed
+            ),
+        ));
+    }
+    let empty = BTreeMap::new();
+    pool.sync(population.map_or(&empty, |runtime| &runtime.households));
+    pool.validate()
+        .map_err(|error| ("invalid_named_citizens", error.to_string()))?;
+    Ok(Some(pool))
+}
+
 fn attach_roads(json: &str, store: &RoadStore) -> Result<String, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(json).map_err(|error| error.to_string())?;
@@ -8172,6 +8280,31 @@ mod tests {
         runtime.format_version = 99;
         let json = attach_population("{}", &runtime).expect("attach");
         assert!(population_from_world_json(&json).is_err());
+    }
+
+    #[test]
+    fn named_citizens_round_trip_in_world_json() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.tick(2.0, 2, &[(1, 2)]);
+        let mut named = NamedCitizens::new(2026);
+        named.sync(&runtime.households);
+        let json = attach_named_citizens("{}", &named.to_save()).expect("attach");
+        let parsed = named_from_world_json(&json, 2026)
+            .expect("parse")
+            .expect("present");
+        assert_eq!(parsed, named);
+        assert!(named_from_world_json("{}", 2026)
+            .expect("old save")
+            .is_none());
+        assert!(named_from_world_json(&json, 2027).is_err());
+    }
+
+    #[test]
+    fn named_citizens_reject_an_unsupported_version() {
+        let mut save = NamedCitizens::new(2026).to_save();
+        save.format_version = 99;
+        let json = attach_named_citizens("{}", &save).expect("attach");
+        assert!(named_from_world_json(&json, 2026).is_err());
     }
 
     #[test]
