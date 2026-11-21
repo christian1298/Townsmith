@@ -22,16 +22,16 @@ tags:
 | `crates/core_voxel` | 32³ chunk, palette/RLE, greedy mesher, chunked volume + cross-chunk meshing | Working, 52 tests |
 | `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming, terrain mesh + LOD + seam skirts | Working, 62 tests |
 | `crates/core_sim` | 1M-scale cohort simulation plus deterministic 2,000 active agents | Working, 26 tests |
-| `crates/core_city` | Deterministic synthetic city layouts, placement, construction, roads, lots, settlements, households, treasury/loans, primary industries, water/power utilities, traffic, the city advisor, population-driven ages, and structural placement limits | Working, 157 tests |
+| `crates/core_city` | Deterministic synthetic city layouts, placement, construction, roads, lots, settlements, households, treasury/loans, primary industries, water/power utilities, traffic, the city advisor, population-driven ages, structural placement limits, research, and age gates | Working, 170 tests |
 | `crates/core_blueprint` | `.tsbp` v1 package: zip, metadata, optional structure block, RLE voxel stream, BLAKE3 hash | Working, 15 tests |
 | `crates/core_rooms` | Room detection, props, capacity/jobs, material stats, shared acceptance fixture, room bounds | Working, 12 tests + 1 doctest |
-| `crates/core_structure` | Structural systems, story/height/span/foundation rules, composite ground checks | Working, 18 tests + 1 doctest |
+| `crates/core_structure` | Structural systems, story/height/span/foundation rules, age requirements, composite ground checks | Working, 19 tests + 1 doctest |
 | `crates/server` | Headless cohort tick harness (no GPU, no socket yet) | Working |
 | `crates/bench` | Voxel, volume, worldgen, terrain, cohort, active-agent, city-layout, rooms, city-loop, and traffic microbenchmarks | Working |
 | `benchmarks/` | Route JSON, results, and benchmark notes | Harness v0 |
 | `scripts/bench_core.sh` | 3-run core benchmark aggregation | Working |
 | `scripts/bench_godot.sh` | 3-run Godot flyover aggregation | Working; headless frame times are not representative |
-| `crates/godot_ext` | Godot 4.7 GDExtension bridge with terrain workers, city layout, editable volume, blueprint, room, copy-mesh, acceptance, world-placement, construction, road, lot, settlement, household, treasury, industry, utility, traffic, advisor, and structure APIs | Working, 43 tests + headless smoke |
+| `crates/godot_ext` | Godot 4.7 GDExtension bridge with terrain workers, city layout, editable volume, blueprint, room, copy-mesh, acceptance, world-placement, construction, road, lot, settlement, household, treasury, industry, utility, traffic, advisor, structure, and research APIs | Working, 46 tests + headless smoke |
 | `godot/` | Terrain/city previews plus the first-person editor, blueprint save/load, room overlay, EN/DE UI, and slice acceptance | Working |
 | `scripts/` | Build, check, run, smoke, and acceptance commands | Working |
 
@@ -164,7 +164,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
 | Traffic graph, 32 × 32 grid | 64 roads | 1,024 nodes | 1,984 edges | ~0.44 ms build; 1.3 ms / 1,000 flow queries |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, agent, and traffic paths and a baseline for regressions. The workspace has **390 tests + 2 doctests**: 52 voxel, 62 world, 26 simulation, 157 city, 15 blueprint, 12 rooms, 43 bridge, 18 structure, 4 city-loop tests, and 1 traffic-grid test.
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, agent, and traffic paths and a baseline for regressions. The workspace has **409 tests + 2 doctests**: 52 voxel, 62 world, 26 simulation, 170 city, 15 blueprint, 12 rooms, 46 bridge, 19 structure, 4 city-loop tests, and 1 traffic-grid test.
 
 ### Vertical slice acceptance
 

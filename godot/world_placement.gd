@@ -214,6 +214,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					_cycle_tax_policy()
 				KEY_L:
 					_borrow()
+				KEY_Y:
+					_research_next()
 				KEY_V:
 					core.construction_add_materials(10000)
 					_update_hud()
@@ -1209,7 +1211,7 @@ func _update_hud() -> void:
 			SEED, blueprint_name, structure_text,
 		]
 	else:
-		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nStructure: %s\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew on/off · I industry · U utility · T tax · L loan · F1 dashboard · V +10k materials · F5 save · F9 load" % [
+		hud.text = "Townsmith — Mayor Mode  (seed %d)\nBlueprint: %s  ·  %d rooms  ·  capacity %d\nStructure: %s\nWASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement\nLMB place · RMB select · Enter: enter selected building\nC crew · I industry · U utility · T tax · L loan · Y research · F1 dashboard · V +10k · F5 save · F9 load" % [
 			SEED, blueprint_name, rooms, capacity, structure_text,
 		]
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
@@ -1228,6 +1230,15 @@ func _update_hud() -> void:
 				int(progression.get("next_threshold", 0)),
 				roundi(float(progression.get("progress", 0.0)) * 100.0),
 			]
+	var research: Dictionary = core.research_state(SEED)
+	var research_text := "—"
+	if bool(research.get("ok", false)):
+		research_text = "%d pts · %d/%d techs · +%.1f/day" % [
+			roundi(float(research.get("points", 0.0))),
+			int(research.get("completed_count", 0)),
+			int(research.get("node_count", 0)),
+			float(research.get("rate_per_day", 0.0)),
+		]
 	var economy: Dictionary = core.economy_state()
 	var treasury_text := "—"
 	if bool(economy.get("open", false)):
@@ -1281,7 +1292,7 @@ func _update_hud() -> void:
 			float(city.get("water", 0.0)) * 100.0,
 			float(city.get("rest", 0.0)) * 100.0,
 		]
-	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nAge: %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nIndustry: %s\nUtilities: %s\nTraffic: %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
+	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nAge: %s\nResearch: %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nIndustry: %s\nUtilities: %s\nTraffic: %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
 		selected_line,
 		int(target_x),
 		int(target_z),
@@ -1299,6 +1310,7 @@ func _update_hud() -> void:
 		int(city.get("employed", 0)),
 		happiness_text,
 		age_text,
+		research_text,
 		float(city.get("average_commute_m", 0.0)),
 		float(city.get("daily_wages", 0.0)),
 		needs_text,
@@ -1333,6 +1345,7 @@ func _update_dashboard() -> void:
 	var construction: Dictionary = core.construction_summary()
 	var traffic: Dictionary = core.traffic_state(SEED)
 	var progression: Dictionary = core.progression_state(SEED)
+	var research: Dictionary = core.research_state(SEED)
 	var advice: Dictionary = core.city_advisor(SEED)
 	var population := int(city.get("population", 0))
 	var happiness := "—"
@@ -1387,6 +1400,15 @@ func _update_dashboard() -> void:
 				roundi(float(progression.get("progress", 0.0)) * 100.0),
 			]
 	text += "[b]Age[/b]\n%s\n" % age_line
+	var research_line := "—"
+	if bool(research.get("ok", false)):
+		research_line = "%d points · +%.1f/day · %d / %d technologies" % [
+			roundi(float(research.get("points", 0.0))),
+			float(research.get("rate_per_day", 0.0)),
+			int(research.get("completed_count", 0)),
+			int(research.get("node_count", 0)),
+		]
+	text += "[b]Research[/b]\n%s\n" % research_line
 	text += "[b]Work[/b]\n%d / %d jobs filled · %d unemployed · commute %.0f m\n" % [
 		int(city.get("employed", 0)),
 		int(city.get("jobs", 0)),
@@ -1885,6 +1907,25 @@ func _refresh_construction_visuals() -> void:
 		if is_instance_valid(label):
 			label.text = _construction_label(site)
 
+func _research_next() -> void:
+	var state: Dictionary = core.research_state(SEED)
+	var nodes: Array = state.get("nodes", [])
+	var best := ""
+	var best_cost := INF
+	for node in nodes:
+		if bool(node.get("available", false)) and float(node.get("cost", INF)) < best_cost:
+			best = str(node.get("id", ""))
+			best_cost = float(node.get("cost", INF))
+	if best == "":
+		_set_modal("Research: nothing is affordable yet", true)
+		return
+	var result: Dictionary = core.research_unlock(SEED, best)
+	if bool(result.get("ok", false)):
+		_set_modal("Researched " + str(result.get("name", best)), false)
+	else:
+		_set_modal("Research failed: " + str(result.get("error", "unknown")), true)
+	_update_hud()
+
 func _advance_construction(seconds: float) -> Dictionary:
 	if seconds <= 0.0:
 		return {}
@@ -1892,6 +1933,7 @@ func _advance_construction(seconds: float) -> Dictionary:
 	core.utilities_refresh(SEED)
 	core.industry_tick(SEED, seconds)
 	core.population_tick(SEED, seconds)
+	core.research_tick(SEED, seconds)
 	core.economy_tick(SEED, seconds)
 	_refresh_construction_visuals()
 	_update_hud()
@@ -2012,6 +2054,7 @@ func _run_scene_smoke() -> void:
 	var render_ok := false
 	var structure_ok := false
 	var age_ok := false
+	var research_ok := false
 	var occupancy_before_ok := false
 	var occupancy_after_ok := false
 	var industry_ok := false
@@ -2417,6 +2460,26 @@ func _run_scene_smoke() -> void:
 				var economy_balance := float(economy_recovered.get("balance", 0.0))
 				var economy_net := float(economy_recovered.get("daily_net", 0.0))
 				var economy_debt := float(economy_recovered.get("debt", 0.0))
+				var research_before: Dictionary = core.research_state(SEED)
+				var research_checksum: String = str(core.research_checksum())
+				var research_points := float(research_before.get("points", 0.0))
+				research_ok = bool(research_before.get("ok", false))
+				research_ok = research_ok and int(research_before.get("node_count", 0)) >= 14
+				research_ok = research_ok and str(research_before.get("age", "")) == "wood"
+				research_ok = research_ok and research_points >= 50.0
+				var timber_result: Dictionary = core.research_unlock(SEED, "construction.timber_frame")
+				research_ok = research_ok and bool(timber_result.get("ok", false))
+				research_ok = research_ok and int(timber_result.get("completed_count", 0)) == 1
+				research_ok = research_ok and float(timber_result.get("points", 0.0)) < research_points
+				var duplicate_result: Dictionary = core.research_unlock(SEED, "construction.timber_frame")
+				research_ok = research_ok and not bool(duplicate_result.get("ok", true))
+				research_ok = research_ok and str(duplicate_result.get("error_code", "")) == "already_unlocked"
+				var locked_result: Dictionary = core.research_unlock(SEED, "construction.concrete")
+				research_ok = research_ok and not bool(locked_result.get("ok", true))
+				research_ok = research_ok and str(locked_result.get("error_code", "")) == "age_locked"
+				research_checksum = str(core.research_checksum())
+				var research_points_after := float(core.research_state(SEED).get("points", 0.0))
+				occupancy_after_ok = occupancy_after_ok and research_ok
 				if occupancy_after_ok:
 					var population_checksum: String = str(core.population_checksum())
 					var economy_checksum: String = str(core.economy_checksum())
@@ -2431,6 +2494,7 @@ func _run_scene_smoke() -> void:
 					core.economy_clear()
 					core.industry_clear()
 					core.utilities_clear()
+					core.research_clear()
 					var reloaded := _load_world()
 					var city_persisted: Dictionary = core.city_summary()
 					var households: Dictionary = core.population_state()
@@ -2470,6 +2534,11 @@ func _run_scene_smoke() -> void:
 					utility_persisted_ok = utility_persisted_ok and str(utility_persisted.get("checksum", "")) == str(core.utilities_checksum())
 					utility_persisted_ok = utility_persisted_ok and utility_nodes.size() == 2
 					utility_ok = utility_ok and utility_persisted_ok
+					var research_persisted: Dictionary = core.research_state(SEED)
+					research_ok = research_ok and bool(research_persisted.get("open", false))
+					research_ok = research_ok and int(research_persisted.get("completed_count", -1)) == 1
+					research_ok = research_ok and absf(float(research_persisted.get("points", 0.0)) - research_points_after) < 0.001
+					research_ok = research_ok and str(core.research_checksum()) == research_checksum
 				if not build_done_ok:
 					status = "construction_complete_failed"
 				elif not render_ok:
@@ -2478,6 +2547,8 @@ func _run_scene_smoke() -> void:
 					status = "structure_failed"
 				elif not age_ok:
 					status = "age_failed"
+				elif not research_ok:
+					status = "research_failed"
 				elif not (occupancy_before_ok and occupancy_after_ok):
 					status = "occupancy_failed"
 				elif not industry_ok:
@@ -2526,7 +2597,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s render=%s structure=%s age=%s occupancy=%s industry=%s utilities=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s render=%s structure=%s age=%s research=%s occupancy=%s industry=%s utilities=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -2541,6 +2612,7 @@ func _run_scene_smoke() -> void:
 		"ok" if render_ok else "failed",
 		"ok" if structure_ok else "failed",
 		"ok" if age_ok else "failed",
+		"ok" if research_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",

@@ -13,7 +13,7 @@ tags:
 # 59 — Progression and Ages
 
 > [!info] What this note is
-> Phase 4.1 starts the long arc: a settlement's age is a deterministic function of its population. The state is shared by the HUD, dashboard, and future content library. Research points, tech unlocks, and structural limits come next; 4.2 structural limits are implemented in [[60 - Structural Limits]].
+> Phase 4.1 starts the long arc: a settlement's age is a deterministic function of its population. The state is shared by the HUD, dashboard, and future content library. Research points, tech unlocks, and structural limits are implemented in [[60 - Structural Limits]] and [[61 - Research]].
 
 ## 1. Phase 4 slices
 
@@ -21,8 +21,8 @@ tags:
 |---|---|---|
 | **4.1** | Age state: population milestones, current/next age, progress, materials, HUD/dashboard | **Done** — PR #76 |
 | **4.2** | Material tiers and structural limits: stories, spans, foundations, composite construction | **Done** — PR #78, see [[60 - Structural Limits]] |
-| **4.3** | Research pool and data-driven tech tree | Next |
-| **4.4** | Starter content library, service tiers, age-specific construction trades | Planned |
+| **4.3** | Research pool and data-driven tech tree | **This PR** — see [[61 - Research]] |
+| **4.4** | Starter content library, service tiers, age-specific construction trades | Next |
 | **4.5** | Tutorial scenario and the wood-to-industrial balance pass | Planned |
 
 ## 2. Ages
@@ -83,23 +83,24 @@ pub struct AgeState {
 
 ## 6. Tests
 
-- `core_city::progression`: 5 tests — thresholds, boundary populations, next threshold/progress, final age, stable names/materials, determinism.
-- `core_city` total: **157 tests**; `core_structure` **18 tests + 1 doctest**.
-- `godot_ext`: **43 tests**; the scene smoke covers `progression_state` and structural limits.
-- Workspace: **390 tests + 2 doctests (392 passed)**.
-- Smoke marker includes `age=ok` and `render=ok`.
+- `core_city::progression`: 6 tests — thresholds, boundary populations, next threshold/progress, final age, stable names/materials, determinism, age-id aliases.
+- `core_city` total: **170 tests**; `core_structure` **19 tests + 1 doctest**.
+- `godot_ext`: **46 tests**; the scene smoke covers `progression_state`, structural limits, research, and age gates.
+- Workspace: **409 tests + 2 doctests (411 passed)**.
+- Smoke marker includes `age=ok` and `research=ok`.
 
 ## 7. Limits
 
-- Population alone unlocks ages; research and explicit tech nodes do not exist yet.
-- Ages do not block placements, materials, or blueprints.
+- Population alone sets the age; research does not change the age threshold.
+- Research gates structural systems by age. Materials, props, and blueprint libraries are not gated yet.
+- A Wood-age city can still author a concrete blueprint; placement rejects it with `age_locked`.
 - No age-specific art, roofs, lights, vehicles, or construction trades.
 - The 1,000-resident late scenario is still Masonry; Industrial is a 20,000-resident target.
 - The age table is draft balance, not a tuned campaign curve.
 
 ## 8. Next
 
-1. 4.3: research pool and data-driven tech tree.
-2. Move structural limits into content data for mods.
+1. 4.4: starter content, civic research output, service tiers, and age-specific trades.
+2. Move structural limits and the tech tree into content data for mods.
 3. Add age-aware blueprint metadata and library filters.
 4. Add a starter library that can sustain a town without player-authored blueprints.

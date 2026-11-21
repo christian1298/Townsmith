@@ -40,6 +40,7 @@ pub mod metrics;
 pub mod placement;
 pub mod population;
 pub mod progression;
+pub mod research;
 pub mod road;
 pub mod settlement;
 pub mod traffic;
@@ -87,6 +88,12 @@ pub use population::{
     WAGE_PER_WORKER_PER_DAY,
 };
 pub use progression::{Age, AgeState};
+pub use research::{
+    ResearchError, ResearchStore, ResearchTick, ResearchUnlock, TechNode, TechTree,
+    MAX_RESEARCH_POINTS, MAX_RESEARCH_RATE_PER_DAY, MAX_RESEARCH_TICK_SECONDS, MAX_TECH_COST,
+    MAX_TECH_NODES, RESEARCH_FORMAT_VERSION, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_RESEARCH,
+    TECH_TREE_FORMAT_VERSION,
+};
 pub use road::{
     RoadError, RoadRequest, RoadSegment, RoadStore, MAX_ROADS, MAX_ROAD_LENGTH_M, MAX_ROAD_SLOPE_M,
     MAX_ROAD_WIDTH_M, MIN_ROAD_WIDTH_M, ROAD_FORMAT_VERSION,

@@ -33,7 +33,7 @@ Out:
 - full voxel load-path tracing, cantilevers, wall thickness, openings, or bracing analysis;
 - finite-element stress simulation;
 - service gates such as elevators, fire stairs, water pressure, or HVAC;
-- age gating of materials (4.3 research/content);
+- age gating of materials and props beyond structural systems (4.4 content);
 - material-specific costs, fire risk, or construction trades;
 - basements and foundation geometry beyond a declared depth;
 - modded material property tables (the system constants are code for now).
@@ -178,13 +178,13 @@ The palette shows `structure: timber frame (3/3 stories)`. Loading a package res
 
 ## 8. Tests and smoke
 
-- `core_structure`: **18 tests + 1 doctest** for each limit, composite bonus/weak ground, span, foundation, aliases, and derivation.
-- `core_city::placement`: 6 tests — a four-story timber request fails with `structure_stories`; a four-story brick request and a stone-ground/timber request pass; legacy requests without metadata pass; loaded placements revalidate. Core city total **157**.
+- `core_structure`: **19 tests + 1 doctest** for each limit, composite bonus/weak ground, span, foundation, aliases, and derivation.
+- `core_city::placement`: 6 tests — a four-story timber request fails with `structure_stories`; a four-story brick request and a stone-ground/timber request pass; legacy requests without metadata pass; loaded placements revalidate. Core city total **170**.
 - `core_blueprint`: **15 tests** — default metadata omits the field; a valid structure roundtrips; an over-limit structure saves as a draft; a height mismatch is rejected on save.
-- `godot_ext`: **43 tests**; blueprint info and placement payloads include the structure summary, with a bridge roundtrip test plus the world-scene and editor smoke coverage.
+- `godot_ext`: **46 tests**; blueprint info and placement payloads include the structure summary, with a bridge roundtrip test plus the world-scene and editor smoke coverage.
 - `smoke_world_scene.sh`: the acceptance house derives timber frame, two stories, and a three-story limit; the marker includes `structure=ok`.
 - The editor blueprint smoke checks the saved/loaded timber structure block.
-- Workspace: **390 tests + 2 doctests (392 passed)**.
+- Workspace: **409 tests + 2 doctests (411 passed)**.
 
 ## 9. Limits
 
@@ -192,16 +192,16 @@ The palette shows `structure: timber frame (3/3 stories)`. Loading a package res
 - Foundation depth is a declared number, not excavated geometry.
 - Bracing, openings, cantilevers, wall thickness, and soil/water tables are not modeled.
 - Only masonry-ground + timber-upper composite receives a bonus.
-- Structural limits are not age-gated yet; a Wood-age city can select concrete in the editor.
+- Placement is age-gated ([[61 - Research]]): a Wood-age city can author a concrete draft but cannot place it. The editor still allows selection for authoring.
 - Structure selection changes metadata and rules, not the voxel palette; brick/concrete art arrives with the 4.4 content library.
-- Age-specific material costs, fire risk, and trades arrive in 4.3/4.4.
+- Age-specific material costs, fire risk, and trades arrive in 4.4.
 - A very wide building can declare span 0 and pass; this is intentional until beam analysis exists.
 - Derived structure for a legacy package is persisted with the placement; changing the derivation heuristic in a future version needs a migration or a revalidation bypass.
 - The editor uses the full volume height, so a tall empty volume with a short house can overstate structural height; a tighter solid-height measure is future work.
 
 ## 10. Next
 
-1. 4.3: research pool and a data-driven tech tree that gates systems by age.
+1. 4.4: starter content, civic research output, and age-specific trades.
 2. Move system limits into content data so mods can add materials and systems.
 3. Add a load-path/beam overlay once the editor can select structural elements.
 4. Add service gates (elevators, fire stairs, water pressure) with occupancy, not placement, as the hard gate.

@@ -10,7 +10,7 @@ use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -30,10 +30,11 @@ use core_city::{
     advise, normalize_rotation, summarize, AdvisorInput, AdvisorReport, Age, AgeState, CityLayout,
     CityRuntime, CitySummary, CityTier, ConstructionSite, ConstructionStore, Economy, Home,
     IndustryKind, IndustryStore, Lot, LotError, LotRequest, LotStore, Placement, PlacementError,
-    PlacementRequest, PlacementStore, RoadError, RoadGraph, RoadRequest, RoadSegment, RoadStore,
-    Settlement, SettlementError, SettlementRequest, SettlementStore, UtilityConsumer, UtilityKind,
-    UtilityReport, UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY,
-    DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M, STARTING_BALANCE,
+    PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph, RoadRequest,
+    RoadSegment, RoadStore, Settlement, SettlementError, SettlementRequest, SettlementStore,
+    TechTree, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
+    DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT,
+    MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -539,6 +540,7 @@ struct TownsmithCore {
     economy: Mutex<Option<Economy>>,
     industry: Mutex<Option<IndustryStore>>,
     utilities: Mutex<Option<UtilityStore>>,
+    research: Mutex<Option<ResearchStore>>,
     terrain_deltas: Arc<RwLock<DeltaStore>>,
     terrain_seed: Mutex<Option<u64>>,
 }
@@ -557,6 +559,7 @@ impl Default for TownsmithCore {
             economy: Mutex::new(None),
             industry: Mutex::new(None),
             utilities: Mutex::new(None),
+            research: Mutex::new(None),
             terrain_deltas: Arc::new(RwLock::new(DeltaStore::new())),
             terrain_seed: Mutex::new(None),
         }
@@ -857,6 +860,13 @@ impl TownsmithCore {
             Ok(value) => value,
             Err(error) => return error,
         };
+        let current_age =
+            AgeState::from_population(variant_u64(&self.city_summary(), "population")).age;
+        if let Some(structure) = request.structure.as_ref() {
+            if let Some((code, error)) = structure_age_error(structure, current_age) {
+                return placement_simple_error(code, error);
+            }
+        }
         let height_at =
             |cell_x, cell_z| self.terrain_height_for_seed(seed, TerrainPos::new(cell_x, cell_z));
         let guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
@@ -983,6 +993,13 @@ impl TownsmithCore {
             Ok(value) => value,
             Err(error) => return error,
         };
+        let current_age =
+            AgeState::from_population(variant_u64(&self.city_summary(), "population")).age;
+        if let Some(structure) = request.structure.as_ref() {
+            if let Some((code, error)) = structure_age_error(structure, current_age) {
+                return placement_simple_error(code, error);
+            }
+        }
         let height_at =
             |cell_x, cell_z| self.terrain_height_for_seed(seed, TerrainPos::new(cell_x, cell_z));
         let mut guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
@@ -3016,6 +3033,160 @@ impl TownsmithCore {
         advisor_payload(seed, &report)
     }
 
+    /// Return the research pool, technology tree, and node availability.
+    #[func]
+    fn research_state(&self, seed: i64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        if seed > i64::MAX as u64 {
+            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
+        }
+        {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(store) = world.as_ref() {
+                if store.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the placement store belongs to a different seed",
+                    );
+                }
+            }
+        }
+        let city = self.city_summary();
+        let population = variant_u64(&city, "population");
+        let age = AgeState::from_population(population).age;
+        let guard = self
+            .research
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if guard.as_ref().is_some_and(|store| store.seed != seed) {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the research pool belongs to a different seed",
+            );
+        }
+        let fallback = ResearchStore::new(seed);
+        let (store, open) = match guard.as_ref() {
+            Some(store) => (store, true),
+            None => (&fallback, false),
+        };
+        research_payload(store, default_tech_tree(), age, population, open)
+    }
+
+    /// Advance the research pool by `seconds` at the current population rate.
+    #[func]
+    fn research_tick(&self, seed: i64, seconds: f64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        if seed > i64::MAX as u64 {
+            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
+        }
+        if !seconds.is_finite() || !(0.0..=core_city::MAX_RESEARCH_TICK_SECONDS).contains(&seconds)
+        {
+            return placement_simple_error("invalid_delta", "research delta is outside 0..=86400");
+        }
+        {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(store) = world.as_ref() {
+                if store.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the placement store belongs to a different seed",
+                    );
+                }
+            }
+        }
+        let city = self.city_summary();
+        let population = variant_u64(&city, "population");
+        let age = AgeState::from_population(population).age;
+        let mut guard = self
+            .research
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if guard.as_ref().is_some_and(|store| store.seed != seed) {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the research pool belongs to a different seed",
+            );
+        }
+        let store = guard.get_or_insert_with(|| ResearchStore::new(seed));
+        let tick = store.tick(seconds, research_rate_per_day(population));
+        let mut result = research_payload(store, default_tech_tree(), age, population, true);
+        result.set("gained", tick.gained);
+        result
+    }
+
+    /// Spend research points on one technology node.
+    #[func]
+    fn research_unlock(&self, seed: i64, node: GString) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        if seed > i64::MAX as u64 {
+            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
+        }
+        let node = node.to_string();
+        {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(store) = world.as_ref() {
+                if store.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the placement store belongs to a different seed",
+                    );
+                }
+            }
+        }
+        let city = self.city_summary();
+        let population = variant_u64(&city, "population");
+        let age = AgeState::from_population(population).age;
+        let mut guard = self
+            .research
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if guard.as_ref().is_some_and(|store| store.seed != seed) {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the research pool belongs to a different seed",
+            );
+        }
+        let store = guard.get_or_insert_with(|| ResearchStore::new(seed));
+        match store.unlock(&node, default_tech_tree(), age) {
+            Ok(unlock) => {
+                let mut result =
+                    research_payload(store, default_tech_tree(), age, population, true);
+                result.set("spent", unlock.spent);
+                result.set("node", &GString::from(unlock.node.id.as_str()));
+                result.set("name", &GString::from(unlock.node.name.as_str()));
+                result
+            }
+            Err(error) => placement_simple_error(error.code(), error.to_string()),
+        }
+    }
+
+    /// Stable research-pool checksum.
+    #[func]
+    fn research_checksum(&self) -> GString {
+        let guard = self
+            .research
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let checksum = guard.as_ref().map_or(0, ResearchStore::checksum);
+        GString::from(&format!("{checksum:016x}"))
+    }
+
+    /// Close and clear the research pool.
+    #[func]
+    fn research_clear(&self) -> bool {
+        *self
+            .research
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        true
+    }
+
     /// Derived population-age state for the current city.
     ///
     /// Age is not saved: it is a pure function of the completed city
@@ -3132,6 +3303,7 @@ impl TownsmithCore {
             economy,
             mut utilities,
             industry,
+            research,
         ) = {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             let construction = self
@@ -3160,6 +3332,10 @@ impl TownsmithCore {
                 .industry
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
+            let research = self
+                .research
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             (
                 world.as_ref().cloned(),
                 construction.clone(),
@@ -3170,6 +3346,7 @@ impl TownsmithCore {
                 economy.as_ref().cloned(),
                 utilities.as_ref().cloned(),
                 industry.as_ref().cloned(),
+                research.as_ref().cloned(),
             )
         };
         let Some(store) = store else {
@@ -3354,6 +3531,24 @@ impl TownsmithCore {
             }
             None => json,
         };
+        let json = match research.as_ref() {
+            Some(research) => {
+                if research.seed != store.seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the research pool belongs to a different seed",
+                    );
+                }
+                if let Err(error) = research.validate(default_tech_tree()) {
+                    return placement_simple_error("invalid_research", error.to_string());
+                }
+                match attach_research(&json, research) {
+                    Ok(json) => json,
+                    Err(error) => return placement_simple_error("save_failed", error),
+                }
+            }
+            None => json,
+        };
         if let Some(utilities) = utilities.as_ref() {
             let mut guard = self
                 .utilities
@@ -3457,6 +3652,21 @@ impl TownsmithCore {
             &GString::from(&format!(
                 "{:016x}",
                 utilities.as_ref().map_or(0, UtilityStore::checksum)
+            )),
+        );
+        result.set(
+            "research_points",
+            research.as_ref().map_or(0.0, |store| store.points),
+        );
+        result.set(
+            "research_completed",
+            research.as_ref().map_or(0, ResearchStore::completed_count) as i64,
+        );
+        result.set(
+            "research_checksum",
+            &GString::from(&format!(
+                "{:016x}",
+                research.as_ref().map_or(0, ResearchStore::checksum)
             )),
         );
         result.set(
@@ -3611,6 +3821,23 @@ impl TownsmithCore {
                     ),
                 );
             }
+        }
+        let research = match research_from_world_json(&json) {
+            Ok(Some(research)) => research,
+            Ok(None) => ResearchStore::new(expected_seed),
+            Err((code, error)) => return placement_simple_error(code, error),
+        };
+        let research_points = research.points;
+        let research_completed = research.completed_count();
+        let research_checksum = research.checksum();
+        if research.seed != expected_seed {
+            return placement_simple_error(
+                "seed_mismatch",
+                format!(
+                    "the research pool uses seed {} but this world is {expected_seed}",
+                    research.seed
+                ),
+            );
         }
         let store = match PlacementStore::from_json(&json) {
             Ok(store) => store,
@@ -3822,6 +4049,10 @@ impl TownsmithCore {
             .industry
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let mut research_guard = self
+            .research
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut deltas_guard = self
             .terrain_deltas
             .write()
@@ -3835,6 +4066,7 @@ impl TownsmithCore {
         *economy_guard = economy;
         *utilities_guard = utilities;
         *industry_guard = industry;
+        *research_guard = Some(research);
         *deltas_guard = deltas;
         *self
             .terrain_seed
@@ -3886,6 +4118,12 @@ impl TownsmithCore {
         result.set(
             "utility_checksum",
             &GString::from(&format!("{utility_checksum:016x}")),
+        );
+        result.set("research_points", research_points);
+        result.set("research_completed", research_completed as i64);
+        result.set(
+            "research_checksum",
+            &GString::from(&format!("{research_checksum:016x}")),
         );
         result
     }
@@ -5082,6 +5320,115 @@ fn placement_request_from_blueprint(
     }
 }
 
+fn default_tech_tree() -> &'static TechTree {
+    static TREE: OnceLock<TechTree> = OnceLock::new();
+    TREE.get_or_init(TechTree::default_tree)
+}
+
+fn research_rate_per_day(population: u64) -> f64 {
+    population as f64 * RESEARCH_PER_RESIDENT_PER_DAY
+}
+
+fn age_rank(age: Age) -> usize {
+    Age::ALL
+        .iter()
+        .position(|candidate| *candidate == age)
+        .unwrap_or(0)
+}
+
+fn structure_required_age(spec: &StructureSpec) -> Age {
+    let mut required = Age::parse(spec.system.min_age()).unwrap_or(Age::Wood);
+    if let Some(ground) = spec.ground_system {
+        let ground_age = Age::parse(ground.min_age()).unwrap_or(Age::Wood);
+        if age_rank(ground_age) > age_rank(required) {
+            required = ground_age;
+        }
+    }
+    required
+}
+
+fn structure_age_error(spec: &StructureSpec, current: Age) -> Option<(&'static str, String)> {
+    let required = structure_required_age(spec);
+    if age_rank(current) >= age_rank(required) {
+        return None;
+    }
+    Some((
+        "age_locked",
+        format!(
+            "{} requires the {} age; the city is in the {} age",
+            spec.system.name(),
+            required.name(),
+            current.name()
+        ),
+    ))
+}
+
+fn research_payload(
+    store: &ResearchStore,
+    tree: &TechTree,
+    age: Age,
+    population: u64,
+    open: bool,
+) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set("open", open);
+    result.set("seed", store.seed as i64);
+    result.set("age", age.name());
+    result.set("age_index", age_rank(age) as i64);
+    result.set("population", population as i64);
+    result.set("points", store.points);
+    result.set("lifetime_points", store.lifetime_points);
+    result.set("rate_per_day", research_rate_per_day(population));
+    result.set("completed_count", store.completed_count() as i64);
+    result.set("node_count", tree.len() as i64);
+
+    let mut completed: Array<GString> = Array::new();
+    for id in &store.completed {
+        completed.push(&GString::from(id.as_str()));
+    }
+    result.set("completed", &completed.to_variant());
+
+    let mut nodes: Array<VarDictionary> = Array::new();
+    for node in tree.ordered() {
+        let unlocked = store.is_completed(&node.id);
+        let age_locked = age < node.age;
+        let prerequisites_met = node
+            .prerequisites
+            .iter()
+            .all(|prerequisite| store.is_completed(prerequisite));
+        let affordable = store.points + 0.000_001 >= node.cost;
+        let available = !unlocked && !age_locked && prerequisites_met && affordable;
+        let mut item = VarDictionary::new();
+        item.set("id", &GString::from(node.id.as_str()));
+        item.set("name", &GString::from(node.name.as_str()));
+        item.set("age", node.age.name());
+        item.set("cost", node.cost);
+        let mut prerequisites: Array<GString> = Array::new();
+        for prerequisite in &node.prerequisites {
+            prerequisites.push(&GString::from(prerequisite.as_str()));
+        }
+        item.set("prerequisites", &prerequisites.to_variant());
+        let mut unlocks: Array<GString> = Array::new();
+        for unlock in &node.unlocks {
+            unlocks.push(&GString::from(unlock.as_str()));
+        }
+        item.set("unlocks", &unlocks.to_variant());
+        item.set("unlocked", unlocked);
+        item.set("age_locked", age_locked);
+        item.set("prerequisites_met", prerequisites_met);
+        item.set("affordable", affordable);
+        item.set("available", available);
+        nodes.push(&item);
+    }
+    result.set("nodes", &nodes.to_variant());
+    result.set(
+        "checksum",
+        &GString::from(&format!("{:016x}", store.checksum())),
+    );
+    result
+}
+
 /// Return the blueprint structure or derive a conservative timber frame.
 fn structure_spec_for_blueprint(blueprint: &Blueprint) -> Option<StructureSpec> {
     if let Some(structure) = blueprint.metadata.structure {
@@ -5522,6 +5869,27 @@ fn advisor_payload(seed: u64, report: &AdvisorReport) -> VarDictionary {
     }
     result.set("messages", &messages.to_variant());
     result
+}
+
+fn attach_research(json: &str, store: &ResearchStore) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    value["research"] = serde_json::to_value(store).map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+}
+
+fn research_from_world_json(json: &str) -> Result<Option<ResearchStore>, (&'static str, String)> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| ("invalid_json", error.to_string()))?;
+    let Some(raw) = value.get("research") else {
+        return Ok(None);
+    };
+    let store: ResearchStore = serde_json::from_value(raw.clone())
+        .map_err(|error| ("invalid_research", error.to_string()))?;
+    store
+        .validate(default_tech_tree())
+        .map_err(|error| ("invalid_research", error.to_string()))?;
+    Ok(Some(store))
 }
 
 fn attach_economy(json: &str, economy: &Economy) -> Result<String, String> {
@@ -6364,6 +6732,45 @@ mod tests {
         assert!(settlements_from_world_json("{}")
             .expect("old save")
             .is_none());
+    }
+
+    #[test]
+    fn research_world_json_round_trips_and_old_saves_are_closed() {
+        let tree = TechTree::default_tree();
+        let mut store = ResearchStore::new(2026);
+        store
+            .unlock("construction.timber_frame", &tree, Age::Wood)
+            .expect("unlock");
+        let json = attach_research("{}", &store).expect("attach");
+        let decoded = research_from_world_json(&json)
+            .expect("parse")
+            .expect("present");
+        assert_eq!(decoded, store);
+        assert!(research_from_world_json("{}").expect("old save").is_none());
+    }
+
+    #[test]
+    fn research_world_json_rejects_unknown_completed_nodes() {
+        let mut store = ResearchStore::new(2026);
+        store.completed.insert("missing.node".to_string());
+        let json = attach_research("{}", &store).expect("attach");
+        let error = research_from_world_json(&json).expect_err("reject");
+        assert_eq!(error.0, "invalid_research");
+    }
+
+    #[test]
+    fn structure_age_requirements_follow_the_city_age() {
+        let brick = StructureSpec::new(StructuralSystem::LoadBearingBrick, 4, 12.0, 7.0);
+        assert_eq!(
+            structure_age_error(&brick, Age::Wood).expect("locked").0,
+            "age_locked"
+        );
+        assert!(structure_age_error(&brick, Age::Masonry).is_none());
+        let timber = StructureSpec::new(StructuralSystem::TimberFrame, 2, 6.0, 6.0);
+        assert!(structure_age_error(&timber, Age::Wood).is_none());
+        let composite = timber.with_ground_system(StructuralSystem::LoadBearingBrick);
+        assert!(structure_age_error(&composite, Age::Wood).is_some());
+        assert!(structure_age_error(&composite, Age::Masonry).is_none());
     }
 
     #[test]

@@ -232,7 +232,7 @@ See [[55 - Utilities]] for rates, formulas, tick order, persistence, HUD, tests,
 ### Verification
 
 - `cargo test -p core_city` — utilities, population service, industry power tests.
-- `cargo test --workspace` — **390 tests + 2 doctests (392 passed)**.
+- `cargo test --workspace` — **409 tests + 2 doctests (411 passed)**.
 - `smoke_world_scene.sh` — water/power service, needs recovery, production, persistence, beacons; marker `utilities=ok` (checked by the script).
 - `cargo run --release -p townsmith-bench --bin city_loop` — checksum `623f39c61b71b68a`.
 - clippy and fmt.
@@ -265,7 +265,7 @@ See [[53 - Treasury and Taxes]] for the ledger, loan model, formulas, controls, 
 ### Verification
 
 - `cargo test -p core_city` — economy construction, loan, bankruptcy, and old-save tests.
-- `cargo test --workspace` — **390 tests + 2 doctests (392 passed)**.
+- `cargo test --workspace` — **409 tests + 2 doctests (411 passed)**.
 - `smoke_world_scene.sh` — placement charge, loan, tax recovery, save/load; marker `economy=ok` (checked by the script).
 - `cargo run --release -p townsmith-bench --bin city_loop` — checksum `623f39c61b71b68a`.
 - clippy and fmt.
@@ -297,7 +297,7 @@ See [[56 - Traffic]] for the graph model, flow fields, commute integration, 30-d
 ### Verification
 
 - `cargo test -p core_city` — traffic graph, flow field, and road-commute tests.
-- `cargo test --workspace` — **390 tests + 2 doctests (392 passed)**.
+- `cargo test --workspace` — **409 tests + 2 doctests (411 passed)**.
 - `smoke_world_scene.sh` — graph stats, cars, movement, save/load; marker `traffic=ok` (checked by the script).
 - `cargo run --release -p townsmith-bench --bin city_loop` — checksum `623f39c61b71b68a`.
 - `cargo run --release -p townsmith-bench --bin traffic` — graph and flow-field benchmark.
@@ -326,7 +326,7 @@ See [[56 - Traffic]] for the graph model, flow fields, commute integration, 30-d
 ### Verification
 
 - `cargo test -p core_city` — 9 advisor tests.
-- `cargo test --workspace` — **390 tests + 2 doctests (392 passed)**.
+- `cargo test --workspace` — **409 tests + 2 doctests (411 passed)**.
 - `smoke_world_scene.sh` — budget-deficit advice, panel toggle, text; marker `dashboard=ok` (checked by the script).
 - `cargo run --release -p townsmith-bench --bin city_loop` — checksum `623f39c61b71b68a`.
 - clippy and fmt.
@@ -355,7 +355,7 @@ See [[58 - Runner Matrix]] for the scenario table, exact results, and checksums.
 
 ### Verification
 
-- `cargo test --workspace` — **390 tests + 2 doctests (392 passed)**.
+- `cargo test --workspace` — **409 tests + 2 doctests (411 passed)**.
 - `./scripts/bench_city_loop.sh` — three scenario checksums match the baseline.
 - `cargo run --release -p townsmith-bench --bin city_loop -- --matrix` — same values.
 - clippy and fmt.
@@ -367,4 +367,4 @@ See [[58 - Runner Matrix]] for the scenario table, exact results, and checksums.
 3. Add a spatial index and incremental traffic graph updates before the 1M gate.
 4. Keep the 500-citizen/50-building 60 FPS gate visible from the first slice.
 5. Record the Q-101 30-minute human playtest.
-6. Phase 4.1 ages and 4.2 structural limits are done ([[59 - Progression and Ages]], [[60 - Structural Limits]]); Phase 4.3 research is next.
+6. Phase 4.1 ages, 4.2 structural limits, and 4.3 research are done ([[59 - Progression and Ages]], [[60 - Structural Limits]], [[61 - Research]]); Phase 4.4 starter content is next.

@@ -370,6 +370,9 @@ Ages are the long-term arc. They change materials, structural limits, building t
 | **Modern** | 150,000 population + electricity | Reinforced concrete, steel, glass, aluminum | 30 | Office tower, apartment block, hospital, subway | Density, transit, health, high-rise construction |
 | **Information** | 750,000 population + research | Composites, electronics, solar | 80+ | Data center, solar farm, monorail, university, supertall | High-tech jobs, sustainability, 1M+ metropolis |
 
+> [!note] Implementation
+> Population-driven ages (4.1), structural limits (4.2), and the research pool/tech tree with structural age gates (4.3) are implemented in [[59 - Progression and Ages]], [[60 - Structural Limits]], and [[61 - Research]].
+
 > [!warning] Draft numbers
 > Population thresholds, story limits, and building names are placeholders. They exist to test the progression curve and the structural-rule system, not to lock the design. The 1M+ target means the late ages must support a very long campaign or a very large sandbox city.
 

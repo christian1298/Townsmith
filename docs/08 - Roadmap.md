@@ -181,7 +181,7 @@ The staged cut is in [[49 - Phase 3 Slice Plan]]: city ledger, households/needs,
 ### Phase 4 — Progression and content (6–8 weeks)
 
 > [!info] Slice plan
-> Phase 4 starts with [[59 - Progression and Ages]] and [[60 - Structural Limits]]: population-driven ages and the first material/story/span rules are implemented. Research, content, and the tutorial are next.
+> Phase 4 starts with [[59 - Progression and Ages]], [[60 - Structural Limits]], and [[61 - Research]]: population-driven ages, material/story/span rules, and the research pool with structural age gates are implemented. Starter content and the tutorial are next.
 
 **Goals**
 - The long arc: wood → masonry → industrial → modern.
