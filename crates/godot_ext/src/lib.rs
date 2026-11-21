@@ -3203,7 +3203,12 @@ impl TownsmithCore {
             .population
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        completed_service_consumers(world.as_ref(), &construction, population.as_ref())
+        let runtime = population.as_ref().filter(|runtime| {
+            world
+                .as_ref()
+                .is_some_and(|store| store.seed == runtime.seed)
+        });
+        completed_service_consumers(world.as_ref(), &construction, runtime)
     }
 
     fn civic_research_per_day(&self, seed: u64) -> f64 {
@@ -3228,7 +3233,12 @@ impl TownsmithCore {
             .population
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        completed_utility_consumers(world.as_ref(), &construction, population.as_ref())
+        let runtime = population.as_ref().filter(|runtime| {
+            world
+                .as_ref()
+                .is_some_and(|store| store.seed == runtime.seed)
+        });
+        completed_utility_consumers(world.as_ref(), &construction, runtime)
     }
 
     /// Deterministic dashboard advice from the current city snapshot.
@@ -3861,6 +3871,21 @@ impl TownsmithCore {
             }
             None => json,
         };
+        if json.len() > MAX_WORLD_SAVE_BYTES as usize {
+            return placement_simple_error(
+                "save_too_large",
+                format!(
+                    "world save is {} bytes; the limit is {MAX_WORLD_SAVE_BYTES}",
+                    json.len()
+                ),
+            );
+        }
+        if let Err(error) = write_text_atomic(&path, &json) {
+            return placement_simple_error("save_failed", error.to_string());
+        }
+        // The refreshed clones are committed only after the save is durable.
+        // Sanitization drops stale sites, so a failed save must not mutate the
+        // live stores.
         if let Some(utilities) = utilities.as_ref() {
             let mut guard = self
                 .utilities
@@ -3884,18 +3909,6 @@ impl TownsmithCore {
             {
                 *guard = Some(services.clone());
             }
-        }
-        if json.len() > MAX_WORLD_SAVE_BYTES as usize {
-            return placement_simple_error(
-                "save_too_large",
-                format!(
-                    "world save is {} bytes; the limit is {MAX_WORLD_SAVE_BYTES}",
-                    json.len()
-                ),
-            );
-        }
-        if let Err(error) = write_text_atomic(&path, &json) {
-            return placement_simple_error("save_failed", error.to_string());
         }
         let mut result = VarDictionary::new();
         result.set("ok", true);
@@ -5728,7 +5741,8 @@ fn default_tech_tree() -> &'static TechTree {
 }
 
 fn research_rate_per_day(population: u64, civic_research: f64) -> f64 {
-    population as f64 * RESEARCH_PER_RESIDENT_PER_DAY + civic_research.max(0.0)
+    (population as f64 * RESEARCH_PER_RESIDENT_PER_DAY + civic_research.max(0.0))
+        .min(core_city::MAX_RESEARCH_RATE_PER_DAY)
 }
 
 fn age_rank(age: Age) -> usize {
