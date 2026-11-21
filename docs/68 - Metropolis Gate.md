@@ -458,6 +458,30 @@ The route is `benchmarks/routes/metropolis_gate_v1.json`; setup is deterministic
 > [!warning] This still is not gate evidence
 > It is **synthetic boxes**, not real voxel buildings; no LOD/impostors, streaming, shadows, GI/SSAO, simulation, or save/load; GL Compatibility rather than Forward+; an RTX 4080 rather than the RTX 3060 reference rig; and a single run. It measures frame budget for a 250k-instance static city, not M5. It does not close G-01, G-02, G-03, G-04, G-07, or G-08.
 
+### 7.7 Voxel-proxy setup and frame-budget harness
+
+`godot/metropolis_voxel_gate.gd` builds three deterministic `MultiMesh` tiers from the Phase 0 demo voxel hut: 1k, 5k, and 20k instances (26k total). It reports per-tier instances, quads, triangles, setup ms, instance-buffer bytes, static-memory delta, and an FNV checksum. `scripts/bench_metropolis_voxel_gate.sh --setup-only` runs headless twice and fails if the layout drifts; the short/full modes capture display-backed frame times with hardware provenance.
+
+Current headless setup (Ryzen 9 7950X, Godot 4.7.2):
+
+| Tier | Instances | Quads | Triangles | Setup ms | Buffer |
+|---|---:|---:|---:|---:|---:|
+| small | 1,000 | 56,000 | 112,000 | ~9.3 | 48,000 B |
+| medium | 5,000 | 280,000 | 560,000 | ~2.3 | 240,000 B |
+| large | 20,000 | 1,120,000 | 2,240,000 | ~10.4 | 960,000 B |
+| **total** | **26,000** | **1,456,000** | **2,912,000** | **~37 ms** | **1,248,000 B** |
+
+Combined checksum **`acc9a456`**; mesh build ~15 ms; static-memory delta ~2.8 MB.
+
+```bash
+GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only
+GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --short
+GODOT=/path/to/godot ./scripts/smoke_metropolis_voxel_gate.sh
+```
+
+> [!warning] Evidence limit
+> This is **26k reused low-poly huts**, not 250k distinct voxel buildings. It has no LOD/impostors, streaming, shadows/GI/SSAO, simulation, save/load, or RTX 3060 reference run. It proves the voxel-proxy instance path and memory shape, and it can capture a frame budget; it does not close the M5 gate.
+
 ## 8. Pass/fail decision rules
 
 ### 8.1 Validity first
