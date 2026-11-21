@@ -97,8 +97,8 @@ citizen_id   = first 63 bits of citizen_seed, with collision probe
 - Bands: child (<18), adult (18–64), elder (65+). v1 has no children (no births); named citizens are adults or elders.
 - `age_days` is persisted; the display is derived.
 
-> [!note] Current bridge placeholder
-> N4 now persists `age_days`; `named_citizens_for` still derives its display age from the identity id (`age_years`) until the bridge applies the persisted age. The core `tick_lifecycle` ages and removes citizens at 100 years; the bridge/scene lifecycle hook remains.
+> [!note] Current bridge state
+> N4 persists `age_days`; `named_citizens_for` now returns the persisted `age_days` and `age_years = age_days / 365`. The core `tick_lifecycle` ages and removes citizens at 100 years; applying deaths to households and the scene lifecycle hook remains.
 
 ## 4. Home, work, and service assignment
 
@@ -376,7 +376,7 @@ The existing world JSON `population` object gets an optional sibling `named_citi
 | **N1 — Identity layer (derived)** | Deterministic ids, names, household slot sync, read-only bridge | **Done** — PR #98; 500-resident city produces stable names; `cargo test -p core_city named`; no save or checksum change; 4k identities generate in < 100 ms under the debug test guard |
 | **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | **Done — PR #108/#126/#135; follow camera, EN/DE card, age/employment rows, and content display names** |
 | **N3 — Materialization** | Active pool, hysteresis, route cache, fade, active cap | **Partial — PR #107/#123/#125/#134; selection core, bridge, F4 overlay, hysteresis/pinning, and change budget done ([[73 - Materialization Core]]); routes/fade/dwell remain** |
-| **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | **Partial — PR #145; persistence #103 and core `age_days`/`tick_lifecycle` aging/death landed; bridge/scene application next** |
+| **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | **Partial — PR #145; persistence #103, core `age_days`/`tick_lifecycle`, and read-only bridge age exposure landed; household death application/scene hook next** |
 | **N5 — Cohort bridge (later)** | Sample from cohorts, district stories, 1M identity store | 1M cohort benchmark unchanged; materialization near camera; no per-citizen tick |
 
 ### N1 checks
@@ -427,8 +427,8 @@ N2 follow/camera additions:
 
 N2 exposes per-citizen **age and employment data** in the bridge:
 
-- `named_citizens_for` now returns `age_years` (deterministic 18–64 from the identity id via `mix64`) and `employed` (slots below `household.workers`) beside `id`, `name`, and `slot`.
-- Both are pure derived views: `age_years(id)` and `slot_is_employed(household, slot)` live in `core_city::named`, add no save fields, and do not change any checksum.
+- `named_citizens_for` returns `age_days` (persisted), `age_years` (whole years from that value), and `employed` (slots below `household.workers`) beside `id`, `name`, and `slot`.
+- Age and employment are pure views over persisted/aggregate data; `slot_is_employed(household, slot)` lives in `core_city::named` and adds no save field. The named checksum includes `age_days`; city/population checksums are unchanged.
 - Employment is a placeholder mapping of the aggregate worker count onto the first slots until per-slot jobs exist.
 - Core tests cover the age range and determinism plus the employment boundaries (`0`, `workers - 1`, `workers`, `residents - 1`).
 
@@ -463,7 +463,9 @@ Not yet implemented: rendering per-citizen job/age rows, per-slot job titles, an
 
 `NamedSave` v1 stores `format_version`, `seed`, `max`, and sorted identity records (`id`, `placement_id`, `slot`, `name`). The bridge writes an optional `named_citizens` object after `population`, checks the seed, syncs with the loaded households, drops orphans, and commits atomically with the other stores. Old saves load an empty pool that fills on demand. Save/load results expose `named`, `named_max`, and `named_checksum`; population/city checksums are unchanged. See [[70 - Named Persistence]].
 
-Core aging/death now persist `age_days`; the bridge/scene lifecycle hook, death-to-household application, events, and a lifecycle-on baseline remain open.
+The bridge now exposes persisted age: `named_citizens_for` returns `age_days` and `age_years`, and `named_citizens_state` reports average/oldest age. No deaths are applied to households yet.
+
+Core aging/death persist `age_days`; the scene lifecycle hook, death-to-household application, events, and a lifecycle-on baseline remain open.
 
 ### N4 checks
 
