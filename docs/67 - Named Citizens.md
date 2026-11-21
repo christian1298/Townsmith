@@ -374,8 +374,8 @@ The existing world JSON `population` object gets an optional sibling `named_citi
 | Slice | Deliverable | Acceptance |
 |---|---|---|
 | **N1 — Identity layer (derived)** | Deterministic ids, names, household slot sync, read-only bridge | **Done** — PR #98; 500-resident city produces stable names; `cargo test -p core_city named`; no save or checksum change; 4k identities generate in < 100 ms under the debug test guard |
-| **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | **Partial — PR #108/#126; follow camera, EN/DE card, and per-citizen age/employment data done; scene rows remain** |
-| **N3 — Materialization** | Active pool, hysteresis, route cache, fade, active cap | **Partial — PR #107/#123/#125; selection core, read-only bridge, F4 overlay, and hysteresis/pinning done ([[73 - Materialization Core]]); routes/fade/dwell remain** |
+| **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | **Done — PR #108/#126/#135; follow camera, EN/DE card, age/employment rows, and content display names** |
+| **N3 — Materialization** | Active pool, hysteresis, route cache, fade, active cap | **Partial — PR #107/#123/#125/#134; selection core, bridge, F4 overlay, hysteresis/pinning, and change budget done ([[73 - Materialization Core]]); routes/fade/dwell remain** |
 | **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | **Partial — PR #103**; persistence landed ([[70 - Named Persistence]]), lifecycle/aging/death next |
 | **N5 — Cohort bridge (later)** | Sample from cohorts, district stories, 1M identity store | 1M cohort benchmark unchanged; materialization near camera; no per-citizen tick |
 

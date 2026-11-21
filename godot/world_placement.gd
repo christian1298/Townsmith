@@ -11,6 +11,7 @@ const TerrainStreamer = preload("res://terrain_streamer.gd")
 const EditorCamera = preload("res://editor_camera.gd")
 const MayorCamera = preload("res://mayor_camera.gd")
 const WorldI18n = preload("res://world_i18n.gd")
+const ContentI18n = preload("res://content_i18n.gd")
 
 const SEED := 2026
 const FIXTURE_X := 169.0
@@ -1500,6 +1501,19 @@ func _update_ghost_color() -> void:
 		Color(0.2, 0.9, 0.4, 0.35) if preview_valid else Color(0.9, 0.2, 0.15, 0.35)
 	)
 
+func _content_display(key: String, fallback: String) -> String:
+	var localized := ContentI18n.display(key, i18n.locale())
+	return fallback if localized == key else localized
+
+
+func _starter_display(id: String, fallback: String) -> String:
+	if not id.begins_with("base:"):
+		return fallback
+	var key := "base.content.starter.%s" % id.get_slice(":", 1)
+	var localized := ContentI18n.display(key, i18n.locale())
+	return fallback if localized == key else localized
+
+
 func _update_hud() -> void:
 	if hud == null:
 		return
@@ -1551,13 +1565,13 @@ func _update_hud() -> void:
 			selected_line += "  ·  owner " + owner_name
 		var industry_kind := str(industry_kinds.get(selected_id, ""))
 		if industry_kind != "":
-			selected_line += "  ·  industry " + industry_kind
+			selected_line += "  ·  industry " + _content_display("base.content.industry.%s" % industry_kind, industry_kind)
 		var utility_kinds_here: Array = utility_kinds.get(selected_id, [])
 		if utility_kinds_here.size() > 0:
 			selected_line += "  ·  utility " + ", ".join(utility_kinds_here)
 		var service_kind := str(service_kinds.get(selected_id, ""))
 		if service_kind != "":
-			selected_line += "  ·  service " + service_kind
+			selected_line += "  ·  service " + _content_display("base.content.service.%s" % service_kind, service_kind)
 		var selected_structure: Dictionary = selected.get("structure", {})
 		if bool(selected_structure.get("present", false)):
 			selected_line += "  ·  %s %d stories" % [
@@ -1865,6 +1879,8 @@ func _update_citizen_panel() -> void:
 			lines.append(i18n.t("base.ui.citizen.resident_line", {
 				"name": str(citizen.get("name", "?")),
 				"slot": int(citizen.get("slot", 0)) + 1,
+				"age": int(citizen.get("age_years", 0)),
+				"employment": i18n.t("base.ui.citizen.employed") if bool(citizen.get("employed", false)) else i18n.t("base.ui.citizen.unemployed"),
 			}))
 	var household := _household_for(selected_id)
 	if household.is_empty():
@@ -2676,7 +2692,9 @@ func _run_scene_smoke() -> void:
 	var trades_ok := false
 	var named_ok := false
 	var citizens_ok := false
+	var citizen_rows_ok := false
 	var citizen_i18n_ok := false
+	var content_i18n_ok := false
 	var materialization_ok := false
 	var follow_ok := false
 	var render_ok := false
@@ -3047,6 +3065,9 @@ func _run_scene_smoke() -> void:
 				citizens_ok = citizens_ok and known_name != "" and citizen_text.text.contains(known_name)
 				citizens_ok = citizens_ok and citizen_text.text.contains("2 / 2 residents")
 				citizens_ok = citizens_ok and citizen_text.text.contains("40/day")
+				citizen_rows_ok = citizen_text.text.contains("age ") and (citizen_text.text.contains("employed") or citizen_text.text.contains("unemployed"))
+				content_i18n_ok = ContentI18n.display("base.content.service.school", "en") == "School"
+				content_i18n_ok = content_i18n_ok and ContentI18n.display("base.content.service.school", "de") == "Schule"
 				_close_citizen_panel()
 				citizens_ok = citizens_ok and not citizen_panel.visible
 				# The same card must render in German and English.
@@ -3424,7 +3445,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s follow=%s citizen_i18n=%s materialization=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -3445,6 +3466,8 @@ func _run_scene_smoke() -> void:
 		"ok" if starter_ok else "failed",
 		"ok" if named_ok else "failed",
 		"ok" if citizens_ok else "failed",
+		"ok" if citizen_rows_ok else "failed",
+		"ok" if content_i18n_ok else "failed",
 		"ok" if follow_ok else "failed",
 		"ok" if citizen_i18n_ok else "failed",
 		"ok" if materialization_ok else "failed",
