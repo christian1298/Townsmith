@@ -26,7 +26,7 @@ use core_blueprint::{
     load_tsbp, save_tsbp_with_hash, Blueprint, BlueprintError, BlueprintMetadata, BlueprintStats,
     PropRecord, RoomRecord,
 };
-use core_city::named::{age_years, slot_is_employed};
+use core_city::named::{age_years_from_days, slot_is_employed};
 use core_city::{
     advise, diff_selection, evaluate_tutorial, normalize_rotation, starter, summarize,
     AdvisorInput, AdvisorReport, Age, AgeState, CityLayout, CityRuntime, CitySummary, CityTier,
@@ -2341,7 +2341,12 @@ impl TownsmithCore {
         true
     }
 
-    /// Derived named-citizen counts and checksum.
+    /// Derived named-citizen counts, age metrics, and checksum.
+    ///
+    /// Age fields are read-only views over the synced pool: `average_age_days`,
+    /// `average_age_years`, `oldest_age_days`, and `oldest_age_years`, all
+    /// truncated to whole units. An empty pool reports zero for every age
+    /// field.
     #[func]
     fn named_citizens_state(&self, seed: i64) -> VarDictionary {
         let Ok(seed) = u64::try_from(seed) else {
@@ -2377,6 +2382,18 @@ impl TownsmithCore {
         result.set("seed", seed as i64);
         result.set("count", pool.len() as i64);
         result.set("max", pool.max as i64);
+        let average_age_days = pool.average_age_days();
+        let oldest_age_days = pool.oldest_age_days().unwrap_or(0);
+        result.set("average_age_days", i64::from(average_age_days));
+        result.set(
+            "average_age_years",
+            i64::from(age_years_from_days(average_age_days)),
+        );
+        result.set("oldest_age_days", i64::from(oldest_age_days));
+        result.set(
+            "oldest_age_years",
+            i64::from(age_years_from_days(oldest_age_days)),
+        );
         result.set(
             "checksum",
             &GString::from(&format!("{:016x}", pool.checksum())),
@@ -2386,10 +2403,10 @@ impl TownsmithCore {
 
     /// Named residents of one home, sorted by slot.
     ///
-    /// Each citizen carries `id`, `name`, `slot`, derived `age_years`
-    /// (deterministic 18–64 from the identity id), and `employed` (the first
-    /// `household.workers` slots). The household lookup is read-only; both
-    /// values are derived placeholders and are not saved. A missing household
+    /// Each citizen carries `id`, `name`, `slot`, persisted `age_days`, derived
+    /// `age_years` (`age_days / 365`), and `employed` (the first
+    /// `household.workers` slots). The household lookup is read-only; the age is
+    /// a view over the synced pool and is not written back. A missing household
     /// reports `employed = false`.
     #[func]
     fn named_citizens_for(&self, seed: i64, placement_id: i64) -> VarDictionary {
@@ -2422,7 +2439,11 @@ impl TownsmithCore {
                 item.set("id", citizen.id as i64);
                 item.set("name", &GString::from(citizen.name.as_str()));
                 item.set("slot", i64::from(citizen.slot));
-                item.set("age_years", i64::from(age_years(citizen.id)));
+                item.set("age_days", i64::from(citizen.age_days));
+                item.set(
+                    "age_years",
+                    i64::from(age_years_from_days(citizen.age_days)),
+                );
                 item.set(
                     "employed",
                     household.is_some_and(|household| slot_is_employed(household, citizen.slot)),

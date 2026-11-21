@@ -99,9 +99,26 @@ pub fn age_years(id: u64) -> u8 {
     18 + (mix64(id ^ 0x4528_21e6_38d0_1377) % 47) as u8
 }
 
+/// Days in one display year.
+///
+/// The lifecycle uses whole days only, so a display age in years is derived by
+/// truncating division. There are no leap days in the simulation.
+pub const DAYS_PER_YEAR: u32 = 365;
+
+/// Derived display age in whole years from a persisted age in days.
+///
+/// This is the bridge-facing counterpart to [`age_years`]: the starting band
+/// comes from the identity, while the current display age comes from the
+/// persisted [`NamedCitizen::age_days`]. The division truncates, so 364 days is
+/// zero years and [`MAX_AGE_DAYS`] is 100 years.
+#[must_use]
+pub fn age_years_from_days(age_days: u32) -> u32 {
+    age_days / DAYS_PER_YEAR
+}
+
 /// Initial persisted age for an identity, in whole days.
 fn initial_age_days(id: u64) -> u32 {
-    u32::from(age_years(id)) * 365
+    u32::from(age_years(id)) * DAYS_PER_YEAR
 }
 
 /// Whether a resident slot is employed according to the household aggregate.
@@ -1037,6 +1054,41 @@ mod tests {
             seen.insert(age);
         }
         assert!(seen.len() > 1, "ages should cover more than one year");
+    }
+
+    #[test]
+    fn age_years_from_days_truncates_to_whole_years() {
+        assert_eq!(age_years_from_days(0), 0);
+        assert_eq!(age_years_from_days(DAYS_PER_YEAR - 1), 0);
+        assert_eq!(age_years_from_days(DAYS_PER_YEAR), 1);
+        assert_eq!(age_years_from_days(18 * DAYS_PER_YEAR), 18);
+        assert_eq!(age_years_from_days(MAX_AGE_DAYS), 100);
+        for id in 1..=1_000 {
+            assert_eq!(
+                age_years_from_days(initial_age_days(id)),
+                u32::from(age_years(id)),
+                "id {id} must round-trip from its initial age"
+            );
+        }
+    }
+
+    #[test]
+    fn age_metrics_cover_empty_and_seeded_pools() {
+        let mut named = NamedCitizens::new(2026);
+        assert_eq!(named.average_age_days(), 0);
+        assert_eq!(named.oldest_age_days(), None);
+
+        let mut households = BTreeMap::new();
+        households.insert(1, household(3));
+        named.sync(&households);
+        let ids: Vec<u64> = named.citizens.values().map(|citizen| citizen.id).collect();
+        let ages = [20 * DAYS_PER_YEAR, 40 * DAYS_PER_YEAR, 90 * DAYS_PER_YEAR];
+        for (id, age_days) in ids.iter().zip(ages) {
+            named.get_mut_for_test(*id).age_days = age_days;
+        }
+        assert_eq!(named.oldest_age_days(), Some(90 * DAYS_PER_YEAR));
+        assert_eq!(named.average_age_days(), 50 * DAYS_PER_YEAR);
+        assert_eq!(age_years_from_days(named.average_age_days()), 50);
     }
 
     #[test]
