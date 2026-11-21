@@ -13,7 +13,7 @@ tags:
 # 73 — Materialization Core
 
 > [!info] What this note is
-> The N3 core selection model: which named residents become active or detailed around a camera point. It is a pure, derived selection over the named identity pool. It does not render citizens, build routes, persist a materialized set, or change the simulation.
+> The N3 core selection model: which named residents become active or detailed around a camera point, including 80 m in / 120 m out hysteresis and an optional pinned citizen. It is a pure, derived selection over the named identity pool. It does not render citizens, build routes, persist a materialized set, or change the simulation.
 
 ## 1. Scope
 
@@ -22,13 +22,14 @@ In:
 - `MaterializationBudget` with active/detailed caps and validation;
 - `MaterializedCitizen` and `MaterializationSelection`;
 - `NamedCitizens::select_near(center, placement_centers, budget, active_radius_m, detailed_radius_m)`;
-- deterministic nearest ordering, tie-break, deduplication, and radius filtering;
+- `NamedCitizens::select_near_with_previous(previous, center, placement_centers, budget, inner_radius_m, outer_radius_m, detailed_radius_m, pinned)`;
+- deterministic nearest ordering, tie-break, deduplication, radius filtering, hysteresis, and a single pin;
 - tests and limits.
 
 Out:
 
 - bridge/UI candidate calls, fade-in/out, or world-space agents;
-- hysteresis/dwell time, pinned/selected priority, or a saved materialized set;
+- dwell time, the 64-changes-per-tick budget, multi-citizen priority, or a saved materialized set;
 - route caching, pathfinding, traffic, schedules, or needs simulation;
 - per-client network filtering.
 
@@ -72,7 +73,19 @@ pub struct MaterializationSelection {
 
 No route, path, or per-citizen simulation state is allocated. The result is deterministic and does not mutate the identity pool or its checksum.
 
-## 4. Bridge
+## 4. Hysteresis
+
+`select_near_with_previous` is the stateful variant. It takes the previous selection as an optional input and applies the N3 policy from [[67 - Named Citizens]] (Q-104): 80 m in, 120 m out, pinned selected.
+
+1. validates the budget, centre, and radii (`0 <= inner_radius_m <= outer_radius_m`, `detailed_radius_m >= 0`);
+2. keeps any citizen from `previous.active` or `previous.detailed` while its **current** distance is `<= outer_radius_m`;
+3. adds any citizen at `<= inner_radius_m`, whether or not it was selected before;
+4. always keeps `pinned` when that id exists in the named pool with a finite home centre, even outside the outer radius;
+5. sorts by `(distance, id)`, deduplicates by id, caps `active` at `active_max`, then takes the detailed prefix within `detailed_radius_m`, capped by `detailed_max`.
+
+A pinned citizen outside the active cap replaces the furthest non-pinned citizen, so the pin is deterministic and the caps still hold. `detailed` remains a prefix of `active`; a pinned citizen outside the detailed radius is active only. `previous` is used by identity only: the current pool supplies the name, home, and distance, so a removed citizen or a stale home never reappears. `select_near` stays the stateless path for callers without a previous selection. Neither method mutates the pool or its checksum.
+
+## 5. Bridge
 
 `TownsmithCore.materialization_state(seed, center_x, center_z, active_radius_m, detailed_radius_m)`:
 
@@ -84,7 +97,7 @@ No route, path, or per-citizen simulation state is allocated. The result is dete
 
 The call is read-only: it does not mutate the live named pool, population, save state, or checksums. Detailed is a prefix of active. The bridge test checks ordering, counts, names, and the prefix invariant.
 
-## 5. Tests
+## 6. Tests
 
 `core_city::named` covers:
 
@@ -94,24 +107,28 @@ The call is read-only: it does not mutate the live named pool, population, save 
 - empty pool / empty centre map;
 - deterministic repeat and checksum stability;
 - duplicate-id deduplication;
-- budget defaults, validation, hard caps, and invalid arguments.
+- budget defaults, validation, hard caps, and invalid arguments;
+- hysteresis: keeping a previous citizen between the inner and outer radii, dropping one beyond the outer radius, and adding a new one inside the inner radius;
+- pinned survival outside the outer radius and under a binding active cap, including absent and invalid-home pins;
+- caps, the detailed prefix, and invalid hysteresis radii.
 
-## 6. Limits
+## 7. Limits
 
 - Home positions are an input map; there is no live spatial index yet.
-- No hysteresis/dwell, pinned selection, priority for the selected citizen, or fade state.
+- Hysteresis needs the caller to pass the previous selection; the core stores no materialized set.
+- One pinned id is supported; the full selection/story priority list and dwell time are later.
 - No route cache; N3 movement can use this selection but must add its own bounded route cache.
 - The world scene has debug markers only; there are no materialized agents, movement, or route visuals yet.
 - No save field: the selected set is derived on demand.
 - Selection is city-wide in N3; per-client interest filtering is later.
 
-## 7. World-scene overlay
+## 8. World-scene overlay
 
 `F4` toggles a read-only overlay at the selected home/camera target. It calls `materialization_state` with a 250 m active / 120 m detailed radius and renders one blue marker per active citizen plus larger amber markers for detailed citizens. The overlay rebuilds on selection change or every 0.5 s while visible and frees its nodes when hidden. It does not persist or move agents.
 
-Limits: no hysteresis, fade, pinned selection, route cache, or movement; markers are debug geometry.
+Limits: the overlay still calls stateless `select_near`; no hysteresis, fade, pin, route cache, or movement; markers are debug geometry.
 
-## 8. Benchmark
+## 9. Benchmark
 
 ```bash
 cargo run --release -p townsmith-bench --bin materialization
@@ -156,8 +173,8 @@ Limits: the benchmark times the current city-wide scan, not a spatial index;
 it reports selection only (no routes, agents, or rendering), and the timing is
 not a CI gate.
 
-## 9. Next
+## 10. Next
 
-1. Add hysteresis, pinned/selected priority, fade/pop handling, and a bounded route cache.
+1. Wire `select_near_with_previous` into the bridge and overlay, then add fade/pop handling and the 64-changes-per-tick budget.
 2. Move markers into a materialized-agent route and add the 2k-active/200-detailed render route.
 3. Add per-client interest filtering.

@@ -391,6 +391,127 @@ impl NamedCitizens {
         Ok(MaterializationSelection { active, detailed })
     }
 
+    /// Select named citizens with radius hysteresis and an optional pin.
+    ///
+    /// This is the stateful variant of [`Self::select_near`]. A citizen in
+    /// `previous` is kept while its current distance is at most
+    /// `outer_radius_m`, and any citizen within `inner_radius_m` is added even
+    /// when it was not selected before. A `pinned` identity is always kept when
+    /// it exists in the pool with a finite home centre, even outside the outer
+    /// radius.
+    ///
+    /// Candidates are sorted by `(distance, id)` and deduplicated by id. The
+    /// active set is capped by [`MaterializationBudget::active_max`]; a pinned
+    /// citizen outside the cap replaces the furthest non-pinned citizen.
+    /// `detailed` is the prefix of `active` within `detailed_radius_m`, capped
+    /// by [`MaterializationBudget::detailed_max`].
+    ///
+    /// `previous` is used by identity only. Names, homes, and distances are
+    /// recomputed from the current pool and `placement_centers`, so removed or
+    /// stale citizens never reappear.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NamedError`] if the budget is invalid, the centre is not
+    /// finite, a radius is negative or not finite, or `inner_radius_m >
+    /// outer_radius_m`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn select_near_with_previous(
+        &self,
+        previous: Option<&MaterializationSelection>,
+        center: [f32; 2],
+        placement_centers: &BTreeMap<u64, [f32; 2]>,
+        budget: MaterializationBudget,
+        inner_radius_m: f32,
+        outer_radius_m: f32,
+        detailed_radius_m: f32,
+        pinned: Option<u64>,
+    ) -> Result<MaterializationSelection, NamedError> {
+        budget.validate()?;
+        if !center.iter().all(|value| value.is_finite()) {
+            return Err(NamedError::Invalid("materialization center"));
+        }
+        if !inner_radius_m.is_finite() || inner_radius_m < 0.0 {
+            return Err(NamedError::Invalid("inner materialization radius"));
+        }
+        if !outer_radius_m.is_finite() || outer_radius_m < 0.0 {
+            return Err(NamedError::Invalid("outer materialization radius"));
+        }
+        if inner_radius_m > outer_radius_m {
+            return Err(NamedError::Invalid(
+                "inner materialization radius exceeds outer",
+            ));
+        }
+        if !detailed_radius_m.is_finite() || detailed_radius_m < 0.0 {
+            return Err(NamedError::Invalid("detailed materialization radius"));
+        }
+
+        let mut retained = BTreeSet::new();
+        if let Some(previous) = previous {
+            retained.extend(previous.active.iter().map(|citizen| citizen.id));
+            retained.extend(previous.detailed.iter().map(|citizen| citizen.id));
+        }
+
+        let mut candidates = Vec::new();
+        for citizen in self.citizens.values() {
+            let Some(&home) = placement_centers.get(&citizen.placement_id) else {
+                continue;
+            };
+            if !home.iter().all(|value| value.is_finite()) {
+                continue;
+            }
+            let distance = RoadGraph::straight_line_m(center, home);
+            let keep = distance <= inner_radius_m
+                || (retained.contains(&citizen.id) && distance <= outer_radius_m)
+                || pinned == Some(citizen.id);
+            if !keep {
+                continue;
+            }
+            candidates.push(MaterializedCitizen {
+                id: citizen.id,
+                placement_id: citizen.placement_id,
+                slot: citizen.slot,
+                name: citizen.name.clone(),
+                home,
+                distance,
+            });
+        }
+        candidates.sort_by(|left, right| {
+            left.distance
+                .total_cmp(&right.distance)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let mut seen = BTreeSet::new();
+        candidates.retain(|citizen| seen.insert(citizen.id));
+
+        let pinned_citizen =
+            pinned.and_then(|id| candidates.iter().find(|citizen| citizen.id == id).cloned());
+
+        let mut active: Vec<MaterializedCitizen> =
+            candidates.into_iter().take(budget.active_max).collect();
+        if let Some(pinned_citizen) = pinned_citizen {
+            if !active.iter().any(|citizen| citizen.id == pinned_citizen.id) {
+                if active.len() >= budget.active_max {
+                    active.pop();
+                }
+                active.push(pinned_citizen);
+                active.sort_by(|left, right| {
+                    left.distance
+                        .total_cmp(&right.distance)
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+            }
+        }
+
+        let detailed = active
+            .iter()
+            .filter(|citizen| citizen.distance <= detailed_radius_m)
+            .take(budget.detailed_max)
+            .cloned()
+            .collect();
+        Ok(MaterializationSelection { active, detailed })
+    }
+
     /// Build the deterministic save object.
     #[must_use]
     pub fn to_save(&self) -> NamedSave {
@@ -968,6 +1089,218 @@ mod tests {
         }
         .validate()
         .is_ok());
+    }
+
+    fn previous_selection(ids: &[u64]) -> MaterializationSelection {
+        MaterializationSelection {
+            active: ids
+                .iter()
+                .map(|&id| MaterializedCitizen {
+                    id,
+                    placement_id: id,
+                    slot: 0,
+                    name: name_for(id),
+                    home: [0.0, 0.0],
+                    distance: 0.0,
+                })
+                .collect(),
+            detailed: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn hysteresis_keeps_between_radii_and_drops_beyond_outer() {
+        let named = pool_with(&[(1, 1, 0), (2, 2, 0)]);
+        let centers = center_map(&[(1, [100.0, 0.0]), (2, [130.0, 0.0])]);
+        let budget = MaterializationBudget::default();
+
+        let fresh = named
+            .select_near_with_previous(None, [0.0, 0.0], &centers, budget, 80.0, 120.0, 40.0, None)
+            .expect("select");
+        assert!(fresh.active.is_empty());
+
+        let previous = previous_selection(&[1, 2]);
+        let selection = named
+            .select_near_with_previous(
+                Some(&previous),
+                [0.0, 0.0],
+                &centers,
+                budget,
+                80.0,
+                120.0,
+                40.0,
+                None,
+            )
+            .expect("select");
+        assert_eq!(selected_ids(&selection.active), vec![1]);
+        assert_eq!(selection.active[0].distance, 100.0);
+        assert!(selection.detailed.is_empty());
+    }
+
+    #[test]
+    fn hysteresis_adds_new_citizen_inside_inner_radius() {
+        let named = pool_with(&[(1, 1, 0), (2, 2, 0), (3, 3, 0)]);
+        let centers = center_map(&[(1, [50.0, 0.0]), (2, [100.0, 0.0]), (3, [110.0, 0.0])]);
+        let previous = previous_selection(&[2]);
+        let selection = named
+            .select_near_with_previous(
+                Some(&previous),
+                [0.0, 0.0],
+                &centers,
+                MaterializationBudget::default(),
+                80.0,
+                120.0,
+                120.0,
+                None,
+            )
+            .expect("select");
+        assert_eq!(selected_ids(&selection.active), vec![1, 2]);
+        assert_eq!(selected_ids(&selection.detailed), vec![1, 2]);
+    }
+
+    #[test]
+    fn hysteresis_pinned_survives_outside_outer_and_active_cap() {
+        let named = pool_with(&[(1, 1, 0), (2, 2, 0), (3, 3, 0), (4, 4, 0)]);
+        let centers = center_map(&[
+            (1, [10.0, 0.0]),
+            (2, [20.0, 0.0]),
+            (3, [500.0, 0.0]),
+            (4, [f32::NAN, 0.0]),
+        ]);
+        let budget = MaterializationBudget {
+            active_max: 2,
+            detailed_max: 1,
+        };
+        let selection = named
+            .select_near_with_previous(
+                None,
+                [0.0, 0.0],
+                &centers,
+                budget,
+                80.0,
+                120.0,
+                40.0,
+                Some(3),
+            )
+            .expect("select");
+        assert_eq!(selected_ids(&selection.active), vec![1, 3]);
+        assert_eq!(selected_ids(&selection.detailed), vec![1]);
+
+        let unpinned = named
+            .select_near_with_previous(
+                None,
+                [0.0, 0.0],
+                &centers,
+                budget,
+                80.0,
+                120.0,
+                40.0,
+                Some(99),
+            )
+            .expect("select");
+        assert_eq!(selected_ids(&unpinned.active), vec![1, 2]);
+
+        let invalid_home = named
+            .select_near_with_previous(
+                None,
+                [0.0, 0.0],
+                &centers,
+                budget,
+                80.0,
+                120.0,
+                40.0,
+                Some(4),
+            )
+            .expect("select");
+        assert_eq!(selected_ids(&invalid_home.active), vec![1, 2]);
+    }
+
+    #[test]
+    fn hysteresis_caps_active_and_detailed_with_validation() {
+        let named = pool_with(&[(1, 1, 0), (2, 2, 0), (3, 3, 0), (4, 4, 0)]);
+        let centers = center_map(&[
+            (1, [10.0, 0.0]),
+            (2, [20.0, 0.0]),
+            (3, [30.0, 0.0]),
+            (4, [40.0, 0.0]),
+        ]);
+        let previous = previous_selection(&[1, 2, 3, 4]);
+        let budget = MaterializationBudget {
+            active_max: 2,
+            detailed_max: 1,
+        };
+        let selection = named
+            .select_near_with_previous(
+                Some(&previous),
+                [0.0, 0.0],
+                &centers,
+                budget,
+                15.0,
+                100.0,
+                55.0,
+                None,
+            )
+            .expect("select");
+        assert_eq!(selected_ids(&selection.active), vec![1, 2]);
+        assert_eq!(selected_ids(&selection.detailed), vec![1]);
+        assert_eq!(selection.detailed[0], selection.active[0]);
+
+        let budget = MaterializationBudget::default();
+        let empty = BTreeMap::new();
+        assert_eq!(
+            named.select_near_with_previous(
+                None,
+                [0.0, 0.0],
+                &empty,
+                budget,
+                80.0,
+                40.0,
+                40.0,
+                None,
+            ),
+            Err(NamedError::Invalid(
+                "inner materialization radius exceeds outer"
+            ))
+        );
+        assert_eq!(
+            named.select_near_with_previous(
+                None,
+                [0.0, 0.0],
+                &empty,
+                budget,
+                -1.0,
+                40.0,
+                40.0,
+                None,
+            ),
+            Err(NamedError::Invalid("inner materialization radius"))
+        );
+        assert_eq!(
+            named.select_near_with_previous(
+                None,
+                [0.0, 0.0],
+                &empty,
+                budget,
+                0.0,
+                f32::NAN,
+                40.0,
+                None,
+            ),
+            Err(NamedError::Invalid("outer materialization radius"))
+        );
+        assert_eq!(
+            named.select_near_with_previous(
+                None,
+                [0.0, 0.0],
+                &empty,
+                budget,
+                0.0,
+                40.0,
+                f32::INFINITY,
+                None,
+            ),
+            Err(NamedError::Invalid("detailed materialization radius"))
+        );
     }
 
     #[test]
