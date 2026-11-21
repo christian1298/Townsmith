@@ -62,7 +62,28 @@ status ok
 
 The checksum is FNV-1a over the per-store checksum array. The fixture is deterministic; repeated runs produce the same value.
 
-## 5. Limits
+## 5. Bridge compatibility matrix
+
+`crates/godot_ext/src/save_compat_tests.rs` covers the pure bridge helpers that
+compose and parse the optional world layers:
+
+- `attach_terrain_deltas`, `attach_construction`, `attach_population`,
+  `attach_named_citizens`, `attach_roads`, `attach_lots`,
+  `attach_settlements`, `attach_economy`, `attach_utilities`,
+  `attach_services`, `attach_industry`, and `attach_research`;
+- every optional layer is absent/closed for `{}` old saves;
+- unsupported versions, malformed field types, and malformed JSON return the
+  documented `invalid_*` / `invalid_json` codes;
+- `named_from_world_json` rejects a foreign seed; the other seeded layers
+  preserve their embedded seed for the bridge-level gate;
+- the full composition roundtrip checks layer checksums, except the economy,
+  which is compared semantically because JSON can normalize an f64's shortest
+  decimal form.
+
+This matrix does not run the Godot `VarDictionary` `world_save`/`world_load`
+paths or disk atomicity.
+
+## 6. Limits
 
 - Core stores only; it does not exercise the Godot `world_save`/`world_load` wrapper, `VarDictionary` payloads, terrain deltas, or disk atomicity.
 - No multiplayer, mod, or migration matrix.
@@ -70,7 +91,7 @@ The checksum is FNV-1a over the per-store checksum array. The fixture is determi
 - One fixed fixture, not a mutation/fuzz corpus; the rejection suite covers representative corrupt inputs.
 - The economy is compared semantically rather than by checksum after the combined roundtrip.
 
-## 6. Next
+## 7. Next
 
 1. Add a bridge-level stress harness once the Godot test runtime is available.
 2. Add a mutation fuzzer for each store's validator.

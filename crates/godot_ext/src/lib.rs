@@ -7749,6 +7749,9 @@ fn city_layout_to_dictionary(layout: &CityLayout) -> VarDictionary {
 }
 
 #[cfg(test)]
+mod save_compat_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
