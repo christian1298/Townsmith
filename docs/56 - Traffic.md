@@ -176,7 +176,7 @@ The pair-query path runs Dijkstra per call. The flow field is roughly **75× fas
 - `core_city::population`: road commute and disconnected fallback.
 - `townsmith-bench`: 4 city-loop tests (small city and a multi-row commute) and 1 traffic-grid test.
 - World scene smoke: `traffic=ok`, graph stats, one car, movement, save/load rebuild.
-- Workspace: **356 tests + 1 doctest**; core_city **146**, bridge **42**.
+- Workspace: **361 tests + 1 doctest**; core_city **151**, bridge **42**.
 
 ## 8. Limits
 

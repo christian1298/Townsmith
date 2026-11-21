@@ -1190,6 +1190,19 @@ func _update_hud() -> void:
 	var state := "VALID" if preview_valid else "INVALID: " + preview_error
 	var construction: Dictionary = core.construction_summary()
 	var city: Dictionary = core.city_summary()
+	var progression: Dictionary = core.progression_state(SEED)
+	var age_text := "—"
+	if bool(progression.get("ok", false)):
+		var next_age := str(progression.get("next_age", ""))
+		if next_age == "":
+			age_text = "%s · final age" % str(progression.get("age", "?"))
+		else:
+			age_text = "%s · next %s at %d (%d%%)" % [
+				str(progression.get("age", "?")),
+				next_age,
+				int(progression.get("next_threshold", 0)),
+				roundi(float(progression.get("progress", 0.0)) * 100.0),
+			]
 	var economy: Dictionary = core.economy_state()
 	var treasury_text := "—"
 	if bool(economy.get("open", false)):
@@ -1243,7 +1256,7 @@ func _update_hud() -> void:
 			float(city.get("water", 0.0)) * 100.0,
 			float(city.get("rest", 0.0)) * 100.0,
 		]
-	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nIndustry: %s\nUtilities: %s\nTraffic: %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
+	status_label.text = "%s\nTarget (%d, %d)  rotation %d°  %s\nPlacements: %d   Roads: %d   Lots: %d   Settlements: %d   Terrain edits: %d\nCity: population %d / housing %d (%d vacant) · jobs %d (%d employed) · happiness %s\nAge: %s\nCommute %.0f m · wages %.0f/day\nNeeds: %s\nTreasury: %s\nIndustry: %s\nUtilities: %s\nTraffic: %s\nConstruction: %d active / %d stalled   Crew: %d   Materials: %d L   Save: %s" % [
 		selected_line,
 		int(target_x),
 		int(target_z),
@@ -1260,6 +1273,7 @@ func _update_hud() -> void:
 		int(city.get("jobs", 0)),
 		int(city.get("employed", 0)),
 		happiness_text,
+		age_text,
 		float(city.get("average_commute_m", 0.0)),
 		float(city.get("daily_wages", 0.0)),
 		needs_text,
@@ -1293,6 +1307,7 @@ func _update_dashboard() -> void:
 	var utilities: Dictionary = core.utilities_state()
 	var construction: Dictionary = core.construction_summary()
 	var traffic: Dictionary = core.traffic_state(SEED)
+	var progression: Dictionary = core.progression_state(SEED)
 	var advice: Dictionary = core.city_advisor(SEED)
 	var population := int(city.get("population", 0))
 	var happiness := "—"
@@ -1334,6 +1349,19 @@ func _update_dashboard() -> void:
 		int(city.get("housing_capacity", 0)),
 		int(city.get("vacancies", 0)),
 	]
+	var age_line := "—"
+	if bool(progression.get("ok", false)):
+		var next_age := str(progression.get("next_age", ""))
+		if next_age == "":
+			age_line = "%s · final age" % str(progression.get("age", "?"))
+		else:
+			age_line = "%s · next %s at %d (%d%%)" % [
+				str(progression.get("age", "?")),
+				next_age,
+				int(progression.get("next_threshold", 0)),
+				roundi(float(progression.get("progress", 0.0)) * 100.0),
+			]
+	text += "[b]Age[/b]\n%s\n" % age_line
 	text += "[b]Work[/b]\n%d / %d jobs filled · %d unemployed · commute %.0f m\n" % [
 		int(city.get("employed", 0)),
 		int(city.get("jobs", 0)),
@@ -1957,6 +1985,7 @@ func _run_scene_smoke() -> void:
 	var build_ok := false
 	var build_done_ok := false
 	var render_ok := false
+	var age_ok := false
 	var occupancy_before_ok := false
 	var occupancy_after_ok := false
 	var industry_ok := false
@@ -2242,6 +2271,12 @@ func _run_scene_smoke() -> void:
 				occupancy_after_ok = occupancy_after_ok and float(city_after.get("food", 0.0)) > 0.0
 				occupancy_after_ok = occupancy_after_ok and float(city_after.get("water", 0.0)) > 0.0
 				occupancy_after_ok = occupancy_after_ok and float(city_after.get("rest", 0.0)) > 0.0
+				var progression_after: Dictionary = core.progression_state(SEED)
+				age_ok = bool(progression_after.get("ok", false))
+				age_ok = age_ok and str(progression_after.get("age", "")) == "wood"
+				age_ok = age_ok and str(progression_after.get("next_age", "")) == "masonry"
+				age_ok = age_ok and int(progression_after.get("next_threshold", 0)) == 250
+				age_ok = age_ok and float(progression_after.get("progress", -1.0)) >= 0.0
 				core.population_tick(SEED, 1000.0)
 				var utility_before: Dictionary = core.city_summary()
 				var before_water := float(utility_before.get("water", 0.0))
@@ -2391,6 +2426,8 @@ func _run_scene_smoke() -> void:
 					status = "construction_complete_failed"
 				elif not render_ok:
 					status = "render_failed"
+				elif not age_ok:
+					status = "age_failed"
 				elif not (occupancy_before_ok and occupancy_after_ok):
 					status = "occupancy_failed"
 				elif not industry_ok:
@@ -2439,7 +2476,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s render=%s occupancy=%s industry=%s utilities=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s render=%s age=%s occupancy=%s industry=%s utilities=%s economy=%s dashboard=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -2452,6 +2489,7 @@ func _run_scene_smoke() -> void:
 		"ok" if build_ok else "failed",
 		"ok" if build_done_ok else "failed",
 		"ok" if render_ok else "failed",
+		"ok" if age_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",

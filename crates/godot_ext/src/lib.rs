@@ -27,9 +27,9 @@ use core_blueprint::{
     PropRecord, RoomRecord,
 };
 use core_city::{
-    advise, normalize_rotation, summarize, AdvisorInput, AdvisorReport, CityLayout, CityRuntime,
-    CitySummary, CityTier, ConstructionSite, ConstructionStore, Economy, Home, IndustryKind,
-    IndustryStore, Lot, LotError, LotRequest, LotStore, Placement, PlacementError,
+    advise, normalize_rotation, summarize, AdvisorInput, AdvisorReport, Age, AgeState, CityLayout,
+    CityRuntime, CitySummary, CityTier, ConstructionSite, ConstructionStore, Economy, Home,
+    IndustryKind, IndustryStore, Lot, LotError, LotRequest, LotStore, Placement, PlacementError,
     PlacementRequest, PlacementStore, RoadError, RoadGraph, RoadRequest, RoadSegment, RoadStore,
     Settlement, SettlementError, SettlementRequest, SettlementStore, UtilityConsumer, UtilityKind,
     UtilityReport, UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY,
@@ -2971,6 +2971,56 @@ impl TownsmithCore {
         }
         let report = advise(&input);
         advisor_payload(seed, &report)
+    }
+
+    /// Derived population-age state for the current city.
+    ///
+    /// Age is not saved: it is a pure function of the completed city
+    /// population. Research and explicit tech unlocks arrive in a later slice.
+    #[func]
+    fn progression_state(&self, seed: i64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        if seed > i64::MAX as u64 {
+            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
+        }
+        {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(store) = world.as_ref() {
+                if store.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the placement store belongs to a different seed",
+                    );
+                }
+            }
+        }
+        let city = self.city_summary();
+        let population = variant_u64(&city, "population");
+        let state = AgeState::from_population(population);
+        let mut materials: Array<GString> = Array::new();
+        for material in state.age.materials() {
+            materials.push(&GString::from(*material));
+        }
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("seed", seed as i64);
+        result.set("population", population as i64);
+        result.set("age", state.age.name());
+        result.set(
+            "age_index",
+            Age::ALL
+                .iter()
+                .position(|age| *age == state.age)
+                .map_or(0, |index| index as i64),
+        );
+        result.set("next_age", state.next_age.map_or("", |age| age.name()));
+        result.set("next_threshold", state.next_threshold.unwrap_or(0) as i64);
+        result.set("progress", f64::from(state.progress));
+        result.set("final_age", state.is_final());
+        result.set("materials", &materials.to_variant());
+        result
     }
 
     /// Set the shared crew pool. Values above 64 are rejected.
