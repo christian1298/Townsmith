@@ -344,11 +344,12 @@ Copy this section into the run record, or fill it in place. Keep the raw notes; 
 ### Closing the loop
 
 1. Add the three issues above (or link the filed issues) to the team backlog.
-2. Move Q-101 to **Answered** in [[09 - Open Questions]] with the date, the mean score, and the top issue; add an ADR only if the finding changes a decision.
-3. Update [[40 - Slice Acceptance Results]]: the technical result does not change, but the slice is only fully accepted once Q-101 is answered.
-4. Update [[00 - Start Here]] status and next actions.
-5. If a finding invalidates the tutorial order or wording, update [[65 - Tutorial]] in the same PR.
-6. Keep this file as the template; add each run as a dated section or a linked run note, not by overwriting the template.
+2. Export each capture (§9), then run `./scripts/check_playtest_report.sh` and paste the `PLAYTEST_SUMMARY …` marker and aggregate into the run note. The summary supports the record; it does not replace the observer's verdict.
+3. Move Q-101 to **Answered** in [[09 - Open Questions]] with the date, the mean score, and the top issue; add an ADR only if the finding changes a decision.
+4. Update [[40 - Slice Acceptance Results]]: the technical result does not change, but the slice is only fully accepted once Q-101 is answered.
+5. Update [[00 - Start Here]] status and next actions.
+6. If a finding invalidates the tutorial order or wording, update [[65 - Tutorial]] in the same PR.
+7. Keep this file as the template; add each run as a dated section or a linked run note, not by overwriting the template.
 
 ## 9. Standalone capture form
 
@@ -401,6 +402,59 @@ The form does not start the game. Keep `./scripts/playtest_session.sh` (or `run_
 ### Partial-report policy
 
 An export never blocks on missing content. An empty tester name adds `tester_name_missing`; zero completed stages adds `no_completed_stage`. Both set `status` to `partial` and are visible in the UI and in `validation.warnings`, but the file is still written so an interrupted or partial session can be kept. Only I/O or schema failures fail the export.
+
+### Summarizing exports
+
+`./scripts/check_playtest_report.sh` validates and aggregates capture exports with `scripts/summarize_playtest.py` (stdlib Python; no Godot, no display). With no arguments it reads every `*.json` in `docs/playtest/`; otherwise it forwards report paths, `--markdown`, `--json`, and `--self-test` to the Python tool:
+
+```bash
+# Default: every *.json in docs/playtest/
+./scripts/check_playtest_report.sh
+
+# One export, with derived outputs
+./scripts/check_playtest_report.sh path/to/q101_capture.json \
+	--markdown /tmp/q101_summary.md \
+	--json /tmp/q101_summary.json
+
+# Exports stay in user:// until copied out:
+mkdir -p docs/playtest
+cp ~/.local/share/godot/app_userdata/"Townsmith Phase 0"/q101_playtest_*.json \
+	docs/playtest/
+```
+
+`PLAYTEST_DIR` overrides the report directory; `PLAYTEST_MD` and `PLAYTEST_JSON` write the derived outputs when the wrapper runs without arguments. Keep `summary.json` outside the report directory: the summarizer rejects its own aggregate when it finds it as input.
+
+A successful run ends with the machine-readable marker:
+
+```text
+PLAYTEST_SUMMARY reports=2 completed=1 issues=3 status=partial
+```
+
+| Field | Meaning |
+|---|---|
+| `reports` | Valid capture files read. A directory expands to its sorted `*.json` files; arguments and files are de-duplicated. |
+| `completed` | Reports with `validation.complete` true and every route stage complete. |
+| `issues` | Non-empty issue rows across reports. A row with a blank description is ignored and counted separately, matching the form. |
+| `status` | `ok` only when every report is complete; `partial` when any report has a validation warning or an incomplete stage. |
+
+Aggregation semantics:
+
+- The text output has one row per report (tester, build, seed, hardware, stages, elapsed, issue count, status), then stage completion (`completed/reports` per segment), warnings by code, issues by severity and area, and the top five issues grouped by identical description. A grouped issue keeps its highest severity and its reproducible count.
+- Elapsed total/mean/min/max are over reports, not route segments. Per-report detail keeps the source path, warnings, notes, and issue rows.
+- The JSON output carries the same numbers in a fixed report order (argument order, or sorted filenames for a directory) with sorted keys, so repeated runs over unchanged files are byte-identical.
+
+Malformed input is a hard failure: an unreadable file, invalid JSON, a missing schema field, an unsupported `schema`/`format_version`, disagreeing counters, or an aggregate passed as input prints one line and exits 2, with no marker:
+
+```text
+PLAYTEST_SUMMARY_ERROR /path/to/q101_capture.json: invalid JSON at line 1 column 2: …
+```
+
+Fix or remove the offending file. A valid partial report is not an error: it still aggregates, with `status=partial`. With no reports at all, the wrapper prints its usage and exits 2.
+
+`--self-test` runs the built-in complete/partial/malformed/version/multi-report fixtures and prints `PLAYTEST_SUMMARY_SELFTEST cases=<n> status=ok`.
+
+> [!warning] A summary is not a playtest
+> The summarizer only counts what an observer already recorded. It does not run the route, score R1–R5, or answer Q-101; a human must still run the session in §2 and write the record in §8. Q-101 stays open in [[09 - Open Questions]] until that record exists.
 
 ### Capture smoke
 

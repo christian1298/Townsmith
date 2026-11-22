@@ -344,6 +344,10 @@ GODOT=/path/to/godot ./scripts/smoke_bench_screen.sh
 GODOT=/path/to/godot ./scripts/smoke_bench_live.sh
 GODOT=/path/to/godot ./scripts/smoke_playtest_capture.sh
 "${GODOT:-godot}" --path godot res://playtest_capture.tscn   # standalone Q-101 observer form
+# Q-101 capture summary (docs/66 §9); no reports prints usage and exits 2
+./scripts/check_playtest_report.sh --self-test
+./scripts/check_playtest_report.sh                  # docs/playtest/*.json
+./scripts/check_playtest_report.sh path/to/q101_capture.json --markdown /tmp/q101_summary.md
 "${GODOT:-godot}" --path godot res://bench_screen.tscn -- --output benchmarks/results/bench_screen_report.json
 # Headless MultiMesh setup harness for 10k/50k/250k boxes (not FPS evidence)
 GODOT=/path/to/godot ./scripts/smoke_metropolis_render.sh

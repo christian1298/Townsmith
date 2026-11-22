@@ -30,7 +30,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 
 | Item | State |
 |---|---|
-| Phase | **Phase 3 and Phase 4 slices implemented.** The Phase 5 1M/3060 render gate is open; the Q-101 human playtest is still pending. |
+| Phase | **Phase 3 and Phase 4 slices implemented.** The Phase 5 1M/3060 render gate is open; the Q-101 human playtest is still pending (the capture form and summary command are ready). |
 | Code | Rust workspace plus a Godot 4 shell. City, world, server, and benchmark paths are implemented; see [Code inventory](#code-inventory). |
 | Engine | **Accepted:** Godot 4 shell + Rust core via GDExtension. The Phase 0 spike passed; the 3060-class 1M 30 FPS gate remains open for Phase 5. See [[04 - Engine and Stack]] and [[10 - Decisions]]. |
 | Team | **Accepted:** 2–3 full-time generalists; Rust/Godot experience or willingness to learn. |
@@ -47,7 +47,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with real 10 cm building detail is tractable. The box-city MultiMesh path is measured well above target on an RTX 4080; the target 3060-class run and voxel building LOD remain. See [[03 - Voxel and Scale]], [[23 - City Rendering Benchmark]], and [[09 - Open Questions]]. |
-| Next action | Run the Q-101 playtest with [[66 - Playtest Kit]] or the standalone `playtest_capture.tscn` form ([[66 - Playtest Kit]] §9). Then: policy editing and selectable settlement panels (the district policy registry and `F6` focus have landed; the dashboard is still read-only), the 1M render gate (`./scripts/check_metropolis_gate.py`, [[08 - Roadmap]], [[09 - Open Questions]]), and client render integration for the multiplayer path. |
+| Next action | Run the Q-101 playtest with [[66 - Playtest Kit]] or the standalone `playtest_capture.tscn` form ([[66 - Playtest Kit]] §9), then summarize the exports with `./scripts/check_playtest_report.sh` (`PLAYTEST_SUMMARY …`). The summarizer counts recorded captures; it does not run the session or answer Q-101. Then: policy editing and selectable settlement panels (the district policy registry and `F6` focus have landed; the dashboard is still read-only), the 1M render gate (`./scripts/check_metropolis_gate.py`, [[08 - Roadmap]], [[09 - Open Questions]]), and client render integration for the multiplayer path. |
 
 ## Current capabilities
 
@@ -183,7 +183,7 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 ## Next actions
 
-1. Record the 30-minute slice playtest in [[66 - Playtest Kit]] (Q-101); use the standalone capture form in §9 to time stages and export the report.
+1. Record the 30-minute slice playtest in [[66 - Playtest Kit]] (Q-101); use the standalone capture form in §9 to time stages and export the report. After the human session, summarize the exports with `./scripts/check_playtest_report.sh`; the tool does not replace the observer or answer the question by itself.
 2. Utility and service per-phase payment, then reconnect and interest filtering for multiplayer.
 3. District policies and selectable settlement panels; the dashboard District section now supports `F6` camera/selection focus.
 4. Close the 1M render gate: real voxel/LOD city, 3060 baseline, fixed fixture, and Phase 5 evidence ([[68 - Metropolis Gate]]).
