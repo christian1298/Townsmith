@@ -176,6 +176,30 @@ const TABLES := {
 		"base.advisor.city.services_healthy.title": "Services are healthy",
 		"base.advisor.city.quiet.title": "No urgent issues",
 
+		"base.advisor.city.bankrupt.detail": "Placement and borrowing are blocked. Raise taxes or repay debt before building.",
+		"base.advisor.city.budget_deficit.detail": "The city is losing {net} per day.",
+		"base.advisor.city.clinic_shortage.detail": "Clinic coverage is {supply}.",
+		"base.advisor.city.construction_active.detail": "{active} construction sites are active.",
+		"base.advisor.city.construction_stalled.detail": "{stalled} construction sites are stalled.",
+		"base.advisor.city.debt.detail": "Outstanding debt is {debt}.",
+		"base.advisor.city.fire_shortage.detail": "Fire coverage is {supply}.",
+		"base.advisor.city.food_shortage.detail": "Food supply is {supply}.",
+		"base.advisor.city.healthy.detail": "Needs, services, employment, and cash flow are all in good shape.",
+		"base.advisor.city.long_commutes.detail": "Average commute is {commute} m.",
+		"base.advisor.city.no_residents.detail": "{housing} housing units are vacant.",
+		"base.advisor.city.no_roads.detail": "{population} residents commute without a road network.",
+		"base.advisor.city.police_shortage.detail": "Police coverage is {supply}.",
+		"base.advisor.city.power_shortage.detail": "Power supply is {supply}.",
+		"base.advisor.city.quiet.detail": "Place a blueprint or let the simulation run to generate advice.",
+		"base.advisor.city.school_shortage.detail": "School coverage is {supply}.",
+		"base.advisor.city.services_healthy.detail": "Food, water, power, and civic services are meeting demand.",
+		"base.advisor.city.traffic_disconnected.detail": "The road network has {components} components.",
+		"base.advisor.city.unemployment.detail": "{unemployed} residents are unemployed; employment is {employment}.",
+		"base.advisor.city.unhappy.detail": "Happiness is {happiness}.",
+		"base.advisor.city.vacant_homes.detail": "{vacancies} of {housing} homes are vacant.",
+		"base.advisor.city.water_shortage.detail": "Water supply is {supply}.",
+
+
 		# Follow camera.
 		"base.ui.citizen.follow_hint": "F3 follows the selected home · Esc stops",
 		"base.ui.citizen.following": "Following home #{id} · Esc stops",
@@ -338,6 +362,30 @@ const TABLES := {
 		"base.advisor.city.services_healthy.title": "Dienste sind gesund",
 		"base.advisor.city.quiet.title": "Keine dringenden Probleme",
 
+		"base.advisor.city.bankrupt.detail": "Platzieren und Leihen sind blockiert. Erhöhe Steuern oder zahle Schulden ab.",
+		"base.advisor.city.budget_deficit.detail": "Die Stadt verliert {net} pro Tag.",
+		"base.advisor.city.clinic_shortage.detail": "Die Klinikversorgung liegt bei {supply}.",
+		"base.advisor.city.construction_active.detail": "{active} Baustellen sind aktiv.",
+		"base.advisor.city.construction_stalled.detail": "{stalled} Baustellen stehen still.",
+		"base.advisor.city.debt.detail": "Die Restschuld beträgt {debt}.",
+		"base.advisor.city.fire_shortage.detail": "Die Feuerwehrversorgung liegt bei {supply}.",
+		"base.advisor.city.food_shortage.detail": "Die Nahrungsversorgung liegt bei {supply}.",
+		"base.advisor.city.healthy.detail": "Bedürfnisse, Dienste, Beschäftigung und Cashflow sind in gutem Zustand.",
+		"base.advisor.city.long_commutes.detail": "Der durchschnittliche Arbeitsweg beträgt {commute} m.",
+		"base.advisor.city.no_residents.detail": "{housing} Wohneinheiten stehen leer.",
+		"base.advisor.city.no_roads.detail": "{population} Bewohner pendeln ohne Straßennetz.",
+		"base.advisor.city.police_shortage.detail": "Die Polizeiversorgung liegt bei {supply}.",
+		"base.advisor.city.power_shortage.detail": "Die Stromversorgung liegt bei {supply}.",
+		"base.advisor.city.quiet.detail": "Platziere eine Blaupause oder lasse die Simulation laufen.",
+		"base.advisor.city.school_shortage.detail": "Die Schulversorgung liegt bei {supply}.",
+		"base.advisor.city.services_healthy.detail": "Nahrung, Wasser, Strom und Bürgerdienste decken den Bedarf.",
+		"base.advisor.city.traffic_disconnected.detail": "Das Straßennetz hat {components} Komponenten.",
+		"base.advisor.city.unemployment.detail": "{unemployed} Bewohner sind arbeitslos; Beschäftigung {employment}.",
+		"base.advisor.city.unhappy.detail": "Die Zufriedenheit liegt bei {happiness}.",
+		"base.advisor.city.vacant_homes.detail": "{vacancies} von {housing} Häusern stehen leer.",
+		"base.advisor.city.water_shortage.detail": "Die Wasserversorgung liegt bei {supply}.",
+
+
 		# Folgekamera.
 		"base.ui.citizen.follow_hint": "F3 folgt dem ausgewählten Zuhause · Esc beendet",
 		"base.ui.citizen.following": "Folgt Zuhause #{id} · Esc beendet",
@@ -395,6 +443,13 @@ func advisor_title(code: String, fallback: String) -> String:
 	var key := "base.advisor.%s.title" % code
 	if has_key(key) or has_key(key, DEFAULT_LOCALE):
 		return t(key)
+	return fallback
+
+
+func advisor_detail(code: String, fallback: String, params = {}) -> String:
+	var key := "base.advisor.%s.detail" % code
+	if has_key(key) or has_key(key, DEFAULT_LOCALE):
+		return t(key, params)
 	return fallback
 
 

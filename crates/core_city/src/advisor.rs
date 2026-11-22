@@ -4,6 +4,7 @@
 //! or persist state; the bridge gathers one snapshot and asks for a report.
 //! This keeps the rules testable and lets the dashboard refresh cheaply.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::Serialize;
@@ -50,8 +51,17 @@ pub struct AdvisorMessage {
     pub severity: Severity,
     /// Short title.
     pub title: String,
-    /// Suggested action or explanation.
+    /// Suggested action or explanation in English.
+    ///
+    /// Clients localize `base.advisor.<code>.detail` and use this string only
+    /// as the fallback for an unknown code or locale.
     pub detail: String,
+    /// Named values referenced by detail placeholders.
+    ///
+    /// Keys and values are stable strings so the bridge can send them as a
+    /// dictionary and clients can substitute `{name}` placeholders without
+    /// knowing the placeholder types.
+    pub params: BTreeMap<String, String>,
 }
 
 impl AdvisorMessage {
@@ -66,8 +76,31 @@ impl AdvisorMessage {
             severity,
             title: title.into(),
             detail: detail.into(),
+            params: BTreeMap::new(),
         }
     }
+
+    /// Attach one named parameter used by detail placeholders.
+    #[must_use]
+    fn with_param(mut self, key: &str, value: impl Into<String>) -> Self {
+        self.params.insert(key.to_string(), value.into());
+        self
+    }
+}
+
+/// Format a `0.0..=1.0` share as a whole percentage.
+fn percent(value: f32) -> String {
+    format!("{:.0}", value.clamp(0.0, 1.0) * 100.0)
+}
+
+/// Format a positive money amount without a currency symbol.
+fn money(value: f64) -> String {
+    format!("{:.0}", value.abs())
+}
+
+/// Format a distance in whole metres.
+fn metres(value: f32) -> String {
+    format!("{:.0}", value.max(0.0))
 }
 
 /// Plain city snapshot used by the advisor.
@@ -200,173 +233,291 @@ pub fn advise(input: &AdvisorInput) -> AdvisorReport {
     if populated {
         let food = input.food_supply.unwrap_or(0.0).clamp(0.0, 1.0);
         if food < 0.25 {
-            messages.push(AdvisorMessage::new(
-                "city.food_shortage",
-                Severity::Critical,
-                "Food shortage",
-                "Residents are eating below a quarter of demand. Add farms or hunters.",
-            ));
+            let supply = percent(food);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.food_shortage",
+                    Severity::Critical,
+                    "Food shortage",
+                    format!(
+                        "Food supply is at {supply}% — residents are eating below a quarter of demand. Add farms or hunters."
+                    ),
+                )
+                .with_param("supply", supply),
+            );
         } else if food < 0.99 {
-            messages.push(AdvisorMessage::new(
-                "city.food_shortage",
-                Severity::Warning,
-                "Food supply is short",
-                "Food satisfaction is falling. Add production before the stock empties.",
-            ));
+            let supply = percent(food);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.food_shortage",
+                    Severity::Warning,
+                    "Food supply is short",
+                    format!(
+                        "Food supply is at {supply}% and falling. Add production before the stock empties."
+                    ),
+                )
+                .with_param("supply", supply),
+            );
         }
 
         let water = input.water_supply.unwrap_or(0.0).clamp(0.0, 1.0);
         if water < 0.25 {
-            messages.push(AdvisorMessage::new(
-                "city.water_shortage",
-                Severity::Critical,
-                "Water shortage",
-                "Most homes are outside water coverage or capacity is exhausted. Build a water site.",
-            ));
+            let supply = percent(water);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.water_shortage",
+                    Severity::Critical,
+                    "Water shortage",
+                    format!("Water service covers only {supply}% of demand. Build a water site."),
+                )
+                .with_param("supply", supply),
+            );
         } else if water < 0.99 {
-            messages.push(AdvisorMessage::new(
-                "city.water_shortage",
-                Severity::Warning,
-                "Water service is short",
-                "Some homes are unserved. Check radius, capacity, and site completion.",
-            ));
+            let supply = percent(water);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.water_shortage",
+                    Severity::Warning,
+                    "Water service is short",
+                    format!(
+                        "Water service covers {supply}% of demand. Check radius, capacity, and site completion."
+                    ),
+                )
+                .with_param("supply", supply),
+            );
         }
 
         let power = input.power_supply.unwrap_or(0.0).clamp(0.0, 1.0);
         if power < 0.25 {
-            messages.push(AdvisorMessage::new(
-                "city.power_shortage",
-                Severity::Critical,
-                "Power outage",
-                "Industry has stopped and rest recovery is failing. Build a power site.",
-            ));
+            let supply = percent(power);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.power_shortage",
+                    Severity::Critical,
+                    "Power outage",
+                    format!(
+                        "Power service covers {supply}% of demand and industry has stopped. Build a power site."
+                    ),
+                )
+                .with_param("supply", supply),
+            );
         } else if power < 0.99 {
-            messages.push(AdvisorMessage::new(
-                "city.power_shortage",
-                Severity::Warning,
-                "Power service is short",
-                "Production and rest recovery are reduced. Add capacity or coverage.",
-            ));
+            let supply = percent(power);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.power_shortage",
+                    Severity::Warning,
+                    "Power service is short",
+                    format!(
+                        "Power service covers {supply}% of demand. Production and rest recovery are reduced."
+                    ),
+                )
+                .with_param("supply", supply),
+            );
         }
 
         let school = input.school_supply.unwrap_or(0.0).clamp(0.0, 1.0);
         if school < 0.25 {
-            messages.push(AdvisorMessage::new(
-                "city.school_shortage",
-                Severity::Critical,
-                "School shortage",
-                "Few school-age residents are covered or school capacity is exhausted. Build or extend a school.",
-            ));
+            let supply = percent(school);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.school_shortage",
+                    Severity::Critical,
+                    "School shortage",
+                    format!("School service covers {supply}% of demand. Build or extend a school."),
+                )
+                .with_param("supply", supply),
+            );
         } else if school < 0.99 {
-            messages.push(AdvisorMessage::new(
-                "city.school_shortage",
-                Severity::Warning,
-                "School service is short",
-                "Some school demand is unserved. Check radius, capacity, and site completion.",
-            ));
+            let supply = percent(school);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.school_shortage",
+                    Severity::Warning,
+                    "School service is short",
+                    format!(
+                        "School service covers {supply}% of demand. Check radius, capacity, and site completion."
+                    ),
+                )
+                .with_param("supply", supply),
+            );
         }
 
         let clinic = input.clinic_supply.unwrap_or(0.0).clamp(0.0, 1.0);
         if clinic < 0.25 {
-            messages.push(AdvisorMessage::new(
-                "city.clinic_shortage",
-                Severity::Critical,
-                "Clinic shortage",
-                "Most residents are outside clinic coverage or capacity is exhausted. Build a clinic.",
-            ));
+            let supply = percent(clinic);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.clinic_shortage",
+                    Severity::Critical,
+                    "Clinic shortage",
+                    format!("Clinic service covers {supply}% of demand. Build a clinic."),
+                )
+                .with_param("supply", supply),
+            );
         } else if clinic < 0.99 {
-            messages.push(AdvisorMessage::new(
-                "city.clinic_shortage",
-                Severity::Warning,
-                "Clinic service is short",
-                "Some residents are unserved. Check radius, capacity, and site completion.",
-            ));
+            let supply = percent(clinic);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.clinic_shortage",
+                    Severity::Warning,
+                    "Clinic service is short",
+                    format!(
+                        "Clinic service covers {supply}% of demand. Check radius, capacity, and site completion."
+                    ),
+                )
+                .with_param("supply", supply),
+            );
         }
 
         let fire = input.fire_supply.unwrap_or(0.0).clamp(0.0, 1.0);
         if fire < 0.25 {
-            messages.push(AdvisorMessage::new(
-                "city.fire_shortage",
-                Severity::Critical,
-                "Fire coverage is low",
-                "Most buildings are outside fire coverage or capacity is exhausted. Build a fire station.",
-            ));
+            let supply = percent(fire);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.fire_shortage",
+                    Severity::Critical,
+                    "Fire coverage is low",
+                    format!(
+                        "Fire coverage reaches only {supply}% of demand. Build a fire station."
+                    ),
+                )
+                .with_param("supply", supply),
+            );
         } else if fire < 0.99 {
-            messages.push(AdvisorMessage::new(
-                "city.fire_shortage",
-                Severity::Warning,
-                "Fire service is short",
-                "Some buildings are unserved. Check radius, capacity, and site completion.",
-            ));
+            let supply = percent(fire);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.fire_shortage",
+                    Severity::Warning,
+                    "Fire service is short",
+                    format!(
+                        "Fire coverage reaches {supply}% of demand. Check radius, capacity, and site completion."
+                    ),
+                )
+                .with_param("supply", supply),
+            );
         }
 
         let police = input.police_supply.unwrap_or(0.0).clamp(0.0, 1.0);
         if police < 0.25 {
-            messages.push(AdvisorMessage::new(
-                "city.police_shortage",
-                Severity::Critical,
-                "Police coverage is low",
-                "Most buildings are outside police coverage or capacity is exhausted. Build a police station.",
-            ));
+            let supply = percent(police);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.police_shortage",
+                    Severity::Critical,
+                    "Police coverage is low",
+                    format!(
+                        "Police coverage reaches only {supply}% of demand. Build a police station."
+                    ),
+                )
+                .with_param("supply", supply),
+            );
         } else if police < 0.99 {
-            messages.push(AdvisorMessage::new(
-                "city.police_shortage",
-                Severity::Warning,
-                "Police service is short",
-                "Some buildings are unserved. Check radius, capacity, and site completion.",
-            ));
+            let supply = percent(police);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.police_shortage",
+                    Severity::Warning,
+                    "Police service is short",
+                    format!(
+                        "Police coverage reaches {supply}% of demand. Check radius, capacity, and site completion."
+                    ),
+                )
+                .with_param("supply", supply),
+            );
         }
 
         let employment = input.employed as f32 / input.population as f32;
         if input.unemployed > 0 && employment < 0.9 {
-            messages.push(AdvisorMessage::new(
-                "city.unemployment",
-                Severity::Warning,
-                "Residents are unemployed",
-                "Add workplaces or improve road access; unemployment lowers happiness and wages.",
-            ));
+            let employment = percent(employment);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.unemployment",
+                    Severity::Warning,
+                    "Residents are unemployed",
+                    format!(
+                        "Employment is at {employment}% with {unemployed} residents looking for work. Add workplaces or improve road access.",
+                        unemployed = input.unemployed
+                    ),
+                )
+                .with_param("employment", employment)
+                .with_param("unemployed", input.unemployed.to_string()),
+            );
         }
 
         if input.vacancies > 0 && input.housing_capacity > input.population {
-            messages.push(AdvisorMessage::new(
-                "city.vacant_homes",
-                Severity::Warning,
-                "Homes are standing empty",
-                "Move-in is still filling vacancies; check jobs and services if it stalls.",
-            ));
+            messages.push(
+                AdvisorMessage::new(
+                    "city.vacant_homes",
+                    Severity::Warning,
+                    "Homes are standing empty",
+                    format!(
+                        "{vacancies} of {housing} housing slots are vacant. Move-in is still filling them; check jobs and services if it stalls.",
+                        vacancies = input.vacancies,
+                        housing = input.housing_capacity
+                    ),
+                )
+                .with_param("vacancies", input.vacancies.to_string())
+                .with_param("housing", input.housing_capacity.to_string()),
+            );
         }
 
         if input.happiness < 0.35 {
-            messages.push(AdvisorMessage::new(
-                "city.unhappy",
-                Severity::Critical,
-                "Residents are unhappy",
-                "Fix food, water, power, jobs, or commutes before the city stops growing.",
-            ));
+            let happiness = percent(input.happiness);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.unhappy",
+                    Severity::Critical,
+                    "Residents are unhappy",
+                    format!(
+                        "Happiness is at {happiness}%. Fix food, water, power, jobs, or commutes before the city stops growing."
+                    ),
+                )
+                .with_param("happiness", happiness),
+            );
         } else if input.happiness < 0.55 {
-            messages.push(AdvisorMessage::new(
-                "city.unhappy",
-                Severity::Warning,
-                "Happiness is low",
-                "Review needs, employment, and commute distance in the dashboard.",
-            ));
+            let happiness = percent(input.happiness);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.unhappy",
+                    Severity::Warning,
+                    "Happiness is low",
+                    format!(
+                        "Happiness is at {happiness}%. Review needs, employment, and commute distance in the dashboard."
+                    ),
+                )
+                .with_param("happiness", happiness),
+            );
         }
 
         if input.average_commute_m > 120.0 {
-            messages.push(AdvisorMessage::new(
-                "city.long_commutes",
-                Severity::Warning,
-                "Commutes are long",
-                "Add a connecting road or move workplaces closer to housing.",
-            ));
+            let commute = metres(input.average_commute_m);
+            messages.push(
+                AdvisorMessage::new(
+                    "city.long_commutes",
+                    Severity::Warning,
+                    "Commutes are long",
+                    format!(
+                        "Residents commute {commute} m on average. Add a connecting road or move workplaces closer to housing."
+                    ),
+                )
+                .with_param("commute", commute),
+            );
         }
     } else if input.housing_capacity > 0 {
-        messages.push(AdvisorMessage::new(
-            "city.no_residents",
-            Severity::Info,
-            "No residents yet",
-            "Completed homes fill over time. Keep jobs and services ready.",
-        ));
+        messages.push(
+            AdvisorMessage::new(
+                "city.no_residents",
+                Severity::Info,
+                "No residents yet",
+                format!(
+                    "Housing has capacity for {housing} residents but nobody has moved in. Keep jobs and services ready.",
+                    housing = input.housing_capacity
+                ),
+            )
+            .with_param("housing", input.housing_capacity.to_string()),
+        );
     }
 
     if let Some(net) = input.daily_net {
@@ -376,52 +527,68 @@ pub fn advise(input: &AdvisorInput) -> AdvisorReport {
                 Severity::Warning,
                 "The city is running a deficit",
                 "Raise taxes, borrow deliberately, or wait for the current tax policy to recover.",
-            ));
+            )
+            .with_param("net", money(input.daily_net.unwrap_or(0.0))));
         }
     }
 
     if input.debt.unwrap_or(0.0) > 0.0 {
-        messages.push(AdvisorMessage::new(
-            "city.debt",
-            Severity::Info,
-            "Outstanding loans",
-            "Loan service is already included in the daily net. Repay before taking more debt.",
-        ));
+        messages.push(
+            AdvisorMessage::new(
+                "city.debt",
+                Severity::Info,
+                "Outstanding loans",
+                "Loan service is already included in the daily net. Repay before taking more debt.",
+            )
+            .with_param("debt", money(input.debt.unwrap_or(0.0))),
+        );
     }
 
     if input
         .traffic_components
         .is_some_and(|components| components > 1)
     {
-        messages.push(AdvisorMessage::new(
-            "city.traffic_disconnected",
-            Severity::Warning,
-            "Road network is disconnected",
-            "Commutes fall back to straight-line distance across gaps. Join the components.",
-        ));
+        messages.push(
+            AdvisorMessage::new(
+                "city.traffic_disconnected",
+                Severity::Warning,
+                "Road network is disconnected",
+                "Commutes fall back to straight-line distance across gaps. Join the components.",
+            )
+            .with_param(
+                "components",
+                input.traffic_components.unwrap_or(0).to_string(),
+            ),
+        );
     } else if input.traffic_nodes.is_some_and(|nodes| nodes == 0) && populated {
         messages.push(AdvisorMessage::new(
             "city.no_roads",
             Severity::Warning,
             "No roads",
             "Residents commute in a straight line. Draw a road network to connect homes and jobs.",
-        ));
+        ).with_param("population", input.population.to_string()));
     }
 
     if input.stalled_sites > 0 {
-        messages.push(AdvisorMessage::new(
-            "city.construction_stalled",
-            Severity::Warning,
-            "Construction is stalled",
-            "A site is waiting for crew or materials. Add capacity or deliver materials.",
-        ));
+        messages.push(
+            AdvisorMessage::new(
+                "city.construction_stalled",
+                Severity::Warning,
+                "Construction is stalled",
+                "A site is waiting for crew or materials. Add capacity or deliver materials.",
+            )
+            .with_param("stalled", input.stalled_sites.to_string()),
+        );
     } else if input.active_sites > 0 {
-        messages.push(AdvisorMessage::new(
-            "city.construction_active",
-            Severity::Info,
-            "Construction is in progress",
-            "Completed sites add housing and jobs when the final phase finishes.",
-        ));
+        messages.push(
+            AdvisorMessage::new(
+                "city.construction_active",
+                Severity::Info,
+                "Construction is in progress",
+                "Completed sites add housing and jobs when the final phase finishes.",
+            )
+            .with_param("active", input.active_sites.to_string()),
+        );
     }
 
     if messages.is_empty()
