@@ -27,6 +27,15 @@ pub const MAX_FRAME_LEN: usize = 1024 * 1024;
 /// Maximum player name length in Unicode scalar values.
 pub const MAX_PLAYER_NAME_CHARS: usize = 32;
 
+/// Maximum number of client-provided characters echoed in a rejection message.
+///
+/// Rejections must always fit in one [`MAX_FRAME_LEN`] frame: a client can send
+/// a ~1 MiB tag, so echoing it verbatim would make the server's own response
+/// oversized and fail the write ([`crate::listen`] then ends the session). The
+/// limit is applied with [`str::chars`], so truncation never splits a UTF-8
+/// scalar or panics.
+pub const MAX_ECHO_CHARS: usize = 64;
+
 /// Tax rates are percentages.
 pub const MAX_TAX_RATE: u16 = 100;
 
@@ -429,12 +438,26 @@ pub fn decode_client_command(payload: &[u8]) -> Result<ClientCommand, Rejection>
     if !KNOWN_TAGS.contains(&tag) {
         return Err(Rejection::new(
             codes::COMMAND_UNKNOWN_TAG,
-            format!("unknown command tag `{tag}`"),
+            format!("unknown command tag `{}`", truncate_for_message(tag)),
         ));
     }
 
     serde_json::from_value(value)
         .map_err(|error| Rejection::new(codes::COMMAND_INVALID_FIELDS, error.to_string()))
+}
+
+/// Bound client-provided text before it is echoed in a rejection message.
+///
+/// The input is sliced on character boundaries, so multi-byte text is never
+/// split; the appended ellipsis marks that the tag was shortened.
+fn truncate_for_message(value: &str) -> String {
+    let mut source = value.chars();
+    let truncated: String = source.by_ref().take(MAX_ECHO_CHARS).collect();
+    if source.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
 }
 
 /// Validate a hello payload. Version is checked before content.
@@ -1059,6 +1082,52 @@ mod tests {
     fn rejects_unknown_command_tag() {
         let rejection = decode_client_command(br#"{"type":"launch_missiles"}"#).unwrap_err();
         assert_eq!(rejection.code, codes::COMMAND_UNKNOWN_TAG);
+        assert_eq!(rejection.message, "unknown command tag `launch_missiles`");
+    }
+
+    #[test]
+    fn oversized_unknown_tags_are_truncated_to_a_bounded_rejection() {
+        // The largest frame the transport accepts must still produce a
+        // rejection that fits in a single response frame.
+        let tag = "x".repeat(MAX_FRAME_LEN - 16);
+        let payload = format!(r#"{{"type":"{tag}"}}"#);
+        assert!(payload.len() <= MAX_FRAME_LEN);
+
+        let rejection = decode_client_command(payload.as_bytes()).unwrap_err();
+        assert_eq!(rejection.code, codes::COMMAND_UNKNOWN_TAG);
+        assert!(
+            rejection.message.chars().count() <= MAX_ECHO_CHARS + 40,
+            "rejection echoes too much client input: {} chars",
+            rejection.message.chars().count()
+        );
+        assert!(rejection.message.contains('…'));
+
+        let message = rejection.into_message();
+        let encoded = encode_json(&message).expect("rejection encodes");
+        assert!(
+            encoded.len() < MAX_FRAME_LEN,
+            "rejection encodes to {} bytes",
+            encoded.len()
+        );
+        let mut frame = Vec::new();
+        write_json_frame(&mut frame, &message).expect("rejection fits one frame");
+    }
+
+    #[test]
+    fn tag_truncation_is_char_safe() {
+        // Multi-byte scalars must not be split; each `€` is three UTF-8 bytes.
+        let tag = "€".repeat(MAX_ECHO_CHARS + 10);
+        let payload = format!(r#"{{"type":"{tag}"}}"#);
+        let rejection = decode_client_command(payload.as_bytes()).unwrap_err();
+        assert_eq!(rejection.code, codes::COMMAND_UNKNOWN_TAG);
+        assert_eq!(
+            truncate_for_message(&tag),
+            format!("{}…", "€".repeat(MAX_ECHO_CHARS))
+        );
+        assert!(rejection.message.is_char_boundary(rejection.message.len()));
+        // A tag at or under the limit is echoed verbatim.
+        let short = "y".repeat(MAX_ECHO_CHARS);
+        assert_eq!(truncate_for_message(&short), short);
     }
 
     #[test]

@@ -509,8 +509,8 @@ impl TimeVote {
             .into_iter()
             .map(|player| player.as_ref().to_string())
             .collect();
-        self.yes.retain(|player| online.contains(player));
-        self.no.retain(|player| online.contains(player));
+        // Ballots stay counted for the vote lifetime. Pruning an offline
+        // voter would let them vote again after a reconnect.
 
         let result = if online.len() < MIN_ONLINE_PLAYERS {
             Some(VoteState::Cancelled)
@@ -1125,7 +1125,7 @@ mod tests {
         assert_eq!(vote.state(), VoteState::Cancelled);
         assert_eq!(vote.cancelled_count, 1);
         assert_eq!(vote.cooldown_until, 2 + FAILED_COOLDOWN_TICKS);
-        assert_eq!(vote.yes_count(), 1, "bob left and was pruned");
+        assert_eq!(vote.yes_count(), 2, "bob left but his ballot stays counted");
     }
 
     #[test]

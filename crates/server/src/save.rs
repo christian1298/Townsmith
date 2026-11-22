@@ -492,7 +492,7 @@ mod tests {
     }
 
     fn played_world() -> ServerWorld {
-        let mut world = ServerWorld::new(LOOPBACK_SEED);
+        let mut world = ServerWorld::with_role(LOOPBACK_SEED, crate::world::ClientRole::Admin);
         world.apply(&hello());
         world.apply(&ClientCommand::SetTax {
             resident_rate: 12,

@@ -80,6 +80,10 @@ const RATE_MILLI_CREDITS_PER_MS: u64 = RATE_CREDITS_PER_SECOND;
 /// running simulation loop keeps the window open until the tick advances.
 pub const RESUME_GRACE_TICKS: u64 = 300;
 
+/// Fresh `hello` attempts allowed while a resume window is open before the
+/// stale window is abandoned.
+pub const MAX_HELLO_RESUME_ATTEMPTS: u32 = 3;
+
 /// Stable executor error codes. These are wire/API contracts; do not rename.
 pub mod codes {
     /// A non-hello command arrived before an accepted `hello`.
@@ -90,6 +94,8 @@ pub mod codes {
     pub const RATE_LIMITED: &str = "rate.limited";
     /// A time action the executor does not support (speed controls).
     pub const TIME_INVALID_ACTION: &str = "time.invalid_action";
+    /// Another online session already uses this player name.
+    pub const PLAYER_NAME_DUPLICATE: &str = "player_name.duplicate";
     /// The resume token is empty, unknown, or does not match this world.
     pub const RESUME_UNKNOWN: &str = "resume.unknown";
     /// `last_tick` is ahead of the authoritative tick.
@@ -173,21 +179,20 @@ impl ClientRole {
     #[must_use]
     pub fn required_role(tag: &str) -> Self {
         match tag {
-            "hello" | "resume" | "ping" | "disconnect" => Self::Viewer,
-            "set_tax" | "place_road" | "time_control" => Self::Mayor,
-            // Any future/unknown tag.
+            "hello" | "resume" | "ping" | "disconnect" | "time_vote" => Self::Viewer,
+            "set_tax" | "place_road" => Self::Mayor,
+            // Time control is admin-only in D-021; unknown tags fail closed.
+            "time_control" => Self::Admin,
             _ => Self::Admin,
         }
     }
 
-    /// Minimum role for a concrete command. `time_control` is Mayor for
-    /// pause/resume, but Admin for a one-day step.
+    /// Minimum role for a concrete command. `time_control` (pause, resume,
+    /// step) is Admin per D-021; a vote cancel is Admin, while call/yes/no
+    /// stay open to every role.
     #[must_use]
     pub fn required_role_for(command: &ClientCommand) -> Self {
         match command {
-            ClientCommand::TimeControl {
-                action: TimeAction::Step,
-            } => Self::Admin,
             ClientCommand::TimeVote {
                 action: crate::protocol::VoteAction::Cancel,
                 ..
@@ -293,20 +298,28 @@ fn audit_entry_hash(mut hash: u64, entry: &AuditEntry) -> u64 {
 /// The record is deliberately excluded from [`ServerWorld::checksum`] and is
 /// not written to [`crate::save::ServerSave`]. Reconnect is process-local; a
 /// loaded world always starts with no resumable session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ResumeWindow {
     /// Last authoritative tick at which `resume` is still accepted.
     deadline_tick: u64,
+    /// Player name from the disconnected session, restored on resume.
+    player: Option<String>,
+    /// Fresh `hello` attempts rejected while this window was open. After a
+    /// small bounded number the window is abandoned so a client that lost its
+    /// token can never be blocked forever.
+    hello_attempts: u32,
 }
 
 impl ResumeWindow {
-    fn starting_at(tick: u64) -> Self {
+    fn starting_at(tick: u64, player: Option<String>) -> Self {
         Self {
             deadline_tick: tick.saturating_add(RESUME_GRACE_TICKS),
+            player,
+            hello_attempts: 0,
         }
     }
 
-    fn is_open_at(self, tick: u64) -> bool {
+    fn is_open_at(&self, tick: u64) -> bool {
         tick <= self.deadline_tick
     }
 }
@@ -483,13 +496,16 @@ impl ServerWorld {
     /// Tick at which the current reconnect window closes, if one is open.
     #[must_use]
     pub fn resume_deadline(&self) -> Option<u64> {
-        self.resume_window.map(|window| window.deadline_tick)
+        self.resume_window
+            .as_ref()
+            .map(|window| window.deadline_tick)
     }
 
     /// Whether a disconnected session can still be resumed at the current tick.
     #[must_use]
     pub fn is_resumable(&self) -> bool {
         self.resume_window
+            .as_ref()
             .is_some_and(|window| window.is_open_at(self.tick))
     }
 
@@ -515,8 +531,12 @@ impl ServerWorld {
     }
 
     fn remember_disconnect(&mut self) {
+        let player = self.player.take();
+        if let Some(name) = &player {
+            self.online.remove(name);
+        }
         self.last_seen_tick = self.tick;
-        self.resume_window = Some(ResumeWindow::starting_at(self.tick));
+        self.resume_window = Some(ResumeWindow::starting_at(self.tick, player));
     }
 
     /// Whether an accepted `hello` has been seen.
@@ -673,18 +693,23 @@ impl ServerWorld {
                 );
             }
             ClientCommand::Hello { .. } => {
-                if let Some(window) = self.resume_window {
+                if let Some(window) = self.resume_window.as_mut() {
                     if window.is_open_at(self.tick) {
-                        return reject_with(
-                            codes::HELLO_RESUMABLE,
-                            format!(
-                                "a disconnected session can resume until tick {}; \
-                                 send `resume` or wait for the grace window to expire",
-                                window.deadline_tick
-                            ),
-                        );
+                        window.hello_attempts = window.hello_attempts.saturating_add(1);
+                        if window.hello_attempts < MAX_HELLO_RESUME_ATTEMPTS {
+                            return reject_with(
+                                codes::HELLO_RESUMABLE,
+                                format!(
+                                    "a disconnected session can resume until tick {}; \
+                                     send `resume` or retry hello",
+                                    window.deadline_tick
+                                ),
+                            );
+                        }
                     }
-                    // The grace window expired: a fresh session may start.
+                    // Expired, or a bounded number of fresh hellos: abandon
+                    // the stale window so a client that lost its token can
+                    // start a new session.
                     self.resume_window = None;
                 }
             }
@@ -717,11 +742,7 @@ impl ServerWorld {
         // Handshake commands are never throttled: a client must always be able
         // to close or reclaim its session.
         let now = self.rate_clock_ms();
-        if !matches!(
-            command,
-            ClientCommand::Disconnect | ClientCommand::Resume { .. }
-        ) && !self.rate.try_consume(now)
-        {
+        if !matches!(command, ClientCommand::Disconnect) && !self.rate.try_consume(now) {
             return reject_with(
                 codes::RATE_LIMITED,
                 format!(
@@ -742,6 +763,12 @@ impl ServerWorld {
                 {
                     return from_rejection(rejection);
                 }
+                if self.online.contains(player_name) {
+                    return reject_with(
+                        codes::PLAYER_NAME_DUPLICATE,
+                        "another session is already using that player name",
+                    );
+                }
                 self.hello = true;
                 self.player = Some(player_name.clone());
                 self.online.insert(player_name.clone());
@@ -757,9 +784,6 @@ impl ServerWorld {
             } => self.apply_resume(session_id, *last_tick),
             ClientCommand::Disconnect => {
                 let was_active = self.hello;
-                if let Some(player) = self.player.take() {
-                    self.online.remove(&player);
-                }
                 self.closed = true;
                 self.hello = false;
                 if was_active {
@@ -877,19 +901,23 @@ impl ServerWorld {
                 "resume token does not match this world",
             );
         }
-        let Some(window) = self.resume_window else {
+        let Some((deadline_tick, player)) = self
+            .resume_window
+            .as_ref()
+            .map(|window| (window.deadline_tick, window.player.clone()))
+        else {
             return reject_with(
                 codes::RESUME_UNKNOWN,
                 "no disconnected session is waiting to resume",
             );
         };
-        if !window.is_open_at(self.tick) {
+        if self.tick > deadline_tick {
             self.resume_window = None;
             return reject_with(
                 codes::RESUME_EXPIRED,
                 format!(
-                    "the reconnect window closed at tick {}; the current tick is {}",
-                    window.deadline_tick, self.tick
+                    "the reconnect window closed at tick {deadline_tick}; the current tick is {}",
+                    self.tick
                 ),
             );
         }
@@ -904,6 +932,10 @@ impl ServerWorld {
         }
 
         self.resume_window = None;
+        if let Some(player) = player {
+            self.player = Some(player.clone());
+            self.online.insert(player);
+        }
         self.hello = true;
         self.closed = false;
         self.last_seen_tick = self.tick;
@@ -2387,6 +2419,101 @@ mod tests {
                 last_tick: 0,
             }),
             codes::RESUME_DUPLICATE,
+        );
+    }
+
+    #[test]
+    fn role_matrix_matches_d021() {
+        assert_eq!(ClientRole::required_role("time_vote"), ClientRole::Viewer);
+        assert_eq!(
+            ClientRole::required_role_for(&ClientCommand::TimeVote {
+                action: crate::protocol::VoteAction::Call,
+                time: Some(TimeAction::Pause),
+            }),
+            ClientRole::Viewer
+        );
+        assert_eq!(
+            ClientRole::required_role_for(&ClientCommand::TimeVote {
+                action: crate::protocol::VoteAction::Cancel,
+                time: None,
+            }),
+            ClientRole::Admin
+        );
+        for action in [TimeAction::Pause, TimeAction::Resume, TimeAction::Step] {
+            assert_eq!(
+                ClientRole::required_role_for(&ClientCommand::TimeControl { action }),
+                ClientRole::Admin
+            );
+        }
+    }
+
+    #[test]
+    fn disconnect_removes_and_resume_restores_the_player() {
+        let mut world = world_with_hello();
+        let token = world.session_token().to_string();
+        let tick = world.tick;
+        assert!(matches!(
+            world.apply(&ClientCommand::Disconnect),
+            ServerMessage::Goodbye
+        ));
+        assert!(world.online.is_empty());
+        world.begin_connection();
+        let responses = world.apply_all(&ClientCommand::Resume {
+            session_id: token,
+            last_tick: tick,
+        });
+        assert!(matches!(
+            responses.first(),
+            Some(ServerMessage::Welcome { resumed: true, .. })
+        ));
+        assert!(world.online.contains("mayor"));
+        let message = world.apply(&ClientCommand::TimeVote {
+            action: crate::protocol::VoteAction::Call,
+            time: Some(TimeAction::Pause),
+        });
+        assert!(
+            !matches!(&message, ServerMessage::Reject { code, .. } if code == codes::NOT_HELLO),
+            "{message:?}"
+        );
+    }
+
+    #[test]
+    fn bounded_hello_attempts_expire_a_stale_resume_window() {
+        let mut world = world_with_hello();
+        world.apply(&ClientCommand::Disconnect);
+        world.begin_connection();
+        for _ in 0..MAX_HELLO_RESUME_ATTEMPTS - 1 {
+            expect_reject(&world.apply(&hello()), codes::HELLO_RESUMABLE);
+        }
+        assert!(matches!(
+            world.apply(&hello()),
+            ServerMessage::Welcome { .. }
+        ));
+        assert!(!world.is_resumable());
+    }
+
+    #[test]
+    fn duplicate_online_player_name_is_rejected() {
+        let mut world = world_with_hello();
+        world.online.insert("mayor".to_string());
+        world.hello = false;
+        expect_reject(&world.apply(&hello()), codes::PLAYER_NAME_DUPLICATE);
+    }
+
+    #[test]
+    fn resume_consumes_a_rate_credit() {
+        let mut world = world_with_hello();
+        let token = world.session_token().to_string();
+        let tick = world.tick;
+        world.apply(&ClientCommand::Disconnect);
+        world.begin_connection();
+        world.rate.milli_credits = 0;
+        expect_reject(
+            &world.apply(&ClientCommand::Resume {
+                session_id: token,
+                last_tick: tick,
+            }),
+            codes::RATE_LIMITED,
         );
     }
 

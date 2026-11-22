@@ -25,10 +25,30 @@ fn arg_value(name: &str) -> Option<String> {
         .cloned()
 }
 
+fn parse_u64_arg(name: &str, default: u64) -> u64 {
+    match arg_value(name) {
+        None => default,
+        Some(value) => match value.parse() {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                eprintln!("townsmith-server: {name} must be an unsigned integer, got `{value}`");
+                std::process::exit(2);
+            }
+        },
+    }
+}
+
 fn parse_arg(name: &str, default: usize) -> usize {
-    arg_value(name)
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
+    match arg_value(name) {
+        None => default,
+        Some(value) => match value.parse() {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                eprintln!("townsmith-server: {name} must be an integer, got `{value}`");
+                std::process::exit(2);
+            }
+        },
+    }
 }
 
 fn has_flag(name: &str) -> bool {
@@ -180,17 +200,13 @@ fn run_listen_mode(port: &str) {
     let save_path = arg_value("--save")
         .map(PathBuf::from)
         .or_else(|| load_path.clone());
-    let seed = arg_value("--seed")
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(LOOPBACK_SEED);
+    let seed = parse_u64_arg("--seed", LOOPBACK_SEED);
     let role_name = arg_value("--role").unwrap_or_else(|| "mayor".to_string());
     let Some(role) = ClientRole::parse(&role_name) else {
         eprintln!("SERVER_LISTEN status=error error=invalid role `{role_name}`");
         std::process::exit(1);
     };
-    let autosave_ticks = arg_value("--autosave-ticks")
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0);
+    let autosave_ticks = parse_u64_arg("--autosave-ticks", 0);
     let once = has_flag("--once");
 
     let world = match &load_path {
