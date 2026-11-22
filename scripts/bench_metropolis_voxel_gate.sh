@@ -9,15 +9,20 @@
 # The default layout has three spatial tiers (1k / 5k / 20k buildings). Every
 # building gets a static distance-band LOD: near = greedy-meshed demo hut,
 # mid = 12-triangle box, far = 2-triangle quad impostor. `--lod` builds one
-# 26k-building layout so the LOD mix can be checked on its own.
+# 26k-building layout so the LOD mix can be checked on its own. `--switch`
+# builds the same single layout but reuses three MultiMeshInstance3D nodes and
+# refills their buffers when the camera enters a new 50 m XZ cell along a
+# deterministic 12-sample serpentine route.
 #
 # This is **voxel-proxy setup/memory evidence plus an optional frame budget**,
-# not the RTX 3060 metropolis gate: static LOD bands with no runtime switching,
-# one reused low-poly hut, no streaming, GI/SSAO, simulation, or 250k buildings.
+# not the RTX 3060 metropolis gate: static LOD bands (or a synthetic switch
+# route), one reused low-poly hut, no streaming, GI/SSAO, simulation, or 250k
+# buildings.
 #
 # Usage:
 #   GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only
 #   GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --lod
+#   GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --switch
 #   GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --short
 #   GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh
 #   GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --runs 3
@@ -35,11 +40,13 @@ OUTPUT="${OUTPUT:-$ROOT/benchmarks/results/metropolis_voxel_gate.json}"
 SETUP_ONLY=0
 SHORT=0
 LOD_MODE=0
+SWITCH_MODE=0
 
 usage() {
 	cat <<'USAGE'
 --setup-only        Headless setup twice, deterministic checks, exit 0
 --lod               Single 26k-building LOD-band layout instead of 3 tiers
+--switch            Runtime distance switching across three reused MultiMeshes
 --short             Short 10 s display-backed route (3 s warm-up)
 --full              Full 60 s display-backed route (8 s warm-up)
 --runs N            Display-backed runs (default 1)
@@ -55,6 +62,7 @@ while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--setup-only) SETUP_ONLY=1; shift ;;
 		--lod) LOD_MODE=1; shift ;;
+		--switch) SWITCH_MODE=1; shift ;;
 		--short) SHORT=1; shift ;;
 		--full) SHORT=0; shift ;;
 		--runs) RUNS="${2:?--runs needs a value}"; shift 2 ;;
@@ -70,6 +78,10 @@ done
 
 if ! [[ "$RUNS" =~ ^[1-9][0-9]*$ ]]; then
 	echo "RUNS must be a positive integer (got '$RUNS')" >&2
+	exit 2
+fi
+if [[ "$SWITCH_MODE" == "1" && "$LOD_MODE" == "1" ]]; then
+	echo "--switch cannot be combined with --lod" >&2
 	exit 2
 fi
 if [[ "$SHORT" == "1" ]]; then
@@ -119,14 +131,17 @@ fi
 run_setup() {
 	local out="$1"
 	local log="$2"
-	local lod_arg=()
+	local mode_arg=()
 	if [[ "$LOD_MODE" == "1" ]]; then
-		lod_arg+=(--lod)
+		mode_arg+=(--lod)
+	fi
+	if [[ "$SWITCH_MODE" == "1" ]]; then
+		mode_arg+=(--switch)
 	fi
 	set +e
 	timeout 240 env -u DISPLAY -u WAYLAND_DISPLAY "$GODOT_BIN" \
 		--headless --path "$ROOT/godot" res://metropolis_voxel_gate.tscn -- \
-		--setup-only "${lod_arg[@]}" --route "$ROUTE" \
+		--setup-only "${mode_arg[@]}" --route "$ROUTE" \
 		--duration "$DURATION" --warmup "$WARMUP" \
 		--git-commit "$GIT_COMMIT" --git-dirty "$GIT_DIRTY" \
 		--output "$out" >"$log" 2>&1
@@ -144,7 +159,9 @@ run_setup() {
 	fi
 }
 
-if [[ "$LOD_MODE" == "1" ]]; then
+if [[ "$SWITCH_MODE" == "1" ]]; then
+	echo "METROPOLIS_VOXEL_GATE_STAGE setup layout=switch_single tiers=1 instances=26000 route=$(basename "$ROUTE") mode=$([[ "$SHORT" == "1" ]] && echo short || echo full)"
+elif [[ "$LOD_MODE" == "1" ]]; then
 	echo "METROPOLIS_VOXEL_GATE_STAGE setup layout=lod_single tiers=1 instances=26000 route=$(basename "$ROUTE") mode=$([[ "$SHORT" == "1" ]] && echo short || echo full)"
 else
 	echo "METROPOLIS_VOXEL_GATE_STAGE setup layout=tiers tiers=3 instances=26000 route=$(basename "$ROUTE") mode=$([[ "$SHORT" == "1" ]] && echo short || echo full)"
@@ -152,13 +169,14 @@ fi
 run_setup "$TMP/setup_a.json" "$TMP/setup_a.log"
 run_setup "$TMP/setup_b.json" "$TMP/setup_b.log"
 
-python3 - "$TMP/setup_a.json" "$TMP/setup_b.json" "$LOD_MODE" <<'PY'
+python3 - "$TMP/setup_a.json" "$TMP/setup_b.json" "$LOD_MODE" "$SWITCH_MODE" <<'PY'
 import json
 import sys
 
 a = json.load(open(sys.argv[1]))
 b = json.load(open(sys.argv[2]))
 lod_mode = sys.argv[3] == "1"
+switch_mode = sys.argv[4] == "1"
 
 def fail(message):
     raise SystemExit("voxel gate setup is not deterministic: " + message)
@@ -173,15 +191,25 @@ if a.get("instances") != 26_000:
 if a.get("lod_mode") is not lod_mode:
     fail(f"lod_mode: {a.get('lod_mode')!r} != {lod_mode}")
 
-expected = {
-    "scene": "metropolis_voxel_gate_lod_single_26k" if lod_mode else "metropolis_voxel_gate_lod_26k",
-    "layout": "lod_single_v1" if lod_mode else "tiers_v1",
-    "checksum": "73ac0757" if lod_mode else "4d14065f",
-    "quads": 85_980 if lod_mode else 185_050,
-    "triangles": 171_960 if lod_mode else 370_100,
-    "lod": {"near": 698, "mid": 4_318, "far": 20_984} if lod_mode else
-           {"near": 2_123, "mid": 8_457, "far": 15_420},
-}
+if switch_mode:
+    expected = {
+        "scene": "metropolis_voxel_gate_switch_26k",
+        "layout": "switch_single_v1",
+        "checksum": "730ad355",
+        "quads": 74_995,
+        "triangles": 149_990,
+        "lod": {"near": 704, "mid": 2_055, "far": 23_241},
+    }
+else:
+    expected = {
+        "scene": "metropolis_voxel_gate_lod_single_26k" if lod_mode else "metropolis_voxel_gate_lod_26k",
+        "layout": "lod_single_v1" if lod_mode else "tiers_v1",
+        "checksum": "73ac0757" if lod_mode else "4d14065f",
+        "quads": 85_980 if lod_mode else 185_050,
+        "triangles": 171_960 if lod_mode else 370_100,
+        "lod": {"near": 698, "mid": 4_318, "far": 20_984} if lod_mode else
+               {"near": 2_123, "mid": 8_457, "far": 15_420},
+    }
 for key in ("scene", "layout", "checksum", "quads", "triangles"):
     if a.get(key) != expected[key]:
         fail(f"{key}: {a.get(key)!r} != {expected[key]!r}")
@@ -190,7 +218,7 @@ if a.get("lod_instances") != expected["lod"]:
 
 tiers_a = a.get("tiers") or []
 tiers_b = b.get("tiers") or []
-expected_tiers = 1 if lod_mode else 3
+expected_tiers = 1 if (lod_mode or switch_mode) else 3
 if len(tiers_a) != expected_tiers or len(tiers_b) != expected_tiers:
     fail(f"tier count: {len(tiers_a)} != {expected_tiers} or {len(tiers_b)} != {expected_tiers}")
 for index, (left, right) in enumerate(zip(tiers_a, tiers_b)):
@@ -217,6 +245,24 @@ if sum(int(entry["triangles"]) for entry in lod_tiers) != a["triangles"]:
     fail("LOD triangles do not sum to total triangles")
 if sum(int(entry["buffer_bytes"]) for entry in lod_tiers) != a["buffer_bytes"]:
     fail("LOD buffer bytes do not sum to total buffer bytes")
+if switch_mode:
+    payload = a.get("switch") or {}
+    if a.get("mode") != "switch":
+        fail(f"mode: {a.get('mode')!r} != 'switch'")
+    if int(payload.get("nodes", -1)) != 3:
+        fail(f"switch nodes: {payload.get('nodes')!r} != 3")
+    if int(payload.get("samples", -1)) != 12 or int(payload.get("updates", -1)) != 60:
+        fail(f"switch samples/updates: {payload.get('samples')!r}/{payload.get('updates')!r}")
+    if int(payload.get("rebuilds", -1)) != 12 or int(payload.get("skips", -1)) != 48:
+        fail(f"switch rebuilds/skips: {payload.get('rebuilds')!r}/{payload.get('skips')!r}")
+    if payload.get("checksum") != a.get("checksum"):
+        fail("switch checksum does not match scene checksum")
+    for name in ("near", "mid", "far"):
+        if int(payload.get(name, -1)) != expected["lod"][name]:
+            fail(f"switch {name}: {payload.get(name)!r} != {expected['lod'][name]}")
+else:
+    if "switch" in a or "mode" in a:
+        fail("switch fields leaked into a non-switch run")
 
 print(
     "METROPOLIS_VOXEL_GATE_SETUP status=ok scene={scene} instances={instances} "
@@ -240,7 +286,7 @@ print(
 PY
 
 if [[ "$SETUP_ONLY" == "1" ]]; then
-	python3 - "$TMP/setup_a.json" "$OUTPUT" "$SHORT" "$LOD_MODE" <<'PY'
+	python3 - "$TMP/setup_a.json" "$OUTPUT" "$SHORT" "$LOD_MODE" "$SWITCH_MODE" <<'PY'
 import json
 import pathlib
 import sys
@@ -248,8 +294,9 @@ import sys
 setup = json.load(open(sys.argv[1]))
 out = pathlib.Path(sys.argv[2])
 lod_mode = sys.argv[4] == "1"
+switch_mode = sys.argv[5] == "1"
 result = dict(setup)
-result["run_kind"] = "setup_only_lod" if lod_mode else "setup_only"
+result["run_kind"] = "setup_only_switch" if switch_mode else ("setup_only_lod" if lod_mode else "setup_only")
 result["runs"] = 0
 result["setup_runs"] = 2
 result["setup_deterministic"] = True
@@ -257,6 +304,12 @@ result["route_mode"] = "short" if sys.argv[3] == "1" else "full"
 result["gate_result"] = "not_measured"
 result["gate_scope"] = "voxel_proxy_setup"
 result["gate_reason"] = (
+    "setup-only run: deterministic voxel-proxy layout with runtime distance "
+    "switching across three reused MultiMesh nodes (near hut / mid box / far "
+    "quad impostor), per-sample assignment, rebuild/skip counts, "
+    "quads/triangles, setup time, and instance-buffer memory; no frames, no "
+    "FPS claim, not gate M5"
+) if switch_mode else (
     "setup-only run: deterministic voxel-proxy layout with static LOD bands "
     "(near hut / mid box / far quad impostor), per-LOD counts, "
     "quads/triangles, setup time, and instance-buffer memory; no runtime LOD "
@@ -272,7 +325,7 @@ PY
 fi
 
 if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
-	python3 - "$TMP/setup_a.json" "$OUTPUT" "$SHORT" "$LOD_MODE" <<'PY'
+	python3 - "$TMP/setup_a.json" "$OUTPUT" "$SHORT" "$LOD_MODE" "$SWITCH_MODE" <<'PY'
 import json
 import pathlib
 import sys
@@ -280,8 +333,9 @@ import sys
 setup = json.load(open(sys.argv[1]))
 out = pathlib.Path(sys.argv[2])
 lod_mode = sys.argv[4] == "1"
+switch_mode = sys.argv[5] == "1"
 result = dict(setup)
-result["run_kind"] = "setup_only_lod" if lod_mode else "setup_only"
+result["run_kind"] = "setup_only_switch" if switch_mode else ("setup_only_lod" if lod_mode else "setup_only")
 result["runs"] = 0
 result["setup_runs"] = 2
 result["setup_deterministic"] = True
@@ -310,6 +364,9 @@ for run in $(seq 1 "$RUNS"); do
 	lod_arg=()
 	if [[ "$LOD_MODE" == "1" ]]; then
 		lod_arg+=(--lod)
+	fi
+	if [[ "$SWITCH_MODE" == "1" ]]; then
+		lod_arg+=(--switch)
 	fi
 	set +e
 	timeout "$GODOT_TIMEOUT" "$GODOT_BIN" --path "$ROOT/godot" res://metropolis_voxel_gate.tscn -- \
