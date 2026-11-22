@@ -27,7 +27,7 @@ tags:
 | Room sampling/volume | F-021, F-054 | Fixed | PR #238 (sim M1) |
 | Bench gates | F-031..F-034, F-063, F-066, F-067 | Fixed | PR #239; movement `b50a763030007ef1`, infra `a920cf0c4eb9a4f1`, save-stress `0ce611887161ff62` |
 | Bridge parity, seeds, acceptance volume, docs | F-029, F-030, F-056..F-062 | Fixed | PR #240; 928 workspace tests |
-| Godot shell: HUD cadence + backlog clamp, streamer-derived chunk cells, bench route helper, headless/editor guards, industry animation cache, deterministic smoke budgets | F-035..F-038, F-068..F-071 | Fixed | PR for `fix/audit-godot-display`; `WORLD_SCENE … chunk_cells=ok status=ok`, `BENCH_SCREEN status=ok scenes=3 rating=playable`, `STREAM_ORDER_SMOKE status=ok checksum=ea5bc6f9 commits=59 loaded=30 stages=4`, `MOVEMENT_STRESS_SMOKE status=ok pass1_checksum=f29c282d`, `MP_CLIENT status=ok checksum=f17ed4f094dad32f`; default flyover route runs 263 frames with no `look_at` diagnostic |
+| Godot shell: HUD cadence + backlog clamp, streamer-derived chunk cells, bench route helper, headless/editor guards, industry animation cache, deterministic smoke budgets | F-035..F-038, F-068..F-071 | Fixed | PR #243; `WORLD_SCENE … chunk_cells=ok status=ok`, `BENCH_SCREEN status=ok scenes=3 rating=playable`, `STREAM_ORDER_SMOKE status=ok checksum=ea5bc6f9 commits=59 loaded=30 stages=4`, `MOVEMENT_STRESS_SMOKE status=ok pass1_checksum=f29c282d`, `MP_CLIENT status=ok checksum=f17ed4f094dad32f`; default flyover route runs 263 frames with no `look_at` diagnostic |
 
 ### Deferred
 
@@ -242,7 +242,7 @@ Fix: treat write errors like read errors (`session_ended` → end session, keep 
 8. **PR8 (mod validation):** F-027, F-028 + duplicate-id tech-tree test.
 9. **PR9 (bridge consistency):** F-029, F-030 + F-056..F-062.
 10. **PR10 (bench gates):** F-031..F-034, F-063, F-066, F-067.
-11. **PR11 (Godot shell):** ~~F-035..F-038 + F-068..F-072~~ Done — F-072 landed earlier; the rest are fixed on `fix/audit-godot-display` with the headless smoke matrix run.
+11. **PR11 (Godot shell):** ~~F-035..F-038 + F-068..F-072~~ Done — F-072 landed earlier; the rest are fixed in PR #243 with the headless smoke matrix run.
 12. **PR12 (docs/scripts hygiene):** F-073..F-081 + F-083.
 
 > [!note] This doc is intentionally not indexed in `00 - Start Here`; it is a transient work item. Delete or archive it once all findings are resolved.
