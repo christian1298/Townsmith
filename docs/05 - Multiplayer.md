@@ -207,7 +207,7 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. It is **tr
 | `welcome` | `session_id`, `session_token`, `tick`, `protocol_version`, `resumed` |
 | `pong` | `nonce` |
 | `snapshot` | `tick`, `population`, `balance`, `checksum`, `interest_center`, `interest_radius_m`, `visible_roads` |
-| `interest_view` | `tick`, `center`, `radius_m`, `roads` (≤64 × `{id, start, end, width_m}`), `truncated` |
+| `interest_view` | `tick`, `center`, `radius_m`, `roads` (≤64 × `{id, start, end, width_m}`), `truncated`, `buildings` (≤64 × `{id, center, radius_m}`), `buildings_truncated` |
 | `reject` | `code`, `message` |
 | `goodbye` | — |
 
@@ -324,10 +324,10 @@ Population, employment, and building counts are static for v0. `employed` is 60%
 | Authority | Stateful executor; hello, ping, time, tax, road, disconnect | `SERVER_AUTHORITY status=ok commands=6 checksum=70e25aff45867b94` |
 | Save/load | `ServerSave` v1, atomic tmp/fsync/rename, one-step `.bak` recovery | `SERVER_SAVE status=ok bytes=744 tick=2 checksum=70e25aff45867b94`; `--listen PORT --save PATH --load PATH` |
 | Roles | Dev-only viewer/mayor/admin, token bucket, 256-entry audit ring | `SERVER_ROLES ... checksum=b6ab299531341226` |
-| Interest | Per-session viewport; snapshot reports `visible_roads`, plus a ≤64-road `InterestView` | `SERVER_INTEREST status=ok center=0.0,0.0 radius=16.0 visible=1 roads=1 truncated=false tick=2 checksum=6d92be74bdbc11f5` |
+| Interest | Per-session viewport; snapshot reports `visible_roads`, plus a ≤64-road and ≤64-building `InterestView` | `SERVER_INTEREST status=ok center=0.0,0.0 radius=16.0 visible=1 roads=1 truncated=false buildings=1 buildings_truncated=false tick=2 checksum=6d92be74bdbc11f5` |
 | Godot client | Loopback `hello`/`ping`/tax/road/interest/disconnect; `--reconnect` resumes a session with the token from `welcome` | `MP_CLIENT ... interest=ok roads=1 truncated=false ... frames=15`; `MP_CLIENT_RECONNECT status=ok resumed=true ... frames=15` |
 
-**Limits.** In-memory world with one session at a time; reconnect/resume works only inside the same server process (300-tick window), is not persisted, and its token is not authentication. No content-manifest enforcement, entity/agent/terrain streaming, delta snapshots, rollback, terrain sampling, or cost/material checks. Interest v0 is a per-session viewport that filters aggregate snapshot counts and a bounded 64-road detail list; it does not stream other entity kinds or activate, deactivate, or hide simulation state. Persistence is one file per world; no journal, compression, or remote storage. Roles are assigned by the server process, not authenticated. Direct mutation of public fields does not refresh `session_checksum`; call `checksum()` for live state.
+**Limits.** In-memory world with one session at a time; reconnect/resume works only inside the same server process (300-tick window), is not persisted, and its token is not authentication. No content-manifest enforcement, entity/agent/terrain streaming, delta snapshots, rollback, terrain sampling, or cost/material checks. Interest v0 is a per-session viewport that filters aggregate snapshot counts and bounded 64-road and 64-building detail lists (building records are synthetic fixtures); it does not stream other entity kinds or activate, deactivate, or hide simulation state. Persistence is one file per world; no journal, compression, or remote storage. Roles are assigned by the server process, not authenticated. Direct mutation of public fields does not refresh `session_checksum`; call `checksum()` for live state.
 
 **Loopback smoke**
 
@@ -337,7 +337,7 @@ cargo run --release -p townsmith-server -- --loopback-smoke
 # SERVER_AUTHORITY status=ok commands=6 checksum=70e25aff45867b94
 # SERVER_ROLES status=ok sessions=3 role_checks=4 rate_limited=1 audit=65 checksum=b6ab299531341226
 # SERVER_RESUME status=ok sessions=2 commands=5 frames=11 resumed=true tick=1 checksum=157ba83a1acf65dd
-# SERVER_INTEREST status=ok center=0.0,0.0 radius=16.0 visible=1 roads=1 truncated=false tick=2 checksum=6d92be74bdbc11f5
+# SERVER_INTEREST status=ok center=0.0,0.0 radius=16.0 visible=1 roads=1 truncated=false buildings=1 buildings_truncated=false tick=2 checksum=6d92be74bdbc11f5
 cargo run --release -p townsmith-server -- --save-load-smoke
 # SERVER_SAVE status=ok action=loopback bytes=744 tick=2 checksum=70e25aff45867b94
 ```
@@ -387,7 +387,7 @@ Open-world multiplayer is mostly a **chunk streaming** problem, not an entity re
 - **Delta compression:** snapshots are diffs against the last acknowledged state.
 
 > [!info] Interest filtering v0
-> `set_interest {center_x, center_z, radius_m}` stores a per-session viewport on `ServerWorld` and answers with a snapshot plus an `interest_view`. `radius_m` must be finite and within **0–2,048 m**; the centre must be finite. Out-of-range values are rejected (`interest.radius_out_of_range`, `interest.invalid_center`), never clamped. `visible_roads` counts every road whose midpoint is inside the circle (inclusive); `interest_view.roads` carries at most **64** of them, ascending by id, with `truncated` when more matched. The command is view-only: it does not advance the tick, does not change the world checksum, and is excluded from `ServerSave`. Viewer may set its own viewport; the transport-only `Session` rejects it with `interest.unavailable`. **Limits:** no entity, agent, terrain, or blueprint streaming yet; no delta snapshots, prioritization, or server-side region activation tied to the viewport.
+> `set_interest {center_x, center_z, radius_m}` stores a per-session viewport on `ServerWorld` and answers with a snapshot plus an `interest_view`. `radius_m` must be finite and within **0–2,048 m**; the centre must be finite. Out-of-range values are rejected (`interest.radius_out_of_range`, `interest.invalid_center`), never clamped. `visible_roads` counts every road whose midpoint is inside the circle (inclusive); `interest_view.roads` carries at most **64** of them, ascending by id, with `truncated` when more matched. `interest_view.buildings` carries at most **64** `BuildingView { id, center, radius_m }` records for the same circle, ascending by id, with `buildings_truncated` when more matched; v0 has no per-building placement store, so these are deterministic synthetic fixtures derived from the static completed-building count, not authoritative footprints. The command is view-only: it does not advance the tick, does not change the world checksum, and is excluded from `ServerSave`. Viewer may set its own viewport; the transport-only `Session` rejects it with `interest.unavailable`. **Limits:** no entity, agent, terrain, or blueprint streaming yet; no delta snapshots, prioritization, or server-side region activation tied to the viewport.
 
 ### Bandwidth target
 
@@ -499,17 +499,19 @@ Limits: the multi-connection vote loopback/smoke is deferred because the v0 worl
 
 ### Interest filtering v0
 
-`set_interest {center_x, center_z, radius_m}` is a per-session viewport. The executor stores `interest_center: [f32; 2]` (default `[0, 0]`) and `interest_radius_m` (default **2,048 m**, the cap). A successful command answers with **two** messages: the current `snapshot`, then an `interest_view`. The snapshot reports `interest_center`, `interest_radius_m`, and `visible_roads`; the view carries `tick`, `center`, `radius_m`, up to **64** `RoadView { id, start, end, width_m }` entries, and `truncated`.
+`set_interest {center_x, center_z, radius_m}` is a per-session viewport. The executor stores `interest_center: [f32; 2]` (default `[0, 0]`) and `interest_radius_m` (default **2,048 m**, the cap). A successful command answers with **two** messages: the current `snapshot`, then an `interest_view`. The snapshot reports `interest_center`, `interest_radius_m`, and `visible_roads`; the view carries `tick`, `center`, `radius_m`, up to **64** `RoadView { id, start, end, width_m }` entries with `truncated`, and up to **64** `BuildingView { id, center, radius_m }` entries with `buildings_truncated`.
 
 Roads match when their midpoint is inside the circle, including the exact boundary (`distance <= radius`). The detail list is sorted by ascending id, so the order is stable even if a loaded store is not; `truncated` is true only when more than 64 roads matched, and the cap keeps the lowest ids. `visible_roads` is the full aggregate count and may exceed `roads.len()`. Both fields derive from the same predicate, so the count and the view cannot disagree.
+
+Buildings use the same inclusive circle over their centres. v0 has no per-building placement store, so the records are deterministic fixtures synthesized from the static completed-building count on a fixed 16-column, 64 m grid anchored at the origin: id 1 at `[0, 0]`, id 2 at `[64, 0]`, id 17 at `[0, 64]`, and so on, with an 8 m render-hint radius. They are ascending by id, capped at `MAX_INTEREST_BUILDINGS` (64), and `buildings_truncated` is true only when more matched. The records are not authoritative placements, footprints, ownership, blueprint, or simulation state; they carry no checksum weight and are a payload fixture for client/AOI plumbing.
 
 The viewport is **view-only**: `set_interest` does not advance the tick, does not mutate roads or the treasury, and is excluded from `checksum()`, so the protocol/authority/roles/resume goldens stay pinned. It is also not saved; a loaded world starts at the default viewport. Viewer may set its own interest; mayor/admin also may, and the command consumes a rate credit and is audited (`tag=set_interest`, `code=ok`) like any other command. It adds no command beyond `set_interest`.
 
 Validation: the centre must be finite (and representable as `f32`), otherwise `interest.invalid_center`; the radius must be finite and `0..=2048`, otherwise `interest.radius_out_of_range`. A rejected or rate-limited request returns exactly one `reject` and leaves the previous viewport and world state unchanged. The transport-only `protocol::Session` has no interest state and rejects the command with `interest.unavailable`.
 
-`cargo run --release -p townsmith-server -- --interest-smoke` prints `SERVER_INTEREST status=ok center=0.0,0.0 radius=16.0 visible=1 roads=1 truncated=false tick=2 checksum=6d92be74bdbc11f5`. The loopback places one road inside and one outside, narrows the viewport, moves it to the far road, and restores it; every batch must be `snapshot` + `interest_view` and match a local reference world.
+`cargo run --release -p townsmith-server -- --interest-smoke` prints `SERVER_INTEREST status=ok center=0.0,0.0 radius=16.0 visible=1 roads=1 truncated=false buildings=1 buildings_truncated=false tick=2 checksum=6d92be74bdbc11f5`. The loopback places one road inside and one outside, narrows the viewport, moves it to the far road, and restores it; every batch must be `snapshot` + `interest_view` and match a local reference world. The 2,048 m batch asserts 64 building records with `buildings_truncated=true`; the narrow batches assert 1 and 0 records with `buildings_truncated=false`. The final restored viewport is the one printed.
 
-Limits: v0 streams only static road geometry. There is no entity, agent, terrain, or blueprint streaming, no delta compression, no prioritization, no server-side region activation, and no per-client `ServerSave` state.
+Limits: v0 streams only static road geometry plus synthetic building fixtures. There is no authoritative per-building placement store, no entity, agent, terrain, or blueprint streaming, no delta compression, no prioritization, no server-side region activation, and no per-client `ServerSave` state.
 
 ### Interest road preview
 

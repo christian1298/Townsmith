@@ -608,7 +608,7 @@ Checksum **`a00cc463d7cb9e72`** (stable across runs; moved from `f265539bcb8804f
 - **Roles:** dev-only viewer/mayor/admin, a deterministic token bucket (20 commands/s, burst 40), and a 256-entry audit ring; golden `SERVER_ROLES status=ok sessions=3 role_checks=4 rate_limited=1 audit=65 checksum=b6ab299531341226`.
 - **Godot client:** `scripts/smoke_mp_client.sh` speaks the same framing over `StreamPeerTCP` and prints `MP_CLIENT ... interest=ok roads=1 truncated=false ... frames=15`.
 
-This proves framing, deterministic command responses, dev role gating, atomic single-world persistence, and the bounded 64-road interest view. It does **not** measure 1M server ticks, network latency/loss, authentication, AOI entity streaming, reconnect, delta snapshots, multiple sessions, or content-manifest enforcement, and it is not §8 gate evidence.
+This proves framing, deterministic command responses, dev role gating, atomic single-world persistence, and the bounded 64-road / 64-building-fixture interest view. It does **not** measure 1M server ticks, network latency/loss, authentication, AOI entity streaming, reconnect, delta snapshots, multiple sessions, or content-manifest enforcement, and it is not §8 gate evidence.
 
 ### 7.11 1M cohort gate harness (`cohort_1m_v1`)
 

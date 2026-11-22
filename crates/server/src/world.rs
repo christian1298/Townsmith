@@ -27,13 +27,24 @@ use core_city::road::{RoadError, RoadRequest, RoadSegment, RoadStore};
 use crate::protocol::{
     configure_stream, decode_client_command, frame_to_io, read_frame, read_json_frame,
     session_id_for_seed, validate_hello, validate_interest, validate_road, validate_tax_rates,
-    write_json_frame, ClientCommand, FrameError, Rejection, RoadView, ServerMessage, SessionConfig,
-    TimeAction, DEFAULT_INTEREST_RADIUS_M, LOOPBACK_SEED, MAX_INTEREST_ROADS, PROTOCOL_VERSION,
-    SESSION_IO_TIMEOUT,
+    write_json_frame, BuildingView, ClientCommand, FrameError, Rejection, RoadView, ServerMessage,
+    SessionConfig, TimeAction, DEFAULT_INTEREST_RADIUS_M, LOOPBACK_SEED, MAX_INTEREST_BUILDINGS,
+    MAX_INTEREST_ROADS, PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
 };
 
 /// Fixed road width for v0 placement commands.
 pub const WORLD_ROAD_WIDTH_M: u8 = 6;
+
+/// Synthetic building footprint radius used by building view records.
+///
+/// A render hint only: the server has no authoritative building footprints yet.
+pub const INTEREST_BUILDING_RADIUS_M: f32 = 8.0;
+
+/// Spacing between synthetic building centres, in metres.
+pub const INTEREST_BUILDING_SPACING_M: f32 = 64.0;
+
+/// Buildings per synthetic grid row.
+pub const INTEREST_BUILDING_COLUMNS: u64 = 16;
 
 /// Longest road a single `place_road` command may add, in cells.
 pub const MAX_WORLD_ROAD_LENGTH: i32 = 512;
@@ -675,23 +686,111 @@ impl ServerWorld {
         roads
     }
 
-    /// Interest viewport plus the bounded road detail list.
+    /// Bounded building details for the current viewport, ascending by id.
     ///
-    /// `truncated` is true when more roads matched than the list carries. The
-    /// view is a read-only copy of the authoritative road store: building it
-    /// mutates nothing and never advances the tick.
+    /// v0 has no per-building placement store, only the static completed
+    /// `buildings` count. Records are therefore synthesized by
+    /// [`synthetic_building`] on a fixed 64 m grid anchored at the origin:
+    /// 16 per row on `z = 0`, then the next row, and so on. The approximation is
+    /// deterministic and stable per id, but it is **not** a footprint of where
+    /// the city's buildings really are. A building is included when its centre
+    /// satisfies `distance <= radius`; the list is capped at
+    /// [`MAX_INTEREST_BUILDINGS`].
+    #[must_use]
+    pub fn interest_buildings(&self) -> Vec<BuildingView> {
+        let (mut buildings, _truncated) = self.interest_building_matches();
+        buildings.truncate(MAX_INTEREST_BUILDINGS);
+        buildings
+    }
+
+    /// Interest viewport plus the bounded road and building detail lists.
+    ///
+    /// `truncated` and `buildings_truncated` are true when more roads or
+    /// buildings matched than the corresponding list carries. The view is a
+    /// read-only copy of authoritative/view-state data: building it mutates
+    /// nothing and never advances the tick.
     #[must_use]
     pub fn interest_view(&self) -> ServerMessage {
         let mut roads = self.interest_matches();
         let truncated = roads.len() > MAX_INTEREST_ROADS;
         roads.truncate(MAX_INTEREST_ROADS);
+        let (mut buildings, buildings_truncated) = self.interest_building_matches();
+        buildings.truncate(MAX_INTEREST_BUILDINGS);
         ServerMessage::InterestView {
             tick: self.tick,
             center: self.interest_center,
             radius_m: self.interest_radius_m,
             roads,
             truncated,
+            buildings,
+            buildings_truncated,
         }
+    }
+
+    /// Building matches for the inclusive interest circle, at most
+    /// [`MAX_INTEREST_BUILDINGS`] + 1 entries so truncation is observable.
+    ///
+    /// Candidate grid cells are derived from the circle bounds instead of
+    /// iterating every possible id: an oversized loaded building count must not
+    /// turn one viewport query into millions of synthesized records.
+    fn interest_building_matches(&self) -> (Vec<BuildingView>, bool) {
+        let mut buildings = Vec::new();
+        let Some((row_min, row_max, column_min, column_max)) = self.building_grid_bounds() else {
+            return (buildings, false);
+        };
+
+        for row in row_min..=row_max {
+            for column in column_min..=column_max {
+                let id = row
+                    .saturating_mul(INTEREST_BUILDING_COLUMNS)
+                    .saturating_add(column)
+                    .saturating_add(1);
+                if id > u64::from(self.buildings) {
+                    continue;
+                }
+                let building = synthetic_building(id);
+                if !point_in_interest(
+                    building.center,
+                    self.interest_center,
+                    self.interest_radius_m,
+                ) {
+                    continue;
+                }
+                buildings.push(building);
+                if buildings.len() > MAX_INTEREST_BUILDINGS {
+                    return (buildings, true);
+                }
+            }
+        }
+        (buildings, false)
+    }
+
+    /// Grid rows and columns whose synthetic centres can fall inside the circle.
+    ///
+    /// Bounds are inclusive, clamped to the 16-column grid and to ids the
+    /// static building count actually contains. Ascending row/column order
+    /// matches ascending id order, so iteration never sorts.
+    fn building_grid_bounds(&self) -> Option<(u64, u64, u64, u64)> {
+        let buildings = u64::from(self.buildings);
+        if buildings == 0 {
+            return None;
+        }
+
+        let spacing = f64::from(INTEREST_BUILDING_SPACING_M);
+        let center_x = f64::from(self.interest_center[0]);
+        let center_z = f64::from(self.interest_center[1]);
+        let radius = f64::from(self.interest_radius_m);
+
+        let max_row = (buildings - 1) / INTEREST_BUILDING_COLUMNS;
+        let (column_min, column_max) = grid_axis_bounds(
+            center_x - radius,
+            center_x + radius,
+            spacing,
+            INTEREST_BUILDING_COLUMNS - 1,
+        )?;
+        let (row_min, row_max) =
+            grid_axis_bounds(center_z - radius, center_z + radius, spacing, max_row)?;
+        Some((row_min, row_max, column_min, column_max))
     }
 
     /// Every road whose midpoint is inside the inclusive interest circle,
@@ -1261,17 +1360,64 @@ fn sanitize_dt(dt_s: f64) -> f64 {
     }
 }
 
+/// Whether `point` is inside the inclusive interest circle.
+///
+/// The comparison is `distance <= radius`, so an exact boundary match is
+/// visible. Both roads and synthetic buildings use this predicate, which keeps
+/// aggregate counts and detail lists consistent.
+fn point_in_interest(point: [f32; 2], center: [f32; 2], radius_m: f32) -> bool {
+    let radius = f64::from(radius_m);
+    let radius_squared = radius * radius;
+    let dx = f64::from(point[0]) - f64::from(center[0]);
+    let dz = f64::from(point[1]) - f64::from(center[1]);
+    dx * dx + dz * dz <= radius_squared
+}
+
 /// Whether a road's midpoint is inside the inclusive interest circle.
 ///
 /// [`ServerWorld::visible_roads`] and [`ServerWorld::interest_view`] share this
 /// predicate so the aggregate count and the detail list can never disagree.
 fn road_in_interest(road: &RoadSegment, center: [f32; 2], radius_m: f32) -> bool {
-    let radius = f64::from(radius_m);
-    let radius_squared = radius * radius;
-    let midpoint = road.center();
-    let dx = f64::from(midpoint[0]) - f64::from(center[0]);
-    let dz = f64::from(midpoint[1]) - f64::from(center[1]);
-    dx * dx + dz * dz <= radius_squared
+    point_in_interest(road.center(), center, radius_m)
+}
+
+/// Stable synthetic record for one completed building.
+///
+/// v0 has no per-building placement store: [`ServerWorld`] keeps only the
+/// static `buildings` count, so interest views approximate the built city on a
+/// fixed grid anchored at the origin. Ids are 1-based, 16 per row and 64 m
+/// apart, so id 1 is at `[0, 0]`, id 2 at `[64, 0]`, id 17 at `[0, 64]`, and so
+/// on. The mapping is deterministic and independent of population, so the same
+/// id always reports the same centre.
+#[must_use]
+pub fn synthetic_building(id: u64) -> BuildingView {
+    let index = id.saturating_sub(1);
+    let column = index % INTEREST_BUILDING_COLUMNS;
+    let row = index / INTEREST_BUILDING_COLUMNS;
+    BuildingView {
+        id,
+        center: [
+            column as f32 * INTEREST_BUILDING_SPACING_M,
+            row as f32 * INTEREST_BUILDING_SPACING_M,
+        ],
+        radius_m: INTEREST_BUILDING_RADIUS_M,
+    }
+}
+
+/// Inclusive grid indices whose cell centres can lie within `low..=high`.
+///
+/// Returns `None` when the interval misses the grid or would start past
+/// `max_index`. The result is clamped, so an extreme viewport centre can never
+/// produce an out-of-grid loop bound or overflow the caller's id arithmetic.
+fn grid_axis_bounds(low: f64, high: f64, spacing: f64, max_index: u64) -> Option<(u64, u64)> {
+    let first = (low / spacing).ceil();
+    let last = (high / spacing).floor();
+    if !first.is_finite() || !last.is_finite() || last < 0.0 || first > max_index as f64 {
+        return None;
+    }
+    let first = first.max(0.0) as u64;
+    let last = last.min(max_index as f64) as u64;
+    (first <= last).then_some((first, last))
 }
 
 fn welcome(world: &ServerWorld, resumed: bool) -> ServerMessage {
@@ -1554,6 +1700,10 @@ pub struct InterestReport {
     pub view_roads: u32,
     /// Whether the final `interest_view` was truncated by the 64-road cap.
     pub view_truncated: bool,
+    /// Building details carried by the final `interest_view`.
+    pub view_buildings: u32,
+    /// Whether the final `interest_view` was truncated by the 64-building cap.
+    pub view_buildings_truncated: bool,
     /// Final authoritative tick (interest commands do not advance it).
     pub tick: u64,
     /// Final world checksum.
@@ -1590,7 +1740,11 @@ fn serve_interest(listener: TcpListener) -> io::Result<InterestReport> {
     )?;
 
     let ServerMessage::InterestView {
-        roads, truncated, ..
+        roads,
+        truncated,
+        buildings,
+        buildings_truncated,
+        ..
     } = world.interest_view()
     else {
         return Err(io::Error::other(
@@ -1606,6 +1760,8 @@ fn serve_interest(listener: TcpListener) -> io::Result<InterestReport> {
         visible_roads: world.visible_roads(),
         view_roads: u32::try_from(roads.len()).unwrap_or(u32::MAX),
         view_truncated: truncated,
+        view_buildings: u32::try_from(buildings.len()).unwrap_or(u32::MAX),
+        view_buildings_truncated: buildings_truncated,
         tick: world.tick,
         checksum: world.checksum(),
     })
@@ -1642,6 +1798,13 @@ fn run_interest_client(address: SocketAddr) -> io::Result<()> {
         }
     }
     let checksum = reference.checksum();
+    // The seeded city has 131 completed buildings, so the default viewport
+    // exercises the 64-building cap rather than an empty list.
+    assert!(
+        reference.buildings > MAX_INTEREST_BUILDINGS as u32,
+        "loopback needs more than {MAX_INTEREST_BUILDINGS} buildings to exercise truncation"
+    );
+    let full_buildings: Vec<u64> = (1..=MAX_INTEREST_BUILDINGS as u64).collect();
 
     let full_view = ClientCommand::SetInterest {
         center_x: 0.0,
@@ -1659,6 +1822,8 @@ fn run_interest_client(address: SocketAddr) -> io::Result<()> {
             (2, [100, 100], [108, 100], WORLD_ROAD_WIDTH_M),
         ],
         false,
+        &full_buildings,
+        true,
     )?;
 
     let near_origin = ClientCommand::SetInterest {
@@ -1673,6 +1838,8 @@ fn run_interest_client(address: SocketAddr) -> io::Result<()> {
         16.0,
         1,
         &[(1, [0, 0], [8, 0], WORLD_ROAD_WIDTH_M)],
+        false,
+        &[1],
         false,
     )?;
 
@@ -1689,6 +1856,8 @@ fn run_interest_client(address: SocketAddr) -> io::Result<()> {
         1,
         &[(2, [100, 100], [108, 100], WORLD_ROAD_WIDTH_M)],
         false,
+        &[],
+        false,
     )?;
 
     // Restore the small origin viewport so the reported line shows filtering.
@@ -1699,6 +1868,8 @@ fn run_interest_client(address: SocketAddr) -> io::Result<()> {
         16.0,
         1,
         &[(1, [0, 0], [8, 0], WORLD_ROAD_WIDTH_M)],
+        false,
+        &[1],
         false,
     )?;
 
@@ -1719,6 +1890,8 @@ fn expect_interest_batch(
     expected_visible: u32,
     expected_roads: &[(u64, [i32; 2], [i32; 2], u8)],
     expected_truncated: bool,
+    expected_buildings: &[u64],
+    expected_buildings_truncated: bool,
 ) -> io::Result<()> {
     match messages {
         [ServerMessage::Snapshot {
@@ -1734,6 +1907,8 @@ fn expect_interest_batch(
             radius_m,
             roads,
             truncated,
+            buildings,
+            buildings_truncated,
         }] if observed == checksum
             && *interest_center == expected_center
             && (*interest_radius_m - expected_radius).abs() < f32::EPSILON
@@ -1747,7 +1922,13 @@ fn expect_interest_batch(
                     && road.start == expected.1
                     && road.end == expected.2
                     && road.width_m == expected.3
-            }) =>
+            })
+            && buildings.len() == expected_buildings.len()
+            && buildings
+                .iter()
+                .zip(expected_buildings)
+                .all(|(building, id)| building == &synthetic_building(*id))
+            && *buildings_truncated == expected_buildings_truncated =>
         {
             Ok(())
         }
@@ -2207,6 +2388,17 @@ mod tests {
         world
     }
 
+    fn world_with_buildings(buildings: u32) -> ServerWorld {
+        let mut world =
+            ServerWorld::with_population_and_role(SEED, buildings * 25, ClientRole::Mayor);
+        assert_eq!(world.buildings, buildings);
+        assert!(matches!(
+            world.apply(&hello()),
+            ServerMessage::Welcome { .. }
+        ));
+        world
+    }
+
     fn expect_reject(message: &ServerMessage, expected_code: &str) {
         match message {
             ServerMessage::Reject { code, message: _ } => assert_eq!(code, expected_code),
@@ -2232,6 +2424,17 @@ mod tests {
             center_x,
             center_z,
             radius_m,
+        }
+    }
+
+    fn interest_building_view(world: &ServerWorld) -> (Vec<BuildingView>, bool) {
+        match world.interest_view() {
+            ServerMessage::InterestView {
+                buildings,
+                buildings_truncated,
+                ..
+            } => (buildings, buildings_truncated),
+            other => panic!("expected interest view, got {other:?}"),
         }
     }
 
@@ -2422,6 +2625,7 @@ mod tests {
                 radius_m,
                 roads,
                 truncated,
+                ..
             } => {
                 assert_eq!(view_tick, tick);
                 assert_eq!(center, [0.0, 0.0]);
@@ -2581,6 +2785,177 @@ mod tests {
     }
 
     #[test]
+    fn interest_buildings_are_empty_without_completed_placements() {
+        let mut world = world_with_hello();
+        world.buildings = 0;
+
+        let (buildings, truncated) = interest_building_view(&world);
+        assert!(buildings.is_empty());
+        assert!(!truncated, "an empty world cannot drop building records");
+        assert!(world.interest_buildings().is_empty());
+    }
+
+    #[test]
+    fn interest_buildings_carry_exact_centres_in_ascending_id_order() {
+        let mut world = world_with_buildings(3);
+        world.apply(&set_interest(0.0, 0.0, 200.0));
+
+        let (buildings, truncated) = interest_building_view(&world);
+        assert!(!truncated);
+        assert_eq!(
+            buildings,
+            vec![
+                BuildingView {
+                    id: 1,
+                    center: [0.0, 0.0],
+                    radius_m: INTEREST_BUILDING_RADIUS_M,
+                },
+                BuildingView {
+                    id: 2,
+                    center: [INTEREST_BUILDING_SPACING_M, 0.0],
+                    radius_m: INTEREST_BUILDING_RADIUS_M,
+                },
+                BuildingView {
+                    id: 3,
+                    center: [2.0 * INTEREST_BUILDING_SPACING_M, 0.0],
+                    radius_m: INTEREST_BUILDING_RADIUS_M,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn interest_buildings_cap_at_64_and_report_truncation() {
+        let mut world = world_with_buildings(100);
+        world.apply(&set_interest(0.0, 0.0, DEFAULT_INTEREST_RADIUS_M));
+        let (buildings, truncated) = interest_building_view(&world);
+
+        assert_eq!(buildings.len(), MAX_INTEREST_BUILDINGS);
+        assert!(truncated, "100 matches must mark the view truncated");
+        assert_eq!(
+            buildings
+                .iter()
+                .map(|building| building.id)
+                .collect::<Vec<_>>(),
+            (1..=MAX_INTEREST_BUILDINGS as u64).collect::<Vec<_>>(),
+            "the cap keeps the lowest ids in deterministic order"
+        );
+
+        let mut exact = world_with_buildings(MAX_INTEREST_BUILDINGS as u32);
+        exact.apply(&set_interest(0.0, 0.0, DEFAULT_INTEREST_RADIUS_M));
+        let (buildings, truncated) = interest_building_view(&exact);
+        assert_eq!(buildings.len(), MAX_INTEREST_BUILDINGS);
+        assert!(!truncated, "exactly the cap is not truncated");
+    }
+
+    #[test]
+    fn interest_buildings_outside_the_radius_are_excluded() {
+        let mut world = world_with_buildings(10);
+
+        world.apply(&set_interest(0.0, 0.0, 16.0));
+        let (buildings, truncated) = interest_building_view(&world);
+        assert_eq!(
+            buildings
+                .iter()
+                .map(|building| building.id)
+                .collect::<Vec<_>>(),
+            vec![1],
+            "64 m spacing leaves only the origin building inside r=16"
+        );
+        assert!(!truncated);
+
+        // A zero radius still includes a building whose centre is the centre.
+        world.apply(&set_interest(INTEREST_BUILDING_SPACING_M as f64, 0.0, 0.0));
+        let (buildings, _) = interest_building_view(&world);
+        assert_eq!(
+            buildings
+                .iter()
+                .map(|building| building.id)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+
+        world.apply(&set_interest(100.0, 100.0, 16.0));
+        let (buildings, truncated) = interest_building_view(&world);
+        assert!(
+            buildings.is_empty(),
+            "every synthetic centre is out of range"
+        );
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn interest_building_view_is_deterministic_across_calls_and_worlds() {
+        let mut world = world_with_buildings(80);
+        world.apply(&set_interest(32.0, 100.0, 512.0));
+
+        let first = world.interest_view();
+        let second = world.interest_view();
+        assert_eq!(first, second);
+        let first_json = serde_json::to_string(&first).expect("interest view serializes");
+        let second_json = serde_json::to_string(&second).expect("interest view serializes");
+        assert_eq!(first_json, second_json, "same view, same wire payload");
+        assert!(
+            first_json.contains("\"buildings\":[{"),
+            "the payload actually carries building records"
+        );
+
+        let mut replay = world_with_buildings(80);
+        replay.apply(&set_interest(32.0, 100.0, 512.0));
+        assert_eq!(
+            serde_json::to_string(&replay.interest_view()).expect("replay serializes"),
+            first_json,
+            "an identically seeded world produces the same building records"
+        );
+    }
+
+    #[test]
+    fn malformed_interest_is_rejected_without_changing_building_records() {
+        let mut world = world_with_buildings(80);
+        world.apply(&set_interest(32.0, 100.0, 512.0));
+        let before = world.interest_view();
+
+        for (command, code) in [
+            (
+                set_interest(f64::NAN, 0.0, 16.0),
+                protocol_codes::INTEREST_INVALID_CENTER,
+            ),
+            (
+                set_interest(0.0, 0.0, -1.0),
+                protocol_codes::INTEREST_RADIUS_OUT_OF_RANGE,
+            ),
+            (
+                set_interest(0.0, 0.0, MAX_INTEREST_RADIUS_M + 0.1),
+                protocol_codes::INTEREST_RADIUS_OUT_OF_RANGE,
+            ),
+        ] {
+            match world.apply_all(&command).as_slice() {
+                [ServerMessage::Reject { code: actual, .. }] => {
+                    assert_eq!(actual.as_str(), code);
+                }
+                other => panic!("expected one rejection, got {other:?}"),
+            }
+            assert_eq!(
+                world.interest_view(),
+                before,
+                "a rejected request must not move the building view"
+            );
+        }
+
+        let mut unopened = ServerWorld::with_population_and_role(SEED, 2_000, ClientRole::Mayor);
+        assert_eq!(unopened.buildings, 80);
+        expect_reject(
+            &unopened.apply(&set_interest(0.0, 0.0, 16.0)),
+            codes::NOT_HELLO,
+        );
+        assert_eq!(
+            unopened.interest_radius_m(),
+            DEFAULT_INTEREST_RADIUS_M as f32,
+            "the rejected command must not store the viewport"
+        );
+    }
+
+    #[test]
     fn set_interest_returns_snapshot_then_view_without_mutating_simulation() {
         let mut world = world_with_hello();
         world.apply(&ClientCommand::PlaceRoad {
@@ -2608,6 +2983,8 @@ mod tests {
                 radius_m,
                 roads: view_roads,
                 truncated,
+                buildings,
+                buildings_truncated,
             }] => {
                 assert_eq!(*observed_tick, tick);
                 assert_eq!(observed_checksum, &checksum);
@@ -2619,6 +2996,9 @@ mod tests {
                 assert_eq!(*radius_m, 16.0);
                 assert_eq!(view_roads.len(), 1);
                 assert!(!truncated);
+                assert_eq!(buildings.len(), 1, "only the origin building is in range");
+                assert_eq!(buildings[0], synthetic_building(1));
+                assert!(!buildings_truncated);
             }
             other => panic!("expected snapshot + interest view, got {other:?}"),
         }
@@ -2705,6 +3085,8 @@ mod tests {
         assert_eq!(first.visible_roads, 1);
         assert_eq!(first.view_roads, 1);
         assert!(!first.view_truncated);
+        assert_eq!(first.view_buildings, 1);
+        assert!(!first.view_buildings_truncated);
         assert_eq!(first.tick, 2);
         assert_eq!(first.checksum.len(), 16);
         assert!(first.checksum.bytes().all(|byte| byte.is_ascii_hexdigit()));

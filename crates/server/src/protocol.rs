@@ -61,6 +61,14 @@ pub const DEFAULT_INTEREST_RADIUS_M: f64 = MAX_INTEREST_RADIUS_M;
 /// `truncated` marks that more roads matched than fit in the list.
 pub const MAX_INTEREST_ROADS: usize = 64;
 
+/// Maximum building details carried by one [`ServerMessage::InterestView`].
+///
+/// Like [`MAX_INTEREST_ROADS`], the list is bounded so a viewport covering a
+/// large city can never grow the response past [`MAX_FRAME_LEN`]. Buildings are
+/// ordered by ascending id and `buildings_truncated` marks that more buildings
+/// matched than fit in the list.
+pub const MAX_INTEREST_BUILDINGS: usize = 64;
+
 /// Fixed seed for the deterministic loopback smoke.
 pub const LOOPBACK_SEED: u64 = 0x544F_574E_534D_4954; // "TOWNSMIT"
 
@@ -322,6 +330,24 @@ pub struct RoadView {
     pub width_m: u8,
 }
 
+/// One building detail in [`ServerMessage::InterestView`].
+///
+/// v0 has no per-building placement store in [`crate::world::ServerWorld`], so
+/// this record is synthesized deterministically from the world's static
+/// completed-building count (see [`crate::world::ServerWorld::interest_buildings`]).
+/// It is a stable viewport approximation for previews, not a live footprint or
+/// an authoritative placement record. It carries no ownership, blueprint, cost,
+/// or simulation state.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BuildingView {
+    /// Stable building id within the world (1-based).
+    pub id: u64,
+    /// Building centre `[x, z]` in metres.
+    pub center: [f32; 2],
+    /// Building footprint radius in metres (a render hint, not authoritative).
+    pub radius_m: f32,
+}
+
 /// Messages the authoritative server sends.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -365,14 +391,16 @@ pub enum ServerMessage {
         #[serde(default)]
         visible_roads: u32,
     },
-    /// Bounded road details for the session's current interest viewport.
+    /// Bounded road and building details for the current interest viewport.
     ///
     /// Sent after the matching [`ServerMessage::Snapshot`] whenever
     /// `set_interest` succeeds. This is the first filtered snapshot payload: it
     /// is a view-only copy, never a mutation. Roads are filtered by their
     /// midpoint against the inclusive circle, ordered by ascending id, and
     /// capped at [`MAX_INTEREST_ROADS`]; `truncated` is true when more roads
-    /// matched than the list carries.
+    /// matched than the list carries. Buildings use the same inclusive
+    /// circle over their centres, ascending id, and are capped separately at
+    /// [`MAX_INTEREST_BUILDINGS`].
     InterestView {
         /// Authoritative tick the view was built from.
         tick: u64,
@@ -384,6 +412,18 @@ pub enum ServerMessage {
         roads: Vec<RoadView>,
         /// True when more roads matched than fit in `roads`.
         truncated: bool,
+        /// Matching buildings, ascending by id, at most
+        /// [`MAX_INTEREST_BUILDINGS`].
+        ///
+        /// Defaults to an empty list for older payloads that predate the
+        /// building list.
+        #[serde(default)]
+        buildings: Vec<BuildingView>,
+        /// True when more buildings matched than fit in `buildings`.
+        ///
+        /// Defaults to false for older payloads that predate the building list.
+        #[serde(default)]
+        buildings_truncated: bool,
     },
     Reject {
         code: String,
@@ -1412,6 +1452,12 @@ mod tests {
                 width_m: 6,
             }],
             truncated: true,
+            buildings: vec![BuildingView {
+                id: 1,
+                center: [0.0, 0.0],
+                radius_m: 8.0,
+            }],
+            buildings_truncated: true,
         };
 
         let payload = encode_json(&message).expect("interest view encodes");
@@ -1421,9 +1467,70 @@ mod tests {
         assert_eq!(value["roads"][0]["start"][0], 0);
         assert_eq!(value["roads"][0]["width_m"], 6);
         assert_eq!(value["truncated"], true);
+        assert_eq!(value["buildings"][0]["id"], 1);
+        assert_eq!(value["buildings"][0]["center"][1], 0.0);
+        assert_eq!(value["buildings"][0]["radius_m"], 8.0);
+        assert_eq!(value["buildings_truncated"], true);
 
         let decoded: ServerMessage = decode_json(&payload).expect("interest view decodes");
         assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn interest_view_defaults_building_fields_for_older_payloads() {
+        // A v0 payload written before the building list existed must still
+        // decode: both building fields default rather than failing the frame.
+        let legacy = br#"{
+            "type": "interest_view",
+            "tick": 2,
+            "center": [0.0, 0.0],
+            "radius_m": 16.0,
+            "roads": [],
+            "truncated": false
+        }"#;
+
+        match decode_json::<ServerMessage>(legacy).expect("legacy interest view decodes") {
+            ServerMessage::InterestView {
+                tick: 2,
+                roads,
+                truncated: false,
+                buildings,
+                buildings_truncated,
+                ..
+            } => {
+                assert!(roads.is_empty());
+                assert!(buildings.is_empty());
+                assert!(!buildings_truncated);
+            }
+            other => panic!("expected interest view, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interest_building_list_is_bounded_by_the_wire_cap() {
+        assert_eq!(MAX_INTEREST_BUILDINGS, 64);
+
+        let buildings: Vec<BuildingView> = (1..=MAX_INTEREST_BUILDINGS as u64)
+            .map(|id| BuildingView {
+                id,
+                center: [(id as f32) * 64.0, 0.0],
+                radius_m: 8.0,
+            })
+            .collect();
+        let message = ServerMessage::InterestView {
+            tick: 0,
+            center: [0.0, 0.0],
+            radius_m: 2_048.0,
+            roads: Vec::new(),
+            truncated: false,
+            buildings,
+            buildings_truncated: true,
+        };
+        let encoded = encode_json(&message).expect("bounded building list encodes");
+        assert!(
+            encoded.len() < MAX_FRAME_LEN,
+            "interest view with a full building list must fit one frame"
+        );
     }
 
     #[test]
