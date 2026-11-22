@@ -44,6 +44,7 @@ pub mod population;
 pub mod progression;
 pub mod research;
 pub mod road;
+pub mod route_cache;
 pub mod services;
 pub mod settlement;
 pub mod trades;
@@ -114,6 +115,9 @@ pub use research::{
 pub use road::{
     RoadError, RoadRequest, RoadSegment, RoadStore, MAX_ROADS, MAX_ROAD_LENGTH_M, MAX_ROAD_SLOPE_M,
     MAX_ROAD_WIDTH_M, MIN_ROAD_WIDTH_M, ROAD_FORMAT_VERSION,
+};
+pub use route_cache::{
+    CachedRoute, RouteCache, DEFAULT_ROUTE_CACHE_CAPACITY, MAX_ROUTE_CACHE_CAPACITY,
 };
 pub use services::{
     ServiceConsumer, ServiceError, ServiceKind, ServiceReport, ServiceSite, ServiceStore,

@@ -2,7 +2,7 @@
 title: Traffic
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-22
 tags:
   - townsmith
   - phase-3
@@ -69,6 +69,8 @@ pub struct FlowField {
 `distance_m(from, to)` snaps each point to its nearest graph node, adds both walking legs, and runs Dijkstra. Coincident points are zero. Unreachable components return `None`.
 
 `flow_to(goal)` builds one Dijkstra field from the goal. `flow_distance_m(from, &field)` reuses it for many origins. This is the scaling primitive: one field per workplace, not one path per home/workplace pair.
+
+`route_points(from, to)` reconstructs one polyline with a predecessor map, including both walking legs and deterministic equal-distance tie-breaking. `RouteCache` (default 512 entries, hard cap 4,096) caches those polylines by 1 cm-quantized endpoints with deterministic LRU eviction, hit/miss counters, and content checksums. It is not yet wired into materialization.
 
 ## 3. Commute integration
 
@@ -190,7 +192,8 @@ These are microbenchmarks on one machine, not the 1M/60 FPS gate.
 
 ## 7. Tests
 
-- `core_city::traffic`: 15 tests — empty graph, single segment, L shape, crossing split, T-junction, disconnected components, walking legs, duplicate edges, invalid points, flow fields, checksum stability, cache reuse/FIFO, invalid goals, flow-field checksums.
+- `core_city::traffic`: 22 tests — graph construction and flow fields plus route polyline, walking legs, invalid/disconnected pairs, and deterministic turn tie-break.
+- `core_city::route_cache`: 5 tests — hit/reuse, LRU eviction, disconnected/invalid pairs not cached, checksums, capacity bounds.
 - `core_city::population`: road commute and disconnected fallback.
 - `townsmith-bench`: 7 city-loop tests (small city and a multi-row commute) and 3 traffic-grid tests.
 - World scene smoke: `traffic=ok`, graph stats, one car, movement, save/load rebuild.

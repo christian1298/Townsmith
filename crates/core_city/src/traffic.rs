@@ -51,13 +51,13 @@ pub fn travel_time_seconds(distance_m: f32, speed_mps: f32) -> Option<f32> {
 /// Maximum graph nodes accepted by one traffic graph.
 pub const MAX_TRAFFIC_NODES: usize = 20_000;
 
-/// FNV-1a 64-bit offset basis used by graph and field checksums.
-const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+/// FNV-1a 64-bit offset basis used by graph, field, and route checksums.
+pub(crate) const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 
 /// FNV-1a 64-bit prime.
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-fn fnv1a_feed(hash: &mut u64, value: u64) {
+pub(crate) fn fnv1a_feed(hash: &mut u64, value: u64) {
     *hash ^= value;
     *hash = hash.wrapping_mul(FNV_PRIME);
 }
@@ -500,6 +500,42 @@ impl RoadGraph {
         Some(start_access + path as f32 + goal_access)
     }
 
+    /// Polyline from `from` to `to` along the road network.
+    ///
+    /// Each endpoint walks straight to its nearest graph node; the result is
+    /// `from`, the node path in travel order, then `to`. Consecutive duplicate
+    /// points are dropped. Coincident endpoints return a two-point degenerate
+    /// polyline `[from, to]`, matching [`Self::distance_m`], even when the
+    /// graph is empty.
+    ///
+    /// Distances use the same integer metre weights as [`Self::distance_m`].
+    /// Equal-length alternatives resolve to the lexicographically smallest
+    /// predecessor node, so repeated builds return the same polyline. Returns
+    /// `None` when an endpoint is non-finite, the graph has no nodes, or the
+    /// snapped nodes are disconnected.
+    #[must_use]
+    pub fn route_points(&self, from: [f32; 2], to: [f32; 2]) -> Option<Vec<[f32; 2]>> {
+        if !from.iter().chain(to.iter()).all(|value| value.is_finite()) {
+            return None;
+        }
+        let dx = to[0] - from[0];
+        let dz = to[1] - from[1];
+        if dx * dx + dz * dz <= 0.000_1 {
+            return Some(vec![from, to]);
+        }
+        let (start, _) = self.nearest_node(from)?;
+        let (goal, _) = self.nearest_node(to)?;
+        let (_, nodes) = self.path_nodes(start, goal)?;
+
+        let mut points = Vec::with_capacity(nodes.len() + 2);
+        push_unique_point(&mut points, from);
+        for node in nodes {
+            push_unique_point(&mut points, [node[0] as f32, node[1] as f32]);
+        }
+        push_unique_point(&mut points, to);
+        Some(points)
+    }
+
     /// Build a flow field from the goal to every reachable node.
     ///
     /// This is the shared-destination primitive: one Dijkstra per workplace,
@@ -627,6 +663,59 @@ impl RoadGraph {
         }
         None
     }
+
+    /// Shortest-path node sequence from `start` to `goal`.
+    ///
+    /// Runs the full Dijkstra pass instead of stopping at the goal so equal
+    /// distance alternatives are still comparable. An equal-length candidate
+    /// replaces the predecessor only when its node sorts lower, which makes
+    /// the reconstructed path independent of heap insertion order.
+    fn path_nodes(&self, start: RoadNode, goal: RoadNode) -> Option<(u32, Vec<RoadNode>)> {
+        if start == goal {
+            return Some((0, vec![start]));
+        }
+        let mut distances: BTreeMap<RoadNode, u32> = BTreeMap::new();
+        let mut previous: BTreeMap<RoadNode, RoadNode> = BTreeMap::new();
+        distances.insert(start, 0);
+        let mut heap: BinaryHeap<Reverse<(u32, RoadNode)>> = BinaryHeap::new();
+        heap.push(Reverse((0, start)));
+        while let Some(Reverse((distance, node))) = heap.pop() {
+            if distances.get(&node).is_some_and(|&known| distance > known) {
+                continue;
+            }
+            let Some(neighbors) = self.adjacency.get(&node) else {
+                continue;
+            };
+            for &(next, weight) in neighbors {
+                let candidate = distance.saturating_add(weight);
+                let known = distances.get(&next).copied();
+                let shorter = known.is_none_or(|value| candidate < value);
+                let tie =
+                    known == Some(candidate) && previous.get(&next).is_none_or(|&pred| node < pred);
+                if shorter || tie {
+                    distances.insert(next, candidate);
+                    previous.insert(next, node);
+                    heap.push(Reverse((candidate, next)));
+                }
+            }
+        }
+
+        let total = *distances.get(&goal)?;
+        let mut path = vec![goal];
+        let mut cursor = goal;
+        while cursor != start {
+            cursor = *previous.get(&cursor)?;
+            path.push(cursor);
+        }
+        path.reverse();
+        Some((total, path))
+    }
+}
+
+fn push_unique_point(points: &mut Vec<[f32; 2]>, point: [f32; 2]) {
+    if points.last() != Some(&point) {
+        points.push(point);
+    }
 }
 
 #[cfg(test)]
@@ -710,6 +799,81 @@ mod tests {
         let graph = RoadGraph::build(&[road(1, [0, 0], [20, 0])]).expect("build");
         let distance = graph.distance_m([-3.0, 4.0], [23.0, 4.0]).expect("path");
         assert!((distance - 30.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn route_points_follow_a_straight_segment() {
+        let graph = RoadGraph::build(&[road(1, [0, 0], [20, 0])]).expect("build");
+        let points = graph.route_points([0.0, 0.0], [20.0, 0.0]).expect("route");
+        assert_eq!(points, vec![[0.0, 0.0], [20.0, 0.0]]);
+    }
+
+    #[test]
+    fn route_points_turn_at_an_l_corner() {
+        let graph = RoadGraph::build(&[road(1, [0, 0], [10, 0]), road(2, [10, 0], [10, 10])])
+            .expect("build");
+        let points = graph.route_points([0.0, 0.0], [10.0, 10.0]).expect("route");
+        assert_eq!(points, vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]]);
+    }
+
+    #[test]
+    fn route_points_include_both_walking_legs() {
+        let graph = RoadGraph::build(&[road(1, [0, 0], [20, 0])]).expect("build");
+        let points = graph.route_points([-3.0, 4.0], [23.0, 4.0]).expect("route");
+        assert_eq!(
+            points,
+            vec![[-3.0, 4.0], [0.0, 0.0], [20.0, 0.0], [23.0, 4.0]]
+        );
+        let length: f32 = points
+            .windows(2)
+            .map(|pair| {
+                let dx = pair[1][0] - pair[0][0];
+                let dz = pair[1][1] - pair[0][1];
+                (dx * dx + dz * dz).sqrt()
+            })
+            .sum();
+        assert!((length - 30.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn route_points_reject_invalid_or_disconnected_pairs() {
+        let graph = RoadGraph::build(&[road(1, [0, 0], [10, 0]), road(2, [50, 50], [60, 50])])
+            .expect("build");
+        assert_eq!(graph.route_points([0.0, 0.0], [50.0, 50.0]), None);
+        assert_eq!(graph.route_points([f32::NAN, 0.0], [0.0, 0.0]), None);
+        assert_eq!(
+            RoadGraph::build(&[])
+                .expect("build")
+                .route_points([0.0, 0.0], [10.0, 0.0]),
+            None
+        );
+        assert_eq!(
+            RoadGraph::build(&[])
+                .expect("build")
+                .route_points([5.0, 5.0], [5.0, 5.0]),
+            Some(vec![[5.0, 5.0], [5.0, 5.0]])
+        );
+    }
+
+    #[test]
+    fn route_points_break_equal_length_ties_deterministically() {
+        let roads = [
+            road(1, [0, 0], [10, 0]),
+            road(2, [10, 0], [10, 10]),
+            road(3, [0, 0], [0, 10]),
+            road(4, [0, 10], [10, 10]),
+        ];
+        let first = RoadGraph::build(&roads).expect("build");
+        let second = RoadGraph::build(&roads).expect("build");
+        let expected = vec![[0.0, 0.0], [0.0, 10.0], [10.0, 10.0]];
+        assert_eq!(
+            first.route_points([0.0, 0.0], [10.0, 10.0]),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            second.route_points([0.0, 0.0], [10.0, 10.0]),
+            Some(expected)
+        );
     }
 
     #[test]

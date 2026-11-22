@@ -2,7 +2,7 @@
 title: Materialization Core
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-22
 tags:
   - townsmith
   - named-citizens
@@ -157,7 +157,7 @@ pub struct MaterializationDiff {
 - The bridge stores a single previous selection, not a full scheduler history; no dwell time or anti-starvation yet.
 - The scene rebuilds markers from `active`/`detailed`; it does not yet apply `changed` incrementally.
 - One pinned id is supported; the full selection/story priority list and dwell time are later.
-- No route cache; N3 movement can use this selection but must add its own bounded route cache.
+- `core_city::route_cache` now provides bounded route polylines, but materialization does not use it yet.
 - The world scene has fading debug markers only; there are no materialized agents, movement, or route visuals yet.
 - Fade materials are per-node duplicates; a 2k-active route needs shared materials or a pooling strategy.
 - Removed markers free after a bounded fade deadline; the node map is keyed by citizen id.
