@@ -654,10 +654,20 @@ impl ServiceStore {
         if !self.sites.contains_key(&placement_id) && self.sites.len() >= MAX_SERVICE_SITES {
             return Err(ServiceError::TooManySites(self.sites.len()));
         }
+        let (paid, remaining) =
+            self.sites
+                .get(&placement_id)
+                .map_or((0.0, lead_days), |existing| {
+                    (
+                        existing.cost_paid.min(cost_total),
+                        existing.build_days_remaining.min(lead_days),
+                    )
+                });
         let mut site = ServiceSite::default_for(kind, tier);
         site.center = center;
-        site.build_days_remaining = lead_days;
+        site.build_days_remaining = remaining;
         site.cost_total = cost_total;
+        site.cost_paid = paid;
         self.sites.insert(placement_id, site);
         Ok(())
     }
@@ -1641,5 +1651,35 @@ mod tests {
             .mark_paid(2_500.0)
             .expect("second installment");
         assert_eq!(decoded.total_payment_due(), 0.0);
+    }
+
+    #[test]
+    fn replacing_a_priced_service_preserves_paid_installments_and_lead() {
+        let mut store = ServiceStore::new(2026);
+        store
+            .add_priced_site_with_lead_days(
+                1,
+                ServiceKind::School,
+                ServiceTier::Basic,
+                [0.0; 3],
+                1.0,
+                1_000.0,
+            )
+            .unwrap();
+        store.site_mut(1).unwrap().mark_paid(500.0).unwrap();
+        store
+            .add_priced_site_with_lead_days(
+                1,
+                ServiceKind::School,
+                ServiceTier::Basic,
+                [0.0; 3],
+                2.0,
+                1_000.0,
+            )
+            .unwrap();
+        let site = store.site(1).unwrap();
+        assert_eq!(site.cost_paid, 500.0);
+        assert_eq!(site.build_days_remaining, 1.0);
+        assert_eq!(site.payment_due(), 0.0);
     }
 }

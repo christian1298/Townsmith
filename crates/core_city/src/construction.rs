@@ -757,7 +757,13 @@ impl ConstructionStore {
     /// crew before it can cross that boundary; it cannot fast-forward through
     /// phases with a smaller pool.
     pub fn tick(&mut self, delta_seconds: f64) -> ConstructionTick {
-        let dt = delta_seconds.clamp(0.0, MAX_TICK_SECONDS) as f32;
+        // NaN survives `clamp` and would poison every site it reaches, so a
+        // non-finite step decays to a no-op instead of being clamped.
+        let dt = if delta_seconds.is_finite() {
+            delta_seconds.clamp(0.0, MAX_TICK_SECONDS) as f32
+        } else {
+            0.0
+        };
         let mut report = ConstructionTick::default();
         if dt <= 0.0 {
             report.active = self
@@ -828,7 +834,11 @@ impl ConstructionStore {
 
             let mut left = dt;
             while left > 0.0 && !site.is_complete() {
-                let duration = total_s * site.phase.weight();
+                let duration = if developer_clock {
+                    site.total_s * site.phase.weight()
+                } else {
+                    time_scale.phase_seconds_for(site.phase, site.materials_required)
+                };
                 if duration <= f32::EPSILON {
                     let next = site.phase.next();
                     site.set_phase(next);
@@ -967,6 +977,9 @@ impl ConstructionStore {
             if !site.phase_progress.is_finite() || !(0.0..=1.0).contains(&site.phase_progress) {
                 return Err(ConstructionError::InvalidSite("phase progress is invalid"));
             }
+            if !site.elapsed_s.is_finite() || site.elapsed_s < 0.0 {
+                return Err(ConstructionError::InvalidSite("elapsed time is invalid"));
+            }
             if site.materials_delivered > site.materials_required {
                 return Err(ConstructionError::InvalidSite(
                     "delivered materials exceed the requirement",
@@ -987,7 +1000,7 @@ impl ConstructionStore {
     /// Stable FNV-1a checksum of the compact JSON.
     #[must_use]
     pub fn checksum(&self) -> u64 {
-        let bytes = serde_json::to_vec(self).unwrap_or_default();
+        let bytes = serde_json::to_vec(self).expect("construction store serialization cannot fail");
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
         for byte in bytes {
             hash ^= u64::from(byte);
@@ -1575,5 +1588,48 @@ mod tests {
         value.as_object_mut().expect("object").remove("time_scale");
         let old = ConstructionStore::from_json(&value.to_string()).expect("old decode");
         assert_eq!(old.time_scale(), ConstructionTimeScale::DeveloperSeconds);
+    }
+
+    #[test]
+    fn non_finite_tick_is_a_noop_and_keeps_the_checksum() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_site(1, 10_000).unwrap();
+        let before = store.checksum();
+        for delta in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            store.tick(delta);
+            assert_eq!(store.checksum(), before, "delta {delta}");
+            assert!(store.validate().is_ok());
+            assert!(store.to_json_pretty().is_ok());
+        }
+    }
+
+    #[test]
+    fn checksum_changes_with_content_and_is_never_empty_bytes() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_site(1, 10_000).unwrap();
+        let empty_hash = 0xcbf2_9ce4_8422_2325_u64;
+        assert_ne!(store.checksum(), empty_hash);
+        let before = store.checksum();
+        store.tick(10.0);
+        assert_ne!(store.checksum(), before);
+    }
+
+    #[test]
+    fn campaign_phases_respect_the_phase_cap_for_large_sites() {
+        let mut store = ConstructionStore::new(64, 100_000_000);
+        store
+            .set_time_scale(ConstructionTimeScale::campaign_default())
+            .unwrap();
+        store.add_site(1, 4_000_000).unwrap();
+        let phase = store.site(1).unwrap().phase;
+        let duration = store.time_scale().phase_seconds_for(phase, 4_000_000);
+        assert!(duration <= (CAMPAIGN_MAX_PHASE_DAYS * DAY_SECONDS) as f32 + 1.0);
+        let total = store.time_scale().total_seconds_for(4_000_000);
+        let mut remaining = f64::from(total * 0.1 + duration) + 1.0;
+        while remaining > 0.0 {
+            store.tick(remaining.min(3_600.0));
+            remaining -= 3_600.0;
+        }
+        assert_ne!(store.site(1).unwrap().phase, phase);
     }
 }

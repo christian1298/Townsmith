@@ -908,7 +908,7 @@ impl PlacementStore {
     /// Stable checksum of the save contents.
     #[must_use]
     pub fn checksum(&self) -> u64 {
-        let bytes = serde_json::to_vec(self).unwrap_or_default();
+        let bytes = serde_json::to_vec(self).expect("placement store serialization cannot fail");
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
         for byte in bytes {
             hash ^= u64::from(byte);

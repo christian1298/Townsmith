@@ -494,10 +494,19 @@ impl UtilityStore {
         if !sites.contains_key(&placement_id) && sites.len() >= MAX_UTILITY_SITES {
             return Err(UtilityError::TooManySites(sites.len()));
         }
+        let (paid, remaining) = sites
+            .get(&placement_id)
+            .map_or((0.0, lead_days), |existing| {
+                (
+                    existing.cost_paid.min(cost_total),
+                    existing.build_days_remaining.min(lead_days),
+                )
+            });
         let mut site = UtilitySite::default_for(kind);
         site.center = center;
-        site.build_days_remaining = lead_days;
+        site.build_days_remaining = remaining;
         site.cost_total = cost_total;
+        site.cost_paid = paid;
         sites.insert(placement_id, site);
         Ok(())
     }
@@ -1300,5 +1309,25 @@ mod tests {
         assert_eq!(UtilityKind::parse("sewage"), None);
         assert_eq!(UtilityKind::Water.as_str(), "water");
         assert_eq!(UtilityKind::Power.as_str(), "power");
+    }
+
+    #[test]
+    fn replacing_a_priced_site_preserves_paid_installments_and_lead() {
+        let mut store = UtilityStore::new(2026);
+        store
+            .add_priced_site_with_lead_days(1, UtilityKind::Water, [0.0; 3], 1.0, 1_000.0)
+            .unwrap();
+        store
+            .site_mut(1, UtilityKind::Water)
+            .unwrap()
+            .mark_paid(500.0)
+            .unwrap();
+        store
+            .add_priced_site_with_lead_days(1, UtilityKind::Water, [0.0; 3], 2.0, 1_000.0)
+            .unwrap();
+        let site = store.site(1, UtilityKind::Water).unwrap();
+        assert_eq!(site.cost_paid, 500.0);
+        assert_eq!(site.build_days_remaining, 1.0);
+        assert_eq!(site.payment_due(), 0.0);
     }
 }
