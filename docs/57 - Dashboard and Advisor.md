@@ -2,7 +2,7 @@
 title: Dashboard and Advisor
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-22
 tags:
   - townsmith
   - phase-3
@@ -21,7 +21,7 @@ tags:
 In:
 
 - a `city_advisor` bridge call that gathers one city snapshot and returns ranked advice;
-- a pure `core_city::advisor` module with stable message codes, severity, title, and detail;
+- a pure `core_city::advisor` module with stable message codes, severity, title, detail, and named params;
 - rules for food, water, power, jobs, vacancies, happiness, commute, roads, construction, debt, and bankruptcy;
 - a `City Dashboard` overlay with population, work, wellbeing, services, treasury, industry, roads, and construction sections;
 - `F1` toggles the dashboard; `Esc` closes it; entering Architect Mode closes it;
@@ -34,7 +34,7 @@ Out:
 - clickable advice that selects or centres a building;
 - acknowledged, dismissed, or persisted notifications;
 - charts, history, trend lines, or time-series;
-- localization beyond advisor titles and the dashboard shell (details and rare modals remain English);
+- localization beyond advisor titles/details and the dashboard shell (remaining modals/content/number formatting);
 - automated pause, advisor actions, or policy changes;
 - per-citizen or per-household advice.
 
@@ -111,7 +111,7 @@ The advisor is intentionally conservative: one clear message per problem, with a
 4. builds `AdvisorInput` and calls `advise`;
 5. returns `{ ok, seed, critical, warnings, infos, healthy, messages[] }`.
 
-Each message is `{ code, severity, title, detail }`. The call is derived state: no save field, no checksum, and no change to placements, households, or the treasury. It may refresh the derived utility supply, as `utilities_state()` does. It takes each store lock separately and holds none while calling the next summary.
+Each message is `{ code, severity, title, detail, params }`; `params` carries named values for localized details. The call is derived state: no save field, no checksum, and no change to placements, households, or the treasury. It may refresh the derived utility supply, as `utilities_state()` does. It takes each store lock separately and holds none while calling the next summary.
 
 ## 5. Dashboard
 
@@ -168,12 +168,12 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 - English-only developer UI.
 - `city.food_shortage`, `city.water_shortage`, `city.power_shortage`, and `city.unhappy` use one code for both critical and warning levels; the severity field distinguishes them.
 - The advisor reports debt as information even when the daily net is positive.
-- Advisor titles are localized by code (`base.advisor.<code>.title`); details remain English until the Rust protocol carries code+params.
+- Advisor titles and details are localized by code (`base.advisor.<code>.title`/`.detail`); details use named params and fall back to the bridge English text for unknown codes.
 
 ## 9. Next
 
 1. 3.9: runner matrix (early town, mid city, late city) and committed baselines.
 2. Make advice clickable to select the relevant building or district.
 3. Add persisted acknowledgement and a notification history.
-4. Localize advisor details/params, remaining modals, and content names.
+4. Finish number formatting, remaining content names, and error-code display.
 5. Add district/settlement panels once per-settlement budgets exist.

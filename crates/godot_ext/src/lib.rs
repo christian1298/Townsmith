@@ -7412,6 +7412,11 @@ fn advisor_payload(seed: u64, report: &AdvisorReport) -> VarDictionary {
         item.set("severity", &GString::from(message.severity.as_str()));
         item.set("title", &GString::from(&message.title));
         item.set("detail", &GString::from(&message.detail));
+        let mut params = VarDictionary::new();
+        for (key, value) in &message.params {
+            params.set(key.as_str(), &GString::from(value.as_str()));
+        }
+        item.set("params", &params);
         messages.push(&item);
     }
     result.set("messages", &messages.to_variant());
