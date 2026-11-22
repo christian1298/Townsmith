@@ -8,18 +8,26 @@ extends Control
 ## snapshot + interest_view, disconnect -> goodbye.
 ##
 ## The client is deliberately a protocol probe, not a game client: it has no
-## render integration, auth, roles, entity streaming, or delta snapshots.
+## production render integration, auth, roles, entity streaming, or delta
+## snapshots. The one visual is a bounded flat top-down preview of the received
+## `interest_view` road set (`mp_interest_canvas.gd`), so viewport filtering is
+## visible without implicating the world renderer or streaming terrain.
 ## v0 is loopback-only and the server serves one connection at a time.
 ##
 ## Run:
 ##   godot --headless --path godot res://mp_client.tscn -- \
 ##     --smoke --port 47015
+##   godot --headless --path godot res://mp_client.tscn -- --self-test
 ##
-## `scripts/smoke_mp_client.sh` starts `townsmith-server --listen PORT`, waits
-## for the port with a bounded connect loop, runs the headless smoke, and
-## asserts the `MP_CLIENT status=ok ...` marker.
+## `scripts/smoke_mp_client.sh` runs the pure-helper self-test first, then starts
+## `townsmith-server --listen PORT`, waits for the port with a bounded connect
+## loop, runs the headless smoke, and asserts the `MP_CLIENT status=ok ...`
+## marker including `interest_render=ok roads=N checksum=<16hex>`.
 ##
 ## See docs/05 - Multiplayer.md §Protocol v0.
+
+const InterestRender = preload("res://mp_interest_render.gd")
+const InterestCanvas = preload("res://mp_interest_canvas.gd")
 
 enum Phase {
 	CONNECTING,
@@ -66,6 +74,9 @@ var _ok_road := false
 var _ok_interest := false
 var _interest_roads := -1
 var _interest_truncated := true
+var _interest_render_checksum := ""
+var _interest_rendered := -1
+var _interest_cleared := false
 var _session_id := ""
 var _last_tick := -1
 var _last_population := -1
@@ -79,6 +90,9 @@ var _population_label: Label
 var _balance_label: Label
 var _checksum_label: Label
 var _frames_label: Label
+var _interest_label: Label
+var _interest_checksum_label: Label
+var _interest_canvas
 
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
@@ -86,6 +100,9 @@ func _ready() -> void:
 	_host = _arg(args, "--host", DEFAULT_HOST)
 	_player_name = _arg(args, "--name", DEFAULT_NAME)
 	_timeout_ms = _positive_int(_arg(args, "--timeout-ms", ""), STEP_TIMEOUT_MS)
+	if args.has("--self-test"):
+		_run_self_test()
+		return
 	_build_ui()
 
 	var port_text := _arg(args, "--port", str(DEFAULT_PORT))
@@ -339,9 +356,28 @@ func _on_interest_view(message: Dictionary) -> void:
 	if truncated:
 		_fail("interest_view_truncated")
 		return
+	if _interest_canvas == null:
+		_fail("interest_canvas_missing")
+		return
+	var view_center: Variant = message.get("center", null)
+	var parsed_roads: int = _interest_canvas.set_view(
+		Vector2(float(view_center[0]), float(view_center[1])), radius_m, roads, truncated
+	)
+	if parsed_roads != roads.size():
+		_fail("interest_render_parse_%d" % parsed_roads)
+		return
+	var rendered: int = _interest_canvas.line_count()
+	if rendered != roads.size():
+		_fail("interest_render_lines_%d" % rendered)
+		return
+	_interest_render_checksum = _interest_canvas.road_checksum()
+	if not _is_hex16(_interest_render_checksum):
+		_fail("interest_render_checksum")
+		return
 	_ok_interest = true
 	_interest_roads = roads.size()
 	_interest_truncated = truncated
+	_interest_rendered = rendered
 	_set_status("Interest view received; disconnecting.")
 	_refresh_ui()
 	if not _send({"type": "disconnect"}):
@@ -396,6 +432,17 @@ func _send(message: Dictionary) -> bool:
 func _finish_ok() -> void:
 	if _finished:
 		return
+	if _interest_canvas == null:
+		_fail("interest_canvas_missing")
+		return
+	var rendered: int = _interest_canvas.line_count()
+	_interest_canvas.clear_view()
+	var cleared: bool = _interest_canvas.line_count() == 0 and not _interest_canvas.has_view
+	if rendered != _interest_roads or _interest_render_checksum.is_empty() or not cleared:
+		_fail("interest_render_teardown")
+		return
+	_interest_rendered = rendered
+	_interest_cleared = cleared
 	_finished = true
 	set_process(false)
 	_set_status("Protocol v0 exchange complete.")
@@ -406,12 +453,17 @@ func _finish_ok() -> void:
 		(
 			"MP_CLIENT status=ok welcome=ok ping=ok snapshot=ok reject=ok road=ok interest=ok"
 			+ " roads=%d truncated=%s"
-			+ " tick=%d population=%d balance=%d checksum=%s session=%s"
+			+ " interest_render=ok roads=%d checksum=%s rendered=%d cleared=%s"
+			+ " tick=%d population=%d balance=%d snapshot_checksum=%s session=%s"
 			+ " frames_sent=%d frames_received=%d"
 		)
 		% [
 			_interest_roads,
 			str(_interest_truncated),
+			_interest_rendered,
+			_interest_render_checksum,
+			_interest_rendered,
+			str(_interest_cleared),
 			_last_tick,
 			_last_population,
 			_last_balance,
@@ -429,6 +481,8 @@ func _fail(reason: String) -> void:
 		return
 	_finished = true
 	set_process(false)
+	if _interest_canvas != null:
+		_interest_canvas.clear_view()
 	_set_status("Protocol v0 failed: " + reason)
 	_refresh_ui()
 	if _peer != null:
@@ -510,6 +564,86 @@ func _positive_int(value: String, fallback: int) -> int:
 	var number := value.to_int()
 	return number if number > 0 else fallback
 
+## Headless pure-helper assertions. No display, server, or scene layout needed.
+func _run_self_test() -> void:
+	_finished = true
+	set_process(false)
+	var failures: Array[String] = []
+	var cases := 0
+
+	var raw: Array = []
+	for index in range(InterestRender.MAX_ROADS + 6):
+		raw.append({"id": index + 1, "start": [0, 0], "end": [8, 0], "width_m": 6})
+	cases += 1
+	var bounded: Array = InterestRender.parse_roads(raw)
+	if bounded.size() != InterestRender.MAX_ROADS:
+		failures.append("bounded=%d" % bounded.size())
+
+	var mixed: Array = [
+		{"id": 2, "start": [8, 0], "end": [16, 0], "width_m": 6},
+		{"id": 1, "start": [0, 0], "end": [8, 0], "width_m": 6},
+		{"id": 3, "start": "bad", "end": [0, 0], "width_m": 6},
+		{"id": 4, "start": [0, 0], "end": [1, 0], "width_m": "wide"},
+		"junk",
+	]
+	cases += 1
+	var parsed: Array = InterestRender.parse_roads(mixed)
+	if parsed.size() != 3:
+		failures.append("parse=%d" % parsed.size())
+	elif int(parsed[0]["id"]) != 1 or int(parsed[1]["id"]) != 2 or int(parsed[2]["id"]) != 4:
+		failures.append("order")
+	elif float(parsed[2]["width_m"]) != InterestRender.DEFAULT_WIDTH_M:
+		failures.append("width_default")
+
+	var sample: Array = [
+		{
+			"id": 1,
+			"start": Vector2(0, 0),
+			"end": Vector2(8, 0),
+			"width_m": 6.0,
+		}
+	]
+	cases += 1
+	var checksum_a := InterestRender.checksum(sample)
+	var checksum_b := InterestRender.checksum(sample.duplicate(true))
+	if not _is_hex16(checksum_a):
+		failures.append("checksum_format")
+	elif checksum_a != checksum_b:
+		failures.append("checksum_unstable")
+	var changed: Array = sample.duplicate(true)
+	changed[0]["end"] = Vector2(9, 0)
+	if InterestRender.checksum(changed) == checksum_a:
+		failures.append("checksum_sensitive")
+
+	cases += 1
+	var panel := Vector2(100, 100)
+	var center_px := InterestRender.project_point(Vector2.ZERO, Vector2.ZERO, 16.0, panel, 10.0)
+	if center_px.distance_to(Vector2(50, 50)) > 0.001:
+		failures.append("project_center=%.3f,%.3f" % [center_px.x, center_px.y])
+	var edge_px := InterestRender.project_point(Vector2(16, 0), Vector2.ZERO, 16.0, panel, 10.0)
+	if absf(edge_px.x - 90.0) > 0.001 or absf(edge_px.y - 50.0) > 0.001:
+		failures.append("project_edge=%.3f,%.3f" % [edge_px.x, edge_px.y])
+
+	cases += 1
+	var segments := InterestRender.segments(sample, Vector2.ZERO, 16.0, panel, 10.0)
+	if segments.size() != 1:
+		failures.append("segments=%d" % segments.size())
+	elif float(segments[0]["width_px"]) < InterestRender.MIN_LINE_WIDTH_PX:
+		failures.append("segment_width")
+
+	if failures.is_empty():
+		print(
+			"MP_INTEREST_HELPER status=ok cases=%d bounded=%d checksum=%s"
+			% [cases, bounded.size(), checksum_a]
+		)
+		get_tree().quit(0)
+		return
+	print(
+		"MP_INTEREST_HELPER status=fail cases=%d error=%s"
+		% [cases, ",".join(failures)]
+	)
+	get_tree().quit(1)
+
 func _build_ui() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 
@@ -537,7 +671,7 @@ func _build_ui() -> void:
 	root.add_child(title)
 
 	var subtitle := Label.new()
-	subtitle.text = "Loopback TCP, length-prefixed JSON. Protocol probe only; no render integration, auth, roles, entity streaming, or deltas."
+	subtitle.text = "Loopback TCP, length-prefixed JSON. Protocol probe with a bounded flat viewport preview; no world renderer, auth, roles, entity streaming, or deltas."
 	subtitle.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	subtitle.add_theme_color_override("font_color", Color(0.70, 0.75, 0.82))
 	subtitle.add_theme_font_size_override("font_size", 15)
@@ -550,6 +684,12 @@ func _build_ui() -> void:
 	_balance_label = _add_row(root, "Balance", "-")
 	_checksum_label = _add_row(root, "Checksum", "-")
 	_frames_label = _add_row(root, "Frames", "0 sent / 0 received")
+	_interest_label = _add_row(root, "Interest view", "roads=0 truncated=false")
+	_interest_checksum_label = _add_row(root, "Interest checksum", "-")
+
+	_interest_canvas = InterestCanvas.new()
+	_interest_canvas.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	root.add_child(_interest_canvas)
 
 func _add_row(parent: VBoxContainer, key: String, value: String) -> Label:
 	var row := HBoxContainer.new()
@@ -582,6 +722,13 @@ func _refresh_ui() -> void:
 	_balance_label.text = str(_last_balance) if _last_tick >= 0 else "-"
 	_checksum_label.text = _last_checksum if not _last_checksum.is_empty() else "-"
 	_frames_label.text = "%d sent / %d received" % [_frames_sent, _frames_received]
+	if _interest_canvas != null:
+		_interest_label.text = _interest_canvas.summary()
+		_interest_checksum_label.text = (
+			_interest_canvas.road_checksum()
+			if _interest_canvas.has_view
+			else (_interest_render_checksum if not _interest_render_checksum.is_empty() else "-")
+		)
 
 func _read_u32_be(buffer: PackedByteArray, offset: int) -> int:
 	return (
