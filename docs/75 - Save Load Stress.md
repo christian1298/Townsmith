@@ -120,7 +120,7 @@ compose and parse the optional world layers:
   decimal form.
 
 This matrix does not run the Godot `VarDictionary` `world_save`/`world_load`
-paths or disk atomicity.
+paths or the Godot bridge file layer.
 
 A deterministic 200-case mutation sweep then picks a layer and applies one of:
 remove the layer, set `format_version=99`, set a foreign seed, null a field,
@@ -130,7 +130,7 @@ panicking. This is a bounded envelope fuzz, not a schema-aware generator.
 
 ## 6. Limits
 
-- Core stores only; it does not exercise the Godot `world_save`/`world_load` wrapper, `VarDictionary` payloads, or disk atomicity.
+- Core stores only; it does not exercise the Godot `world_save`/`world_load` wrapper or `VarDictionary` payloads. Bridge atomic-write/`.bak` recovery is covered by `godot_ext` unit tests.
 - Terrain deltas are covered as a core encoded blob; the full world-save size limit is still absent.
 - No multiplayer, mod, or migration matrix.
 - The combined JSON path can normalize f64 text; byte-stable checksums are asserted per store where possible.
@@ -141,8 +141,8 @@ panicking. This is a bounded envelope fuzz, not a schema-aware generator.
 
 ## 7. Next
 
-The full-world 1M save/load harness is `cargo run --release -p townsmith-bench --bin save_1m`; see [[68 - Metropolis Gate]] §7.4 for the measured 182.8 MB / 232.5 ms save / 694.7 ms load envelope. It includes all 13 core stores and terrain deltas; Godot envelope and disk-durability overhead remain out.
+The full-world 1M save/load harness is `cargo run --release -p townsmith-bench --bin save_1m`; see [[68 - Metropolis Gate]] §7.4 for the measured 182.8 MB / 232.5 ms save / 694.7 ms load envelope. It includes all 13 core stores and terrain deltas; Godot envelope and compression overhead remain out; bridge atomic-write/`.bak` recovery is covered by unit tests.
 
 1. Add a bridge-level stress harness once the Godot test runtime is available.
 2. Add a mutation fuzzer for each store's validator.
-3. Add the full world-save size limit and a disk/atomicity path.
+3. ~~Add the full world-save size limit and a disk/atomicity path.~~ Core size limit and bridge atomic/recovery path landed; compression and 1M bridge timing remain.

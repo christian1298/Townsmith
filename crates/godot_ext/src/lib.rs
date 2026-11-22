@@ -5444,9 +5444,10 @@ impl TownsmithCore {
                 ),
             );
         }
-        if let Err(error) = write_text_atomic(&path, &json) {
-            return placement_simple_error("save_failed", error.to_string());
-        }
+        let backup_rotated = match write_text_atomic(&path, &json) {
+            Ok(rotated) => rotated,
+            Err(error) => return placement_simple_error("save_failed", error.to_string()),
+        };
         // The refreshed clones are committed only after the save is durable.
         // Sanitization drops stale sites, so a failed save must not mutate the
         // live stores.
@@ -5483,6 +5484,8 @@ impl TownsmithCore {
         let mut result = VarDictionary::new();
         result.set("ok", true);
         result.set("path", &GString::from(path.to_string_lossy().as_ref()));
+        result.set("bytes", json.len() as i64);
+        result.set("backup_rotated", backup_rotated);
         result.set("seed", store.seed as i64);
         result.set("count", store.placements.len() as i64);
         result.set("terrain_edits", deltas_count as i64);
@@ -5619,23 +5622,11 @@ impl TownsmithCore {
             Ok(path) => path,
             Err(error) => return placement_simple_error("invalid_save_path", error),
         };
-        let metadata = match std::fs::metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) => return placement_simple_error("load_failed", error.to_string()),
+        let read = match read_json_with_backup(&path) {
+            Ok(read) => read,
+            Err(error) => return placement_simple_error("corrupt_save", error),
         };
-        if metadata.len() > MAX_WORLD_SAVE_BYTES {
-            return placement_simple_error(
-                "save_too_large",
-                format!(
-                    "world save is {} bytes; the limit is {MAX_WORLD_SAVE_BYTES}",
-                    metadata.len()
-                ),
-            );
-        }
-        let json = match std::fs::read_to_string(&path) {
-            Ok(json) => json,
-            Err(error) => return placement_simple_error("load_failed", error.to_string()),
-        };
+        let json = read.json;
         let deltas = match terrain_deltas_from_world_json(&json) {
             Ok(deltas) => deltas,
             Err((code, error)) => return placement_simple_error(code, error),
@@ -6082,6 +6073,20 @@ impl TownsmithCore {
         let mut result = VarDictionary::new();
         result.set("ok", true);
         result.set("path", &GString::from(path.to_string_lossy().as_ref()));
+        result.set("recovered_from_backup", read.recovered_from_backup);
+        result.set(
+            "backup",
+            &GString::from(
+                read.backup
+                    .as_ref()
+                    .map_or_else(String::new, |path| path.to_string_lossy().to_string())
+                    .as_str(),
+            ),
+        );
+        result.set(
+            "backup_checksum",
+            &GString::from(&format!("{:016x}", read.backup_checksum)),
+        );
         result.set("seed", seed as i64);
         result.set("count", count);
         result.set("terrain_edits", deltas_count as i64);
@@ -9018,17 +9023,108 @@ fn world_save_path_from_arg(raw: &str) -> Result<PathBuf, String> {
 /// Refuse absurdly large world saves before reading them into memory.
 const MAX_WORLD_SAVE_BYTES: u64 = 64 * 1024 * 1024;
 
-fn write_text_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
-    let temp = path.with_extension("json.tmp");
+fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn fnv1a_bytes(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fn looks_like_json_object(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    text.trim_start().starts_with('{') && serde_json::from_str::<serde_json::Value>(text).is_ok()
+}
+
+/// Write `contents` through a sibling temp file and atomically replace `path`.
+///
+/// A structurally valid previous save is rotated to `<path>.bak` first. The
+/// temp file is removed on failure, and the parent directory is synced on Unix
+/// so the rename is durable.
+fn write_text_atomic(path: &Path, contents: &str) -> std::io::Result<bool> {
+    let temp = sibling_with_suffix(path, ".tmp");
+    let backup = sibling_with_suffix(path, ".bak");
     let mut file = std::fs::File::create(&temp)?;
     file.write_all(contents.as_bytes())?;
     file.sync_all()?;
     drop(file);
+
+    let mut backup_rotated = false;
+    if let Ok(previous) = std::fs::read(path) {
+        if looks_like_json_object(&previous) {
+            let mut backup_file = std::fs::File::create(&backup)?;
+            backup_file.write_all(&previous)?;
+            backup_file.sync_all()?;
+            drop(backup_file);
+            backup_rotated = true;
+        }
+    }
+
     if let Err(error) = std::fs::rename(&temp, path) {
         let _ = std::fs::remove_file(&temp);
         return Err(error);
     }
-    Ok(())
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        if let Ok(directory) = std::fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
+    }
+    Ok(backup_rotated)
+}
+
+struct ReadJsonOutcome {
+    json: String,
+    recovered_from_backup: bool,
+    backup: Option<PathBuf>,
+    backup_checksum: u64,
+}
+
+fn read_json_file(path: &Path) -> Result<String, String> {
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if metadata.len() > MAX_WORLD_SAVE_BYTES {
+        return Err(format!(
+            "world save is {} bytes; the limit is {MAX_WORLD_SAVE_BYTES}",
+            metadata.len()
+        ));
+    }
+    std::fs::read_to_string(path).map_err(|error| error.to_string())
+}
+
+fn read_json_with_backup(path: &Path) -> Result<ReadJsonOutcome, String> {
+    let primary = read_json_file(path);
+    if let Ok(json) = primary {
+        if looks_like_json_object(json.as_bytes()) {
+            return Ok(ReadJsonOutcome {
+                json,
+                recovered_from_backup: false,
+                backup: None,
+                backup_checksum: 0,
+            });
+        }
+    }
+    let backup = sibling_with_suffix(path, ".bak");
+    let json = read_json_file(&backup).map_err(|error| {
+        format!("save is missing or invalid and no usable backup exists: {error}")
+    })?;
+    if !looks_like_json_object(json.as_bytes()) {
+        return Err("save and backup are both invalid JSON objects".to_string());
+    }
+    Ok(ReadJsonOutcome {
+        backup_checksum: fnv1a_bytes(json.as_bytes()),
+        recovered_from_backup: true,
+        backup: Some(backup),
+        json,
+    })
 }
 
 /// Validate a GDScript blueprint path.
@@ -10843,6 +10939,73 @@ mod tests {
         assert!((first_construction_payment(12_345.67) - 370.37).abs() < 1e-9);
         assert!(first_construction_payment(f64::NAN).abs() < 1e-9);
         assert!(first_construction_payment(-5.0).abs() < 1e-9);
+    }
+
+    fn unique_save_path(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("townsmith_atomic_{}_{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir.join("world.json")
+    }
+
+    #[test]
+    fn atomic_save_writes_and_reads_back() {
+        let path = unique_save_path("roundtrip");
+        let rotated = write_text_atomic(&path, "{\"a\":1}").expect("write");
+        assert!(!rotated);
+        assert!(!sibling_with_suffix(&path, ".tmp").exists());
+        let read = read_json_with_backup(&path).expect("read");
+        assert!(!read.recovered_from_backup);
+        assert_eq!(read.json, "{\"a\":1}");
+        let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
+    }
+
+    #[test]
+    fn atomic_save_rotates_a_valid_previous_file() {
+        let path = unique_save_path("rotate");
+        write_text_atomic(&path, "{\"a\":1}").expect("first");
+        let rotated = write_text_atomic(&path, "{\"a\":2}").expect("second");
+        assert!(rotated);
+        let backup = sibling_with_suffix(&path, ".bak");
+        assert_eq!(
+            std::fs::read_to_string(&backup).expect("backup"),
+            "{\"a\":1}"
+        );
+        let read = read_json_with_backup(&path).expect("read");
+        assert!(!read.recovered_from_backup);
+        let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
+    }
+
+    #[test]
+    fn atomic_save_recovers_a_corrupt_primary_from_backup() {
+        let path = unique_save_path("recover");
+        write_text_atomic(&path, "{\"a\":1}").expect("first");
+        write_text_atomic(&path, "{\"a\":2}").expect("second");
+        std::fs::write(&path, "not json").expect("corrupt primary");
+        let read = read_json_with_backup(&path).expect("recover");
+        assert!(read.recovered_from_backup);
+        assert_eq!(read.json, "{\"a\":1}");
+        assert!(read.backup_checksum != 0);
+        let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
+    }
+
+    #[test]
+    fn atomic_save_rejects_two_corrupt_files() {
+        let path = unique_save_path("corrupt");
+        std::fs::write(&path, "not json").expect("primary");
+        std::fs::write(sibling_with_suffix(&path, ".bak"), "also not json").expect("backup");
+        assert!(read_json_with_backup(&path).is_err());
+        let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
+    }
+
+    #[test]
+    fn atomic_save_rejects_a_missing_directory() {
+        let path = std::env::temp_dir()
+            .join("townsmith_atomic_missing_dir")
+            .join("world.json");
+        assert!(write_text_atomic(&path, "{}").is_err());
+        assert!(read_json_with_backup(&path).is_err());
     }
 
     #[test]
