@@ -2,7 +2,7 @@
 title: Multiplayer
 project: Townsmith
 status: proposed
-updated: 2026-11-19
+updated: 2026-11-23
 tags:
   - townsmith
   - multiplayer
@@ -175,6 +175,65 @@ The server validates every command:
 8. **Construction:** `PlaceBuilding` creates a **construction site**, not a finished instance. The server reserves/consumes materials, validates access, and assigns crews; the site is saved and synced like any other entity.
 
 Accepted commands produce **events** (construction site created, phase changed, building completed, tax changed, blueprint updated) that are broadcast to interested clients. Rejected commands return a reason for UI feedback.
+
+### Protocol v0 (Phase 6 foundation)
+
+The first runnable protocol lives in `crates/server/src/protocol.rs`. It is **transport only**: it freezes framing, validation codes, and the handshake before simulation messages are added. It does not change or drive the city simulation.
+
+**Framing**
+
+- A 4-byte big-endian payload length followed by UTF-8 JSON.
+- Maximum payload: 1 MiB.
+- Zero-length, oversized, truncated, non-UTF-8, and malformed JSON frames are rejected with stable codes: `frame.zero_length`, `frame.oversized`, `frame.truncated`, `frame.invalid_utf8`, `frame.invalid_json`, `frame.io`.
+- JSON is deliberate for v0 so loopback transcripts are inspectable. The production transport/encoding decision remains Q-055.
+
+**Client commands**
+
+| Tag | Fields |
+|---|---|
+| `hello` | `protocol_version`, `content_hash`, `player_name` |
+| `ping` | `nonce` |
+| `time_control` | `action`: `pause`, `resume`, `speed_1x`, `speed_2x`, `speed_4x` |
+| `set_tax` | `resident_rate`, `business_rate` (percent, 0–100) |
+| `place_road` | `start: [x, y]`, `end: [x, y]` |
+| `disconnect` | — |
+
+**Server messages**
+
+| Tag | Fields |
+|---|---|
+| `welcome` | `session_id`, `tick`, `protocol_version` |
+| `pong` | `nonce` |
+| `snapshot` | `tick`, `population`, `balance`, `checksum` |
+| `reject` | `code`, `message` |
+| `goodbye` | — |
+
+**Validation rules (v0)**
+
+| Rule | Code |
+|---|---|
+| Protocol version must match `0` | `protocol.version_mismatch` |
+| Player name non-empty, ≤ 32 characters, no control characters | `player_name.empty`, `player_name.too_long`, `player_name.invalid` |
+| Content hash is 64 lowercase hex characters | `content_hash.invalid` |
+| Tax rates are 0–100 percent | `tax.rate_out_of_range` |
+| Road endpoints inside ±1,000,000 | `road.out_of_bounds` |
+| Road start ≠ end | `road.empty` |
+| Road length ≤ 1,024 cells (Chebyshev) | `road.too_long` |
+| Second `hello` | `hello.duplicate` |
+| Any other command before `hello` | `hello.required` |
+| Unknown command tag | `command.unknown_tag` |
+| Session already closed | `session.closed` |
+
+`disconnect` is accepted before `hello` so a client can close cleanly. Roles, permissions, content-manifest checks, costs, and spatial rules are deferred to later protocol revisions.
+
+**Loopback smoke**
+
+```bash
+cargo run --release -p townsmith-server -- --loopback-smoke
+# SERVER_PROTOCOL status=ok frames=8 checksum=<16 hex>
+```
+
+The harness binds `127.0.0.1:0`, runs `hello → welcome`, `ping → pong`, `set_tax → snapshot`, `disconnect → goodbye`, and derives the session id and snapshot checksum deterministically from a fixed seed. It uses socket timeouts rather than sleeps, so it is safe for CI.
 
 ## 6. Voxel editing and blueprint sync
 

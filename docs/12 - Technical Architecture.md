@@ -2,7 +2,7 @@
 title: Technical Architecture
 project: Townsmith
 status: proposed
-updated: 2026-11-21
+updated: 2026-11-23
 tags:
   - townsmith
   - architecture
@@ -115,7 +115,7 @@ seed + generator version
 | `core_save` | SQLite schema, snapshots, migrations, journal | `SaveDb`, `Snapshot`, `Migration` |
 | `core_net` | Protocol, commands, snapshots, validation hooks | `NetCommand`, `Snapshot`, `Manifest`, `TimeCommand` |
 | `godot_ext` | GDExtension bindings, buffer conversion | `TownsmithCore`, `Node` wrappers |
-| `server` | Headless server binary | `ServerConfig`, `ServerApp` |
+| `server` | Headless server binary + protocol v0 framing/validation | `Session`, `ClientCommand`, `ServerMessage` |
 | `bench` | Fixed-scene benchmark runner, camera routes, frame metrics, JSON/compare | `BenchScene`, `CameraRoute`, `FrameStats` |
 | `tools` | CLI: validate mods, inspect blueprints, run sims | `validate`, `inspect`, `bench` |
 
@@ -305,9 +305,10 @@ save_001/
 ## 8. Networking boundary
 
 - **Protocol version** is explicit; mismatches are rejected.
-- **Serialization:** `postcard` or `bincode` for compact messages; JSON only for debugging.
+- **Serialization:** `postcard` or `bincode` for compact messages; JSON only for debugging. Protocol v0 uses length-prefixed JSON so the first loopback transcripts are inspectable; compact binary encoding is still the target.
 - **Transport:** Godot ENet for v1 co-op; a Rust QUIC/`quinn` transport is a later option.
 - **Messages:** `Hello`, `Manifest`, `Command`, `CommandRejected`, `Snapshot`, `Event`, `Chat`, `Ping`.
+- **Protocol v0 (foundation):** `crates/server/src/protocol.rs` implements length-prefixed JSON over TCP, the first command/snapshot set, stable validation codes, and a deterministic loopback smoke (`townsmith-server --loopback-smoke`). It is transport-only and does not replace the production transport decision (Q-055).
 - **Validation:** every command is checked on the server (permission, content, cost, space, version).
 - **Snapshots:** per-client AOI, delta-compressed, prioritized.
 - **Backpressure:** bounded queues; drop/aggregate distant dynamic entities.
@@ -423,6 +424,7 @@ cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort
 cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
+cargo run --release -p townsmith-server -- --loopback-smoke
 ./scripts/bench_core.sh
 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5
 ```
