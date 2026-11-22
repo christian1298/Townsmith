@@ -2,7 +2,7 @@
 title: Named Citizens
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-22
 tags:
   - townsmith
   - simulation
@@ -98,7 +98,7 @@ citizen_id   = first 63 bits of citizen_seed, with collision probe
 - `age_days` is persisted; the display is derived.
 
 > [!note] Current bridge state
-> N4 persists `age_days`; `named_citizens_for` returns the persisted `age_days` and `age_years = age_days / 365`. The core `tick_lifecycle` and bridge `named_lifecycle_tick` age and remove citizens at 100 years; applying deaths to households and the scene lifecycle hook remains.
+> N4 persists `age_days`; `named_citizens_for` returns the persisted `age_days` and `age_years = age_days / 365`. The core `tick_lifecycle` and bridge `named_lifecycle_tick` age and remove citizens at 100 years. `CityRuntime::apply_deaths` now applies `(placement_id, slot)` deaths to household counts in core; bridge wiring and the scene lifecycle hook remain.
 
 ## 4. Home, work, and service assignment
 
@@ -164,6 +164,7 @@ Named → Retired (death / move-out / demolition)
   - modified by clinic coverage, which reduces it by up to 25%;
   - rolled from `mix64(citizen_seed, day, LIFECYCLE_VERSION)`.
 - On death: emit `CitizenDied`, retire the identity, and decrement household `residents` by 1.
+- Core applies deaths through `CityRuntime::apply_deaths(&[(placement_id, slot)])`. It sorts and dedups internally, ignores unknown homes and slots outside `0..residents`, clamps `workers` to the new resident count, and returns the number applied. Capacity is unchanged; the named pool and save data are not touched.
 - The vacancy can be refilled by normal move-in later; there are no births in v1.
 - Lifecycle is **off by default** in the existing benchmark profiles and **on** in a dedicated `lifecycle` scenario. This keeps the pinned city-loop checksums stable until the slice that intentionally re-baselines them.
 - Death runs only for named citizens. The named pool is a story sample, not a demographic model; city-scale mortality belongs to the cohort layer.
@@ -303,6 +304,7 @@ The existing world JSON `population` object gets an optional sibling `named_citi
 - Job view matches household assignment counts.
 - Variance clamps to `[-8, 8]`.
 - Death roll is stable and band rates are ordered.
+- Household death application: valid deaths reduce residents/workers, duplicates apply once, unknown homes and out-of-range slots are ignored, and an empty slice is a no-op.
 
 ### Integration
 
@@ -376,7 +378,7 @@ The existing world JSON `population` object gets an optional sibling `named_citi
 | **N1 — Identity layer (derived)** | Deterministic ids, names, household slot sync, read-only bridge | **Done** — PR #98; 500-resident city produces stable names; `cargo test -p core_city named`; no save or checksum change; 4k identities generate in < 100 ms under the debug test guard |
 | **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | **Done — PR #108/#126/#135; follow camera, EN/DE card, age/employment rows, and content display names** |
 | **N3 — Materialization** | Active pool, hysteresis, route cache, fade, active cap | **Partial — selection core, bridge, F4 overlay, hysteresis/pinning, change budget, and marker fades done ([[73 - Materialization Core]]); routes/agents remain** |
-| **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | **Partial — PR #145/#150 plus lifecycle bridge tick; persistence #103, core `age_days`/`tick_lifecycle`, persisted age, and `named_lifecycle_tick` landed; household death application/scene hook next** |
+| **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | **Partial — PR #145/#150 plus lifecycle bridge tick; persistence #103, core `age_days`/`tick_lifecycle`, persisted age, `named_lifecycle_tick`, and core household death application landed; bridge death wiring, scene hook, and re-baseline next** |
 | **N5 — Cohort bridge (later)** | Sample from cohorts, district stories, 1M identity store | 1M cohort benchmark unchanged; materialization near camera; no per-citizen tick |
 
 ### N1 checks
@@ -463,13 +465,16 @@ Not yet implemented: rendering per-citizen job/age rows, per-slot job titles, an
 
 `NamedSave` v1 stores `format_version`, `seed`, `max`, and sorted identity records (`id`, `placement_id`, `slot`, `name`). The bridge writes an optional `named_citizens` object after `population`, checks the seed, syncs with the loaded households, drops orphans, and commits atomically with the other stores. Old saves load an empty pool that fills on demand. Save/load results expose `named`, `named_max`, and `named_checksum`; population/city checksums are unchanged. See [[70 - Named Persistence]].
 
-The bridge now exposes persisted age: `named_citizens_for` returns `age_days` and `age_years`, and `named_citizens_state` reports average/oldest age. No deaths are applied to households yet.
+The bridge now exposes persisted age: `named_citizens_for` returns `age_days` and `age_years`, and `named_citizens_state` reports average/oldest age.
 
-Core aging/death persist `age_days`; the scene lifecycle hook, death-to-household application, events, and a lifecycle-on baseline remain open.
+Core death application landed as `CityRuntime::apply_deaths(&[(u64, u32)])`. It is a pure household operation: sorted/deduped internally, unknown homes and out-of-range slots ignored, `residents` reduced per valid death, `workers` clamped, `capacity` unchanged, return value the number applied. Named identities and the save format are not touched.
+
+Still open: the bridge/scene lifecycle hook must collect removed `(placement_id, slot)` identities (today `LifecycleTick` only reports a count), feed them into `apply_deaths` in the same tick, emit `CitizenDied`, and re-baseline a lifecycle-on baseline intentionally (the default profiles stay lifecycle-off).
 
 ### N4 checks
 
 - Save/load roundtrip and tolerant old save — pass ([[70 - Named Persistence]]).
+- Core household death application (`cargo test -p core_city population` or the `deaths_*` tests) — pass.
 - Lifecycle scenario with fixed seed and expected events — open.
 - `bench_city_loop.sh` baseline unchanged for lifecycle-off — pass.
 - Docs 70 and the named save/load result fields are documented.
