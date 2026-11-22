@@ -26,10 +26,10 @@ In:
 - a `City Dashboard` overlay with population, district, work, wellbeing, services, treasury, industry, roads, and construction sections;
 - a District section that queries `district_summary` around the Mayor camera target or the selected building with a 256 m radius once per dashboard rebuild;
 - an `F6` District focus toggle: camera focus by default, selection focus when a building is selected, with the selected placement's centre as the query centre and an F6 return action;
-- an `F7` district heatmap overlay that queries `district_heatmap` at 512 m / 32 m around the same focus, renders up to 1,024 pooled cells, and shows a localized status/legend line;
+- an `F7` district heatmap overlay that queries `district_heatmap` at 512 m / 32 m around the same focus, renders up to 1,024 pooled cells, and shows a localized status/legend line; `Shift+F7` cycles Population, Jobs, and Happiness with metric-aware colours and peak values;
 - `F1` toggles the dashboard; `Esc` closes it; entering Architect Mode closes it;
 - a world-scene smoke that checks the advisor warning, dashboard text, district values and labels, the camera/selection focus toggle, localized advisor titles, and the heatmap grid/instance/teardown contract;
-- markers `dashboard=ok`, `district_ui=ok`, `district_select=ok`, and `heatmap_ui=ok`, enforced by `scripts/smoke_world_scene.sh`.
+- markers `dashboard=ok`, `district_ui=ok`, `district_select=ok`, `heatmap_ui=ok`, and `heatmap_modes=ok`, enforced by `scripts/smoke_world_scene.sh`.
 
 Out:
 
@@ -37,7 +37,7 @@ Out:
 - clickable advice that selects or centres a building;
 - acknowledged, dismissed, or persisted notifications;
 - charts, history, trend lines, or time-series;
-- a new dashboard panel or window; the focus controls live inside the existing District section (four strings were added to the 230-key world table); developer-only debug text stays English;
+- a new dashboard panel or window; the focus controls live inside the existing District section (four strings were added to the 234-key world table); developer-only debug text stays English;
 - automated pause, advisor actions, or policy changes;
 - per-citizen or per-household advice.
 
@@ -204,13 +204,17 @@ Colors: critical red, warning amber, info green. `Esc` closes the panel before o
 
 `F7` toggles a read-only in-world heatmap. It is independent of the dashboard: it does not open, close, or rebuild the panel, and the dashboard District section is unchanged.
 
+**Metric modes.** `Shift+F7` cycles the displayed metric in the order **Population → Jobs → Happiness**. Population and jobs are counted per cell; happiness is resident-weighted and shown as a percentage. The query radius/cell size stay fixed, and each mode uses its own normalisation and rebuild key, so switching never reuses the previous mode's colours. The legend reports the active metric and peak. The smoke checks all three modes, distinct rebuild keys, EN/DE labels, and teardown.
+
+
 - **Query:** `district_heatmap(SEED, center.x, center.z, 512.0, 32.0)`, where the centre is `_materialization_center()` (the selected building or the Mayor camera target). `ceil(1024 / 32) = 32`, so the grid is 32 × 32 = **1,024 cells**, exactly the renderer cap.
 - **Refresh:** opening queries immediately; while visible `_process` refreshes on a `0.5 s` accumulator. Closing frees the pooled node and clears the height/state caches.
 - **Render:** one `DistrictHeatmap` root owns one `MultiMeshInstance3D` with a flat `BoxMesh` (`31 m × 0.05 m × 31 m`). The pool grows `instance_count` once and uses `visible_instance_count` for the current nonzero cells, so panning reuses the same buffer. `use_colors` and an unshaded, translucent, vertex-color material tint each cell.
 - **Cells:** only cells with `population > 0` are instanced; zero cells stay hidden. Cells whose sampled `world_height_at` is negative are skipped. Each visible cell sits at `ground + 0.15 m`.
 - **Colors:** `population / peak` interpolates blue (`0.5`) → yellow (`0.5`) → red (`1.0`); alpha stays below `0.75` so terrain and buildings remain readable. The peak cell is always red.
 - **Bounds:** the pool is capped at `HEATMAP_MAX_CELLS = 1024` instances. The ground cache is keyed by rounded cell centre, capped at 2 × 1,024 entries, and invalidated by `terrain_delta_checksum` so terrain edits cannot leave stale heights.
-- **HUD:** one localized status line is always present: `District heatmap: on/off · {cells} cells · peak {peak}` (`cells` is the number of rendered, nonzero cells). When on, a legend line gives the blue/yellow/red scale and the `512 m / 32 m` query. With no residents in range the localized empty line replaces the legend detail; a bridge error shows the localized `unavailable` line with its code.
+- **Metrics:** `F7` opens on Population; `Shift+F7` cycles Population → Jobs → Happiness. Each mode normalises by that metric's peak positive cell value, uses the same blue→yellow→red ramp, and names the active metric in the HUD. Happiness is shown as a percentage and is already clamped to 0–1 by the bridge; population and jobs use integer counts. The rebuild key includes the metric, so switching modes redraws the bounded pool without leaking instances. Hiding the overlay keeps the chosen metric for the next open.
+- **HUD:** one localized status line is always present: `District heatmap: on/off · {cells} cells · peak {peak}` (`cells` is the number of rendered, nonzero cells), plus a metric line such as `Metric: Population · peak 2 · Shift+F7`. When on, a legend line gives the blue/yellow/red scale and the `512 m / 32 m` query. With no residents in range the localized empty line replaces the legend detail; a bridge error shows the localized `unavailable` line with its code.
 
 ## 6. Smoke
 
@@ -230,12 +234,13 @@ Colors: critical red, warning amber, info green. `Esc` closes the panel before o
 - the nonzero cell count equals `heatmap_cells`, the peak matches the bridge cells, the single pooled `DistrictHeatmapPool` node reports the same `visible_instance_count`, the pool stays at or below 1,024 instances, and the checksum is 16 hex characters and repeatable;
 - the HUD shows the EN and DE on/off status, the legend, the `F7` help text, and the localized empty line when the fixture has no populated cell;
 - a second `F7` frees the pool and caches and returns the root to zero children;
-- markers include `dashboard=ok`, `district_ui=ok`, `district_select=ok`, and `heatmap_ui=ok`; the script requires all four.
+- `Shift+F7` cycles jobs and happiness; each mode asserts the metric name, a distinct metric-prefixed rebuild key, the payload-derived peak and cell/instance counts, deterministic colour-helper output, and EN/DE labels before wrapping back to population;
+- markers include `dashboard=ok`, `district_ui=ok`, `district_select=ok`, `heatmap_ui=ok`, and `heatmap_modes=ok`; the script requires all five.
 
 Final marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok trades=ok render=ok structure=ok age=ok research=ok starter=ok named=ok occupancy=ok industry=ok utilities=ok services=ok economy=ok dashboard=ok district_ui=ok district_select=ok heatmap_ui=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok trades=ok render=ok structure=ok age=ok research=ok starter=ok named=ok occupancy=ok industry=ok utilities=ok services=ok economy=ok dashboard=ok district_ui=ok district_select=ok heatmap_ui=ok heatmap_modes=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 ## 7. Tests
@@ -249,7 +254,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 ## 8. Limits
 
 - Advisor advice is city-wide; the dashboard District section is read-only and camera- or selection-centred (256 m), not a selectable settlement/district panel. It follows the selected building but does not persist the focus choice or follow a moving citizen. No building drill-down from advice.
-- The heatmap is camera/selection-centred (`_materialization_center`, 512 m), read-only, and does not aggregate cohorts, settlements, or off-screen districts. It draws one density metric (population) and only nonzero cells; needs, jobs, and happiness are in the bridge payload but not rendered yet. The F7 overlay, status line, legend, and unavailable/empty text are localized and pooled through one `MultiMesh`.
+- The heatmap is camera/selection-centred (`_materialization_center`, 512 m), read-only, and does not aggregate cohorts, settlements, or off-screen districts. It renders Population, Jobs, or Happiness (one at a time) and only nonzero cells; food, water, rest, employment, and housing are not heatmap modes. Headless Godot returns default MultiMesh transform/colour readback, so the smoke validates the deterministic payload-derived value/peak and colour helper instead of reading instance colours. The F7 overlay, metric line, status line, legend, and unavailable/empty text are localized and pooled through one `MultiMesh`.
 - District policies are data only: the bridge can create, update, remove, and list them, but no UI, simulation, advisor, treasury, or world save consumes them. There is no policy overlay, selection, priority rule, or effect on tax, funding, construction, or blueprint placement.
 - Thresholds are fixed; no difficulty, policy, or player preference.
 - Advice is not persisted, acknowledged, or suppressed.
