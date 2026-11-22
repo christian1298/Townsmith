@@ -28,6 +28,7 @@ tags:
 | Bench gates | F-031..F-034, F-063, F-066, F-067 | Fixed | PR #239; movement `b50a763030007ef1`, infra `a920cf0c4eb9a4f1`, save-stress `0ce611887161ff62` |
 | Bridge parity, seeds, acceptance volume, docs | F-029, F-030, F-056..F-062 | Fixed | PR #240; 928 workspace tests |
 | Godot shell: HUD cadence + backlog clamp, streamer-derived chunk cells, bench route helper, headless/editor guards, industry animation cache, deterministic smoke budgets | F-035..F-038, F-068..F-071 | Fixed | PR #243; `WORLD_SCENE … chunk_cells=ok status=ok`, `BENCH_SCREEN status=ok scenes=3 rating=playable`, `STREAM_ORDER_SMOKE status=ok checksum=ea5bc6f9 commits=59 loaded=30 stages=4`, `MOVEMENT_STRESS_SMOKE status=ok pass1_checksum=f29c282d`, `MP_CLIENT status=ok checksum=f17ed4f094dad32f`; default flyover route runs 263 frames with no `look_at` diagnostic |
+| Mod validation guards | F-027, F-028 | Fixed | This PR; duplicate tech ids reject with `invalid_tech_tree`, manifest sets cap at 10,000 and chains at 512; 946 workspace tests |
 
 ### Deferred
 
@@ -37,7 +38,7 @@ tags:
 | F-010, F-011, F-023 | Cohort integration semantics (NaN, multi-day dt, fractional employment carry) change pinned cohort/dormant checksums and documented behavior; needs a balance pass. |
 | F-015, F-016 | Refund-on-failed-mark-paid and the no-treasury utility/service fallback change charges/checksums. Needs an economy decision, not a mechanical fix. |
 | F-017..F-020, F-022, F-043..F-051, F-053, F-055 | World/mesh/blueprint/structure cluster; design changes (delta reload semantics, winding, palette/blueprint caps, basement depth) need focused PRs and golden updates. |
-| F-024..F-028 | Scale work (flow-field cache, service spatial index, graph build, mod duplicate/recursion guards) needs benchmarks and mod-format decisions. |
+| F-024..F-026 | Scale work (flow-field cache, service spatial index, graph build) needs benchmarks. |
 | F-072, F-082, F-084 | Operational: the generated script UID sidecars are tracked; the extension was rebuilt and the world/bench/stream/movement/MP smokes were run in this session. |
 
 ## How to use this document
@@ -115,8 +116,8 @@ Fix: treat write errors like read errors (`session_ended` → end session, keep 
 
 ### Cluster G — mod/content validation gaps (D-006)
 
-- **F-027** `crates/core_city/src/research.rs:81-88,323-327` — duplicate tech-node IDs in mod trees are silently collapsed (`BTreeMap` deserialize keeps the last; `validate()` runs after the collapse, so it can never detect). Contradicts the D-006 duplicate-rejection pattern used in `registry.rs`/`manifest.rs`. Fix: deserialize into `Vec<TechNode>` and reject repeated ids before building the map.
-- **F-028** `crates/core_city/src/manifest.rs:460-502` — `detect_cycles` recursion depth unbounded in manifest count; a very deep dependency chain can stack-overflow `visit`. Fix: node-count cap on the set.
+- **F-027 (fixed)** `crates/core_city/src/research.rs:81-88,323-327` — duplicate tech-node IDs in mod trees are silently collapsed (`BTreeMap` deserialize keeps the last; `validate()` runs after the collapse, so it can never detect). Contradicts the D-006 duplicate-rejection pattern used in `registry.rs`/`manifest.rs`. Fix: deserialize into a list before building the map and reject repeated ids with `invalid_tech_tree`; tests cover raw duplicate map keys and array form. Valid trees keep canonical map serialization.
+- **F-028 (fixed)** `crates/core_city/src/manifest.rs:460-502` — `detect_cycles` recursion depth unbounded in manifest count; a very deep dependency chain can stack-overflow `visit`. Fix: `MAX_MANIFESTS = 10_000` and `MAX_DEPENDENCY_DEPTH = 512`; cycle detection threads depth and returns stable `TooManyManifests`/`DependencyDepthExceeded` errors. Tests cover a 20,000-manifest chain, a valid 512 chain, and a rejected 513 chain.
 
 ### Cluster H — bridge state consistency (godot_ext)
 

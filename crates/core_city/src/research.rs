@@ -9,7 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::progression::Age;
 
@@ -67,12 +68,90 @@ pub struct TechNode {
 }
 
 /// A validated, data-driven technology tree.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// The JSON form is a `nodes` map keyed by node id. Deserialization also
+/// accepts a `nodes` array for authoring convenience, but every parse path
+/// rejects repeated node ids instead of silently collapsing them. Valid trees
+/// always serialize in the canonical map form.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TechTree {
     /// Tree format version.
     pub format_version: u16,
     /// Nodes keyed by id.
     pub nodes: BTreeMap<String, TechNode>,
+}
+
+/// Unchecked tree form that preserves repeated map keys and array entries.
+#[derive(Deserialize)]
+struct RawTechTree {
+    format_version: u16,
+    #[serde(deserialize_with = "deserialize_tech_nodes")]
+    nodes: Vec<(String, TechNode)>,
+}
+
+impl RawTechTree {
+    fn into_tree(self) -> Result<TechTree, ResearchError> {
+        let mut nodes = BTreeMap::new();
+        for (id, node) in self.nodes {
+            if nodes.insert(id, node).is_some() {
+                return Err(ResearchError::InvalidTree("duplicate tech node id"));
+            }
+        }
+        Ok(TechTree {
+            format_version: self.format_version,
+            nodes,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for TechTree {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        RawTechTree::deserialize(deserializer)?
+            .into_tree()
+            .map_err(de::Error::custom)
+    }
+}
+
+fn deserialize_tech_nodes<'de, D>(deserializer: D) -> Result<Vec<(String, TechNode)>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct NodesVisitor;
+
+    impl<'de> Visitor<'de> for NodesVisitor {
+        type Value = Vec<(String, TechNode)>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a map keyed by node id or an array of technology nodes")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut nodes = Vec::with_capacity(map.size_hint().unwrap_or(0));
+            while let Some(entry) = map.next_entry::<String, TechNode>()? {
+                nodes.push(entry);
+            }
+            Ok(nodes)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut nodes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(node) = seq.next_element::<TechNode>()? {
+                nodes.push((node.id.clone(), node));
+            }
+            Ok(nodes)
+        }
+    }
+
+    deserializer.deserialize_any(NodesVisitor)
 }
 
 impl TechTree {
@@ -320,8 +399,12 @@ impl TechTree {
     }
 
     /// Parse and validate a technology tree.
+    ///
+    /// Accepts `nodes` as a map keyed by node id, or as an array of nodes.
+    /// Repeated ids are rejected with [`ResearchError::InvalidTree`] (code
+    /// `invalid_tech_tree`) before the map is built.
     pub fn from_json(json: &str) -> Result<Self, ResearchError> {
-        let tree: Self = serde_json::from_str(json)?;
+        let tree = serde_json::from_str::<RawTechTree>(json)?.into_tree()?;
         tree.validate()?;
         Ok(tree)
     }
@@ -802,6 +885,65 @@ mod tests {
         assert_eq!(decoded.checksum(), store.checksum());
         let tree_json = tree.to_json_pretty().expect("tree json");
         assert_eq!(TechTree::from_json(&tree_json).expect("tree"), tree);
+    }
+
+    #[test]
+    fn duplicate_tech_node_ids_in_a_map_are_rejected() {
+        let json = r#"{
+            "format_version": 1,
+            "nodes": {
+                "a": {"id": "a", "name": "A", "age": "wood", "cost": 10.0},
+                "a": {"id": "a", "name": "A again", "age": "wood", "cost": 10.0}
+            }
+        }"#;
+        let error = TechTree::from_json(json).expect_err("duplicate map key");
+        assert_eq!(error.code(), "invalid_tech_tree");
+        assert!(matches!(
+            error,
+            ResearchError::InvalidTree(message) if message.contains("duplicate")
+        ));
+        assert!(serde_json::from_str::<TechTree>(json).is_err());
+    }
+
+    #[test]
+    fn duplicate_tech_node_ids_in_an_array_are_rejected() {
+        let json = r#"{
+            "format_version": 1,
+            "nodes": [
+                {"id": "a", "name": "A", "age": "wood", "cost": 10.0},
+                {"id": "a", "name": "A again", "age": "wood", "cost": 10.0}
+            ]
+        }"#;
+        let error = TechTree::from_json(json).expect_err("duplicate node id");
+        assert_eq!(error.code(), "invalid_tech_tree");
+        assert!(serde_json::from_str::<TechTree>(json).is_err());
+    }
+
+    #[test]
+    fn array_nodes_are_accepted_and_serialize_as_the_canonical_map() {
+        let json = r#"{
+            "format_version": 1,
+            "nodes": [
+                {"id": "b", "name": "B", "age": "wood", "cost": 10.0},
+                {
+                    "id": "a",
+                    "name": "A",
+                    "age": "wood",
+                    "cost": 10.0,
+                    "prerequisites": ["b"]
+                }
+            ]
+        }"#;
+        let tree = TechTree::from_json(json).expect("array form");
+        assert_eq!(tree.len(), 2);
+        let encoded = tree.to_json_pretty().expect("tree json");
+        assert!(
+            encoded.starts_with("{\n  \"format_version\": 1,\n  \"nodes\": {\n"),
+            "{encoded}"
+        );
+        let decoded: TechTree = serde_json::from_str(&encoded).expect("map form");
+        assert_eq!(decoded, tree);
+        assert_eq!(decoded.to_json_pretty().expect("tree json"), encoded);
     }
 
     #[test]

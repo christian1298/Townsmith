@@ -91,7 +91,7 @@ The first data contracts are in `content/`:
 Current output: `CONTENT_SCHEMA files=4 entries=32 errors=0 status=ok`; self-test `cases=13 status=ok`. Entries are 23 base definitions, one manifest, and 8 example-pack definitions.
 
 > [!warning] Contract, not runtime
-> The runtime registry loads and validates the bundled base content. A v0 mod manifest (`core_city::manifest`) parses `content/mods/*.mod.json`, validates namespaced IDs, semver-like versions, safe relative content paths, dependency sets/cycles, and duplicate content IDs across registries; `validate_set`/`merged_content` are in-memory only (checksum `7d907860f7e7d20d` for the example).
+> The runtime registry loads and validates the bundled base content. A v0 mod manifest (`core_city::manifest`) parses `content/mods/*.mod.json`, validates namespaced IDs, semver-like versions, safe relative content paths, dependency sets/cycles, and duplicate content IDs across registries; `validate_set`/`merged_content` are in-memory only (checksum `7d907860f7e7d20d` for the example). `validate_set` also caps a set at 10,000 manifests (`TooManyManifests`) and a dependency chain at 512 manifests (`DependencyDepthExceeded`), so oversized or deeply chained graphs fail with a stable error before the recursive cycle walk can exhaust the stack.
 >
 > `core_city::pack::ContentPack` adds the first in-memory pack: `from_json(manifest, materials, rooms, props)` validates the pack registry, requires every content ID to use the manifest's namespace (the part before the first `:`; `base` is reserved), and rejects collisions with base content. `merged_with_base()` returns a merged registry (no overrides, no load-order wins) with pack checksum `ad4c645869a411ed` and merged checksum `330a538d07805b50` for the example (8 pack definitions, 31 merged). Pack content is validated in isolation, so pack props cannot reference base rooms in v0.
 >
@@ -203,6 +203,7 @@ example_copper_age/
 - Duplicate IDs: the later mod cannot silently replace an existing ID. It must use a new ID or declare an explicit override (allowed only for resource packs and, with a warning, for data patches).
 - Missing dependencies: disable the mod and show a clear error.
 - Version mismatch: disable with a message; do not attempt partial loading.
+- Oversized or pathological graphs: `validate_set` rejects more than 10,000 manifests (`TooManyManifests`) and dependency chains deeper than 512 manifests (`DependencyDepthExceeded`); reject the set and report the error rather than traversing it.
 - Broken blueprint: load a placeholder, preserve the instance, and let the player repair or remove it.
 
 ### Content hash

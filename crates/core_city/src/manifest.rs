@@ -63,6 +63,18 @@ use crate::registry::{ContentRegistry, Fnv1a};
 /// Mod-manifest format version understood by this build.
 pub const MOD_FORMAT_VERSION: u32 = 1;
 
+/// Maximum manifests accepted in one validated set.
+///
+/// The cap bounds memory and traversal work for a hostile or broken mod
+/// directory before dependency validation starts.
+pub const MAX_MANIFESTS: usize = 10_000;
+
+/// Maximum dependency-chain depth accepted by cycle detection.
+///
+/// The traversal is recursive, so the cap keeps a pathological chain from
+/// overflowing the stack. A chain of exactly this many manifests is valid.
+pub const MAX_DEPENDENCY_DEPTH: usize = 512;
+
 /// Relative paths to the content documents a mod contributes.
 ///
 /// The named files use the same document shapes as `content/base/*.json`
@@ -268,17 +280,26 @@ impl ModManifest {
 
 /// Validate a collection of manifests as one dependency graph.
 ///
-/// An empty set is valid. Every manifest is re-validated first; then the set
-/// rejects duplicate IDs, dependencies that are not present, and dependency
-/// cycles. Dependency IDs must match exactly; v0 does not parse version
-/// ranges. The error for a cycle lists the cycle starting at the repeated ID,
-/// for example `["a:b", "a:c", "a:b"]`.
+/// An empty set is valid. More than [`MAX_MANIFESTS`] manifests are rejected
+/// before any graph work. Every manifest is re-validated next; then the set
+/// rejects duplicate IDs, dependencies that are not present, dependency chains
+/// deeper than [`MAX_DEPENDENCY_DEPTH`], and dependency cycles. Dependency IDs
+/// must match exactly; v0 does not parse version ranges. The error for a cycle
+/// lists the cycle starting at the repeated ID, for example
+/// `["a:b", "a:c", "a:b"]`.
 ///
 /// # Errors
 ///
-/// Returns [`ManifestError`] from [`ModManifest::validate`] or when the set has
-/// a duplicate ID, a missing dependency, or a cycle.
+/// Returns [`ManifestError`] from [`ModManifest::validate`] or when the set is
+/// too large, has a duplicate ID, a missing dependency, a dependency chain
+/// that is too deep, or a cycle.
 pub fn validate_set(manifests: &[ModManifest]) -> Result<(), ManifestError> {
+    if manifests.len() > MAX_MANIFESTS {
+        return Err(ManifestError::TooManyManifests {
+            found: manifests.len(),
+            max: MAX_MANIFESTS,
+        });
+    }
     let mut by_id: BTreeMap<&str, &ModManifest> = BTreeMap::new();
     for manifest in manifests {
         manifest.validate()?;
@@ -388,6 +409,20 @@ pub enum ManifestError {
         /// Missing dependency.
         dependency: String,
     },
+    /// The set contains more manifests than [`MAX_MANIFESTS`].
+    TooManyManifests {
+        /// Number of manifests supplied.
+        found: usize,
+        /// Maximum accepted count.
+        max: usize,
+    },
+    /// A dependency chain exceeds [`MAX_DEPENDENCY_DEPTH`].
+    DependencyDepthExceeded {
+        /// Depth reached, before the chain was cut off.
+        depth: usize,
+        /// Maximum accepted depth.
+        max: usize,
+    },
     /// Dependencies form a cycle within the validated set.
     DependencyCycle {
         /// Cycle in traversal order, with the repeated starting ID last.
@@ -432,6 +467,13 @@ impl fmt::Display for ManifestError {
             Self::MissingDependency { id, dependency } => {
                 write!(formatter, "mod {id} requires missing mod {dependency}")
             }
+            Self::TooManyManifests { found, max } => {
+                write!(formatter, "mod set has {found} manifests; the limit is {max}")
+            }
+            Self::DependencyDepthExceeded { depth, max } => write!(
+                formatter,
+                "dependency chain reached depth {depth}; the limit is {max}"
+            ),
             Self::DependencyCycle { cycle } => {
                 write!(formatter, "dependency cycle: {}", cycle.join(" -> "))
             }
@@ -463,7 +505,14 @@ fn detect_cycles(manifests: &BTreeMap<&str, &ModManifest>) -> Result<(), Manifes
         manifests: &BTreeMap<&'a str, &'a ModManifest>,
         states: &mut BTreeMap<&'a str, VisitState>,
         stack: &mut Vec<&'a str>,
+        depth: usize,
     ) -> Result<(), ManifestError> {
+        if depth > MAX_DEPENDENCY_DEPTH {
+            return Err(ManifestError::DependencyDepthExceeded {
+                depth,
+                max: MAX_DEPENDENCY_DEPTH,
+            });
+        }
         match states.get(id).copied() {
             Some(VisitState::Done) => return Ok(()),
             Some(VisitState::Visiting) => {
@@ -485,7 +534,7 @@ fn detect_cycles(manifests: &BTreeMap<&str, &ModManifest>) -> Result<(), Manifes
                 manifest.dependencies.iter().map(String::as_str).collect();
             dependencies.sort_unstable();
             for dependency in dependencies {
-                visit(dependency, manifests, states, stack)?;
+                visit(dependency, manifests, states, stack, depth + 1)?;
             }
         }
         stack.pop();
@@ -496,7 +545,7 @@ fn detect_cycles(manifests: &BTreeMap<&str, &ModManifest>) -> Result<(), Manifes
     let mut states = BTreeMap::new();
     let mut stack = Vec::new();
     for id in manifests.keys().copied() {
-        visit(id, manifests, &mut states, &mut stack)?;
+        visit(id, manifests, &mut states, &mut stack, 1)?;
     }
     Ok(())
 }
@@ -958,6 +1007,46 @@ mod tests {
             error,
             ManifestError::DependencyCycle { cycle }
                 if cycle == ["example:self", "example:self"]
+        ));
+    }
+
+    fn chain(len: usize) -> Vec<ModManifest> {
+        let template = manifest_with("example:m00000", &[]);
+        (0..len)
+            .map(|index| {
+                let mut manifest = template.clone();
+                manifest.id = format!("example:m{index:05}");
+                if index + 1 < len {
+                    manifest.dependencies = vec![format!("example:m{:05}", index + 1)];
+                }
+                manifest
+            })
+            .collect()
+    }
+
+    #[test]
+    fn oversized_manifest_sets_are_rejected_before_traversal() {
+        // A 20,000-link chain would overflow the stack if recursion started;
+        // the count cap rejects it before any graph work.
+        let manifests = chain(20_000);
+        let error = validate_set(&manifests).expect_err("oversized set");
+        assert!(matches!(
+            error,
+            ManifestError::TooManyManifests { found, max }
+                if found == 20_000 && max == MAX_MANIFESTS
+        ));
+    }
+
+    #[test]
+    fn dependency_depth_is_bounded() {
+        validate_set(&chain(MAX_DEPENDENCY_DEPTH)).expect("maximal-depth chain is valid");
+
+        let error =
+            validate_set(&chain(MAX_DEPENDENCY_DEPTH + 1)).expect_err("chain exceeds depth cap");
+        assert!(matches!(
+            error,
+            ManifestError::DependencyDepthExceeded { depth, max }
+                if depth == MAX_DEPENDENCY_DEPTH + 1 && max == MAX_DEPENDENCY_DEPTH
         ));
     }
 
