@@ -78,7 +78,7 @@ pub struct IndustryStore {
 }
 ```
 
-`add_site(placement_id, kind)` accepts a placement with at least one job slot; the bridge enforces that. A site may be designated while the building is still under construction: the beacon appears immediately, but production starts only after the building completes and the household runtime staffs it. Replacing the kind keeps the city stock and resets the site’s lifetime counter.
+`industry_add_site(seed, placement_id, kind)` accepts a placement with at least one job slot; the bridge enforces that. A site may be designated while the building is still under construction: the beacon appears immediately, but production starts only after the building completes and the household runtime staffs it. Replacing the kind keeps the city stock and resets the site’s lifetime counter.
 
 ### Staffing
 
