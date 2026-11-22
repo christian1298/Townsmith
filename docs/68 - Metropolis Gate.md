@@ -501,6 +501,14 @@ The route is `benchmarks/routes/metropolis_gate_v1.json`; setup is deterministic
 > [!warning] This still is not gate evidence
 > It is **synthetic boxes**, not real voxel buildings; no LOD/impostors, streaming, shadows, GI/SSAO, simulation, or save/load; GL Compatibility rather than Forward+; an RTX 4080 rather than the RTX 3060 reference rig; and a single run. It measures frame budget for a 250k-instance static city, not M5. It does not close G-01, G-02, G-03, G-04, G-07, or G-08.
 
+### 7.9 Streaming-scale data harness
+
+`cargo run --release -p townsmith-bench --bin streaming_scale` models a deterministic 10 km × 10 km (100 km²) area on a 10.24 km out-and-back route. It keeps a bounded resident set with near/mid/far rings (1/4/7 chunks, LOD steps 1/4/8), a 256-chunk resident cap, a 32-chunk generation budget per step, and a 384-entry mesh cache.
+
+Current developer-machine result: 525 chunks visited, 775 generated, 833 skipped by the generation budget, peak resident 225, peak mesh bytes 280,900,200 (~281 MB), resident bytes peak 325,137,000, generate mean 280.3 ms, mesh mean 17.4 ms, step p95 517.5 ms, elapsed 12.35 s, checksum `4dfb48204244e377`. The full 100 km² extrapolation is ~1,526 chunks / ~22 s single-threaded. The harness reports `status=capped` when the generation budget skips chunks; that is the measured bounded behaviour, not a failure.
+
+This is a **data harness**: no renderer, GPU, frame pacing, buildings, or simulation. It is not the 1M/30 FPS gate and does not close G-11.
+
 ### 7.7 Voxel-proxy setup and frame-budget harness
 
 `godot/metropolis_voxel_gate.gd` builds three deterministic `MultiMesh` tiers from the Phase 0 demo voxel hut: 1k, 5k, and 20k instances (26k total). Each tier is split into static distance bands: **LOD 0 near** (`<=150 m`, greedy hut), **LOD 1 mid** (`<=400 m`, box proxy), and **LOD 2 far** (impostor quad). The default and `--lod` modes are static. `--switch` adds a runtime mode: one 26k layout, three reused `MultiMeshInstance3D` nodes, and deterministic distance reassignment as a 12-sample serpentine camera route crosses 50 m cells. It reports per-tier/per-LOD instances, quads, triangles, setup ms, instance-buffer bytes, static-memory delta, and an FNV checksum. `scripts/bench_metropolis_voxel_gate.sh --setup-only` runs headless twice and fails if the layout drifts; the short/full modes capture display-backed frame times with hardware provenance.

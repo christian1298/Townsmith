@@ -228,6 +228,10 @@ cargo run --release -p townsmith-bench -- 100
 # Worldgen/streaming microbenchmark
 cargo run --release -p townsmith-bench --bin worldgen
 
+# 100 km² chunk streaming/LOD data-scale harness (not the render gate)
+cargo run --release -p townsmith-bench --bin streaming_scale
+cargo run --release -p townsmith-bench --bin streaming_scale -- --smoke
+
 # 1M cohort tick microbenchmark
 cargo run --release -p townsmith-bench --bin cohort
 
