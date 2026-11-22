@@ -258,6 +258,10 @@ cargo run --release -p townsmith-bench --bin infra_cost -- --smoke
 # 1M data-scale harness (not the render gate)
 cargo run --release -p townsmith-bench --bin metropolis -- --smoke
 
+# 1M population / 250k placement core save-load harness
+cargo run --release -p townsmith-bench --bin save_1m -- --smoke
+cargo run --release -p townsmith-bench --bin save_1m
+
 # 250k placement-record scale harness
 cargo run --release -p townsmith-bench --bin placements -- --smoke
 
