@@ -10,7 +10,34 @@ const POWER_INDUSTRIAL: u64 = 84;
 const WATER_MODERN: u64 = 510;
 const POWER_MODERN: u64 = 640;
 
+/// Pinned FNV-1a checksum over the whole fixture report. A change here is
+/// either an intentional cost-table/fixture change or a regression; update the
+/// pin and `docs/77` together when it is intentional.
+const SMOKE_CHECKSUM: u64 = 0xa920_cf0c_4eb9_a4f1;
+
 fn main() {
+    let output = output();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output).expect("infra cost json")
+    );
+    if std::env::args().any(|argument| argument == "--smoke") {
+        let checksum = checksum_json(&output);
+        let pinned = checksum == SMOKE_CHECKSUM;
+        println!(
+            "INFRA_COST_SMOKE checksum={checksum:016x} expected={SMOKE_CHECKSUM:016x} pinned={pinned} status={}",
+            if pinned { "ok" } else { "failed" }
+        );
+        if !pinned {
+            eprintln!(
+                "infra_cost smoke: checksum {checksum:016x} does not match pinned {SMOKE_CHECKSUM:016x}"
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+fn output() -> serde_json::Value {
     let industrial = report(
         "industrial",
         20_000,
@@ -27,19 +54,11 @@ fn main() {
         POWER_MODERN,
         (49, 196, 144, 144),
     );
-    let output = serde_json::json!({
+    serde_json::json!({
         "scene": "infra_cost",
         "scenarios": [industrial, modern],
         "status": "ok",
-    });
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&output).expect("infra cost json")
-    );
-    if std::env::args().any(|argument| argument == "--smoke") {
-        let checksum = checksum_json(&output);
-        println!("INFRA_COST_SMOKE checksum={checksum:016x} status=ok");
-    }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -121,5 +140,12 @@ mod tests {
         );
         assert_eq!(modern["construction_cost"], 8_261_000.0);
         assert_eq!(modern["upkeep_per_day"], 5_948.0);
+    }
+
+    #[test]
+    fn smoke_path_pins_the_report_checksum() {
+        let output = output();
+        assert_eq!(output["status"], "ok");
+        assert_eq!(checksum_json(&output), SMOKE_CHECKSUM);
     }
 }

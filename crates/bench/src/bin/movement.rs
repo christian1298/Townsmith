@@ -40,6 +40,14 @@ const SAMPLE_TIMES_S: [f64; 3] = [0.0, 30.0, 120.0];
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 
+/// Pinned checksums for the documented default smoke fixture (400 homes,
+/// 2,000 citizens). A change here is either an intentional movement/fixture
+/// change or a regression; update these pins and `docs/19` together when it is
+/// intentional. Fixture overrides skip the pin and only check determinism.
+const SMOKE_MOTION_CHECKSUM: u64 = 0xb50a_7630_3000_7ef1;
+const SMOKE_CACHE_CHECKSUM: u64 = 0x84c6_9f0c_cd32_0d47;
+const SMOKE_POSITION_CHECKSUM_30S: u64 = 0xca36_728e_0c30_74cf;
+
 fn main() {
     let homes = arg_value("--homes")
         .and_then(|value| value.parse::<usize>().ok())
@@ -81,11 +89,20 @@ fn main() {
         && rebuilt.cache_checksum() == measured.motion.cache_checksum()
         && rebuilt_positions == measured.positions[1];
 
-    let status = if deterministic { "ok" } else { "mismatch" };
+    let motion_checksum = measured.motion.checksum();
+    let cache_checksum = measured.motion.cache_checksum();
+    let position_checksum_30s = measured.position_checksums[1];
+    let pin_applies = config.is_default();
+    let pinned = !pin_applies
+        || pinned_checksums_match(motion_checksum, cache_checksum, position_checksum_30s);
+    let ok = deterministic && pinned;
+    let status = if ok { "ok" } else { "mismatch" };
     let result = serde_json::json!({
         "scene": "movement",
         "status": status,
         "deterministic": deterministic,
+        "pinned": pinned,
+        "pin_applies": pin_applies,
         "seed": SEED,
         "grid": config.grid,
         "spacing_m": SPACING_M,
@@ -113,20 +130,43 @@ fn main() {
         "checksum": format!("{:016x}", measured.motion.checksum()),
     });
 
-    if smoke && !deterministic {
-        eprintln!("movement smoke: non-deterministic results");
+    if smoke && !ok {
+        eprintln!(
+            "movement smoke: {}",
+            if !deterministic {
+                "non-deterministic results"
+            } else {
+                "pinned checksum mismatch"
+            }
+        );
+        println!(
+            "MOVEMENT_SMOKE checksum={motion_checksum:016x} cache={cache_checksum:016x} \
+             positions_30s={position_checksum_30s:016x} deterministic={deterministic} \
+             pinned={pinned} status=failed"
+        );
         println!("{}", serde_json::to_string(&result).expect("compact json"));
         std::process::exit(1);
     }
 
     if smoke {
         println!("{}", serde_json::to_string(&result).expect("compact json"));
+        println!(
+            "MOVEMENT_SMOKE checksum={motion_checksum:016x} cache={cache_checksum:016x} \
+             positions_30s={position_checksum_30s:016x} deterministic={deterministic} \
+             pinned={pinned} status=ok"
+        );
     } else {
         println!(
             "{}",
             serde_json::to_string_pretty(&result).expect("pretty json")
         );
     }
+}
+
+fn pinned_checksums_match(motion: u64, cache: u64, positions_30s: u64) -> bool {
+    motion == SMOKE_MOTION_CHECKSUM
+        && cache == SMOKE_CACHE_CHECKSUM
+        && positions_30s == SMOKE_POSITION_CHECKSUM_30S
 }
 
 /// Fixture dimensions for one benchmark run.
@@ -139,6 +179,15 @@ struct FixtureConfig {
 }
 
 impl FixtureConfig {
+    /// Whether this is exactly the documented fixture whose checksums are
+    /// pinned by `--smoke`.
+    fn is_default(self) -> bool {
+        self.grid == DEFAULT_GRID
+            && self.homes == DEFAULT_HOMES
+            && self.workplaces == DEFAULT_WORKPLACES
+            && self.citizens == DEFAULT_HOMES * RESIDENTS_PER_HOME
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.grid < 2 {
             return Err("grid must be at least 2".to_string());
@@ -535,5 +584,52 @@ mod tests {
             ..small_config()
         };
         assert!(zero_homes.validate().is_err());
+    }
+
+    #[test]
+    fn only_the_documented_fixture_is_pinned() {
+        let default = FixtureConfig {
+            grid: DEFAULT_GRID,
+            homes: DEFAULT_HOMES,
+            workplaces: DEFAULT_WORKPLACES,
+            citizens: DEFAULT_HOMES * RESIDENTS_PER_HOME,
+        };
+        assert!(default.is_default());
+        assert!(!small_config().is_default());
+        assert!(!FixtureConfig {
+            homes: DEFAULT_HOMES - 1,
+            citizens: (DEFAULT_HOMES - 1) * RESIDENTS_PER_HOME,
+            ..default
+        }
+        .is_default());
+        assert!(!FixtureConfig {
+            citizens: default.citizens - 1,
+            ..default
+        }
+        .is_default());
+    }
+
+    #[test]
+    fn pinned_checksum_match_requires_every_pin() {
+        assert!(pinned_checksums_match(
+            SMOKE_MOTION_CHECKSUM,
+            SMOKE_CACHE_CHECKSUM,
+            SMOKE_POSITION_CHECKSUM_30S
+        ));
+        assert!(!pinned_checksums_match(
+            SMOKE_MOTION_CHECKSUM ^ 1,
+            SMOKE_CACHE_CHECKSUM,
+            SMOKE_POSITION_CHECKSUM_30S
+        ));
+        assert!(!pinned_checksums_match(
+            SMOKE_MOTION_CHECKSUM,
+            SMOKE_CACHE_CHECKSUM ^ 1,
+            SMOKE_POSITION_CHECKSUM_30S
+        ));
+        assert!(!pinned_checksums_match(
+            SMOKE_MOTION_CHECKSUM,
+            SMOKE_CACHE_CHECKSUM,
+            SMOKE_POSITION_CHECKSUM_30S ^ 1
+        ));
     }
 }
