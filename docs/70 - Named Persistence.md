@@ -2,7 +2,7 @@
 title: Named Persistence
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-22
 tags:
   - townsmith
   - named-citizens
@@ -13,7 +13,7 @@ tags:
 # 70 — Named Persistence
 
 > [!info] What this note is
-> N4 persistence for the derived named-citizen layer. It saves identity records plus `age_days`; the core lifecycle tick ages and removes citizens at 100 years, and the bridge exposes both persisted age and an explicit `named_lifecycle_tick`. Household death application is wired through the bridge; the scene lifecycle hook remains.
+> N4 persistence for the derived named-citizen layer. It saves identity records plus `age_days`; the core lifecycle tick ages and removes citizens at 100 years, and the bridge exposes both persisted age and an explicit `named_lifecycle_tick`. Household death application is wired through the bridge, and the world scene drives a 60 s/game-day lifecycle clock with a `lifecycle_scene=ok` smoke check.
 
 ## 1. Scope
 
@@ -28,7 +28,7 @@ In:
 
 Out:
 
-- scene lifecycle hook, births, migration;
+- births, migration, `CitizenDied` events;
 - event emission for aging/death;
 - materialization or route caches;
 - per-citizen simulation or network replication;
@@ -89,7 +89,7 @@ A missing object creates an empty pool for the loaded world; `named_citizens_sta
 
 ## 6. Limits
 
-- No scene lifecycle hook yet; `named_lifecycle_tick` now reduces household residents/workers through `apply_deaths` and re-syncs the named pool. Slot reindexing can replace a surviving named slot when a non-top slot dies; this is the documented derived-slot limitation.
+- The scene clock is one game day per 60 real seconds and is paused in headless/scene-smoke runs; the smoke drives zero-day and one-day ticks directly. A normal session will not reach a 100-year death without acceleration. `named_lifecycle_tick` reduces household residents/workers through `apply_deaths` and re-syncs the named pool. Slot reindexing can replace a surviving named slot when a non-top slot dies; this is the documented derived-slot limitation.
 - Records are identities plus `age_days`; no births, migration, jobs, or events.
 - A crafted save can contain any valid name/id set; server provenance is a networking task.
 - The pool cap is 4,096; orphaned records are dropped on load.
