@@ -29,18 +29,18 @@ use core_blueprint::{
 use core_city::named::{age_years_from_days, slot_is_employed, MAX_AGE_DAYS};
 use core_city::{
     advise, diff_selection, evaluate_tutorial, normalize_rotation, starter, summarize,
-    summarize_district, AdvisorInput, AdvisorReport, Age, AgeState, CitizenMotion, CitizenPosition,
-    CityLayout, CityRuntime, CitySummary, CityTier, ConstructionPhase, ConstructionSite,
-    ConstructionStore, DistrictSummary, Economy, Home, Household, IndustryKind, IndustryStore,
-    InfrastructureCosts, LifecycleTick, Lot, LotError, LotRequest, LotStore, MaterializationBudget,
-    MaterializationSelection, MaterializedCitizen, MotionLeg, NamedCitizens, NamedSave, Placement,
-    PlacementError, PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph,
-    RoadRequest, RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind, ServiceReport,
-    ServiceStore, ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore,
-    TechTree, Trade, TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport,
-    UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS,
-    DEFAULT_ROUTE_CACHE_CAPACITY, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M,
-    RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    summarize_district, AdvisorInput, AdvisorReport, Age, AgeState, CitizenDeath, CitizenMotion,
+    CitizenPosition, CityLayout, CityRuntime, CitySummary, CityTier, ConstructionPhase,
+    ConstructionSite, ConstructionStore, DistrictSummary, Economy, Home, Household, IndustryKind,
+    IndustryStore, InfrastructureCosts, LifecycleTick, Lot, LotError, LotRequest, LotStore,
+    MaterializationBudget, MaterializationSelection, MaterializedCitizen, MotionLeg, NamedCitizens,
+    NamedSave, Placement, PlacementError, PlacementRequest, PlacementStore, ResearchStore,
+    RoadError, RoadGraph, RoadRequest, RoadSegment, RoadStore, RouteCache, ServiceConsumer,
+    ServiceKind, ServiceReport, ServiceStore, ServiceTier, Settlement, SettlementError,
+    SettlementRequest, SettlementStore, TechTree, Trade, TradePool, TutorialInput, UtilityConsumer,
+    UtilityKind, UtilityReport, UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY,
+    DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY, MAX_LOANS, MAX_TOTAL_DEBT,
+    MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -2787,9 +2787,13 @@ impl TownsmithCore {
     /// concern.
     ///
     /// Returns `{ok, seed, aged, died, count, average_age_days,
-    /// oldest_age_days, checksum}`. `aged` counts every citizen that received
-    /// the advance, including citizens removed in the same tick; `died` counts
-    /// the removals.
+    /// oldest_age_days, checksum, deaths}`. `aged` counts every citizen that
+    /// received the advance, including citizens removed in the same tick;
+    /// `died` counts the removals. `deaths` is an array of
+    /// `{id, placement_id, slot, name, age_days}` records captured before the
+    /// household sync, ordered ascending by `(placement_id, slot)`. It is empty
+    /// when nobody dies. The array is the deterministic sequence for the tick;
+    /// there is no persisted day or event journal.
     #[func]
     fn named_lifecycle_tick(&self, seed: i64, days: f64) -> VarDictionary {
         let Ok(seed) = u64::try_from(seed) else {
@@ -2832,6 +2836,10 @@ impl TownsmithCore {
         }
         let pool = named.get_or_insert_with(|| NamedCitizens::new(seed));
         let outcome = tick_named_lifecycle(pool, runtime, days);
+        let mut deaths = VarArray::new();
+        for event in &outcome.death_events {
+            deaths.push(&citizen_death_to_dictionary(event));
+        }
         let mut result = VarDictionary::new();
         result.set("ok", true);
         result.set("seed", seed as i64);
@@ -2842,6 +2850,7 @@ impl TownsmithCore {
         result.set("count", outcome.count as i64);
         result.set("average_age_days", i64::from(outcome.average_age_days));
         result.set("oldest_age_days", i64::from(outcome.oldest_age_days));
+        result.set("deaths", &deaths.to_variant());
         result.set(
             "checksum",
             &GString::from(&format!("{:016x}", outcome.checksum)),
@@ -7876,6 +7885,7 @@ struct NamedLifecycleOutcome {
     average_age_days: u32,
     oldest_age_days: u32,
     checksum: u64,
+    death_events: Vec<CitizenDeath>,
 }
 
 fn tick_named_lifecycle(
@@ -7885,6 +7895,10 @@ fn tick_named_lifecycle(
 ) -> NamedLifecycleOutcome {
     let outcome = pool.tick_lifecycle_with_deaths(days);
     let applied_deaths = runtime.apply_deaths(&outcome.deaths);
+    // Snapshot the events before the household sync: sync may rebuild a
+    // surviving slot with a different identity, and the death record must keep
+    // the retired citizen's name and age.
+    let death_events = outcome.death_events;
     pool.sync(&runtime.households);
     NamedLifecycleOutcome {
         tick: outcome.tick,
@@ -7894,6 +7908,7 @@ fn tick_named_lifecycle(
         average_age_days: pool.average_age_days(),
         oldest_age_days: pool.oldest_age_days().unwrap_or(0),
         checksum: pool.checksum(),
+        death_events,
     }
 }
 
@@ -7951,6 +7966,16 @@ fn materialized_citizen_to_dictionary(citizen: &MaterializedCitizen) -> VarDicti
     item.set("slot", i64::from(citizen.slot));
     item.set("distance_m", f64::from(citizen.distance));
     item.set("home", &PackedFloat32Array::from(citizen.home));
+    item
+}
+
+fn citizen_death_to_dictionary(event: &CitizenDeath) -> VarDictionary {
+    let mut item = VarDictionary::new();
+    item.set("id", event.id as i64);
+    item.set("placement_id", event.placement_id as i64);
+    item.set("slot", i64::from(event.slot));
+    item.set("name", &GString::from(event.name.as_str()));
+    item.set("age_days", i64::from(event.age_days));
     item
 }
 
@@ -10207,7 +10232,7 @@ mod tests {
     #[test]
     fn named_lifecycle_tick_ages_and_reaps_at_the_limit() {
         let mut pool = NamedCitizens::new(2026);
-        for slot in 0..2_u32 {
+        for slot in 0..3_u32 {
             let id = core_city::citizen_id(2026, 1, slot);
             pool.citizens.insert(
                 (1, slot),
@@ -10216,27 +10241,90 @@ mod tests {
                     placement_id: 1,
                     slot,
                     name: core_city::name_for(id),
-                    age_days: if slot == 1 {
-                        core_city::MAX_AGE_DAYS - 5
-                    } else {
+                    age_days: if slot == 0 {
                         40 * 365
+                    } else {
+                        core_city::MAX_AGE_DAYS - 5
                     },
                 },
             );
         }
         let before = pool.checksum();
         let mut runtime = CityRuntime::new(2026);
-        runtime.sync(&[(1, 2)]);
-        runtime.tick(10.0, 2, &[(1, 2)]);
+        runtime.sync(&[(1, 3)]);
+        runtime.tick(10.0, 3, &[(1, 3)]);
         let outcome = tick_named_lifecycle(&mut pool, &mut runtime, 10.0);
-        assert_eq!(outcome.tick.aged, 2);
-        assert_eq!(outcome.tick.died, 1);
-        assert_eq!(outcome.applied_deaths, 1);
+        assert_eq!(outcome.tick.aged, 3);
+        assert_eq!(outcome.tick.died, 2);
+        assert_eq!(outcome.applied_deaths, 2);
         assert_eq!(outcome.population, 1);
         assert_eq!(outcome.count, 1);
         assert_eq!(outcome.average_age_days, 40 * 365 + 10);
         assert_eq!(outcome.oldest_age_days, 40 * 365 + 10);
         assert_ne!(outcome.checksum, before);
+        assert_eq!(outcome.death_events.len(), 2);
+        for (event, slot) in outcome.death_events.iter().zip([1_u32, 2]) {
+            let id = core_city::citizen_id(2026, 1, slot);
+            assert_eq!(event.id, id);
+            assert_eq!(event.placement_id, 1);
+            assert_eq!(event.slot, slot);
+            assert_eq!(event.name, core_city::name_for(id));
+            assert_eq!(event.age_days, core_city::MAX_AGE_DAYS);
+            assert!(pool.get(1, slot).is_none());
+        }
+    }
+
+    #[test]
+    fn named_lifecycle_tick_returns_no_events_when_nobody_dies() {
+        let mut pool = NamedCitizens::new(2026);
+        let id = core_city::citizen_id(2026, 1, 0);
+        pool.citizens.insert(
+            (1, 0),
+            core_city::NamedCitizen {
+                id,
+                placement_id: 1,
+                slot: 0,
+                name: core_city::name_for(id),
+                age_days: 40 * 365,
+            },
+        );
+        let mut runtime = CityRuntime::new(2026);
+        runtime.sync(&[(1, 1)]);
+        runtime.tick(10.0, 1, &[(1, 1)]);
+        let before = pool.checksum();
+        let outcome = tick_named_lifecycle(&mut pool, &mut runtime, 1.0);
+        assert_eq!(outcome.tick.aged, 1);
+        assert_eq!(outcome.tick.died, 0);
+        assert_eq!(outcome.applied_deaths, 0);
+        assert!(outcome.death_events.is_empty());
+        assert_ne!(outcome.checksum, before);
+    }
+
+    #[test]
+    fn named_lifecycle_tick_no_op_preserves_checksums_and_events() {
+        let mut pool = NamedCitizens::new(2026);
+        let id = core_city::citizen_id(2026, 1, 0);
+        pool.citizens.insert(
+            (1, 0),
+            core_city::NamedCitizen {
+                id,
+                placement_id: 1,
+                slot: 0,
+                name: core_city::name_for(id),
+                age_days: 40 * 365,
+            },
+        );
+        let mut runtime = CityRuntime::new(2026);
+        runtime.sync(&[(1, 1)]);
+        runtime.tick(10.0, 1, &[(1, 1)]);
+        let named_checksum = pool.checksum();
+        let population_checksum = runtime.checksum();
+        let outcome = tick_named_lifecycle(&mut pool, &mut runtime, 0.0);
+        assert_eq!(outcome.tick, LifecycleTick::default());
+        assert_eq!(outcome.applied_deaths, 0);
+        assert!(outcome.death_events.is_empty());
+        assert_eq!(outcome.checksum, named_checksum);
+        assert_eq!(runtime.checksum(), population_checksum);
     }
 
     #[test]
