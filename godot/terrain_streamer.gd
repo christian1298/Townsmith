@@ -3,8 +3,10 @@ extends Node3D
 ## Streams deterministic 256 m terrain chunks around a camera.
 ##
 ## Terrain generation and meshing run on Rust worker threads. This node queues
-## chunk requests, polls finished meshes on the main thread, and uploads them to
-## MeshInstance3D nodes. LOD is distance-based.
+## chunk requests, polls finished meshes on the main thread, and stages them in
+## a ready map. Each frame it uploads at most `COMMIT_BUDGET` ready chunks in a
+## deterministic priority order, so worker completion order never decides which
+## chunk is committed first. LOD is distance-based.
 
 const WaterBody = preload("res://water_body.gd")
 
@@ -13,6 +15,12 @@ const CHUNK_CELLS := 256
 const WATER_HEIGHT := 24.1
 const MAX_COORD_ATTEMPTS := 3
 const MAX_IN_FLIGHT := 32
+## Maximum ready chunks applied to the scene per frame. Commits are selected
+## nearest-ring first, then by (distance, coord.x, coord.z).
+const COMMIT_BUDGET := 4
+## 32-bit FNV-1a: deterministic over the ordered commit sequence.
+const CHECKSUM_OFFSET := 2166136261
+const CHECKSUM_PRIME := 16777619
 
 @export var seed: int = 2026
 @export var view_radius: int = 1
@@ -28,6 +36,8 @@ var terrain_material: StandardMaterial3D
 var chunks: Dictionary = {}
 var chunks_lod: Dictionary = {}
 var in_flight: Dictionary = {}
+## Finished meshes keyed by chunk coord, waiting for a commit slot.
+var ready_chunks: Dictionary = {}
 var queue: Array[Vector2i] = []
 var camera: Camera3D
 var water: WaterBody
@@ -40,6 +50,13 @@ var chunks_requested := 0
 var chunks_applied := 0
 var chunks_dropped := 0
 var bridge_failures := 0
+var commit_checksum := CHECKSUM_OFFSET
+## Hold commits until the request queue and worker pool drain. Benchmark smoke
+## paths set this so every stage has the same ready set before committing.
+var commit_barrier := false
+## Optional full commit log for deterministic smoke comparisons.
+var track_commit_sequence := false
+var commit_sequence: Array[Vector2i] = []
 
 func _ready() -> void:
 	view_radius = maxi(view_radius, 0)
@@ -71,6 +88,7 @@ func chunk_count() -> int:
 
 ## Mark a loaded or queued chunk for remeshing after a terrain edit.
 func invalidate_chunk(coord: Vector2i) -> void:
+	ready_chunks.erase(coord)
 	dirty[coord] = int(dirty.get(coord, 0)) + 1
 	_enqueue(coord)
 
@@ -104,6 +122,7 @@ func _process(_delta: float) -> void:
 		_refill_queue(center)
 
 	_poll_results(center)
+	_commit_ready(center)
 	_request_jobs(center)
 	_unload_outside(center)
 	if is_instance_valid(water):
@@ -121,6 +140,8 @@ func _refill_queue(center: Vector2i) -> void:
 	for dz in range(-view_radius, view_radius + 1):
 		for dx in range(-view_radius, view_radius + 1):
 			var coord := center + Vector2i(dx, dz)
+			if ready_chunks.has(coord) and not dirty.has(coord):
+				continue
 			if not chunks.has(coord) or int(chunks_lod.get(coord, 0)) != _lod_step(coord, center) or dirty.has(coord):
 				queue.append(coord)
 	queue.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
@@ -183,13 +204,73 @@ func _poll_results(center: Vector2i) -> void:
 				_enqueue(coord)
 			continue
 
-		_apply_chunk(coord, step, mesh, int(job.get("generation", 0)))
+		_stage_chunk(coord, step, mesh, int(job.get("generation", 0)))
+
+## Hold a finished mesh until a deterministic commit slot opens.
+func _stage_chunk(coord: Vector2i, step: int, mesh: ArrayMesh, generation: int) -> void:
+	ready_chunks[coord] = {
+		"step": step,
+		"mesh": mesh,
+		"generation": generation,
+	}
+
+## Apply at most COMMIT_BUDGET ready chunks. The selection order depends only
+## on the current center and chunk coords, never on which worker finished first:
+## nearest Chebyshev ring, then squared distance, then coord.x, then coord.z.
+func _commit_ready(center: Vector2i) -> void:
+	if ready_chunks.is_empty():
+		return
+	if commit_barrier and (not in_flight.is_empty() or not queue.is_empty()):
+		return
+
+	var candidates: Array[Dictionary] = []
+	for key in ready_chunks.keys():
+		var coord: Vector2i = key
+		var dx := coord.x - center.x
+		var dz := coord.y - center.y
+		candidates.append({
+			"coord": coord,
+			"ring": maxi(absi(dx), absi(dz)),
+			"distance": dx * dx + dz * dz,
+		})
+	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		if int(a["ring"]) != int(b["ring"]):
+			return int(a["ring"]) < int(b["ring"])
+		if int(a["distance"]) != int(b["distance"]):
+			return int(a["distance"]) < int(b["distance"])
+		var ca: Vector2i = a["coord"]
+		var cb: Vector2i = b["coord"]
+		if ca.x != cb.x:
+			return ca.x < cb.x
+		return ca.y < cb.y
+	)
+
+	var committed := 0
+	for candidate in candidates:
+		if committed >= COMMIT_BUDGET:
+			return
+		var coord: Vector2i = candidate["coord"]
+		if not ready_chunks.has(coord):
+			continue
+		var data: Dictionary = ready_chunks[coord]
+		var step := int(data["step"])
+		if not _is_desired(coord, center) or _lod_step(coord, center) != step:
+			ready_chunks.erase(coord)
+			chunks_dropped += 1
+			if _is_desired(coord, center):
+				_enqueue(coord)
+			continue
+		ready_chunks.erase(coord)
+		_apply_chunk(coord, step, data["mesh"], int(data["generation"]))
+		committed += 1
 
 func _request_jobs(center: Vector2i) -> void:
 	var deferred: Array[Vector2i] = []
 	while in_flight.size() < max_in_flight and not queue.is_empty():
 		var coord: Vector2i = queue.pop_front()
 		if not _is_desired(coord, center):
+			continue
+		if ready_chunks.has(coord) and not dirty.has(coord):
 			continue
 		var step := _lod_step(coord, center)
 		if chunks.has(coord) and int(chunks_lod.get(coord, 0)) == step and not dirty.has(coord):
@@ -236,16 +317,38 @@ func _handle_disconnected() -> void:
 	if has_center:
 		_refill_queue(last_center)
 
+func is_drained() -> bool:
+	return in_flight.is_empty() and ready_chunks.is_empty() and queue.is_empty()
+
+func commit_checksum_hex() -> String:
+	return "%08x" % commit_checksum
+
+func commit_sequence_text() -> String:
+	var parts: PackedStringArray = []
+	for coord in commit_sequence:
+		parts.append("%d,%d" % [coord.x, coord.y])
+	return ";".join(parts)
+
 func stats() -> Dictionary:
 	return {
 		"chunks_loaded": chunks.size(),
+		"chunks_ready": ready_chunks.size(),
+		"chunks_pending": in_flight.size() + ready_chunks.size(),
 		"chunks_requested": chunks_requested,
 		"chunks_applied": chunks_applied,
 		"chunks_dropped": chunks_dropped,
 		"in_flight": in_flight.size(),
 		"queue": queue.size(),
 		"dirty": dirty.size(),
+		"commit_count": chunks_applied,
+		"commit_checksum": commit_checksum_hex(),
 	}
+
+func _hash_commit(coord: Vector2i, step: int) -> void:
+	for value in [coord.x, coord.y, step]:
+		var bits: int = value & 0xFFFFFFFF
+		for shift in range(0, 32, 8):
+			commit_checksum = ((commit_checksum ^ ((bits >> shift) & 0xFF)) * CHECKSUM_PRIME) & 0xFFFFFFFF
 
 func _apply_chunk(coord: Vector2i, step: int, mesh: ArrayMesh, generation: int) -> void:
 	var instance := MeshInstance3D.new()
@@ -265,12 +368,19 @@ func _apply_chunk(coord: Vector2i, step: int, mesh: ArrayMesh, generation: int) 
 	else:
 		_enqueue(coord)
 	coord_attempts.erase(coord)
+	_hash_commit(coord, step)
+	if track_commit_sequence:
+		commit_sequence.append(coord)
 	chunks_applied += 1
 	chunks_built += 1
 	if chunks_built <= 3 or chunks_built % 8 == 0:
 		print("Terrain chunk ", coord, " LOD ", step, " loaded; total ", chunks.size())
 
 func _unload_outside(center: Vector2i) -> void:
+	for key in ready_chunks.keys():
+		var coord: Vector2i = key
+		if maxi(absi(coord.x - center.x), absi(coord.y - center.y)) > keep_radius:
+			ready_chunks.erase(key)
 	for key in chunks.keys():
 		var coord: Vector2i = key
 		var distance := maxi(absi(coord.x - center.x), absi(coord.y - center.y))
