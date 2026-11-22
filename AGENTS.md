@@ -313,6 +313,10 @@ cargo run --release -p townsmith-server -- --loopback-smoke
 cargo test -p townsmith-server
 GODOT=/path/to/godot ./scripts/smoke_mp_client.sh
 
+# Server save/load smoke (atomic .tmp/.bak, deterministic checksum)
+cargo run --release -p townsmith-server -- --save-load-smoke
+cargo run --release -p townsmith-server -- --listen 0 --save /tmp/opencode/townsmith-world.json --once
+
 # 3-run core benchmark summary
 ./scripts/bench_core.sh
 

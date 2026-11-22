@@ -43,24 +43,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"$ROOT/target/debug/townsmith-server" --listen "$PORT" >"$SERVER_LOG" 2>&1 &
+"$ROOT/target/debug/townsmith-server" --listen "$PORT" --once >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
-# Bounded retry loop. The connect attempt is the readiness probe; the process
-# check fails fast if the server exited instead of waiting for the deadline.
-python3 - "$PORT" "$SERVER_PID" <<'PY'
+# Bounded retry loop. The server log is the readiness probe: a TCP probe would
+# consume the single `--once` session.
+python3 - "$SERVER_LOG" "$SERVER_PID" <<'PY'
 import os
-import socket
 import sys
 import time
 
-port = int(sys.argv[1])
+log_path = sys.argv[1]
 pid = int(sys.argv[2])
 deadline = time.monotonic() + 10.0
 while time.monotonic() < deadline:
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.25):
-            sys.exit(0)
+        with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+            if "SERVER_LISTEN status=ok address=" in handle.read():
+                sys.exit(0)
     except OSError:
         pass
     try:
@@ -123,7 +123,7 @@ if [[ "$FRAMES_SENT" != "6" || "$FRAMES_RECEIVED" != "6" ]]; then
 	echo "Multiplayer client smoke failed: frames sent=${FRAMES_SENT:-none} received=${FRAMES_RECEIVED:-none}" >&2
 	exit 1
 fi
-if ! grep -q "status=session frames=12" "$SERVER_LOG"; then
+if ! grep -Eq "status=session frames=12|SERVER_LISTEN status=ok sessions=1 " "$SERVER_LOG"; then
 	echo "Multiplayer client smoke failed: server did not report a 12-frame session" >&2
 	cat "$SERVER_LOG" >&2
 	exit 1

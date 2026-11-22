@@ -427,6 +427,7 @@ cargo run --release -p townsmith-bench --bin cohort
 cargo test -p townsmith-server
 cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
 cargo run --release -p townsmith-server -- --loopback-smoke
+cargo run --release -p townsmith-server -- --save-load-smoke
 ./scripts/bench_core.sh
 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5
 ```
