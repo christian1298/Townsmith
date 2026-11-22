@@ -5,11 +5,12 @@
 //! executor: there is no interest management, authentication, or multi-client
 //! broadcast yet. The world survives between connections of the same process.
 //!
-//! When a save path is configured, the world is saved on every clean session
-//! end (disconnect, EOF, or an idle timeout) and optionally every
-//! `autosave_ticks` accepted tick changes.
+//! When a save path is configured, the world is saved on every non-empty
+//! session end (disconnect, EOF, an idle timeout, or a failed response write)
+//! and optionally every `autosave_ticks` accepted tick changes. A session that
+//! read no command frame (a port probe or cancelled connect) writes no save.
 
-use std::io;
+use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -49,8 +50,11 @@ pub struct ListenReport {
 ///
 /// The caller owns the bound listener so it can print the real address (useful
 /// with port `0`). `max_sessions = None` serves until the process is stopped.
-/// A save failure ends the loop with an error; the previous save and its backup
-/// remain on disk.
+///
+/// A session-level failure (socket configuration, a write to a peer that went
+/// away, or a framing error) ends **only that session**; the accept loop keeps
+/// serving. A save failure ends the loop with an error; the previous save and
+/// its backup remain on disk.
 pub fn run_listen(
     listener: TcpListener,
     mut world: ServerWorld,
@@ -63,27 +67,35 @@ pub fn run_listen(
     let mut last_saved_tick = world.tick;
 
     loop {
-        let (mut stream, _peer) = listener.accept()?;
-        configure_stream(&stream)?;
+        let (stream, _peer) = listener.accept()?;
+        if let Err(error) = configure_stream(&stream) {
+            eprintln!("SERVER_LISTEN status=error phase=configure error={error}");
+            continue;
+        }
         sessions += 1;
         // A reconnect reuses the same in-memory world. This clears the closed
         // flag from the previous connection and, for a dropped socket, opens
         // the resume grace window.
         world.begin_connection();
 
-        serve_session(
-            &mut stream,
+        let session_commands = serve_session(
+            &stream,
             &mut world,
             &config,
             &mut last_saved_tick,
-            &mut commands,
             &mut saves,
         )?;
+        commands = commands.saturating_add(session_commands);
 
-        if let Some(path) = &config.save_path {
-            persist(&world, path, "disconnect")?;
-            last_saved_tick = world.tick;
-            saves += 1;
+        // A port probe (or any connect with no command frame) has nothing to
+        // persist. Saving it would rotate the backup and rewrite an identical
+        // file for every health check.
+        if session_commands > 0 {
+            if let Some(path) = &config.save_path {
+                persist(&world, path, "disconnect")?;
+                last_saved_tick = world.tick;
+                saves += 1;
+            }
         }
 
         if max_sessions.is_some_and(|limit| sessions >= limit) {
@@ -100,31 +112,63 @@ pub fn run_listen(
     })
 }
 
+/// Serve one session on a borrowed stream without letting a peer-side write
+/// failure escape as an error.
+///
+/// `TcpStream` implements `Read`/`Write` for `&TcpStream`, so both halves can
+/// borrow the same socket; tests drive [`serve_io`] with independent reader and
+/// writer types.
 fn serve_session(
-    stream: &mut TcpStream,
+    stream: &TcpStream,
     world: &mut ServerWorld,
     config: &ListenConfig,
     last_saved_tick: &mut u64,
-    commands: &mut u64,
     saves: &mut u64,
-) -> io::Result<()> {
+) -> io::Result<u64> {
+    let mut reader = stream;
+    let mut writer = stream;
+    serve_io(
+        &mut reader,
+        &mut writer,
+        world,
+        config,
+        last_saved_tick,
+        saves,
+    )
+}
+
+/// Read and answer command frames until the peer leaves or the session closes.
+///
+/// Returns the number of command frames read. The only `Err` is a save failure:
+/// a read error ends the session quietly and a response-write error (a reset or
+/// half-closed peer, or an oversized response) ends it too, without taking down
+/// the accept loop.
+fn serve_io<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    world: &mut ServerWorld,
+    config: &ListenConfig,
+    last_saved_tick: &mut u64,
+    saves: &mut u64,
+) -> io::Result<u64> {
+    let mut session_commands = 0u64;
     loop {
-        let payload = match read_frame(stream) {
+        let payload = match read_frame(&mut *reader) {
             Ok(payload) => payload,
             // A clean EOF at the frame boundary: the client closed without
             // `disconnect`.
-            Err(FrameError::Truncated { actual: 0, .. }) => return Ok(()),
-            Err(FrameError::Io(error)) if session_ended(&error) => return Ok(()),
+            Err(FrameError::Truncated { actual: 0, .. }) => return Ok(session_commands),
+            Err(FrameError::Io(error)) if session_ended(&error) => return Ok(session_commands),
             Err(error) => {
                 eprintln!(
                     "SERVER_PROTOCOL status=error code={} message={}",
                     error.code(),
                     error.message()
                 );
-                return Ok(());
+                return Ok(session_commands);
             }
         };
-        *commands += 1;
+        session_commands += 1;
 
         let tick_before = world.tick;
         let responses = match decode_client_command(&payload) {
@@ -132,13 +176,18 @@ fn serve_session(
             Err(rejection) => vec![rejection.into_message()],
         };
         for response in &responses {
-            write_json_frame(stream, response).map_err(|error| {
-                io::Error::other(format!("{}: {}", error.code(), error.message()))
-            })?;
+            if let Err(error) = write_json_frame(&mut *writer, response) {
+                eprintln!(
+                    "SERVER_SESSION status=end reason=write_error code={} message={}",
+                    error.code(),
+                    error.message()
+                );
+                return Ok(session_commands);
+            }
         }
 
         if world.is_closed() {
-            return Ok(());
+            return Ok(session_commands);
         }
 
         if config.autosave_ticks > 0
