@@ -213,6 +213,9 @@ Two instances of the same blueprint can diverge through upgrades, damage, and oc
 - **Upgrades:** renovate a building to a new blueprint version, add a floor, replace a roof, install insulation. Temporary closure, crews, and cost. Editing a blueprint in the library is design work; applying it to a placed building is a renovation project, not an instant swap.
 - **Pause:** construction progress freezes while paused, but players can still place/design. See [[05 - Multiplayer]] and D-021.
 
+> [!note] Time scale (D-029, Proposed)
+> The developer slice keeps seconds-based construction. Campaign play is proposed to use the same simulated clock as population and economy, at 1 game day = 60 real seconds, with phase durations authored in game days and a 30-day cap per phase. See [[10 - Decisions]] D-029 and Q-102.
+
 > [!note] Design goal
 > Construction should make the city feel built by people, not spawned by the player. It also creates a visible demand for trades, training, and logistics — and a reason to care about the construction sector.
 

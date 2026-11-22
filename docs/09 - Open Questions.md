@@ -2,7 +2,7 @@
 title: Open Questions
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-22
 tags:
   - townsmith
   - questions
@@ -268,7 +268,7 @@ These must be answered before or during Phase 0. They change the architecture, t
 | **Q-056** | SQLite for all state, or a binary snapshot for hot simulation data? | SQLite for structured state; binary snapshots only if profiling demands | Normal |
 | **Q-057** | Mesh upload on the main thread or via `RenderingServer` from a worker? | Measure in the Phase 0 spike | High |
 | **Q-058** | Blueprint overrides: new version or per-instance diff? | New version for shared edits; per-instance diff for live tweaks | Normal |
-| **Q-102** | Should construction phases take game days rather than seconds? | Keep the developer slice at seconds; decide a campaign build-time scale before replacing the financing projection with the live construction clock | High |
+| **Q-102** | Should construction phases take game days rather than seconds? | Keep the developer slice at seconds; [[10 - Decisions]] D-029 proposes a mode-selected campaign clock (1 game day = 60 s, cottage 2–4 days, 30-day phase cap). Still open: human sign-off and a measured financing run with the live clock. | High |
 
 ## Art and content questions
 
