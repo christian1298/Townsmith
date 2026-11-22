@@ -4,6 +4,10 @@
 //! into one JSON object, and round-trips it repeatedly. This is a core harness,
 //! not the Godot world save: it catches layer-local serialization/validation
 //! drift without needing a Godot runtime.
+//!
+//! `--terrain` adds a deterministic [`DeltaStore`] to the same envelope using
+//! the bridge convention: lowercase hex under `terrain_deltas` plus a
+//! `terrain_checksum` field.
 
 use std::collections::BTreeSet;
 use std::time::Instant;
@@ -15,6 +19,7 @@ use core_city::{
     TechTree, UtilityKind, UtilityStore, Workplace, Zone, DAY_SECONDS, DEFAULT_LOAN_RATE_PER_DAY,
     DEFAULT_LOAN_TERM_DAYS,
 };
+use core_world::{DeltaStore, WorldChunkCoord, MAX_HEIGHT_M, WATER_LEVEL_M};
 
 const SEED: u64 = 2026;
 const DEFAULT_PLACEMENTS: usize = 120;
@@ -31,6 +36,13 @@ const MOVE_IN_TICK_SECONDS: f64 = 60.0;
 const MOVE_IN_BASE_RATE: f32 = 100.0;
 const MAX_MOVE_IN_TICKS: usize = 16;
 const MAX_CYCLES: usize = 10_000;
+const DEFAULT_TERRAIN_EDITS: usize = 2_000;
+const MAX_TERRAIN_EDITS: usize = 100_000;
+/// Terrain edits are spread over an 8×8 block of 256 m chunks, mirroring the
+/// multi-chunk streaming scenes.
+const TERRAIN_CHUNKS_PER_SIDE: usize = 8;
+const TERRAIN_CELLS_PER_SIDE: usize = 256;
+const TERRAIN_CHUNKS: usize = TERRAIN_CHUNKS_PER_SIDE * TERRAIN_CHUNKS_PER_SIDE;
 
 /// Per-cycle timing samples, only populated when `--timing` is set.
 #[derive(Default)]
@@ -49,16 +61,22 @@ fn main() {
         value.parse::<usize>().unwrap_or(0)
     });
     let timing = std::env::args().any(|arg| arg == "--timing" || arg == "--bench");
+    let terrain_enabled = std::env::args().any(|arg| arg == "--terrain");
+    let terrain_edits = arg_value("--terrain-edits").map_or(DEFAULT_TERRAIN_EDITS, |value| {
+        value.parse::<usize>().unwrap_or(0)
+    });
     if cycles == 0
         || cycles > MAX_CYCLES
         || !(MIN_PLACEMENTS..=MAX_PLACEMENTS).contains(&placements)
+        || !(1..=MAX_TERRAIN_EDITS).contains(&terrain_edits)
     {
         eprintln!(
-            "usage: save_stress [--cycles N] [--placements {MIN_PLACEMENTS}..={MAX_PLACEMENTS}] [--timing|--bench] [--smoke]"
+            "usage: save_stress [--cycles N] [--placements {MIN_PLACEMENTS}..={MAX_PLACEMENTS}] [--terrain [--terrain-edits 1..={MAX_TERRAIN_EDITS}]] [--timing|--bench] [--smoke]"
         );
         std::process::exit(2);
     }
-    match run(cycles, placements, timing) {
+    let terrain = terrain_enabled.then_some(terrain_edits);
+    match run(cycles, placements, timing, terrain) {
         Ok(summary) => {
             println!(
                 "{}",
@@ -72,10 +90,15 @@ fn main() {
     }
 }
 
-fn run(cycles: usize, placements: usize, timing: bool) -> Result<serde_json::Value, String> {
+fn run(
+    cycles: usize,
+    placements: usize,
+    timing: bool,
+    terrain_edits: Option<usize>,
+) -> Result<serde_json::Value, String> {
     let run_start = Instant::now();
     let build_start = Instant::now();
-    let city = City::build(placements)?;
+    let city = City::build(placements, terrain_edits)?;
     let build_ms = elapsed_ms(build_start);
     let mut checksum: Option<u64> = None;
     let mut timings = CycleTiming::default();
@@ -122,6 +145,12 @@ fn run(cycles: usize, placements: usize, timing: bool) -> Result<serde_json::Val
         "combined_checksum": format!("{checksum:016x}"),
         "status": "ok",
     });
+    if let Some(terrain) = &city.terrain {
+        summary["terrain_edits"] = serde_json::json!(terrain.edit_count());
+        summary["terrain_chunks"] = serde_json::json!(terrain.chunk_count());
+        summary["terrain_bytes"] = serde_json::json!(terrain.encode().len());
+        summary["terrain_checksum"] = serde_json::json!(format!("{:016x}", terrain.checksum()));
+    }
     if timing {
         summary["timing"] = timing_report(
             &timings, &city, houses, workplaces, build_ms, total_ms, placements,
@@ -202,10 +231,11 @@ struct City {
     settlements: SettlementStore,
     roads: RoadStore,
     lots: LotStore,
+    terrain: Option<DeltaStore>,
 }
 
 impl City {
-    fn build(placement_count: usize) -> Result<Self, String> {
+    fn build(placement_count: usize, terrain_edits: Option<usize>) -> Result<Self, String> {
         if !(MIN_PLACEMENTS..=MAX_PLACEMENTS).contains(&placement_count) {
             return Err(format!(
                 "placements must be {MIN_PLACEMENTS}..={MAX_PLACEMENTS}, got {placement_count}"
@@ -442,6 +472,8 @@ impl City {
         )
         .map_err(|error| error.to_string())?;
 
+        let terrain = terrain_edits.map(terrain_fixture).transpose()?;
+
         let city = Self {
             placements,
             construction,
@@ -455,13 +487,14 @@ impl City {
             settlements,
             roads,
             lots,
+            terrain,
         };
         city.validate()?;
         Ok(city)
     }
 
     fn to_value(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "placements": self.placements,
             "construction": self.construction,
             "population": self.runtime,
@@ -474,7 +507,15 @@ impl City {
             "settlements": self.settlements,
             "roads": self.roads,
             "lots": self.lots,
-        })
+        });
+        if let Some(terrain) = &self.terrain {
+            // Same envelope convention as the Godot bridge: the encoded
+            // binary delta blob as lowercase hex plus its FNV-1a checksum.
+            value["terrain_deltas"] = serde_json::Value::String(hex_encode(&terrain.encode()));
+            value["terrain_checksum"] =
+                serde_json::Value::String(format!("{:016x}", terrain.checksum()));
+        }
+        value
     }
 
     fn check_value(&self, value: &serde_json::Value) -> Result<(), String> {
@@ -523,6 +564,30 @@ impl City {
             return Err(format!(
                 "per-store state changed during roundtrip: {actual:?} != {expected:?}"
             ));
+        }
+        if let Some(expected) = &self.terrain {
+            let encoded = value
+                .get("terrain_deltas")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing terrain_deltas".to_string())?;
+            let checksum_hex = value
+                .get("terrain_checksum")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing terrain_checksum".to_string())?;
+            let expected_checksum = u64::from_str_radix(checksum_hex, 16)
+                .map_err(|error| format!("terrain_checksum: {error}"))?;
+            let decoded = terrain_from_hex(encoded, expected_checksum)?;
+            if decoded.checksum() != expected.checksum() {
+                return Err("terrain checksum changed during roundtrip".to_string());
+            }
+            if decoded.edit_count() != expected.edit_count() {
+                return Err("terrain edit count changed during roundtrip".to_string());
+            }
+            if hex_encode(&decoded.encode()) != encoded {
+                return Err("terrain deltas are not byte-stable".to_string());
+            }
+        } else if value.get("terrain_deltas").is_some() || value.get("terrain_checksum").is_some() {
+            return Err("unexpected terrain deltas in the combined value".to_string());
         }
         Ok(())
     }
@@ -650,6 +715,14 @@ impl City {
                 return Err("named citizen slot is invalid".to_string());
             }
         }
+        if let Some(terrain) = &self.terrain {
+            let encoded = terrain.encode();
+            let decoded =
+                DeltaStore::decode(&encoded).map_err(|error| format!("terrain deltas: {error}"))?;
+            if decoded != *terrain {
+                return Err("terrain deltas changed during roundtrip".to_string());
+            }
+        }
         Ok(())
     }
 }
@@ -704,7 +777,99 @@ fn combined_checksum(city: &City) -> u64 {
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
+    if let Some(terrain) = &city.terrain {
+        for byte in terrain.checksum().to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
     hash
+}
+
+/// Build the deterministic terrain fixture: edits are dealt round-robin across
+/// an 8×8 chunk block, cells never repeat within a chunk, and heights come from
+/// a seeded splitmix64 stream.
+fn terrain_fixture(edit_count: usize) -> Result<DeltaStore, String> {
+    if !(1..=MAX_TERRAIN_EDITS).contains(&edit_count) {
+        return Err(format!(
+            "terrain edits must be 1..={MAX_TERRAIN_EDITS}, got {edit_count}"
+        ));
+    }
+    if edit_count > TERRAIN_CHUNKS * TERRAIN_CELLS_PER_SIDE * TERRAIN_CELLS_PER_SIDE {
+        return Err("terrain fixture cannot place unique cells".to_string());
+    }
+    let mut store = DeltaStore::new();
+    for index in 0..edit_count {
+        let chunk_index = index % TERRAIN_CHUNKS;
+        let column = index / TERRAIN_CHUNKS;
+        let coord = WorldChunkCoord::new(
+            (chunk_index % TERRAIN_CHUNKS_PER_SIDE) as i64,
+            (chunk_index / TERRAIN_CHUNKS_PER_SIDE) as i64,
+        );
+        // Multiplication by 37 is a bijection modulo 256, so the x offset
+        // scatters cells without ever repeating a (z, x) pair in a chunk.
+        let x = ((column % TERRAIN_CELLS_PER_SIDE) as u8)
+            .wrapping_mul(37)
+            .wrapping_add(chunk_index as u8);
+        let z = (column / TERRAIN_CELLS_PER_SIDE) as u8;
+        let height = WATER_LEVEL_M
+            + (splitmix64(SEED ^ (index as u64)) % u64::from(MAX_HEIGHT_M - WATER_LEVEL_M + 1))
+                as u16;
+        store
+            .set_height(coord, x, z, height)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(store)
+}
+
+/// splitmix64 finalizer, used only to derive fixture heights.
+fn splitmix64(value: u64) -> u64 {
+    let mut value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn hex_decode(encoded: &str) -> Result<Vec<u8>, String> {
+    let bytes = encoded.as_bytes();
+    if !bytes.len().is_multiple_of(2) || !encoded.is_ascii() {
+        return Err("terrain delta hex string has an invalid length or character".to_string());
+    }
+    let mut decoded = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.as_chunks::<2>().0 {
+        decoded.push((hex_value(pair[0])? << 4) | hex_value(pair[1])?);
+    }
+    Ok(decoded)
+}
+
+fn hex_value(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        _ => Err("terrain delta hex string has an invalid character".to_string()),
+    }
+}
+
+/// Decode the bridge hex envelope, check its checksum, then decode the blob.
+fn terrain_from_hex(encoded: &str, expected_checksum: u64) -> Result<DeltaStore, String> {
+    let bytes = hex_decode(encoded)?;
+    let actual = DeltaStore::checksum_bytes(&bytes);
+    if actual != expected_checksum {
+        return Err(format!(
+            "terrain checksum mismatch: expected {expected_checksum:016x}, deltas are {actual:016x}"
+        ));
+    }
+    DeltaStore::decode(&bytes).map_err(|error| format!("terrain deltas: {error}"))
 }
 
 fn arg_value(name: &str) -> Option<String> {
@@ -726,9 +891,64 @@ mod tests {
 
     #[test]
     fn a_small_city_round_trips() {
-        let summary = run(2, 120, false).expect("stress");
+        let summary = run(2, 120, false, None).expect("stress");
         assert_eq!(summary["status"], "ok");
         assert_eq!(summary["placements"], 120);
         assert!(summary["population"].as_u64().expect("population") > 0);
+    }
+
+    #[test]
+    fn default_fixture_checksum_is_unchanged() {
+        let expected = "0ce611887161ff62";
+        let summary = run(1, 120, false, None).expect("stress");
+        assert_eq!(summary["combined_checksum"], expected);
+        assert!(summary.get("terrain_edits").is_none());
+        let city = City::build(120, None).expect("city");
+        let value = city.to_value();
+        assert!(value.get("terrain_deltas").is_none());
+        assert!(value.get("terrain_checksum").is_none());
+    }
+
+    #[test]
+    fn terrain_fixture_is_deterministic() {
+        let first = terrain_fixture(DEFAULT_TERRAIN_EDITS).expect("terrain");
+        let second = terrain_fixture(DEFAULT_TERRAIN_EDITS).expect("terrain");
+        assert_eq!(first, second);
+        assert_eq!(first.edit_count(), DEFAULT_TERRAIN_EDITS);
+        assert_eq!(first.chunk_count(), TERRAIN_CHUNKS);
+        assert_eq!(first.checksum(), second.checksum());
+        assert_eq!(first.encode(), second.encode());
+    }
+
+    #[test]
+    fn terrain_hex_round_trips() {
+        let store = terrain_fixture(500).expect("terrain");
+        let encoded = hex_encode(&store.encode());
+        let decoded = terrain_from_hex(&encoded, store.checksum()).expect("decode");
+        assert_eq!(decoded, store);
+        assert_eq!(hex_encode(&decoded.encode()), encoded);
+    }
+
+    #[test]
+    fn invalid_terrain_hex_is_rejected() {
+        let store = terrain_fixture(100).expect("terrain");
+        let checksum = store.checksum();
+        assert!(terrain_from_hex("zz", checksum).is_err());
+        assert!(terrain_from_hex("abc", checksum).is_err());
+        assert!(terrain_from_hex(&hex_encode(&store.encode()), checksum ^ 1).is_err());
+        let mut corrupt = store.encode();
+        corrupt[0] = b'X';
+        let encoded = hex_encode(&corrupt);
+        assert!(terrain_from_hex(&encoded, DeltaStore::checksum_bytes(&corrupt)).is_err());
+    }
+
+    #[test]
+    fn terrain_enabled_round_trips_in_the_combined_value() {
+        let summary = run(1, 120, false, Some(256)).expect("stress");
+        assert_eq!(summary["status"], "ok");
+        assert_eq!(summary["terrain_edits"], 256);
+        assert_eq!(summary["terrain_chunks"], TERRAIN_CHUNKS);
+        assert!(summary["terrain_bytes"].as_u64().expect("bytes") > 0);
+        assert_ne!(summary["combined_checksum"], "0ce611887161ff62");
     }
 }
