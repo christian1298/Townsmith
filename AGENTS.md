@@ -287,6 +287,11 @@ GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_strea
 # Synthetic city routes (200 / 10k / 100k buildings)
 CITY_TIER=late GODOT=/path/to/godot ./scripts/bench_godot.sh 1 5 benchmarks/routes/phase0_city_late.json
 GODOT=/path/to/godot ./scripts/smoke_city.sh
+
+# Player-facing benchmark report over existing Early/Mid/Late summaries.
+# Report only: it does not run scenes and is not the 1M gate.
+GODOT=/path/to/godot ./scripts/smoke_bench_screen.sh
+"${GODOT:-godot}" --path godot res://bench_screen.tscn -- --output benchmarks/results/bench_screen_report.json
 # Headless MultiMesh setup harness for 10k/50k/250k boxes (not FPS evidence)
 GODOT=/path/to/godot ./scripts/smoke_metropolis_render.sh
 GODOT=/path/to/godot ./scripts/bench_metropolis_gate.sh --setup-only
