@@ -717,71 +717,83 @@ impl ServiceStore {
     /// the city-wide service share. Schools add research when they cover at
     /// least one consumer with school demand.
     pub fn refresh(&mut self, consumers: &[ServiceConsumer]) -> ServiceReport {
+        // Bucket operational sites once, preserving `BTreeMap` id order so
+        // capacity sums and the research allocation keep their accumulation
+        // order. Only operational sites can supply service.
+        let mut sites_of = [0_usize; 4];
+        let mut operational: [Vec<&ServiceSite>; 4] = std::array::from_fn(|_| Vec::new());
+        for site in self.sites.values() {
+            sites_of[site.kind as usize] += 1;
+            if site.is_operational() {
+                operational[site.kind as usize].push(site);
+            }
+        }
+        let grids: [SiteGrid<'_>; 4] =
+            std::array::from_fn(|index| SiteGrid::new(std::mem::take(&mut operational[index])));
+
+        // One ordered consumer pass: every per-kind demand, covered-demand,
+        // and covered-building sum still visits consumers in slice order, so
+        // the f64 accumulation order is unchanged.
+        let mut demand = [0.0_f64; 4];
+        let mut covered_demand = [0.0_f64; 4];
+        let mut covered_buildings = [0_usize; 4];
+        for consumer in consumers {
+            for (index, grid) in grids.iter().enumerate() {
+                let kind = ServiceKind::ALL[index];
+                let value = consumer.demand(kind);
+                demand[index] += value;
+                if grid.covers(consumer) {
+                    covered_demand[index] += value;
+                    if value > 0.0 {
+                        covered_buildings[index] += 1;
+                    }
+                }
+            }
+        }
+
         let mut report = ServiceReport {
             consumers: consumers.len(),
             sites: self.sites.len(),
             ..ServiceReport::default()
         };
-        for kind in ServiceKind::ALL {
-            let demand: f64 = consumers.iter().map(|consumer| consumer.demand(kind)).sum();
-            let capacity: f64 = self
-                .sites
-                .values()
-                .filter(|site| site.kind == kind && site.is_operational())
-                .map(|site| site.capacity)
-                .sum();
-            let covered_demand: f64 = consumers
-                .iter()
-                .filter(|consumer| covered(consumer, kind, &self.sites))
-                .map(|consumer| consumer.demand(kind))
-                .sum();
-            let service = supply_share(
-                demand,
-                covered_demand,
-                capacity,
-                self.operational_site_count(kind),
-            );
+        let mut supplies = [0.0_f32; 4];
+        for (index, kind) in ServiceKind::ALL.iter().copied().enumerate() {
+            let sites = grids[index].sites();
+            let capacity: f64 = sites.iter().map(|site| site.capacity).sum();
+            let service = supply_share(demand[index], covered_demand[index], capacity, sites.len());
+            supplies[index] = service.supply;
+            report.sites_of[index] = sites_of[index];
+            report.covered_buildings[index] = covered_buildings[index];
             match kind {
                 ServiceKind::School => {
-                    self.school_supply = service.supply;
                     report.school_supply = service.supply;
-                    report.school_demand = demand;
+                    report.school_demand = demand[index];
                     report.school_served = service.served;
                     report.school_capacity = capacity;
                     report.school_coverage = service.coverage;
                 }
                 ServiceKind::Clinic => {
-                    self.clinic_supply = service.supply;
                     report.clinic_supply = service.supply;
-                    report.clinic_demand = demand;
+                    report.clinic_demand = demand[index];
                     report.clinic_served = service.served;
                     report.clinic_capacity = capacity;
                     report.clinic_coverage = service.coverage;
                 }
                 ServiceKind::Fire => {
-                    self.fire_supply = service.supply;
                     report.fire_supply = service.supply;
-                    report.fire_demand = demand;
+                    report.fire_demand = demand[index];
                     report.fire_served = service.served;
                     report.fire_capacity = capacity;
                     report.fire_coverage = service.coverage;
                 }
                 ServiceKind::Police => {
-                    self.police_supply = service.supply;
                     report.police_supply = service.supply;
-                    report.police_demand = demand;
+                    report.police_demand = demand[index];
                     report.police_served = service.served;
                     report.police_capacity = capacity;
                     report.police_coverage = service.coverage;
                 }
             }
-            report.sites_of[kind as usize] = self.count_of(kind);
-            report.covered_buildings[kind as usize] = consumers
-                .iter()
-                .filter(|consumer| {
-                    consumer.demand(kind) > 0.0 && covered(consumer, kind, &self.sites)
-                })
-                .count();
         }
 
         // Allocate the served school demand across sites in id order. Flat
@@ -789,25 +801,38 @@ impl ServiceStore {
         // served demand, so overlapping schools cannot stack research.
         let mut remaining = report.school_served;
         let mut research = 0.0_f64;
-        for site in self
-            .sites
-            .values()
-            .filter(|site| site.kind == ServiceKind::School && site.is_operational())
-        {
-            if remaining <= 0.0 || site.capacity <= 0.0 {
-                continue;
-            }
-            let covered_demand: f64 = consumers
-                .iter()
-                .filter(|consumer| consumer.school_demand() > 0.0 && site_covers(site, consumer))
-                .map(ServiceConsumer::school_demand)
-                .sum();
-            let allocated = covered_demand.min(site.capacity).min(remaining);
-            if allocated > 0.0 {
-                research += site.research_per_day;
-                remaining -= allocated;
+        let school_sites = grids[ServiceKind::School as usize].sites();
+        if remaining > 0.0 && !school_sites.is_empty() {
+            let consumer_grid = ConsumerGrid::new(consumers, max_site_radius(school_sites));
+            let mut candidates = Vec::new();
+            for site in school_sites {
+                if remaining <= 0.0 {
+                    break;
+                }
+                if site.capacity <= 0.0 {
+                    continue;
+                }
+                consumer_grid.collect(site, &mut candidates);
+                let mut site_covered = 0.0_f64;
+                for &index in &candidates {
+                    let consumer = &consumers[index];
+                    let value = consumer.school_demand();
+                    if value > 0.0 && site_covers(site, consumer) {
+                        site_covered += value;
+                    }
+                }
+                let allocated = site_covered.min(site.capacity).min(remaining);
+                if allocated > 0.0 {
+                    research += site.research_per_day;
+                    remaining -= allocated;
+                }
             }
         }
+
+        self.school_supply = supplies[ServiceKind::School as usize];
+        self.clinic_supply = supplies[ServiceKind::Clinic as usize];
+        self.fire_supply = supplies[ServiceKind::Fire as usize];
+        self.police_supply = supplies[ServiceKind::Police as usize];
         self.research_per_day = research.min(MAX_SERVICE_RESEARCH_PER_DAY);
         report.research_per_day = self.research_per_day;
         report
@@ -977,14 +1002,132 @@ fn site_covers(site: &ServiceSite, consumer: &ServiceConsumer) -> bool {
     dx * dx + dz * dz <= f64::from(site.radius_m) * f64::from(site.radius_m)
 }
 
-fn covered(
-    consumer: &ServiceConsumer,
-    kind: ServiceKind,
-    sites: &BTreeMap<u64, ServiceSite>,
-) -> bool {
+/// Smallest service grid cell, in metres.
+///
+/// A zero-radius site still covers a consumer at exactly the same point, so
+/// the cell must stay finite and positive. Keeping it at least one metre also
+/// avoids division blowups for sub-metre radii.
+const SERVICE_GRID_MIN_CELL_M: f64 = 1.0;
+
+/// Cell index for a world coordinate.
+///
+/// The cast saturates, and an infinite cell size maps every finite coordinate
+/// to cell zero, which keeps the 3x3 query conservative for pathological
+/// saves.
+fn grid_cell(value: f32, cell_m: f64) -> i64 {
+    (f64::from(value) / cell_m).floor() as i64
+}
+
+/// Largest absolute site radius, used as the grid cell size.
+///
+/// `site_covers` squares the radius, so a negative radius behaves like its
+/// absolute value. NaN radii are ignored by `f64::max`; an infinite radius
+/// forces a single cell and therefore a full scan of that kind, preserving the
+/// original "infinite radius covers everything finite" semantics.
+fn max_site_radius(sites: &[&ServiceSite]) -> f64 {
     sites
-        .values()
-        .any(|site| site.kind == kind && site.is_operational() && site_covers(site, consumer))
+        .iter()
+        .map(|site| f64::from(site.radius_m).abs())
+        .fold(SERVICE_GRID_MIN_CELL_M, f64::max)
+}
+
+/// One service kind's operational sites, bucketed into a uniform grid.
+///
+/// Sites are kept in insertion (`BTreeMap` id) order, so summing their
+/// capacity and allocating research over them keeps the pre-index
+/// accumulation order. Only the coverage predicate uses the grid.
+struct SiteGrid<'a> {
+    sites: Vec<&'a ServiceSite>,
+    cells: BTreeMap<(i64, i64), Vec<usize>>,
+    cell_m: f64,
+}
+
+impl<'a> SiteGrid<'a> {
+    fn new(sites: Vec<&'a ServiceSite>) -> Self {
+        let cell_m = max_site_radius(&sites);
+        let mut cells: BTreeMap<(i64, i64), Vec<usize>> = BTreeMap::new();
+        for (index, site) in sites.iter().enumerate() {
+            let key = (
+                grid_cell(site.center[0], cell_m),
+                grid_cell(site.center[2], cell_m),
+            );
+            cells.entry(key).or_default().push(index);
+        }
+        Self {
+            sites,
+            cells,
+            cell_m,
+        }
+    }
+
+    fn sites(&self) -> &[&'a ServiceSite] {
+        &self.sites
+    }
+
+    /// Whether any operational site covers the consumer.
+    ///
+    /// Because the cell size is at least every site radius, a covering site's
+    /// centre lies in the consumer's cell or one of its eight neighbours.
+    fn covers(&self, consumer: &ServiceConsumer) -> bool {
+        if self.sites.is_empty() {
+            return false;
+        }
+        let x = grid_cell(consumer.center[0], self.cell_m);
+        let z = grid_cell(consumer.center[1], self.cell_m);
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let key = (x.saturating_add(dx), z.saturating_add(dz));
+                if let Some(indices) = self.cells.get(&key) {
+                    if indices
+                        .iter()
+                        .any(|&index| site_covers(self.sites[index], consumer))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+}
+
+/// Consumer positions bucketed into a uniform grid for the school loop.
+///
+/// Candidate indices are sorted before summing so each school site still adds
+/// its covered demand in consumer-slice order, keeping the f64 result
+/// bit-identical to the previous full scan.
+struct ConsumerGrid {
+    cells: BTreeMap<(i64, i64), Vec<usize>>,
+    cell_m: f64,
+}
+
+impl ConsumerGrid {
+    fn new(consumers: &[ServiceConsumer], cell_m: f64) -> Self {
+        let mut cells: BTreeMap<(i64, i64), Vec<usize>> = BTreeMap::new();
+        for (index, consumer) in consumers.iter().enumerate() {
+            let key = (
+                grid_cell(consumer.center[0], cell_m),
+                grid_cell(consumer.center[1], cell_m),
+            );
+            cells.entry(key).or_default().push(index);
+        }
+        Self { cells, cell_m }
+    }
+
+    fn collect(&self, site: &ServiceSite, out: &mut Vec<usize>) {
+        out.clear();
+        let x = grid_cell(site.center[0], self.cell_m);
+        let z = grid_cell(site.center[2], self.cell_m);
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let key = (x.saturating_add(dx), z.saturating_add(dz));
+                if let Some(indices) = self.cells.get(&key) {
+                    out.extend_from_slice(indices);
+                }
+            }
+        }
+        out.sort_unstable();
+    }
 }
 
 fn supply_share(demand: f64, covered: f64, capacity: f64, sites: usize) -> ServiceShare {
@@ -1681,5 +1824,431 @@ mod tests {
         assert_eq!(site.cost_paid, 500.0);
         assert_eq!(site.build_days_remaining, 1.0);
         assert_eq!(site.payment_due(), 0.0);
+    }
+
+    /// Old brute-force coverage predicate, kept as the equivalence oracle.
+    fn covered_reference(
+        consumer: &ServiceConsumer,
+        kind: ServiceKind,
+        sites: &BTreeMap<u64, ServiceSite>,
+    ) -> bool {
+        sites
+            .values()
+            .any(|site| site.kind == kind && site.is_operational() && site_covers(site, consumer))
+    }
+
+    /// Old full-scan `refresh`, kept test-only as the equivalence oracle.
+    fn refresh_reference(store: &ServiceStore, consumers: &[ServiceConsumer]) -> ServiceReport {
+        let mut report = ServiceReport {
+            consumers: consumers.len(),
+            sites: store.sites.len(),
+            ..ServiceReport::default()
+        };
+        for kind in ServiceKind::ALL {
+            let demand: f64 = consumers.iter().map(|consumer| consumer.demand(kind)).sum();
+            let capacity: f64 = store
+                .sites
+                .values()
+                .filter(|site| site.kind == kind && site.is_operational())
+                .map(|site| site.capacity)
+                .sum();
+            let covered_demand: f64 = consumers
+                .iter()
+                .filter(|consumer| covered_reference(consumer, kind, &store.sites))
+                .map(|consumer| consumer.demand(kind))
+                .sum();
+            let service = supply_share(
+                demand,
+                covered_demand,
+                capacity,
+                store.operational_site_count(kind),
+            );
+            match kind {
+                ServiceKind::School => {
+                    report.school_supply = service.supply;
+                    report.school_demand = demand;
+                    report.school_served = service.served;
+                    report.school_capacity = capacity;
+                    report.school_coverage = service.coverage;
+                }
+                ServiceKind::Clinic => {
+                    report.clinic_supply = service.supply;
+                    report.clinic_demand = demand;
+                    report.clinic_served = service.served;
+                    report.clinic_capacity = capacity;
+                    report.clinic_coverage = service.coverage;
+                }
+                ServiceKind::Fire => {
+                    report.fire_supply = service.supply;
+                    report.fire_demand = demand;
+                    report.fire_served = service.served;
+                    report.fire_capacity = capacity;
+                    report.fire_coverage = service.coverage;
+                }
+                ServiceKind::Police => {
+                    report.police_supply = service.supply;
+                    report.police_demand = demand;
+                    report.police_served = service.served;
+                    report.police_capacity = capacity;
+                    report.police_coverage = service.coverage;
+                }
+            }
+            report.sites_of[kind as usize] = store.count_of(kind);
+            report.covered_buildings[kind as usize] = consumers
+                .iter()
+                .filter(|consumer| {
+                    consumer.demand(kind) > 0.0 && covered_reference(consumer, kind, &store.sites)
+                })
+                .count();
+        }
+
+        let mut remaining = report.school_served;
+        let mut research = 0.0_f64;
+        for site in store
+            .sites
+            .values()
+            .filter(|site| site.kind == ServiceKind::School && site.is_operational())
+        {
+            if remaining <= 0.0 || site.capacity <= 0.0 {
+                continue;
+            }
+            let covered_demand: f64 = consumers
+                .iter()
+                .filter(|consumer| consumer.school_demand() > 0.0 && site_covers(site, consumer))
+                .map(ServiceConsumer::school_demand)
+                .sum();
+            let allocated = covered_demand.min(site.capacity).min(remaining);
+            if allocated > 0.0 {
+                research += site.research_per_day;
+                remaining -= allocated;
+            }
+        }
+        report.research_per_day = research.min(MAX_SERVICE_RESEARCH_PER_DAY);
+        report
+    }
+
+    /// Run both implementations and compare the whole resulting store state.
+    fn assert_refresh_matches_reference(
+        store: &ServiceStore,
+        consumers: &[ServiceConsumer],
+    ) -> ServiceReport {
+        assert_refresh_matches_reference_inner(store, consumers, true)
+    }
+
+    /// Same comparison, for stores that JSON cannot serialize (NaN/infinite
+    /// radii), so only the report and in-memory supplies are checked.
+    fn assert_refresh_matches_reference_unserialized(
+        store: &ServiceStore,
+        consumers: &[ServiceConsumer],
+    ) -> ServiceReport {
+        assert_refresh_matches_reference_inner(store, consumers, false)
+    }
+
+    fn assert_refresh_matches_reference_inner(
+        store: &ServiceStore,
+        consumers: &[ServiceConsumer],
+        check_checksum: bool,
+    ) -> ServiceReport {
+        let mut indexed = store.clone();
+        let indexed_report = indexed.refresh(consumers);
+        let reference_report = refresh_reference(store, consumers);
+        assert_eq!(
+            indexed_report, reference_report,
+            "indexed report must match the brute-force report"
+        );
+
+        if check_checksum {
+            let mut reference_store = store.clone();
+            reference_store.school_supply = reference_report.school_supply;
+            reference_store.clinic_supply = reference_report.clinic_supply;
+            reference_store.fire_supply = reference_report.fire_supply;
+            reference_store.police_supply = reference_report.police_supply;
+            reference_store.research_per_day = reference_report.research_per_day;
+            assert_eq!(
+                indexed.checksum(),
+                reference_store.checksum(),
+                "indexed refresh must produce bit-identical saved state"
+            );
+        }
+        indexed_report
+    }
+
+    /// Deterministic pseudo-random generator for fixtures; no external crate.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0
+        }
+
+        fn range(&mut self, low: i64, high: i64) -> i64 {
+            let span = (high - low + 1) as u64;
+            low + (self.next() % span) as i64
+        }
+
+        fn chance(&mut self, one_in: u64) -> bool {
+            self.next().is_multiple_of(one_in)
+        }
+    }
+
+    const EDGE_COORDS: [f32; 12] = [
+        0.0,
+        -0.0,
+        0.5,
+        1.0,
+        179.9,
+        180.0,
+        -180.0,
+        10_000.0,
+        -10_000.0,
+        1_000_000.0,
+        f32::MAX,
+        f32::MIN,
+    ];
+
+    fn edge_coord(rng: &mut Lcg) -> f32 {
+        EDGE_COORDS[(rng.next() as usize) % EDGE_COORDS.len()]
+    }
+
+    fn random_fixture(
+        seed: u64,
+        site_count: usize,
+        consumer_count: usize,
+    ) -> (ServiceStore, Vec<ServiceConsumer>) {
+        let mut rng = Lcg(seed);
+        let mut store = ServiceStore::new(seed);
+        for _ in 0..site_count {
+            let kind = ServiceKind::ALL[(rng.next() as usize) % ServiceKind::ALL.len()];
+            let tier = ServiceTier::ALL[(rng.next() as usize) % ServiceTier::ALL.len()];
+            let x = if rng.chance(8) {
+                edge_coord(&mut rng)
+            } else {
+                rng.range(-4_000, 4_000) as f32
+            };
+            let z = if rng.chance(8) {
+                edge_coord(&mut rng)
+            } else {
+                rng.range(-4_000, 4_000) as f32
+            };
+            let id = (rng.next() % 100_000) + 1;
+            let lead_days = if rng.chance(6) { 1.5 } else { 0.0 };
+            store
+                .add_site_with_lead_days(id, kind, tier, [x, 0.0, z], lead_days)
+                .expect("fixture site");
+            if rng.chance(5) {
+                let radius = match rng.next() % 6 {
+                    0 => 0.0,
+                    1 => -180.0,
+                    2 => 0.5,
+                    3 => 3_000.0,
+                    4 => 500.0,
+                    _ => 10_000.0,
+                };
+                if let Some(site) = store.site_mut(id) {
+                    site.radius_m = radius;
+                }
+            }
+        }
+
+        let mut consumers: Vec<ServiceConsumer> = (0..consumer_count)
+            .map(|index| {
+                let x = if rng.chance(8) {
+                    edge_coord(&mut rng)
+                } else {
+                    rng.range(-4_500, 4_500) as f32
+                };
+                let z = if rng.chance(8) {
+                    edge_coord(&mut rng)
+                } else {
+                    rng.range(-4_500, 4_500) as f32
+                };
+                ServiceConsumer {
+                    id: index as u64 + 1,
+                    center: [x, z],
+                    residents: (rng.next() % 8_000) as u32,
+                    workers: (rng.next() % 4_000) as u32,
+                }
+            })
+            .collect();
+
+        // Place a few consumers exactly on site centres so zero and negative
+        // radii are exercised at distance zero.
+        let centers: Vec<[f32; 3]> = store.sites.values().map(|site| site.center).collect();
+        if !centers.is_empty() {
+            for (index, consumer) in consumers.iter_mut().take(16).enumerate() {
+                let center = centers[index % centers.len()];
+                consumer.center = [center[0], center[2]];
+            }
+        }
+        (store, consumers)
+    }
+
+    #[test]
+    fn indexed_refresh_matches_bruteforce_on_randomized_mixed_fixtures() {
+        for seed in 0..16_u64 {
+            let (store, consumers) = random_fixture(seed, 80, 300);
+            assert_refresh_matches_reference(&store, &consumers);
+        }
+    }
+
+    #[test]
+    fn indexed_refresh_matches_bruteforce_for_empty_and_building_only_stores() {
+        let empty = ServiceStore::new(2026);
+        assert_refresh_matches_reference(&empty, &[]);
+        assert_refresh_matches_reference(&empty, &[consumer(1, 0.0, 4, 2)]);
+
+        let mut building = ServiceStore::new(2026);
+        for (id, kind) in ServiceKind::ALL.iter().copied().enumerate() {
+            building
+                .add_site_with_lead_days(
+                    id as u64 + 1,
+                    kind,
+                    ServiceTier::Basic,
+                    [0.0, 0.0, 0.0],
+                    2.0,
+                )
+                .expect("building site");
+        }
+        let consumers = [consumer(1, 0.0, 4_000, 2_000), consumer(2, 10_000.0, 0, 0)];
+        let report = assert_refresh_matches_reference(&building, &consumers);
+        assert_eq!(report.school_supply, 0.0);
+        assert_eq!(report.research_per_day, 0.0);
+        assert_eq!(report.covered_buildings, [0; 4]);
+    }
+
+    #[test]
+    fn indexed_refresh_matches_bruteforce_for_degenerate_radii() {
+        let mut store = ServiceStore::new(2026);
+        store
+            .add_site(1, ServiceKind::Clinic, ServiceTier::Basic, [0.0, 0.0, 0.0])
+            .expect("infinite clinic");
+        store.site_mut(1).expect("clinic").radius_m = f32::INFINITY;
+        store
+            .add_site(
+                2,
+                ServiceKind::Fire,
+                ServiceTier::Basic,
+                [1_000.0, 0.0, 1_000.0],
+            )
+            .expect("nan fire");
+        store.site_mut(2).expect("fire").radius_m = f32::NAN;
+        store
+            .add_site(
+                3,
+                ServiceKind::Police,
+                ServiceTier::Basic,
+                [10.0, 0.0, 10.0],
+            )
+            .expect("point police");
+        store.site_mut(3).expect("police").radius_m = 0.0;
+        store
+            .add_site(4, ServiceKind::School, ServiceTier::Basic, [0.0, 0.0, 0.0])
+            .expect("negative school");
+        store.site_mut(4).expect("school").radius_m = -240.0;
+
+        let consumers = [
+            ServiceConsumer {
+                id: 1,
+                center: [10.0, 10.0],
+                residents: 40,
+                workers: 10,
+            },
+            ServiceConsumer {
+                id: 2,
+                center: [1_000_000.0, -1_000_000.0],
+                residents: 40,
+                workers: 10,
+            },
+            ServiceConsumer {
+                id: 3,
+                center: [0.0, 0.0],
+                residents: 0,
+                workers: 0,
+            },
+            ServiceConsumer {
+                id: 4,
+                center: [f32::MAX, f32::MIN],
+                residents: 40,
+                workers: 10,
+            },
+        ];
+        let report = assert_refresh_matches_reference_unserialized(&store, &consumers);
+        assert_eq!(report.clinic_supply, 1.0);
+        assert_eq!(report.covered_buildings[ServiceKind::Police as usize], 1);
+    }
+
+    #[test]
+    fn indexed_refresh_is_deterministic() {
+        let (store, consumers) = random_fixture(7, 64, 256);
+        let mut first = store.clone();
+        let first_report = first.refresh(&consumers);
+        let mut second = store.clone();
+        let second_report = second.refresh(&consumers);
+        assert_eq!(first_report, second_report);
+        assert_eq!(first.checksum(), second.checksum());
+
+        let repeat_report = first.refresh(&consumers);
+        assert_eq!(first_report, repeat_report);
+    }
+
+    #[test]
+    fn cap_scale_refresh_stays_within_a_generous_bound() {
+        const CONSUMERS: usize = 100_000;
+        let mut store = ServiceStore::new(2026);
+        for index in 0..MAX_SERVICE_SITES {
+            let kind = ServiceKind::ALL[index % ServiceKind::ALL.len()];
+            let tier = ServiceTier::ALL[index % ServiceTier::ALL.len()];
+            let center = [
+                ((index % 100) as f32) * 400.0,
+                0.0,
+                ((index / 100) as f32) * 400.0,
+            ];
+            let id = index as u64 + 1;
+            if index % 10 == 0 {
+                store
+                    .add_site_with_lead_days(id, kind, tier, center, 1.0)
+                    .expect("fixture site");
+            } else {
+                store
+                    .add_site(id, kind, tier, center)
+                    .expect("fixture site");
+            }
+        }
+        let consumers: Vec<ServiceConsumer> = (0..CONSUMERS)
+            .map(|index| ServiceConsumer {
+                id: index as u64,
+                center: [
+                    ((index % 400) as f32) * 100.0,
+                    ((index / 400) as f32) * 100.0,
+                ],
+                residents: (index % 5) as u32,
+                workers: (index % 3) as u32,
+            })
+            .collect();
+
+        let started = std::time::Instant::now();
+        let report = store.refresh(&consumers);
+        let elapsed = started.elapsed();
+
+        assert_eq!(report.sites, MAX_SERVICE_SITES);
+        assert_eq!(report.consumers, CONSUMERS);
+        assert_eq!(report.sites_of.iter().sum::<usize>(), MAX_SERVICE_SITES);
+        for supply in [
+            report.school_supply,
+            report.clinic_supply,
+            report.fire_supply,
+            report.police_supply,
+        ] {
+            assert!(supply.is_finite() && (0.0..=1.0).contains(&supply));
+        }
+        assert!(report.research_per_day.is_finite());
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "cap-scale refresh took {elapsed:?}, expected well under 30 s"
+        );
     }
 }
