@@ -162,7 +162,8 @@ impl TradePool {
     /// Total crew slots.
     #[must_use]
     pub fn total(&self) -> u16 {
-        self.capacity.values().copied().sum()
+        let total: u32 = self.capacity.values().copied().map(u32::from).sum();
+        u16::try_from(total).unwrap_or(u16::MAX)
     }
 
     /// Whether the roster has at least one crew slot for a trade.
@@ -251,5 +252,14 @@ mod tests {
         assert!(pool.validate().is_ok());
         pool.capacity.insert(Trade::Mason, 0);
         assert!(pool.validate().is_err());
+    }
+
+    #[test]
+    fn total_saturates_instead_of_overflowing() {
+        let mut pool = TradePool::new();
+        for trade in Trade::ALL {
+            pool.capacity.insert(trade, u16::MAX);
+        }
+        assert_eq!(pool.total(), u16::MAX);
     }
 }

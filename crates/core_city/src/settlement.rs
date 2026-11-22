@@ -313,7 +313,7 @@ impl SettlementStore {
     /// Stable 64-bit checksum over the settlement layer.
     #[must_use]
     pub fn checksum(&self) -> u64 {
-        let bytes = serde_json::to_vec(self).unwrap_or_default();
+        let bytes = serde_json::to_vec(self).expect("settlement store serialization cannot fail");
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
         for byte in bytes {
             hash ^= u64::from(byte);

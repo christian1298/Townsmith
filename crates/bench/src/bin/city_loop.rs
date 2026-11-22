@@ -38,8 +38,6 @@ struct Scenario {
     workplaces: u64,
     industry_count: u64,
     recovery_day: f64,
-    water_ids: &'static [u64],
-    power_ids: &'static [u64],
 }
 
 const SCENARIOS: [Scenario; 3] = [
@@ -49,8 +47,6 @@ const SCENARIOS: [Scenario; 3] = [
         workplaces: 1,
         industry_count: 3,
         recovery_day: 15.0,
-        water_ids: &[1, 10],
-        power_ids: &[1, 5, 10],
     },
     Scenario {
         name: "mid",
@@ -58,8 +54,6 @@ const SCENARIOS: [Scenario; 3] = [
         workplaces: 5,
         industry_count: 10,
         recovery_day: 15.0,
-        water_ids: &[1, 10],
-        power_ids: &[1, 5, 10],
     },
     Scenario {
         name: "late",
@@ -67,8 +61,6 @@ const SCENARIOS: [Scenario; 3] = [
         workplaces: 10,
         industry_count: 20,
         recovery_day: 5.0,
-        water_ids: &[1, 10, 91, 100],
-        power_ids: &[1, 10, 46, 55, 91, 100],
     },
 ];
 
@@ -162,7 +154,7 @@ fn main() {
     } else {
         None
     };
-    if days == 0 || !step.is_finite() || step <= 0.0 {
+    if days == 0 || !step_is_valid(step) {
         eprintln!(
             "usage: city_loop [--scenario early|mid|late] [--days N] [--houses N] [--workplaces N] [--step SECONDS] [--campaign-days [--seconds-per-day 60]] [--matrix] [--balance] [--degraded no_water|no_power|no_industry|no_roads|no_utilities] [--degraded-matrix]"
         );
@@ -715,6 +707,10 @@ fn checksum_json(value: &serde_json::Value) -> u64 {
     checksum
 }
 
+fn step_is_valid(step: f64) -> bool {
+    step.is_finite() && step > 0.0 && step <= core_city::MAX_POPULATION_TICK_SECONDS
+}
+
 fn arg_value(name: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
     for index in 0..args.len() {
@@ -740,8 +736,6 @@ mod tests {
             workplaces,
             industry_count: houses.min(10),
             recovery_day: 15.0,
-            water_ids: &[],
-            power_ids: &[],
         }
     }
 
@@ -800,6 +794,16 @@ mod tests {
         assert_eq!(campaign["campaign_seconds_per_day"], 60.0);
         assert!(campaign["construction_days"].as_f64().unwrap() > 0.0);
         assert_ne!(developer["checksum"], campaign["checksum"]);
+    }
+
+    #[test]
+    fn step_must_fit_the_population_tick_cap() {
+        assert!(step_is_valid(1.0));
+        assert!(step_is_valid(core_city::MAX_POPULATION_TICK_SECONDS));
+        assert!(!step_is_valid(0.0));
+        assert!(!step_is_valid(-1.0));
+        assert!(!step_is_valid(f64::NAN));
+        assert!(!step_is_valid(core_city::MAX_POPULATION_TICK_SECONDS + 1.0));
     }
 
     #[test]
