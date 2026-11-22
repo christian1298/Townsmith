@@ -359,30 +359,37 @@ fn push_wall_span(
 ) {
     let y0 = f32::from(bottom);
     let y1 = f32::from(top);
-    let wx = origin[0];
-    let wz = origin[1];
+    let [wx, wz] = origin;
 
-    // Corners are ordered around the wall; culling is disabled in the preview
-    // material until the winding convention is locked.
-    let (p0, p1, p2, p3) = if normal[0] != 0.0 {
-        (
-            [wx, y0, wz],
-            [wx, y0, wz + span],
-            [wx, y1, wz + span],
-            [wx, y1, wz],
-        )
+    // Pick the horizontal edge direction `u` so that `u x up == normal`.
+    // Walking base -> base + u -> + up -> base + up is then counter-clockwise
+    // around `normal`; `push_quad` emits the Godot-clockwise index order.
+    let (base, u): ([f32; 3], [f32; 3]) = if normal[0] < 0.0 {
+        ([wx, y0, wz], [0.0, 0.0, span])
+    } else if normal[0] > 0.0 {
+        ([wx, y0, wz + span], [0.0, 0.0, -span])
+    } else if normal[2] < 0.0 {
+        ([wx + span, y0, wz], [-span, 0.0, 0.0])
     } else {
-        (
-            [wx, y0, wz],
-            [wx + span, y0, wz],
-            [wx + span, y1, wz],
-            [wx, y1, wz],
-        )
+        ([wx, y0, wz], [span, 0.0, 0.0])
     };
+    let p0 = base;
+    let p1 = [base[0] + u[0], y0, base[2] + u[2]];
+    let p2 = [p1[0], y1, p1[2]];
+    let p3 = [p0[0], y1, p0[2]];
+
     push_quad(mesh, [p0, p1, p2, p3], normal, color);
 }
 
 fn push_quad(mesh: &mut TerrainMesh, corners: [[f32; 3]; 4], normal: [f32; 3], color: [f32; 3]) {
+    debug_assert!(
+        dot3(
+            cross3(sub3(corners[1], corners[0]), sub3(corners[2], corners[0])),
+            normal
+        ) > 0.0,
+        "terrain quad corners must be counter-clockwise around the normal"
+    );
+
     let base = mesh.vertices.len() as u32;
     for position in corners {
         mesh.vertices.push(TerrainVertex {
@@ -391,8 +398,28 @@ fn push_quad(mesh: &mut TerrainMesh, corners: [[f32; 3]; 4], normal: [f32; 3], c
             color,
         });
     }
+
+    // Godot treats clockwise triangles as front-facing when viewed from the
+    // outside, matching the voxel mesher (`core_voxel::mesh::emit_quad`). The
+    // corners above are counter-clockwise around `normal`, so reverse them.
     mesh.indices
-        .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        .extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+}
+
+fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 #[cfg(test)]
@@ -818,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn skirt_normals_face_outward_and_winding_matches() {
+    fn skirt_normals_face_outward_and_winding_is_godot_clockwise() {
         let mesh = terrain_mesh_lod_with_sampler_and_skirt(&flat_chunk(24), 2, |_, _| 24, 2.0);
         let skirts = non_top_quads(&mesh);
         assert_eq!(skirts.len(), 4 * 128);
@@ -843,7 +870,53 @@ mod tests {
             let p1 = quad[1].position;
             let p2 = quad[2].position;
             let cross = cross(sub(p1, p0), sub(p2, p0));
+            // Stored corners are counter-clockwise around the outward normal;
+            // `push_quad` emits the reversed Godot-clockwise index order.
             assert!(dot(cross, normal) > 0.0);
+        }
+    }
+
+    #[test]
+    fn every_terrain_quad_is_godot_clockwise() {
+        // Every step gets a raised sample so the mesh has top, all four wall
+        // signs, and perimeter skirts. The sampler keeps the boundary walls
+        // that the no-sampler path emits at this milestone.
+        for (step, bump) in [(1, 10), (2, 10), (3, 9), (4, 8)] {
+            let mut chunk = flat_chunk(24);
+            chunk.set_height(bump, bump, 30).expect("valid cell");
+
+            let no_sampler = terrain_mesh(&chunk);
+            assert_godot_clockwise(&no_sampler);
+
+            let mesh = terrain_mesh_lod_with_sampler_and_skirt(&chunk, step, |_, _| 20, 2.0);
+            assert_godot_clockwise(&mesh);
+
+            let mut saw_top = false;
+            let mut wall_signs = [false; 4];
+            let mut saw_skirt = false;
+            for vertices in all_quads(&mesh) {
+                let normal = vertices[0].normal;
+                if normal[1] > 0.0 {
+                    saw_top = true;
+                } else if normal[0] < 0.0 {
+                    wall_signs[0] = true;
+                } else if normal[0] > 0.0 {
+                    wall_signs[1] = true;
+                } else if normal[2] < 0.0 {
+                    wall_signs[2] = true;
+                } else {
+                    wall_signs[3] = true;
+                }
+                if vertices.iter().any(|vertex| vertex.position[1] < 24.0) {
+                    saw_skirt = true;
+                }
+            }
+            assert!(saw_top, "step {step} is missing top quads");
+            assert!(
+                wall_signs.iter().all(|seen| *seen),
+                "step {step} is missing a wall normal sign: {wall_signs:?}"
+            );
+            assert!(saw_skirt, "step {step} is missing skirt quads");
         }
     }
 
@@ -853,13 +926,38 @@ mod tests {
     }
 
     fn non_top_quads(mesh: &TerrainMesh) -> Vec<[TerrainVertex; 4]> {
+        all_quads(mesh)
+            .into_iter()
+            .filter(|quad| quad[0].normal[1] == 0.0)
+            .collect()
+    }
+
+    fn all_quads(mesh: &TerrainMesh) -> Vec<[TerrainVertex; 4]> {
         mesh.indices
             .as_chunks::<6>()
             .0
             .iter()
             .map(|indices| quad_vertices(mesh, indices[0] as usize))
-            .filter(|quad| quad[0].normal[1] == 0.0)
             .collect()
+    }
+
+    /// Godot renders clockwise triangles as front faces. Under the right-hand
+    /// rule a clockwise triangle's cross product points opposite the outward
+    /// normal, so every emitted quad must have `dot(cross, normal) < 0`.
+    fn assert_godot_clockwise(mesh: &TerrainMesh) {
+        let quads = mesh.indices.as_chunks::<6>().0;
+        assert!(!quads.is_empty(), "expected terrain quads");
+        for (index, indices) in quads.iter().enumerate() {
+            let p0 = mesh.vertices[indices[0] as usize];
+            let p1 = mesh.vertices[indices[1] as usize];
+            let p2 = mesh.vertices[indices[2] as usize];
+            let cross = cross(sub(p1.position, p0.position), sub(p2.position, p0.position));
+            assert!(
+                dot(cross, p0.normal) < 0.0,
+                "quad {index} is counter-clockwise from its normal {:?}",
+                p0.normal
+            );
+        }
     }
 
     fn on_perimeter(vertex: &TerrainVertex) -> bool {

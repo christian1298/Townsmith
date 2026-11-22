@@ -197,10 +197,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		if key == KEY_H:
 			_cycle_structure()
 			return
-		if event.keycode == KEY_BRACKETLEFT and not event.ctrl_pressed and not event.alt_pressed:
+		# Bracket room cycling follows the same physical-preferred key strategy
+		# as every other shortcut in this handler (`_event_key`).
+		if key == KEY_BRACKETLEFT and not event.ctrl_pressed and not event.alt_pressed:
 			_cycle_room(-1)
 			return
-		if event.keycode == KEY_BRACKETRIGHT and not event.ctrl_pressed and not event.alt_pressed:
+		if key == KEY_BRACKETRIGHT and not event.ctrl_pressed and not event.alt_pressed:
 			_cycle_room(1)
 			return
 		for index in PROPS.size():
@@ -332,6 +334,8 @@ func _place_under_crosshair() -> void:
 		_material_name(_active_material), cell]))
 
 func _place_prop_under_crosshair() -> void:
+	if _camera == null:
+		return
 	var hit := _raycast(_camera.global_position, -_camera.global_transform.basis.z)
 	if not bool(hit.get("hit", false)) or not bool(hit.get("has_place", false)):
 		_status("base.editor.status.no_prop_cell")
@@ -346,6 +350,8 @@ func _place_prop_under_crosshair() -> void:
 	_status("base.editor.status.prop_placed", [_prop_name(_active_prop), cell])
 
 func _remove_prop_under_crosshair() -> void:
+	if _camera == null:
+		return
 	var hit := _raycast(_camera.global_position, -_camera.global_transform.basis.z)
 	if not bool(hit.get("hit", false)) or not bool(hit.get("has_place", false)):
 		_status("base.editor.status.no_prop_cell_in_reach")

@@ -1,8 +1,17 @@
 //! Palette and run-length encoding for chunks.
 
+use std::collections::HashMap;
+
 use crate::chunk::VoxelChunk;
 use crate::coords::{coords_from_index, MaterialId, AIR, CHUNK_VOLUME};
 use crate::error::VoxelError;
+
+/// Maximum number of palette entries a chunk can reference.
+///
+/// A chunk holds [`CHUNK_VOLUME`] voxels, and entry 0 is always air, so at most
+/// one entry per voxel plus air is reachable. Decoding rejects larger palettes
+/// before walking the run stream.
+pub const MAX_PALETTE_ENTRIES: usize = CHUNK_VOLUME + 1;
 
 /// One run of identical palette entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,12 +36,22 @@ pub struct EncodedChunk {
 
 impl EncodedChunk {
     /// Encode a dense chunk.
+    ///
+    /// Palette order follows first appearance in linear chunk order, with air
+    /// first. The material-to-index map makes this O(voxels) instead of
+    /// O(voxels x palette entries).
     #[must_use]
     pub fn from_chunk(chunk: &VoxelChunk) -> Self {
         let mut palette = vec![AIR];
+        let mut indices: HashMap<MaterialId, u16> = HashMap::new();
+        indices.insert(AIR, 0);
+
         for &material in chunk.as_slice() {
-            if !palette.contains(&material) {
+            if let std::collections::hash_map::Entry::Vacant(entry) = indices.entry(material) {
+                let index = u16::try_from(palette.len())
+                    .expect("a chunk palette cannot exceed u16::MAX entries");
                 palette.push(material);
+                entry.insert(index);
             }
         }
 
@@ -40,11 +59,9 @@ impl EncodedChunk {
         let mut current_index = 0u16;
         let mut count = 0u16;
         for &material in chunk.as_slice() {
-            let index = palette
-                .iter()
-                .position(|&entry| entry == material)
-                .expect("palette contains every material in the chunk")
-                as u16;
+            let index = *indices
+                .get(&material)
+                .expect("palette contains every material in the chunk");
 
             if count == 0 {
                 current_index = index;
@@ -75,6 +92,12 @@ impl EncodedChunk {
     pub fn decode(&self) -> Result<VoxelChunk, VoxelError> {
         if self.palette.is_empty() {
             return Err(VoxelError::EmptyPalette);
+        }
+        if self.palette.len() > MAX_PALETTE_ENTRIES {
+            return Err(VoxelError::PaletteTooLarge {
+                entries: self.palette.len(),
+                max: MAX_PALETTE_ENTRIES,
+            });
         }
         if self.palette[0] != AIR {
             return Err(VoxelError::PaletteMustStartWithAir);
@@ -249,5 +272,61 @@ mod tests {
         assert_eq!(encoded.voxel_at(0), Some(AIR));
         assert_eq!(encoded.voxel_at(1), Some(4));
         assert_eq!(encoded.voxel_at(CHUNK_VOLUME), None);
+    }
+
+    #[test]
+    fn decode_rejects_oversized_palette() {
+        let mut palette = vec![AIR];
+        palette.extend(1..=(MAX_PALETTE_ENTRIES as MaterialId));
+        assert_eq!(palette.len(), MAX_PALETTE_ENTRIES + 1);
+        let encoded = EncodedChunk {
+            palette,
+            runs: vec![RleRun {
+                palette_index: 0,
+                count: CHUNK_VOLUME as u16,
+            }],
+        };
+        assert_eq!(
+            encoded.decode(),
+            Err(VoxelError::PaletteTooLarge {
+                entries: MAX_PALETTE_ENTRIES + 1,
+                max: MAX_PALETTE_ENTRIES,
+            })
+        );
+    }
+
+    #[test]
+    fn decode_accepts_the_maximum_palette_size() {
+        let mut palette = vec![AIR];
+        palette.extend(1..=(MAX_PALETTE_ENTRIES as MaterialId - 1));
+        assert_eq!(palette.len(), MAX_PALETTE_ENTRIES);
+        let encoded = EncodedChunk {
+            palette,
+            runs: vec![RleRun {
+                palette_index: 0,
+                count: CHUNK_VOLUME as u16,
+            }],
+        };
+        let chunk = encoded.decode().expect("maximum palette is valid");
+        assert!(chunk.is_empty());
+    }
+
+    #[test]
+    fn many_material_chunk_round_trips() {
+        let voxels: Vec<MaterialId> = (0..CHUNK_VOLUME)
+            .map(|index| (index as MaterialId) + 1)
+            .collect();
+        let chunk = VoxelChunk::from_voxels(voxels.clone()).expect("dense chunk");
+        let encoded = chunk.encode();
+
+        assert_eq!(encoded.palette.len(), MAX_PALETTE_ENTRIES);
+        assert_eq!(encoded.palette[0], AIR);
+        assert_eq!(encoded.runs.len(), CHUNK_VOLUME);
+        assert_eq!(encoded.decode().expect("roundtrip"), chunk);
+        assert_eq!(encoded.voxel_at(0), Some(1));
+        assert_eq!(
+            encoded.voxel_at(CHUNK_VOLUME - 1),
+            Some(CHUNK_VOLUME as MaterialId)
+        );
     }
 }
