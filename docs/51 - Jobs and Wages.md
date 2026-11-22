@@ -2,7 +2,7 @@
 title: Jobs and Wages
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-3
@@ -59,12 +59,14 @@ pub struct Household {
     pub water: f32,
     pub rest: f32,
     pub commute_m: f32,
+    /// Remembered majority workplace (lowest id on ties).
+    pub workplace_id: Option<u64>,
     pub income_per_day: f64,
     pub home: [f32; 2],
 }
 ```
 
-`CityRuntime::tick_with_workplaces(dt, homes, workplaces)`:
+`CityRuntime::tick_with_workplaces(dt, homes, workplaces)` also records one `workplace_id` per household: the workplace with the most assigned workers, tie-broken by lower id. The field is derived, cleared at zero workers, and excluded from `checksum`; `workplace_checksum()` gives movement caches a key that changes when the destination changes. Old saves default to `None`. This is still aggregate: residents in a split household share the majority destination.
 
 1. syncs households with completed homes;
 2. fills vacancies from the move-in rate;

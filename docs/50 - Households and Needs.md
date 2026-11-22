@@ -2,7 +2,7 @@
 title: Households and Needs
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-3
@@ -75,7 +75,7 @@ Default rate: **1 resident/second** for the developer slice; the value is saved 
 
 ### Jobs
 
-3.2 uses `workers = min(residents, remaining jobs)` in id order. [[51 - Jobs and Wages]] replaces this with nearest-workplace assignment, commute distance, and gross wages; unemployed residents remain in the household and lower happiness.
+3.2 uses `workers = min(residents, remaining jobs)` in id order. [[51 - Jobs and Wages]] replaces this with nearest-workplace assignment, commute distance, and gross wages; unemployed residents remain in the household and lower happiness. The household remembers the workplace with the most assigned workers (lowest id on ties) as `workplace_id`; it is cleared when workers reach zero and is excluded from the population checksum so old baselines stay stable.
 
 ### Needs and happiness
 

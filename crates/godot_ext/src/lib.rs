@@ -3333,6 +3333,9 @@ impl TownsmithCore {
             world_checksum,
             construction_checksum,
             population_checksum: population.as_ref().map_or(0, CityRuntime::checksum),
+            workplace_checksum: population
+                .as_ref()
+                .map_or(0, CityRuntime::workplace_checksum),
             named_checksum: named.as_ref().map_or(0, NamedCitizens::checksum),
             roads_checksum: roads.as_ref().map_or(0, RoadStore::checksum),
             center: [request.center[0].to_bits(), request.center[1].to_bits()],
@@ -8299,6 +8302,7 @@ struct MovementCacheKey {
     world_checksum: u64,
     construction_checksum: u64,
     population_checksum: u64,
+    workplace_checksum: u64,
     named_checksum: u64,
     roads_checksum: u64,
     center: [u32; 2],
@@ -8458,11 +8462,12 @@ fn movement_motion(
         active_radius_m,
         detailed_radius_m,
     )?;
-    Ok(CitizenMotion::new(
+    Ok(CitizenMotion::new_with_households(
         &MaterializationSelection {
             active: selection.active,
             detailed: selection.detailed,
         },
+        households,
         workplaces,
         graph,
         DEFAULT_ROUTE_CACHE_CAPACITY,
@@ -10710,6 +10715,7 @@ mod tests {
             world_checksum: 1,
             construction_checksum: 2,
             population_checksum: 3,
+            workplace_checksum: 6,
             named_checksum: 4,
             roads_checksum: 5,
             center: [10.0_f32.to_bits(), 20.0_f32.to_bits()],
@@ -10737,6 +10743,7 @@ mod tests {
             world_checksum: 1,
             construction_checksum: 2,
             population_checksum: 3,
+            workplace_checksum: 6,
             named_checksum: 4,
             roads_checksum: 5,
             center: [0.0_f32.to_bits(), 0.0_f32.to_bits()],

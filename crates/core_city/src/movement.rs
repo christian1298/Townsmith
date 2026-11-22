@@ -22,7 +22,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::named::{mix64, MaterializationSelection, MaterializedCitizen};
-use crate::population::Workplace;
+use crate::population::{Household, Workplace};
 use crate::route_cache::{CachedRoute, RouteCache};
 use crate::traffic::{fnv1a_feed, FlowField, RoadGraph, FNV_OFFSET_BASIS};
 
@@ -248,6 +248,29 @@ impl CitizenMotion {
         graph: &RoadGraph,
         route_cache_capacity: usize,
     ) -> Self {
+        Self::new_with_households(
+            selection,
+            &BTreeMap::new(),
+            workplaces,
+            graph,
+            route_cache_capacity,
+        )
+    }
+
+    /// Build movement with remembered household workplaces.
+    ///
+    /// A household with `workplace_id` set tries that workplace first; unknown,
+    /// zero-slot, unreachable, or disconnected ids fall back to the nearest
+    /// reachable workplace. Old saves and callers without households use
+    /// [`Self::new`].
+    #[must_use]
+    pub fn new_with_households(
+        selection: &MaterializationSelection,
+        remembered: &BTreeMap<u64, Household>,
+        workplaces: &[Workplace],
+        graph: &RoadGraph,
+        route_cache_capacity: usize,
+    ) -> Self {
         let mut households: BTreeMap<u64, BTreeMap<u64, &MaterializedCitizen>> = BTreeMap::new();
         for citizen in &selection.active {
             households
@@ -288,9 +311,18 @@ impl CitizenMotion {
             if !home.iter().all(|value| value.is_finite()) {
                 continue;
             }
-            let Some(route) =
-                choose_route(placement_id, home, workplaces, &fields, graph, &mut cache)
-            else {
+            let remembered_workplace = remembered
+                .get(&placement_id)
+                .and_then(|household| household.workplace_id);
+            let Some(route) = choose_route(
+                placement_id,
+                home,
+                remembered_workplace,
+                workplaces,
+                &fields,
+                graph,
+                &mut cache,
+            ) else {
                 continue;
             };
 
@@ -487,11 +519,34 @@ pub fn phase_offset_s(id: u64, cycle_s: f64) -> f64 {
 fn choose_route(
     placement_id: u64,
     home: [f32; 2],
+    remembered_workplace: Option<u64>,
     workplaces: &[Workplace],
     fields: &[Option<FlowField>],
     graph: &RoadGraph,
     cache: &mut RouteCache,
 ) -> Option<HouseholdRoute> {
+    if let Some(remembered) = remembered_workplace {
+        if let Some(index) = workplaces
+            .iter()
+            .position(|workplace| workplace.id == remembered && workplace.slots > 0)
+        {
+            let workplace = workplaces[index];
+            if fields
+                .get(index)
+                .and_then(Option::as_ref)
+                .and_then(|field| graph.flow_distance_m(home, field))
+                .is_some_and(f32::is_finite)
+            {
+                if let Some(route) = cache.get_or_build(graph, home, workplace.center) {
+                    return Some(HouseholdRoute::from_cached(
+                        placement_id,
+                        workplace.id,
+                        route,
+                    ));
+                }
+            }
+        }
+    }
     let mut candidates: Vec<(f32, u64, usize)> = workplaces
         .iter()
         .enumerate()
@@ -748,8 +803,16 @@ mod tests {
             .map(|workplace| graph.flow_to(workplace.center))
             .collect();
         let mut cache = RouteCache::new(4);
-        let route =
-            choose_route(7, [0.0, 0.0], &workplaces, &fields, &graph, &mut cache).expect("route");
+        let route = choose_route(
+            7,
+            [0.0, 0.0],
+            None,
+            &workplaces,
+            &fields,
+            &graph,
+            &mut cache,
+        )
+        .expect("route");
         assert_eq!(route.workplace_id, 10);
         assert_eq!(cache.misses(), 1);
     }
