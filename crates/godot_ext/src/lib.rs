@@ -553,7 +553,7 @@ struct TownsmithCore {
     research: Mutex<Option<ResearchStore>>,
     route_preview: Mutex<Option<RoutePreviewState>>,
     graph_cache: Mutex<Option<RoadGraphCache>>,
-    movement_cache: Mutex<Option<MovementCache>>,
+    movement_cache: Mutex<MovementCacheSlot>,
     terrain_deltas: Arc<RwLock<DeltaStore>>,
     terrain_seed: Mutex<Option<u64>>,
 }
@@ -578,7 +578,7 @@ impl Default for TownsmithCore {
             research: Mutex::new(None),
             route_preview: Mutex::new(None),
             graph_cache: Mutex::new(None),
-            movement_cache: Mutex::new(None),
+            movement_cache: Mutex::new(MovementCacheSlot::default()),
             terrain_deltas: Arc::new(RwLock::new(DeltaStore::new())),
             terrain_seed: Mutex::new(None),
         }
@@ -3343,7 +3343,7 @@ impl TownsmithCore {
             .movement_cache
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(cache) = movement_cache.as_ref().filter(|cache| cache.key == key) {
+        if let Some(cache) = movement_cache.lookup(&key) {
             let payload = movement_payload_from_motion(
                 request.seed,
                 request.center,
@@ -3374,48 +3374,49 @@ impl TownsmithCore {
         };
         let payload =
             movement_payload_from_motion(request.seed, request.center, request.time_s, &motion);
-        *movement_cache = Some(MovementCache { key, motion });
+        movement_cache.store(key, motion);
         movement_payload_to_dictionary(&payload)
     }
 
     /// Movement cache counters and key.
+    ///
+    /// `hits`, `misses`, `builds`, and `clears` are cumulative for the lifetime
+    /// of this bridge instance. `movement_cache_clear` drops the cached entry
+    /// and increments `clears` but keeps the other three counters, matching
+    /// `core_city::RouteCache::clear`.
     #[func]
     fn movement_cache_state(&self) -> VarDictionary {
         let guard = self
             .movement_cache
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let stats = guard.stats();
         let mut result = VarDictionary::new();
         result.set("ok", true);
-        match guard.as_ref() {
-            Some(cache) => {
-                result.set("open", true);
-                result.set("seed", cache.key.seed as i64);
-                result.set("routes", cache.motion.route_count() as i64);
-                result.set("citizens", cache.motion.citizen_count() as i64);
-                result.set(
-                    "checksum",
-                    &GString::from(&format!("{:016x}", cache.motion.checksum())),
-                );
-            }
-            None => {
-                result.set("open", false);
-                result.set("seed", 0);
-                result.set("routes", 0);
-                result.set("citizens", 0);
-                result.set("checksum", &GString::from("0000000000000000"));
-            }
-        }
+        result.set("open", stats.open);
+        result.set("seed", stats.seed as i64);
+        result.set("routes", stats.routes as i64);
+        result.set("citizens", stats.citizens as i64);
+        result.set("hits", stats.hits as i64);
+        result.set("misses", stats.misses as i64);
+        result.set("builds", stats.builds as i64);
+        result.set("clears", stats.clears as i64);
+        result.set(
+            "checksum",
+            &GString::from(&format!("{:016x}", stats.checksum)),
+        );
         result
     }
 
-    /// Drop the cached movement tracks and their counters.
+    /// Drop the cached movement tracks and count the clear.
+    ///
+    /// The `hits`, `misses`, and `builds` counters stay cumulative.
     #[func]
     fn movement_cache_clear(&self) -> bool {
-        *self
-            .movement_cache
+        self.movement_cache
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = None;
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
         true
     }
 
@@ -8300,9 +8301,102 @@ struct MovementCacheKey {
     detailed_radius: u32,
 }
 
+#[derive(Debug)]
 struct MovementCache {
     key: MovementCacheKey,
     motion: CitizenMotion,
+}
+
+/// Bridge-owned movement cache entry plus cumulative lookup counters.
+///
+/// Counters live for the lifetime of the bridge instance. Like
+/// `core_city::RouteCache`, [`MovementCacheSlot::clear`] drops the cached entry
+/// but keeps `hits`, `misses`, and `builds`; it only increments `clears` so the
+/// reset boundary stays visible.
+#[derive(Debug, Default)]
+struct MovementCacheSlot {
+    entry: Option<MovementCache>,
+    counters: MovementCacheCounters,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct MovementCacheCounters {
+    hits: u64,
+    misses: u64,
+    builds: u64,
+    clears: u64,
+}
+
+/// Read-only snapshot of one movement cache slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MovementCacheStats {
+    open: bool,
+    seed: u64,
+    routes: usize,
+    citizens: usize,
+    hits: u64,
+    misses: u64,
+    builds: u64,
+    clears: u64,
+    checksum: u64,
+}
+
+impl MovementCacheSlot {
+    /// Return the cached entry for `key`, counting a hit or a miss.
+    ///
+    /// A hit means the key matches and only [`CitizenMotion::positions_at`]
+    /// needs to rerun for the requested time. A miss counts even when the
+    /// subsequent build fails, mirroring [`RouteCache`](core_city::RouteCache).
+    fn lookup(&mut self, key: &MovementCacheKey) -> Option<&MovementCache> {
+        if self.entry.as_ref().is_some_and(|entry| entry.key == *key) {
+            self.counters.hits += 1;
+            self.entry.as_ref()
+        } else {
+            self.counters.misses += 1;
+            None
+        }
+    }
+
+    /// Store a freshly built motion and count the build.
+    fn store(&mut self, key: MovementCacheKey, motion: CitizenMotion) {
+        self.counters.builds += 1;
+        self.entry = Some(MovementCache { key, motion });
+    }
+
+    /// Drop the entry, count the clear, and keep cumulative counters.
+    fn clear(&mut self) {
+        self.counters.clears += 1;
+        self.entry = None;
+    }
+
+    /// Snapshot for `movement_cache_state`.
+    fn stats(&self) -> MovementCacheStats {
+        let counters = self.counters;
+        match self.entry.as_ref() {
+            Some(cache) => MovementCacheStats {
+                open: true,
+                seed: cache.key.seed,
+                routes: cache.motion.route_count(),
+                citizens: cache.motion.citizen_count(),
+                hits: counters.hits,
+                misses: counters.misses,
+                builds: counters.builds,
+                clears: counters.clears,
+                checksum: cache.motion.checksum(),
+            },
+            None => MovementCacheStats {
+                open: false,
+                seed: 0,
+                routes: 0,
+                citizens: 0,
+                hits: counters.hits,
+                misses: counters.misses,
+                builds: counters.builds,
+                clears: counters.clears,
+                checksum: 0,
+            },
+        }
+    }
 }
 
 /// Selected movement positions for one materialization selection.
@@ -10539,6 +10633,84 @@ mod tests {
         let mut changed = base;
         changed.active_radius = 51.0_f32.to_bits();
         assert_ne!(base, changed);
+    }
+
+    fn movement_cache_fixture() -> (MovementCacheKey, CitizenMotion) {
+        let key = MovementCacheKey {
+            seed: 2026,
+            world_checksum: 1,
+            construction_checksum: 2,
+            population_checksum: 3,
+            named_checksum: 4,
+            roads_checksum: 5,
+            center: [0.0_f32.to_bits(), 0.0_f32.to_bits()],
+            active_radius: 50.0_f32.to_bits(),
+            detailed_radius: 20.0_f32.to_bits(),
+        };
+        let motion = CitizenMotion::new(
+            &MaterializationSelection::default(),
+            &[],
+            &RoadGraph::build(&[]).expect("empty graph"),
+            DEFAULT_ROUTE_CACHE_CAPACITY,
+        );
+        (key, motion)
+    }
+
+    #[test]
+    fn movement_cache_counts_hits_misses_builds_and_clears() {
+        let mut slot = MovementCacheSlot::default();
+        let (key, motion) = movement_cache_fixture();
+        assert_eq!(slot.stats().hits, 0);
+        assert!(!slot.stats().open);
+
+        assert!(slot.lookup(&key).is_none());
+        slot.store(key, motion.clone());
+        let stats = slot.stats();
+        assert_eq!(
+            (stats.hits, stats.misses, stats.builds, stats.clears),
+            (0, 1, 1, 0)
+        );
+        assert!(stats.open);
+
+        let hit = slot.lookup(&key).expect("hit");
+        assert_eq!(hit.motion.checksum(), motion.checksum());
+        let stats = slot.stats();
+        assert_eq!(
+            (stats.hits, stats.misses, stats.builds, stats.clears),
+            (1, 1, 1, 0)
+        );
+
+        let mut changed = key;
+        changed.seed += 1;
+        assert!(slot.lookup(&changed).is_none());
+        let stats = slot.stats();
+        assert_eq!(
+            (stats.hits, stats.misses, stats.builds, stats.clears),
+            (1, 2, 1, 0)
+        );
+
+        slot.clear();
+        let stats = slot.stats();
+        assert!(!stats.open);
+        assert_eq!(
+            (stats.hits, stats.misses, stats.builds, stats.clears),
+            (1, 2, 1, 1)
+        );
+        assert_eq!(stats.checksum, 0);
+    }
+
+    #[test]
+    fn movement_cache_counters_are_repeatable() {
+        let run = || {
+            let mut slot = MovementCacheSlot::default();
+            let (key, motion) = movement_cache_fixture();
+            let _ = slot.lookup(&key);
+            slot.store(key, motion.clone());
+            let _ = slot.lookup(&key);
+            slot.clear();
+            slot.stats()
+        };
+        assert_eq!(run(), run());
     }
 
     #[test]
