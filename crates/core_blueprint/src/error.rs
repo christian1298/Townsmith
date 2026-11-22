@@ -56,7 +56,7 @@ impl fmt::Display for BlueprintError {
                 write!(f, "blueprint requires missing dependency {dependency}")
             }
             Self::TooLarge { what, limit } => {
-                write!(f, "blueprint {what} exceeds the {limit}-byte limit")
+                write!(f, "blueprint {what} exceeds the limit of {limit}")
             }
         }
     }

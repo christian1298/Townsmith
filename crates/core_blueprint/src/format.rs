@@ -4,10 +4,10 @@ use std::collections::HashSet;
 
 use core_voxel::palette::RleRun;
 use core_voxel::volume::{ChunkPos, VolumeConfig, VoxelVolume};
-use core_voxel::{MaterialId, VoxelChunk, CHUNK_SIZE, CHUNK_VOLUME};
+use core_voxel::{MaterialId, VoxelChunk, AIR, CHUNK_SIZE, CHUNK_VOLUME};
 
 use crate::error::BlueprintError;
-use crate::limits::{MAX_CHUNKS, MAX_VOXEL_STREAM_BYTES};
+use crate::limits::{MAX_CHUNKS, MAX_SOLID_VOXELS, MAX_VOLUME_VOXELS, MAX_VOXEL_STREAM_BYTES};
 
 const MAGIC: &[u8; 4] = b"TSBV";
 const STREAM_VERSION: u16 = 1;
@@ -110,10 +110,26 @@ pub fn decode_voxels(bytes: &[u8]) -> Result<DecodedVoxels, BlueprintError> {
     let chunks_x = reader.u32()?;
     let chunks_y = reader.u32()?;
     let chunks_z = reader.u32()?;
+    // Reject an oversized declared grid before `VolumeConfig`/`VoxelVolume`
+    // allocate anything. The dense capacity is the worst-case chunk storage.
+    let capacity =
+        u128::from(chunks_x) * u128::from(chunks_y) * u128::from(chunks_z) * CHUNK_VOLUME as u128;
+    if capacity > u128::from(MAX_VOLUME_VOXELS) {
+        return Err(BlueprintError::TooLarge {
+            what: "declared volume",
+            limit: MAX_VOLUME_VOXELS,
+        });
+    }
     let config = VolumeConfig::new(chunks_x, chunks_y, chunks_z)
         .map_err(|error| BlueprintError::Format(error.to_string()))?;
     let count = reader.u32()? as usize;
     let declared_solid = reader.u64()?;
+    if declared_solid > MAX_SOLID_VOXELS {
+        return Err(BlueprintError::TooLarge {
+            what: "solid voxel count",
+            limit: MAX_SOLID_VOXELS,
+        });
+    }
     if count > MAX_CHUNKS {
         return Err(BlueprintError::TooLarge {
             what: "chunk count",
@@ -124,6 +140,7 @@ pub fn decode_voxels(bytes: &[u8]) -> Result<DecodedVoxels, BlueprintError> {
     let mut volume =
         VoxelVolume::new(config).map_err(|error| BlueprintError::Format(error.to_string()))?;
     let mut seen = HashSet::with_capacity(count);
+    let mut declared_solid_total: u64 = 0;
     for _ in 0..count {
         let pos = ChunkPos::new(reader.u32()?, reader.u32()?, reader.u32()?);
         if pos.x >= config.chunks_x || pos.y >= config.chunks_y || pos.z >= config.chunks_z {
@@ -153,10 +170,27 @@ pub fn decode_voxels(bytes: &[u8]) -> Result<DecodedVoxels, BlueprintError> {
         }
         let mut runs = Vec::with_capacity(run_count);
         for _ in 0..run_count {
-            runs.push(RleRun {
+            let run = RleRun {
                 palette_index: reader.u16()?,
                 count: reader.u16()?,
-            });
+            };
+            // Track the declared solid budget while reading runs, before the
+            // dense chunk is allocated. Palette index validity is still
+            // checked by `VoxelChunk::decode`; an invalid index cannot smuggle
+            // solids past this check because the chunk is rejected there.
+            if palette
+                .get(run.palette_index as usize)
+                .is_some_and(|material| *material != AIR)
+            {
+                declared_solid_total = declared_solid_total.saturating_add(u64::from(run.count));
+                if declared_solid_total > MAX_SOLID_VOXELS {
+                    return Err(BlueprintError::TooLarge {
+                        what: "solid voxel count",
+                        limit: MAX_SOLID_VOXELS,
+                    });
+                }
+            }
+            runs.push(run);
         }
         let encoded = core_voxel::palette::EncodedChunk { palette, runs };
         let chunk = VoxelChunk::decode(&encoded)?;
@@ -221,5 +255,93 @@ impl<'a> Reader<'a> {
         Ok(u64::from_le_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::limits::MAX_VOLUME_VOXELS;
+
+    fn header(chunks: [u32; 3], count: u32, declared_solid: u64) -> Vec<u8> {
+        let mut out = Vec::with_capacity(HEADER_BYTES);
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&STREAM_VERSION.to_le_bytes());
+        out.extend_from_slice(&(CHUNK_SIZE as u16).to_le_bytes());
+        for axis in chunks {
+            out.extend_from_slice(&axis.to_le_bytes());
+        }
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&declared_solid.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn oversized_declared_volume_is_rejected_before_allocation() {
+        // 32³ chunks × 32³ voxels = 1,073,741,824 voxels: the densest header
+        // the axis limits allow. The capacity guard rejects it before
+        // `VolumeConfig`/`VoxelVolume` allocate anything, with zero records.
+        let bytes = header([32, 32, 32], 0, 0);
+        assert_eq!(bytes.len(), HEADER_BYTES);
+        match decode_voxels(&bytes) {
+            Err(BlueprintError::TooLarge { what, limit }) => {
+                assert_eq!(what, "declared volume");
+                assert_eq!(limit, MAX_VOLUME_VOXELS);
+            }
+            other => panic!("expected a declared-volume rejection, got {other:?}"),
+        }
+
+        // 16³ is a valid `VolumeConfig` (4096 chunks) but still far over the
+        // decode budget, so the guard must fire before the slot table.
+        let bytes = header([16, 16, 16], 0, 0);
+        assert!(matches!(
+            decode_voxels(&bytes),
+            Err(BlueprintError::TooLarge {
+                what: "declared volume",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn declared_solid_over_budget_is_rejected_from_the_header() {
+        let bytes = header([1, 1, 1], 0, MAX_SOLID_VOXELS + 1);
+        match decode_voxels(&bytes) {
+            Err(BlueprintError::TooLarge { what, limit }) => {
+                assert_eq!(what, "solid voxel count");
+                assert_eq!(limit, MAX_SOLID_VOXELS);
+            }
+            other => panic!("expected a solid-voxel rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rle_solid_runs_over_budget_are_rejected_before_chunk_decode() {
+        // One chunk whose non-air runs declare more than the solid budget.
+        // The runs are individually valid RLE counts but together exceed both
+        // a chunk and the package budget; the incremental guard must fire
+        // while reading the runs, before the dense chunk is allocated.
+        let mut bytes = header([1, 1, 1], 1, 0);
+        for _ in 0..3 {
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+        }
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        let run_count: u16 = 123;
+        bytes.extend_from_slice(&run_count.to_le_bytes());
+        bytes.extend_from_slice(&AIR.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        for _ in 0..run_count {
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&u16::MAX.to_le_bytes());
+        }
+        // 123 × 65,535 = 8,060,805 > 8,000,000.
+        assert!(u64::from(run_count) * u64::from(u16::MAX) > MAX_SOLID_VOXELS);
+        match decode_voxels(&bytes) {
+            Err(BlueprintError::TooLarge { what, limit }) => {
+                assert_eq!(what, "solid voxel count");
+                assert_eq!(limit, MAX_SOLID_VOXELS);
+            }
+            other => panic!("expected an incremental solid-voxel rejection, got {other:?}"),
+        }
     }
 }
