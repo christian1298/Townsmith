@@ -415,11 +415,36 @@ pub struct LifecycleTick {
     pub died: usize,
 }
 
+/// One named citizen retired by a lifecycle tick.
+///
+/// The record is a snapshot taken immediately before the identity is removed,
+/// so it keeps the name and age even when a later household sync rebuilds the
+/// slot with a new identity. Records are ordered ascending by
+/// `(placement_id, slot)`, which is the deterministic sequence for the tick.
+///
+/// Death events are in memory only. The named save stores identities, not an
+/// event journal, and there is no persisted day or sequence counter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CitizenDeath {
+    /// Stable 63-bit identity.
+    pub id: u64,
+    /// Home placement id the identity lived in.
+    pub placement_id: u64,
+    /// Resident slot occupied before the death.
+    pub slot: u32,
+    /// Generated display name at the time of death.
+    pub name: String,
+    /// Persisted age in whole days at death.
+    ///
+    /// The lifecycle removes at [`MAX_AGE_DAYS`], so this is normally the cap.
+    pub age_days: u32,
+}
+
 /// Result of one lifecycle tick that also names the retired resident slots.
 ///
 /// [`NamedCitizens::tick_lifecycle`] keeps the count-only API for existing
 /// callers. This type is for callers that must apply population consequences,
-/// such as `CityRuntime::apply_deaths`.
+/// such as `CityRuntime::apply_deaths`, or report who died.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LifecycleOutcome {
     /// Aging and death counts for the tick.
@@ -430,6 +455,12 @@ pub struct LifecycleOutcome {
     /// for a no-op tick. An entry is the slot that was occupied before the
     /// removal; callers must apply it against the pre-death household.
     pub deaths: Vec<(u64, u32)>,
+    /// One structured record per removed identity, ascending.
+    ///
+    /// `death_events[i]` corresponds to `deaths[i]`. The list is empty for a
+    /// no-op tick. The array order is the deterministic sequence within the
+    /// tick; no day or sequence value is persisted.
+    pub death_events: Vec<CitizenDeath>,
 }
 
 impl LifecycleOutcome {
@@ -601,10 +632,12 @@ impl NamedCitizens {
     ///
     /// `aged` counts citizens that received the advance, including citizens
     /// removed in the same tick; `died` counts the removals, and
-    /// [`LifecycleOutcome::deaths`] lists the same removals as slots. The named
-    /// layer does not change household `residents`, `workers`, or needs:
-    /// applying [`LifecycleOutcome::deaths`] to the aggregate population is a
-    /// caller concern (`CityRuntime::apply_deaths`).
+    /// [`LifecycleOutcome::deaths`] lists the same removals as slots.
+    /// [`LifecycleOutcome::death_events`] carries the corresponding identity,
+    /// name, and age captured before removal. The named layer does not change
+    /// household `residents`, `workers`, or needs: applying
+    /// [`LifecycleOutcome::deaths`] to the aggregate population is a caller
+    /// concern (`CityRuntime::apply_deaths`).
     ///
     /// This method does not sync the pool with the households. A caller that
     /// loads, ticks, and then syncs should expect identities to be added or
@@ -620,7 +653,7 @@ impl NamedCitizens {
         }
 
         let mut tick = LifecycleTick::default();
-        let mut deaths: Vec<(u64, u32)> = Vec::new();
+        let mut dying: Vec<((u64, u32), CitizenDeath)> = Vec::new();
         for (key, citizen) in &mut self.citizens {
             if citizen.age_days == 0 {
                 citizen.age_days = initial_age_days(citizen.id);
@@ -631,12 +664,32 @@ impl NamedCitizens {
                 .min(MAX_AGE_DAYS);
             tick.aged += 1;
             if citizen.age_days >= MAX_AGE_DAYS {
-                deaths.push(*key);
+                dying.push((
+                    *key,
+                    CitizenDeath {
+                        id: citizen.id,
+                        placement_id: citizen.placement_id,
+                        slot: citizen.slot,
+                        name: citizen.name.clone(),
+                        age_days: citizen.age_days,
+                    },
+                ));
             }
         }
-        deaths.retain(|key| self.citizens.remove(key).is_some());
+        let mut deaths = Vec::with_capacity(dying.len());
+        let mut death_events = Vec::with_capacity(dying.len());
+        for (key, event) in dying {
+            if self.citizens.remove(&key).is_some() {
+                deaths.push(key);
+                death_events.push(event);
+            }
+        }
         tick.died = deaths.len();
-        LifecycleOutcome { tick, deaths }
+        LifecycleOutcome {
+            tick,
+            deaths,
+            death_events,
+        }
     }
 
     /// Oldest persisted age in whole days, or `None` for an empty pool.
@@ -1957,6 +2010,27 @@ mod tests {
         assert_eq!(outcome.tick.aged, 4);
         assert_eq!(outcome.tick.died, 2);
         assert_eq!(outcome.deaths, vec![(1, 0), (1, 2)]);
+        assert_eq!(outcome.death_events.len(), 2);
+        let first = &outcome.death_events[0];
+        assert_eq!(first.id, citizen_id(2026, 1, 0));
+        assert_eq!(first.placement_id, 1);
+        assert_eq!(first.slot, 0);
+        assert_eq!(first.name, name_for(first.id));
+        assert_eq!(first.age_days, MAX_AGE_DAYS);
+        let second = &outcome.death_events[1];
+        assert_eq!(second.id, citizen_id(2026, 1, 2));
+        assert_eq!(second.placement_id, 1);
+        assert_eq!(second.slot, 2);
+        assert_eq!(second.name, name_for(second.id));
+        assert_eq!(second.age_days, MAX_AGE_DAYS);
+        assert_eq!(
+            outcome
+                .death_events
+                .iter()
+                .map(|event| (event.placement_id, event.slot))
+                .collect::<Vec<_>>(),
+            outcome.deaths
+        );
         assert!(!outcome.is_empty());
         assert_eq!(named.len(), 2);
         assert!(named.get(1, 0).is_none());
@@ -1973,12 +2047,47 @@ mod tests {
         households.insert(1, household(2));
         named.sync(&households);
         let before = named.clone();
+        let before_checksum = named.checksum();
         for days in [f64::NAN, f64::INFINITY, 0.0, -1.0, 0.5] {
             let outcome = named.tick_lifecycle_with_deaths(days);
             assert!(outcome.is_empty(), "days {days} must not retire anyone");
+            assert!(outcome.death_events.is_empty());
             assert_eq!(outcome.tick, LifecycleTick::default());
             assert_eq!(named, before);
+            assert_eq!(named.checksum(), before_checksum);
         }
+    }
+
+    #[test]
+    fn lifecycle_death_events_are_not_part_of_the_named_checksum() {
+        let mut named = NamedCitizens::new(2026);
+        let mut households = BTreeMap::new();
+        households.insert(1, household(2));
+        named.sync(&households);
+        let mut reference = named.clone();
+        for citizen in reference.citizens.values_mut() {
+            citizen.age_days += 1;
+        }
+        let before = named.checksum();
+        let outcome = named.tick_lifecycle_with_deaths(1.0);
+        assert!(outcome.death_events.is_empty());
+        assert_eq!(named.checksum(), reference.checksum());
+        assert_ne!(named.checksum(), before);
+    }
+
+    #[test]
+    fn death_events_are_not_persisted_and_the_pool_still_loads() {
+        let mut named = NamedCitizens::new(2026);
+        let mut households = BTreeMap::new();
+        households.insert(1, household(1));
+        named.sync(&households);
+        named.get_mut_for_test(citizen_id(2026, 1, 0)).age_days = MAX_AGE_DAYS - 1;
+        let outcome = named.tick_lifecycle_with_deaths(1.0);
+        assert_eq!(outcome.death_events.len(), 1);
+        let json = named.to_json_pretty().expect("json");
+        assert!(!json.contains("death_events"));
+        let decoded = NamedCitizens::from_json(&json).expect("decode");
+        assert_eq!(decoded, named);
     }
 
     #[test]

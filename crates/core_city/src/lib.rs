@@ -95,11 +95,12 @@ pub use movement::{
     MIN_MOVEMENT_CYCLE_S,
 };
 pub use named::{
-    age_years, age_years_from_days, citizen_id, diff_selection, mix64, name_for, LifecycleOutcome,
-    LifecycleTick, MaterializationBudget, MaterializationDiff, MaterializationSelection,
-    MaterializedCitizen, NamedCitizen, NamedCitizens, NamedError, NamedSave, DAYS_PER_YEAR,
-    IDENTITY_VERSION, MAX_ACTIVE_CITIZENS, MAX_AGE_DAYS, MAX_DETAILED_CITIZENS,
-    MAX_MATERIALIZATION_CHANGES, MAX_NAMED_CITIZENS, MAX_NAMED_NAME_BYTES, NAMED_FORMAT_VERSION,
+    age_years, age_years_from_days, citizen_id, diff_selection, mix64, name_for, CitizenDeath,
+    LifecycleOutcome, LifecycleTick, MaterializationBudget, MaterializationDiff,
+    MaterializationSelection, MaterializedCitizen, NamedCitizen, NamedCitizens, NamedError,
+    NamedSave, DAYS_PER_YEAR, IDENTITY_VERSION, MAX_ACTIVE_CITIZENS, MAX_AGE_DAYS,
+    MAX_DETAILED_CITIZENS, MAX_MATERIALIZATION_CHANGES, MAX_NAMED_CITIZENS, MAX_NAMED_NAME_BYTES,
+    NAMED_FORMAT_VERSION,
 };
 pub use placement::{
     footprint_for, normalize_rotation, validate_placement, Placement, PlacementError,
