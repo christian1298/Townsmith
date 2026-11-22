@@ -498,3 +498,7 @@ Validation: the centre must be finite (and representable as `f32`), otherwise `i
 `cargo run --release -p townsmith-server -- --interest-smoke` prints `SERVER_INTEREST status=ok center=0.0,0.0 radius=16.0 visible=1 roads=1 truncated=false tick=2 checksum=6d92be74bdbc11f5`. The loopback places one road inside and one outside, narrows the viewport, moves it to the far road, and restores it; every batch must be `snapshot` + `interest_view` and match a local reference world.
 
 Limits: v0 streams only static road geometry. There is no entity, agent, terrain, or blueprint streaming, no delta compression, no prioritization, no server-side region activation, and no per-client `ServerSave` state.
+
+### Interest road preview
+
+The Godot client draws the `interest_view` road list in a flat top-down `Control` preview (`godot/mp_interest_render.gd` + `mp_interest_canvas.gd`): fitted circle, one line per road, width clamped 1–32 px, at most 64 roads, deterministic 16-hex checksum. The smoke asserts `interest_render=ok roads=1 checksum=… rendered=1 cleared=true`; the snapshot checksum is reported as `snapshot_checksum=`. Limits: debug visualization only; no terrain, chunks, entities, map projection, clipping policy, or AOI activation.

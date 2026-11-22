@@ -16,6 +16,20 @@ if ! command -v "$GODOT_BIN" >/dev/null 2>&1; then
 	exit 2
 fi
 
+# Pure-helper assertions (projection, bounded road parsing, checksum) run
+# without a display or a server, so a broken preview fails before the socket
+# exchange and is reported separately from the protocol contract.
+set +e
+HELPER_OUTPUT="$(timeout 30s "$GODOT_BIN" --headless --path "$ROOT/godot" res://mp_client.tscn -- \
+	--self-test 2>&1)"
+HELPER_STATUS=$?
+set -e
+printf '%s\n' "$HELPER_OUTPUT"
+if [[ $HELPER_STATUS -ne 0 ]] || ! grep -q '^MP_INTEREST_HELPER status=ok ' <<<"$HELPER_OUTPUT"; then
+	echo "Multiplayer interest helper self-test failed (status $HELPER_STATUS)" >&2
+	exit 1
+fi
+
 cargo build --manifest-path "$ROOT/Cargo.toml" -p townsmith-server >/dev/null
 
 # The bind-then-close probe below can race with the server bind, but the
@@ -99,11 +113,13 @@ fi
 
 TICK="$(sed -n 's/.* tick=\([0-9][0-9]*\).*/\1/p' <<<"$LINE")"
 POPULATION="$(sed -n 's/.* population=\([0-9][0-9]*\).*/\1/p' <<<"$LINE")"
-CHECKSUM="$(sed -n 's/.* checksum=\([0-9a-f]*\).*/\1/p' <<<"$LINE")"
+CHECKSUM="$(sed -n 's/.* snapshot_checksum=\([0-9a-f]\{16\}\).*/\1/p' <<<"$LINE")"
+INTEREST_CHECKSUM="$(sed -n 's/.* interest_render=ok roads=[0-9][0-9]* checksum=\([0-9a-f]\{16\}\).*/\1/p' <<<"$LINE")"
 FRAMES_SENT="$(sed -n 's/.* frames_sent=\([0-9][0-9]*\).*/\1/p' <<<"$LINE")"
 FRAMES_RECEIVED="$(sed -n 's/.* frames_received=\([0-9][0-9]*\).*/\1/p' <<<"$LINE")"
 
-for FIELD in "reject=ok" "road=ok" "interest=ok" "roads=1" "truncated=false"; do
+for FIELD in "reject=ok" "road=ok" "interest=ok" "roads=1" "truncated=false" \
+	"interest_render=ok" "cleared=true"; do
 	if [[ "$LINE" != *"$FIELD"* ]]; then
 		echo "Multiplayer client smoke failed: missing $FIELD ($LINE)" >&2
 		exit 1
@@ -118,7 +134,15 @@ if [[ -z "$POPULATION" ]] || (( POPULATION < 1 )); then
 	exit 1
 fi
 if [[ ! "$CHECKSUM" =~ ^[0-9a-f]{16}$ ]]; then
-	echo "Multiplayer client smoke failed: bad checksum '${CHECKSUM:-none}'" >&2
+	echo "Multiplayer client smoke failed: bad snapshot checksum '${CHECKSUM:-none}'" >&2
+	exit 1
+fi
+if [[ ! "$INTEREST_CHECKSUM" =~ ^[0-9a-f]{16}$ ]]; then
+	echo "Multiplayer client smoke failed: bad interest render checksum '${INTEREST_CHECKSUM:-none}'" >&2
+	exit 1
+fi
+if [[ "$LINE" != *"interest_render=ok roads=1 checksum=$INTEREST_CHECKSUM rendered=1 cleared=true"* ]]; then
+	echo "Multiplayer client smoke failed: interest render contract ($LINE)" >&2
 	exit 1
 fi
 if [[ "$FRAMES_SENT" != "7" || "$FRAMES_RECEIVED" != "8" ]]; then
@@ -131,4 +155,4 @@ if ! grep -Eq "SERVER_LISTEN status=ok sessions=1 commands=7 " "$SERVER_LOG"; th
 	exit 1
 fi
 
-echo "MP_CLIENT_SMOKE status=ok port=$PORT tick=$TICK population=$POPULATION checksum=$CHECKSUM frames=15"
+echo "MP_CLIENT_SMOKE status=ok port=$PORT tick=$TICK population=$POPULATION checksum=$CHECKSUM interest_checksum=$INTEREST_CHECKSUM frames=15"
