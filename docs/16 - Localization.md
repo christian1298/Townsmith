@@ -2,7 +2,7 @@
 title: Localization
 project: Townsmith
 status: proposed
-updated: 2026-11-21
+updated: 2026-11-22
 tags:
   - townsmith
   - localization
@@ -181,7 +181,7 @@ Content data references keys, not display names:
 - **Missing-key lint:** every `*_key` reference exists in English.
 - **Duplicate-key lint:** no duplicate keys in a namespace.
 - **Placeholder lint:** placeholders match across languages.
-- **Pseudo-localization:** a generated locale with accented/expanded text to catch clipping.
+- **Pseudo-localization:** `scripts/check_pseudo_locale.py` generates accented, 130%-length text, preserves placeholders, checks EN/DE parity, and enforces a 120-character limit with a long-string allowlist. It is wired into default `scripts/check_locale.sh` and prints `PSEUDO_LOCALE editor=111 world=211 content=34 long=11 status=ok`.
 - **German UI pass:** screenshots of the main menus, build tools, city dashboard, and notifications.
 - **Plural tests:** 0/1/2/many for counts.
 - **No hard-coded strings:** a lint/review rule for GDScript/Rust UI code.
