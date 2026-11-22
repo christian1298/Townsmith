@@ -4,11 +4,12 @@
 //! static population counters, the treasury, and the road store. It applies
 //! decoded [`ClientCommand`]s and answers with one [`ServerMessage`].
 //!
-//! This is deliberately in-memory only and single-session. It has no
-//! persistence, authentication, interest management, rollback, terrain
-//! sampling, or wall-clock loop. Time advances only through `time_control`
-//! (`step`) or an explicit [`ServerWorld::advance_day`] call, so transcripts
-//! are deterministic.
+//! Persistence lives in [`crate::save`] and is opt-in: one world to one JSON
+//! file, with atomic writes and a single `.bak` rotation. The executor itself
+//! has no authentication, interest management, rollback, terrain sampling, or
+//! wall-clock loop. Time advances only through `time_control` (`step`) or an
+//! explicit [`ServerWorld::advance_day`] call, so transcripts are
+//! deterministic.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -129,6 +130,31 @@ impl ServerWorld {
             hello: false,
             closed: false,
             session_id: session_id_for_seed(seed),
+        };
+        world.refresh_checksum();
+        world
+    }
+
+    /// Rebuild a world from an already validated [`crate::save::ServerSave`].
+    ///
+    /// The restored session is open and has not accepted a `hello`, so a
+    /// reconnecting client must handshake again. Saved tick, paused flag,
+    /// treasury, and roads resume unchanged; the checksum is recomputed from
+    /// the restored state.
+    pub(crate) fn restore(save: crate::save::ServerSave) -> Self {
+        let mut world = Self {
+            seed: save.seed,
+            tick: save.tick,
+            population: save.population,
+            employed: save.employed,
+            buildings: save.buildings,
+            economy: save.economy,
+            roads: save.roads,
+            paused: save.paused,
+            session_checksum: String::new(),
+            hello: false,
+            closed: false,
+            session_id: session_id_for_seed(save.seed),
         };
         world.refresh_checksum();
         world

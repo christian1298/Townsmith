@@ -350,6 +350,9 @@ These are planning targets. The Phase 0 spike and a network test must measure th
 
 ## 8. Persistence and reconnect
 
+> [!info] Server save v0
+> `crates/server/src/save.rs` implements the first server-world save: a deterministic `ServerSave` v1 JSON containing seed, tick, population/employment/building counts, paused state, economy, and roads. `save_to` writes `<path>.tmp`, fsyncs, renames, syncs the parent directory on Unix, and rotates a valid primary to `<path>.bak`. `load_from` falls back to the backup when the primary is missing/corrupt and rejects when both are corrupt. `crates/server/src/listen.rs` saves on disconnect/EOF/reset/idle timeout and optionally autosaves every N ticks. CLI: `--listen PORT --save PATH --load PATH [--autosave-ticks N] [--once]` and `--save-load-smoke`. Limits: one world file, no journal, compression, remote storage, authentication, or reconnect tokens yet.
+
 - **Save format:** world seed + terrain/resource deltas + SQLite for world state + binary blueprint files (see [[03 - Voxel and Scale]] and [[12 - Technical Architecture]]).
 - **Autosave:** every 5–10 minutes, atomic (temp file → fsync → rename), with rotating backups.
 - **Journal:** world edits are appended to a write-ahead log between autosaves; crash recovery replays it.
