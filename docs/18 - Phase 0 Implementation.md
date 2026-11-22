@@ -2,7 +2,7 @@
 title: Phase 0 Implementation
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-23
 tags:
   - townsmith
   - implementation
@@ -183,7 +183,7 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 - Boundary culling samples the deterministic generator, not live edited heights. Edited edge cells can render missing or doubled walls until the sampler reads the delta store.
 - Blueprint packages use `.tsbp` v1 (zip + RLE + BLAKE3). Terrain deltas still use the phase 0 blob; a world save format is later.
 - The Godot benchmark has terrain, streaming, and Early/Mid/Late box-city routes plus a 200-voxel-hut route; a real voxel city scene is later, and headless frame times are not render measurements.
-- Async chunk completion order is scheduling-dependent; the camera/settings are deterministic, but the frame at which a chunk appears is not yet deterministic (D-020 caveat).
+- Async chunk completion is staged in a ready map and committed in ring/distance/coordinate order with a 4-chunk frame budget; a fixed-center staged route is deterministic and gated by `smoke_stream_order.sh` (`STREAM_ORDER_SMOKE status=ok stream_order=ok`). The free-flight route can still change commit order when the camera crosses rings on different frames.
 - The headless server has no networking, persistence, or commands yet; it only proves the CPU tick path.
 - Windows CI validates compile, clippy, and tests only. The Godot headless smoke, benchmark routes, and packaging stay Linux-only, and `godot/townsmith_core.gdextension` still declares only `linux.*` library paths, so a Windows Godot run needs `windows.*` entries before it can be added.
 - The engine choice is **accepted** (D-003); the 3060-class 1M 30 FPS gate remains a Phase 5 performance gate.

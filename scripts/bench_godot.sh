@@ -130,6 +130,9 @@ chunks = [
     for record in records
     if (value := record.get("chunks_loaded")) is not None
 ]
+stream_records = [record.get("streaming") or {} for record in records]
+commit_checksums = [str(stream.get("commit_checksum", "")) for stream in stream_records]
+commit_counts = [int(stream.get("commit_count", 0)) for stream in stream_records]
 city_records = [record.get("city") for record in records if record.get("city")]
 voxel_records = [
     record.get("voxel_instances")
@@ -162,6 +165,11 @@ result = {
         "chunks_requested_median": med_stream("chunks_requested") if chunks else None,
         "chunks_applied_median": med_stream("chunks_applied") if chunks else None,
         "chunks_dropped_median": med_stream("chunks_dropped") if chunks else None,
+        "chunks_ready_median": med_stream("chunks_ready") if chunks else None,
+        "chunks_pending_median": med_stream("chunks_pending") if chunks else None,
+        "commit_checksums": commit_checksums if chunks else None,
+        "commit_counts": commit_counts if chunks else None,
+        "commit_order_stable": len(set(commit_checksums)) == 1 if chunks else None,
     },
 }
 if city_records:

@@ -2,7 +2,7 @@
 title: Phase 0 Results
 project: Townsmith
 status: active
-updated: 2026-11-19
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-0
@@ -21,7 +21,7 @@ tags:
 |---|---|
 | 10 cm voxel core | 32³ chunks, palette/RLE, greedy mesher, deterministic hut |
 | Terrain | 1 m heightmap, 256 m chunks, biomes, edit deltas, worker-thread generation |
-| Streaming | 3 × 3 chunk ring, LOD 1/2/4, seam culling, skirts, async requests |
+| Streaming | 3 × 3 chunk ring, LOD 1/2/4, seam culling, skirts, async requests, staged ready-map commit order; fixed-center determinism gated by `smoke_stream_order.sh` |
 | City scale | Deterministic 200 / 10k / 100k building layouts; 1M population metadata |
 | Population | 10k cohorts / 1M citizens; ~0.21 ms per aggregate tick |
 | Active agents | 2,000 agents; sparse ~0.19 ms, dense ~0.90 ms per 10 Hz tick |
@@ -45,6 +45,8 @@ RTX 4080, Ryzen 9 7950X, 1920×1080, vsync off, GL Compatibility, 3 × 5 s runs:
 | 200 voxel huts | 5,407 | 1,692 | 0 |
 
 Late city build: ~110–115 ms, 6.4 MB instance buffer. Voxel-hut build: ~8.25 ms, 9.6 KB buffer.
+
+Chunk commit order is deterministic and no longer depends on worker completion timing. Finished meshes wait in a ready map, and each frame commits at most `COMMIT_BUDGET` (4) chunks nearest-ring first, then by `(squared distance, coord.x, coord.z)`. The headless two-run gate `./scripts/smoke_stream_order.sh` reports `stream_order=ok checksum=ea5bc6f9 commits=59 loaded=30` on the developer machine. See [[15 - Benchmarks]] §1.
 
 These are **not** the target-hardware numbers. The 4080 is much faster than an RTX 3060-class GPU, the city is boxes only, and the huts are 200 low-poly instances. The real 1M voxel-city question is still open.
 
@@ -75,7 +77,7 @@ All are comfortably inside their Phase 0 budgets. Worldgen is the largest single
 | 1M cohort tick < 60 ms | **Pass** (~0.21 ms) |
 | 2k active agents < 10 ms | **Pass** (~0.90 ms dense) |
 | Worldgen deterministic | **Pass** |
-| Benchmark harness repeatable | **Pass**; 3-run summaries and provenance |
+| Benchmark harness repeatable | **Pass**; 3-run summaries and provenance; deterministic chunk commit sequence (`smoke_stream_order.sh`) |
 | PCK mod loads without engine fork | **Not yet** |
 | Headless server runs without GPU | **Pass** (CPU tick harness; no socket yet) |
 | Stack agreed | **Pending D-003** |
