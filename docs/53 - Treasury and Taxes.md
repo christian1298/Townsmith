@@ -194,13 +194,13 @@ The world-scene smoke checks:
 
 - `core_city::economy`: 18 tests — starting balance, income/expenses, clamped rates, bankruptcy, construction affordability, loan cash/interest/repayment, payoff, bankruptcy borrowing block, payment underflow, debt limit, daily net, JSON/checksum, old-save debt default, invalid balance, infrastructure defaults/cost/legacy equivalence/roundtrip.
 - `godot_ext`: 49 tests, including economy JSON/loan roundtrip, old-save loans default, and invalid balance.
-- `core_city` total **276**; `core_structure` **19**; bridge **60**; workspace **558 tests + 2 doctests**; 30-day runner 7 tests.
+- `core_city` total **276**; `core_structure` **19**; bridge **72**; workspace **613 tests + 2 doctests**; 30-day runner 7 tests.
 - `city_loop` bin test asserts construction spending, debt, positive final balance, and no bankruptcy.
 - 30-day city-loop checksum: `623f39c61b71b68a`.
 
 
 > [!note] Phase billing (D-028, Proposed)
-> `ConstructionStore` carries a per-site `cost_total`/`cost_paid` schedule and a payment stall. Placement charges the 3% Survey installment, `construction_tick` charges each later phase boundary, and an unaffordable installment sets `stall_reason = "payment"` until the treasury can pay it. Legacy zero-cost sites remain prepaid. The `financing` projection still assumes fixed 50-building batches and is not yet replaced by the live schedule.
+> `ConstructionStore` carries a per-site `cost_total`/`cost_paid` schedule and a payment stall. Placement charges the 3% Survey installment, `construction_tick` charges each later phase boundary, and an unaffordable installment sets `stall_reason = "payment"` until the treasury can pay it. Legacy zero-cost sites remain prepaid. The `financing` projection still assumes fixed 50-building batches and is not yet replaced by the live schedule, because construction currently finishes in seconds while the economy advances in days (Q-102).
 
 ## 12. Limits
 
