@@ -99,6 +99,17 @@ A city of 1M people does not need to know that citizen #481,222 is 3% hungrier t
 > [!info] First district snapshot
 > `core_city::district::summarize_district` is the first derived district layer: a circular XZ query over completed placements and household records, returning population, housing, vacancies, jobs, employment, resident-weighted needs/happiness/commute, and construction counts. The bridge exposes it as `district_summary(seed, center_x, center_z, radius_m)`; it adds no save field and no UI yet. Cohorts, heatmaps, policies, and district catch-up remain open.
 
+> [!info] Cohort district summaries
+> `core_sim` now provides the cohort-side district layer for the Phase 5 dashboard. `CohortSimulation::district_summaries()` returns one `DistrictCohortSummary` per district in index order, including empty districts; `CohortSimulation::district_summary(district)` returns `Option<DistrictCohortSummary>` for a single index. Each summary reports district id, population, cohort count, employed citizens and fraction, population-weighted average happiness, need, and income, plus citizen counts by average-need band:
+>
+> | Band | Average need |
+> |---|---|
+> | Content | `>= 0.75` |
+> | Stressed | `>= 0.4` and `< 0.75` |
+> | Critical | `< 0.4` |
+>
+> Bands are assigned per cohort from `Cohort::average_need()` and counted by population, so `content + stressed + critical` equals the district population. Averages are weighted by cohort population; an empty district reports zero counts and `0.0` averages. The summary is deterministic, derived on demand, read-only, and adds no save field. It has no bridge or UI yet; migration, heatmaps, district catch-up, and policies remain open.
+
 Think of it like traffic: you do not simulate every car's engine to know that a highway is congested. You track how many cars are in each speed band and move them between bands. Cohorts do the same for people and needs.
 
 #### What a cohort is

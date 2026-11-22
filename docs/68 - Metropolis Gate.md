@@ -342,7 +342,7 @@ The current `bench_godot.sh` builds a debug extension, forces GL Compatibility t
 | Traffic 32×32 | 0.44 ms build; 1.3 ms per 1k flow queries; 94 ms per 1k pair queries | 7950X, release | CPU microbenchmark | Flow fields are the right primitive; 32×32 is cheap | 100k–200k edges, incremental updates, or a 65k-node spatial index |
 | City layout Late | 5.13 ms generation; Godot debug build/upload 110–115 ms, 6.4 MB buffer | 7950X + RTX 4080 | CPU microbenchmark / one-time build | Deterministic 100k-box layout generation is fast | Per-frame rendering, voxel buildings, or LOD |
 | Voxel/terrain meshing | 3.4–3.8 ms checkerboard; 0.5 ms hut; 1.4–1.6 ms terrain; worldgen 131–141 ms | 7950X, release | CPU microbenchmark | Individual meshing/worldgen paths fit their budgets | Streaming under a 1M city, upload contention, or frame pacing |
-| Save/load | Only smoke-level correctness; no 1M timing | — | Structural smoke | The save/load path round-trips and hashes match | The 30 s save/load target, memory peak, or 1M file size |
+| Save/load | Core harness: **save 172–579 ms, load 515–521 ms**, 134.5 MB JSON, 365 MB peak RSS at 1M/250k | 7950X, release, tmpfs/NVMe | CPU + file microbenchmark | The three core stores round-trip far under the 30 s target | Full world save layers, Godot envelope, disk durability, VRAM, or the full 1M scene |
 
 ### 7.2 What is player-facing today
 
@@ -419,6 +419,31 @@ Measured on the developer machine (Ryzen 9 7950X, Linux, release build, three ru
 | Checksum | `c39839fdabbc1939` | `599dca66809e4223` |
 
 This validates the overlap-index path and the record envelope at the Phase 5 building count. It is not a 250k render, save/load, or memory measurement; construction, households, and meshes are absent.
+
+#### 1M save/load data harness
+
+`cargo run --release -p townsmith-bench --bin save_1m` builds 250,000 placements, 250,000 households × 4 residents = **1,000,000 population**, and 2,000 named citizens, composes the three core stores into one JSON envelope, writes a real temp file, reads it back, parses and validates every store, and reports save/load timings plus peak RSS. `--strict` exits nonzero when either direction exceeds the 30,000 ms target.
+
+Measured on a 32-thread developer machine, release build, tmpfs default and NVMe (`--json`):
+
+| Metric | 1M tmpfs | 1M NVMe |
+|---|---:|---:|
+| Placements / households / population / named | 250,000 / 250,000 / 1,000,000 / 2,000 | same |
+| Build | 102.7 ms | 109.5 ms |
+| Serialize | 141.5 ms | 155.2 ms |
+| File write | 30.9 ms | 424.0 ms |
+| File read | 21.1 ms | 21.5 ms |
+| Parse | 188.3 ms | 177.9 ms |
+| Verify | 311.4 ms | 315.1 ms |
+| **Total save** | **172.4 ms** | **579.2 ms** |
+| **Total load** | **520.8 ms** | **514.5 ms** |
+| JSON bytes | 134,515,727 | same |
+| Peak RSS | 365.8 MB | 364.0 MB |
+| Combined checksum | `cc4f4553ddd97794` | same |
+
+Both directions are far under the 30 s target (about 52–58× headroom). `--smoke` uses 25,000 placements / 100,000 population / 2,000 named and runs twice; smoke checksum `e24deb9ebadfbf6a`.
+
+This is **core-store evidence**, not the full world save: it omits construction, economy, industry, utilities, services, research, roads, lots, settlements, terrain deltas, Godot `world_save` envelope overhead, and disk atomicity/durability. It also raises `MAX_HOUSEHOLDS` to 1,000,000 for the 250k-household shape. It does not close G-07 by itself.
 
 ### 7.5 CPU setup harness
 

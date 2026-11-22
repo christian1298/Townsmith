@@ -141,6 +141,8 @@ panicking. This is a bounded envelope fuzz, not a schema-aware generator.
 
 ## 7. Next
 
+The 1M core-store save/load harness is `cargo run --release -p townsmith-bench --bin save_1m`; see [[68 - Metropolis Gate]] §7.4 for the measured 134.5 MB envelope and 30 s headroom. This harness still omits the full world layers.
+
 1. Add a bridge-level stress harness once the Godot test runtime is available.
 2. Add a mutation fuzzer for each store's validator.
 3. Add the full world-save size limit and a disk/atomicity path.

@@ -218,7 +218,7 @@ These are microbenchmarks on one machine, not the 1M/60 FPS gate.
 - `core_city::population`: road commute and disconnected fallback.
 - `townsmith-bench`: 7 city-loop tests (small city and a multi-row commute) and 4 traffic-grid tests.
 - World scene smoke: `traffic=ok`, graph stats, one car, movement, save/load rebuild.
-- Workspace on this branch: **658 tests + 2 doctests (660 passed)**.
+- Workspace on this branch: **658 tests + 2 doctests (660 passed)**; core_city **346**, bridge **72**.
 
 ## 8. Limits
 

@@ -116,6 +116,11 @@ var movement_multimesh: MultiMesh
 var movement_ground: Dictionary = {}
 # Citizen ids in MultiMesh instance order for the most recent refresh.
 var movement_ids: Array[int] = []
+# One merged line mesh for every routed household, rebuilt only when the
+# bridge movement checksum changes.
+var movement_route_lines: MeshInstance3D
+var movement_route_material: StandardMaterial3D
+var movement_route_key := ""
 var movement_accum := 0.0
 var movement_time := 0.0
 var last_movement_state: Dictionary = {}
@@ -892,6 +897,10 @@ func _setup_materialization() -> void:
 	movement_material = StandardMaterial3D.new()
 	movement_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	movement_material.albedo_color = Color(0.18, 0.95, 0.72)
+	movement_route_material = StandardMaterial3D.new()
+	movement_route_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	movement_route_material.albedo_color = Color(0.16, 0.62, 0.58, 0.75)
+	movement_route_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 
 func _setup_movement_pool() -> void:
 	# Created lazily on the first marker refresh so a hidden overlay owns no
@@ -1220,9 +1229,47 @@ func _clear_movement_nodes() -> void:
 				child.free()
 	movement_multimesh_instance = null
 	movement_multimesh = null
+	movement_route_lines = null
+	movement_route_key = ""
 	movement_ground.clear()
 	movement_ids.clear()
 	last_movement_state = {}
+
+
+func _refresh_route_lines(state: Dictionary) -> void:
+	if movement_root == null or core == null:
+		return
+	var key := str(state.get("checksum", ""))
+	if movement_route_lines != null and is_instance_valid(movement_route_lines) and movement_route_key == key:
+		return
+	var surface := SurfaceTool.new()
+	surface.begin(Mesh.PRIMITIVE_LINES)
+	var vertex_count := 0
+	for route in state.get("route_polylines", []):
+		var points: PackedVector2Array = route.get("points", PackedVector2Array())
+		if points.size() < 2:
+			continue
+		for index in points.size() - 1:
+			var start := points[index]
+			var end := points[index + 1]
+			var start_y: float = core.world_height_at(SEED, start.x, start.y)
+			var end_y: float = core.world_height_at(SEED, end.x, end.y)
+			if start_y < 0.0 or end_y < 0.0:
+				continue
+			surface.add_vertex(Vector3(start.x, start_y + 0.35, start.y))
+			surface.add_vertex(Vector3(end.x, end_y + 0.35, end.y))
+			vertex_count += 2
+	var mesh: ArrayMesh = surface.commit() if vertex_count > 0 else null
+	if movement_route_lines == null or not is_instance_valid(movement_route_lines):
+		movement_route_lines = MeshInstance3D.new()
+		movement_route_lines.name = "CitizenRoutes"
+		movement_route_lines.material_override = movement_route_material
+		movement_route_lines.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		movement_root.add_child(movement_route_lines)
+		movement_root.move_child(movement_route_lines, 0)
+	movement_route_lines.mesh = mesh
+	movement_route_lines.visible = vertex_count > 0
+	movement_route_key = key
 
 
 func _update_movement_markers() -> void:
@@ -1239,6 +1286,7 @@ func _update_movement_markers() -> void:
 	_setup_movement_pool()
 	if movement_multimesh == null:
 		return
+	_refresh_route_lines(state)
 	var ids: Array[int] = []
 	var seen := {}
 	var transforms: Array[Transform3D] = []
@@ -3266,6 +3314,7 @@ func _run_scene_smoke() -> void:
 	var materialization_fade_ok := false
 	var movement_scene_ok := false
 	var movement_pool_ok := false
+	var movement_routes_ok := false
 	var follow_ok := false
 	var render_ok := false
 	var structure_ok := false
@@ -3731,11 +3780,29 @@ func _run_scene_smoke() -> void:
 				var movement_pool_live := movement_pool != null and is_instance_valid(movement_pool)
 				# One pooled MultiMesh instead of one node per citizen.
 				movement_pool_ok = movement_pool_live and movement_multimesh != null
-				movement_pool_ok = movement_pool_ok and movement_root.get_child_count() == 1
+				movement_pool_ok = movement_pool_ok and movement_root.get_child_count() == 2
 				movement_pool_ok = movement_pool_ok and movement_multimesh.instance_count == movement_positions.size()
 				movement_pool_ok = movement_pool_ok and movement_ids.size() == movement_positions.size()
 				movement_pool_ok = movement_pool_ok and movement_ground.size() == movement_positions.size()
-				movement_scene_ok = movement_scene_ok and movement_pool_ok
+				var route_vertices := 0
+				var route_count := 0
+				for route in last_movement_state.get("route_polylines", []):
+					var route_points: PackedVector2Array = route.get("points", PackedVector2Array())
+					if route_points.size() < 2:
+						continue
+					route_count += 1
+					route_vertices += (route_points.size() - 1) * 2
+				movement_routes_ok = route_count > 0 and route_vertices > 0
+				movement_routes_ok = movement_routes_ok and movement_route_lines != null and is_instance_valid(movement_route_lines)
+				var route_mesh: ArrayMesh = null
+				if movement_route_lines != null:
+					route_mesh = movement_route_lines.mesh as ArrayMesh
+				movement_routes_ok = movement_routes_ok and route_mesh != null
+				movement_routes_ok = movement_routes_ok and route_mesh.get_surface_count() == 1
+				movement_routes_ok = movement_routes_ok and route_mesh.surface_get_array_len(0) == route_vertices
+				movement_routes_ok = movement_routes_ok and movement_route_key.length() > 0
+				var route_mesh_ref := movement_route_lines
+				movement_scene_ok = movement_scene_ok and movement_pool_ok and movement_routes_ok
 				var movement_cache: Dictionary = core.movement_cache_state()
 				movement_scene_ok = movement_scene_ok and bool(movement_cache.get("open", false))
 				movement_scene_ok = movement_scene_ok and int(movement_cache.get("citizens", 0)) == movement_positions.size()
@@ -3745,9 +3812,11 @@ func _run_scene_smoke() -> void:
 				movement_scene_ok = movement_scene_ok and bool(last_movement_state.get("ok", false))
 				# The pool is reused across ticks; only count and transforms change.
 				movement_scene_ok = movement_scene_ok and movement_pool_live and movement_multimesh_instance == movement_pool
-				movement_scene_ok = movement_scene_ok and movement_root.get_child_count() == 1
+				movement_scene_ok = movement_scene_ok and movement_root.get_child_count() == 2
 				movement_scene_ok = movement_scene_ok and movement_multimesh.instance_count == moved_positions.size()
 				movement_pool_ok = movement_pool_ok and movement_ids.size() == moved_positions.size()
+				movement_routes_ok = movement_routes_ok and movement_route_lines == route_mesh_ref
+				movement_scene_ok = movement_scene_ok and movement_routes_ok
 				_advance_materialization_fades(MATERIALIZATION_FADE_SECONDS + 0.05)
 				var added_settled_ok := materialization_root.get_child_count() > 0
 				for child in materialization_root.get_children():
@@ -3785,6 +3854,7 @@ func _run_scene_smoke() -> void:
 				# F4 off frees the pooled markers and clears the height/id caches.
 				movement_scene_ok = movement_scene_ok and movement_root.get_child_count() == 0
 				movement_scene_ok = movement_scene_ok and movement_multimesh_instance == null
+				movement_scene_ok = movement_scene_ok and movement_route_lines == null
 				movement_pool_ok = movement_pool_ok and movement_root.get_child_count() == 0
 				movement_pool_ok = movement_pool_ok and movement_multimesh == null
 				movement_pool_ok = movement_pool_ok and movement_ground.is_empty()
@@ -4218,7 +4288,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -4249,6 +4319,7 @@ func _run_scene_smoke() -> void:
 		"ok" if materialization_fade_ok else "failed",
 		"ok" if movement_scene_ok else "failed",
 		"ok" if movement_pool_ok else "failed",
+		"ok" if movement_routes_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",

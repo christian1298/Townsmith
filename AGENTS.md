@@ -240,6 +240,11 @@ cargo run --release -p townsmith-bench --bin city_loop
 # Early/mid/late runner matrix against the committed baseline
 ./scripts/bench_city_loop.sh
 
+# Compare a baseline with a fresh result (5% numeric tolerance, exact checksums)
+./scripts/bench_compare.sh
+./scripts/compare_bench.py --baseline PATH --candidate PATH
+./scripts/compare_bench.py --self-test
+
 # 20,000-resident Industrial-age operating balance
 ./scripts/bench_industrial.sh
 
@@ -257,6 +262,10 @@ cargo run --release -p townsmith-bench --bin infra_cost -- --smoke
 
 # 1M data-scale harness (not the render gate)
 cargo run --release -p townsmith-bench --bin metropolis -- --smoke
+
+# 1M population / 250k placement core save-load harness
+cargo run --release -p townsmith-bench --bin save_1m -- --smoke
+cargo run --release -p townsmith-bench --bin save_1m
 
 # 250k placement-record scale harness
 cargo run --release -p townsmith-bench --bin placements -- --smoke

@@ -30,7 +30,11 @@ pub const WAGE_PER_WORKER_PER_DAY: f64 = 20.0;
 pub const MAX_COMMUTE_M: f32 = 200.0;
 
 /// Maximum households in one save.
-pub const MAX_HOUSEHOLDS: usize = 100_000;
+///
+/// The Phase 5 1M-population target needs 250,000 four-resident households;
+/// the cap leaves room for single-resident homes without letting a malformed
+/// save allocate unbounded memory.
+pub const MAX_HOUSEHOLDS: usize = 1_000_000;
 
 /// Food satisfaction lost per simulated second.
 const FOOD_DECAY_PER_S: f32 = 0.0004;
