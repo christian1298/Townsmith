@@ -87,6 +87,12 @@ const TABLES := {
 		"base.ui.hud.treasury_bankrupt": "BANKRUPT · {value}",
 		"base.ui.hud.needs_value": "food {food}% · water {water}% · rest {rest}%",
 		"base.ui.hud.citizens_near": "Citizens near: {active} active · {detailed} detailed",
+		"base.ui.heatmap.status": "District heatmap: {state} · {cells} cells · peak {peak}",
+		"base.ui.heatmap.on": "on",
+		"base.ui.heatmap.off": "off",
+		"base.ui.heatmap.legend": "Blue low · yellow mid · red high · 512 m radius · 32 m cells",
+		"base.ui.heatmap.empty": "No residents in range",
+		"base.ui.heatmap.unavailable": "District heatmap unavailable: {code}",
 		"base.ui.hud.lifecycle": "Lifecycle: day {day} · {aged} aged · {died} died",
 		"base.ui.hud.selected_owner": "  ·  owner {owner}",
 		"base.ui.hud.selected_industry": "  ·  industry {kind}",
@@ -160,7 +166,7 @@ const TABLES := {
 
 		"base.ui.help.move": "WASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement",
 		"base.ui.help.edit": "LMB place · RMB select · Enter: enter selected building",
-		"base.ui.help.tools": "C crew · I industry · U utility · K services · B starter · T tax · L loan · Y research · F1 dashboard · F2 citizens · {follow} · F4 materialization · V +10k · F5 save · F9 load",
+		"base.ui.help.tools": "C crew · I industry · U utility · K services · B starter · T tax · L loan · Y research · F1 dashboard · F2 citizens · {follow} · F4 materialization · F7 heatmap · V +10k · F5 save · F9 load",
 		"base.ui.help.architect": "First-person view at the selected door · M / Esc returns to Mayor",
 
 		# Dashboard shell.
@@ -329,6 +335,12 @@ const TABLES := {
 		"base.ui.hud.treasury_bankrupt": "BANKROTT · {value}",
 		"base.ui.hud.needs_value": "Essen {food} % · Wasser {water} % · Ruhe {rest} %",
 		"base.ui.hud.citizens_near": "Bürger in der Nähe: {active} aktiv · {detailed} detailliert",
+		"base.ui.heatmap.status": "Stadtteil-Heatmap: {state} · {cells} Zellen · Spitze {peak}",
+		"base.ui.heatmap.on": "an",
+		"base.ui.heatmap.off": "aus",
+		"base.ui.heatmap.legend": "Blau niedrig · Gelb mittel · Rot hoch · 512 m Radius · 32 m Zellen",
+		"base.ui.heatmap.empty": "Keine Bewohner im Umkreis",
+		"base.ui.heatmap.unavailable": "Stadtteil-Heatmap nicht verfügbar: {code}",
 		"base.ui.hud.lifecycle": "Lebenszyklus: Tag {day} · {aged} gealtert · {died} gestorben",
 		"base.ui.hud.selected_owner": "  ·  Eigentümer {owner}",
 		"base.ui.hud.selected_industry": "  ·  Industrie {kind}",
@@ -402,7 +414,7 @@ const TABLES := {
 
 		"base.ui.help.move": "WASD: schwenken · Q/E: drehen · Mausrad: zoomen · R: drehen · X: anheben · Z: absenken · N: Siedlung gründen",
 		"base.ui.help.edit": "LMB: platzieren · RMB: auswählen · Enter: ausgewähltes Gebäude betreten",
-		"base.ui.help.tools": "C: Crew · I: Industrie · U: Versorgung · K: Dienste · B: Startpaket · T: Steuern · L: Kredit · Y: Forschung · F1: Dashboard · F2: Bürger · {follow} · F4: Materialisierung · V: +10k · F5: speichern · F9: laden",
+		"base.ui.help.tools": "C: Crew · I: Industrie · U: Versorgung · K: Dienste · B: Startpaket · T: Steuern · L: Kredit · Y: Forschung · F1: Dashboard · F2: Bürger · {follow} · F4: Materialisierung · F7: Heatmap · V: +10k · F5: speichern · F9: laden",
 		"base.ui.help.architect": "Ego-Ansicht an der ausgewählten Tür · M / Esc kehrt zum Bürgermeistermodus zurück",
 
 		# Dashboard-Hülle.
