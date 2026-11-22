@@ -95,7 +95,7 @@ Current output: `CONTENT_SCHEMA files=4 entries=32 errors=0 status=ok`; self-tes
 >
 > `core_city::pack::ContentPack` adds the first in-memory pack: `from_json(manifest, materials, rooms, props)` validates the pack registry, requires every content ID to use the manifest's namespace (the part before the first `:`; `base` is reserved), and rejects collisions with base content. `merged_with_base()` returns a merged registry (no overrides, no load-order wins) with pack checksum `ad4c645869a411ed` and merged checksum `330a538d07805b50` for the example (8 pack definitions, 31 merged). Pack content is validated in isolation, so pack props cannot reference base rooms in v0.
 >
-> Content packaging, filesystem loading, ZIP, scripts, Workshop, save references, cross-mod references, hot reload, and balance tuning are still open. D-006 remains **Proposed**; these files do not make it accepted. Values in `content/base/` are placeholders, not campaign balance.
+> `ContentPack::from_dir(path)` loads the same pack from a mod directory (`mod.json`, or exactly one `*.mod.json`, plus the manifest content paths). It canonicalizes and confines every path under the mod root (rejecting absolute/`..`/symlink escapes), enforces UTF-8, 2 MiB per file and 8 MiB total, then delegates to `from_json`. `load_dir_with_base(path)` merges after validation. This is local loading only: no discovery, downloads, ZIP/Workshop packaging, scripts, native code, save references, cross-mod references, hot reload, or balance tuning. D-006 remains **Proposed**; these files do not make it accepted. Values in `content/base/` are placeholders, not campaign balance.
 
 ## 4. Mod package format
 
