@@ -29,17 +29,18 @@ use core_blueprint::{
 use core_city::named::{age_years_from_days, slot_is_employed, MAX_AGE_DAYS};
 use core_city::{
     advise, diff_selection, evaluate_tutorial, normalize_rotation, starter, summarize,
-    AdvisorInput, AdvisorReport, Age, AgeState, CitizenMotion, CitizenPosition, CityLayout,
-    CityRuntime, CitySummary, CityTier, ConstructionPhase, ConstructionSite, ConstructionStore,
-    Economy, Home, Household, IndustryKind, IndustryStore, InfrastructureCosts, LifecycleTick, Lot,
-    LotError, LotRequest, LotStore, MaterializationBudget, MaterializationSelection,
-    MaterializedCitizen, MotionLeg, NamedCitizens, NamedSave, Placement, PlacementError,
-    PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph, RoadRequest,
-    RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore,
-    ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree, Trade,
-    TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace,
-    Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY,
-    MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    summarize_district, AdvisorInput, AdvisorReport, Age, AgeState, CitizenMotion, CitizenPosition,
+    CityLayout, CityRuntime, CitySummary, CityTier, ConstructionPhase, ConstructionSite,
+    ConstructionStore, DistrictSummary, Economy, Home, Household, IndustryKind, IndustryStore,
+    InfrastructureCosts, LifecycleTick, Lot, LotError, LotRequest, LotStore, MaterializationBudget,
+    MaterializationSelection, MaterializedCitizen, MotionLeg, NamedCitizens, NamedSave, Placement,
+    PlacementError, PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph,
+    RoadRequest, RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind, ServiceReport,
+    ServiceStore, ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore,
+    TechTree, Trade, TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport,
+    UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS,
+    DEFAULT_ROUTE_CACHE_CAPACITY, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M,
+    RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -2486,6 +2487,90 @@ impl TownsmithCore {
         result.set(
             "checksum",
             &GString::from(&format!("{:016x}", runtime.checksum())),
+        );
+        result
+    }
+
+    /// Aggregate metrics for one circular district query.
+    ///
+    /// This is a read-only derived snapshot: no save field, no checksum change,
+    /// and no district UI yet. Lock order is world -> construction -> population.
+    #[func]
+    fn district_summary(
+        &self,
+        seed: i64,
+        center_x: f64,
+        center_z: f64,
+        radius_m: f64,
+    ) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        let center = [center_x as f32, center_z as f32];
+        if !center.iter().all(|value| value.is_finite()) {
+            return placement_simple_error("invalid_center", "district center must be finite");
+        }
+        let max_radius_m = f64::from(MAX_WORLD_COORD_M);
+        if !radius_m.is_finite() || !(0.0..=max_radius_m).contains(&radius_m) {
+            return placement_simple_error(
+                "invalid_radius",
+                "district radius must be finite and within 0..=1,000,000 m",
+            );
+        }
+        let placements = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        if placements.as_ref().is_some_and(|store| store.seed != seed) {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the placement store belongs to a different seed",
+            );
+        }
+        let construction = self
+            .construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let population = self
+            .population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if population
+            .as_ref()
+            .is_some_and(|runtime| runtime.seed != seed)
+        {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the household runtime belongs to a different seed",
+            );
+        }
+        let summary = match placements.as_ref() {
+            Some(store) => {
+                let empty_runtime = CityRuntime::new(seed);
+                let runtime = population.as_ref().unwrap_or(&empty_runtime);
+                summarize_district(store, &construction, runtime, center, radius_m as f32)
+            }
+            None => DistrictSummary::default(),
+        };
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("seed", seed as i64);
+        result.set("center", &PackedFloat32Array::from(center));
+        result.set("radius_m", radius_m);
+        result.set("population", summary.population as i64);
+        result.set("housing_capacity", summary.housing_capacity as i64);
+        result.set("vacancies", summary.vacancies as i64);
+        result.set("households", summary.households as i64);
+        result.set("jobs", summary.jobs as i64);
+        result.set("employed", summary.employed as i64);
+        result.set("unemployed", summary.unemployed as i64);
+        result.set("happiness", f64::from(summary.happiness));
+        result.set("food", f64::from(summary.food));
+        result.set("water", f64::from(summary.water));
+        result.set("rest", f64::from(summary.rest));
+        result.set("average_commute_m", f64::from(summary.average_commute_m));
+        result.set("completed_buildings", summary.completed_buildings as i64);
+        result.set("construction_sites", summary.construction_sites as i64);
+        result.set(
+            "checksum",
+            &GString::from(&format!("{:016x}", summary.checksum())),
         );
         result
     }

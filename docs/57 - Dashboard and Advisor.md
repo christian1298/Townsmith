@@ -113,6 +113,16 @@ The advisor is intentionally conservative: one clear message per problem, with a
 
 Each message is `{ code, severity, title, detail, params }`; `params` carries named values for localized details. The call is derived state: no save field, no checksum, and no change to placements, households, or the treasury. It may refresh the derived utility supply, as `utilities_state()` does. It takes each store lock separately and holds none while calling the next summary.
 
+`TownsmithCore.district_summary(seed, center_x, center_z, radius_m)` returns the same derived metrics restricted to one circular district:
+
+```text
+ok, seed, center, radius_m, population, housing_capacity, vacancies,
+households, jobs, employed, unemployed, happiness, food, water, rest,
+average_commute_m, completed_buildings, construction_sites, checksum
+```
+
+It validates a non-negative seed, finite centre, and radius in `0..=1,000,000 m`; rejects placement/population seed mismatches; and takes the world -> construction -> population locks in that order. Only completed sites contribute to the completed metrics; incomplete sites in the radius are counted separately. It is read-only, has no save field, and does not change the city-wide advisor. The dashboard does not call it yet.
+
 ## 5. Dashboard
 
 `F1` toggles a right-side panel. It shows:
