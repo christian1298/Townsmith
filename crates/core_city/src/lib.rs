@@ -44,6 +44,7 @@ pub mod movement;
 pub mod named;
 pub mod pack;
 pub mod placement;
+pub mod policy;
 pub mod population;
 pub mod progression;
 pub mod registry;
@@ -123,6 +124,13 @@ pub use placement::{
     PlacementIndex, PlacementPlan, PlacementRequest, PlacementStore, MAX_BUILDING_HEIGHT_M,
     MAX_FOOTPRINT_M, MAX_SLOPE_M, MAX_WORLD_COORD_M, PLACEMENT_GAP_M, PLACEMENT_INDEX_CELL_M,
     WATER_LEVEL_M, WORLD_SAVE_FORMAT_VERSION,
+};
+pub use policy::{
+    DistrictPolicy, DistrictPolicyError, DistrictPolicyRequest, DistrictPolicyStore,
+    DISTRICT_POLICY_FORMAT_VERSION, MAX_DISTRICT_POLICIES, MAX_DISTRICT_POLICY_ALLOWLIST,
+    MAX_DISTRICT_POLICY_ID, MAX_DISTRICT_POLICY_NAME_CHARS, MAX_DISTRICT_POLICY_RADIUS_M,
+    MAX_DISTRICT_SERVICE_FUNDING, MAX_DISTRICT_TAX_MULTIPLIER, MIN_DISTRICT_POLICY_RADIUS_M,
+    MIN_DISTRICT_TAX_MULTIPLIER,
 };
 pub use population::{
     CityRuntime, Home, Household, PopulationError, PopulationReport, Workplace,

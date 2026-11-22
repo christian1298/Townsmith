@@ -97,7 +97,7 @@ flowchart TB
 A city of 1M people does not need to know that citizen #481,222 is 3% hungrier than yesterday. It needs to know that **12% of the Riverside district is hungry**, that the number is rising, and that a new grocery store would fix it. Cohort simulation tracks those groups and the flows between them.
 
 > [!info] First district snapshot
-> `core_city::district::summarize_district` is the first derived district layer: a circular XZ query over completed placements and household records, returning population, housing, vacancies, jobs, employment, resident-weighted needs/happiness/commute, and construction counts. The bridge exposes it as `district_summary(seed, center_x, center_z, radius_m)`; it adds no save field. The dashboard renders a 256 m district section. `summarize_heatmap` / bridge `district_heatmap(seed, center_x, center_z, radius_m, cell_m)` add a bounded dense grid (4–256 m cells, ≤4,096 cells, row-major, out-of-circle cells zeroed) for the F7 heatmap overlay, which renders a 512 m / 32 m population-density grid with a 1,024-cell cap. Cohorts, district policies, per-settlement panels, and district catch-up remain open.
+> `core_city::district::summarize_district` is the first derived district layer: a circular XZ query over completed placements and household records, returning population, housing, vacancies, jobs, employment, resident-weighted needs/happiness/commute, and construction counts. The bridge exposes it as `district_summary(seed, center_x, center_z, radius_m)`; it adds no save field. The dashboard renders a 256 m district section. `summarize_heatmap` / bridge `district_heatmap(seed, center_x, center_z, radius_m, cell_m)` add a bounded dense grid (4–256 m cells, ≤4,096 cells, row-major, out-of-circle cells zeroed) for the F7 heatmap overlay, which renders a 512 m / 32 m population-density grid with a 1,024-cell cap. A policy registry exists as data only (§3, “District policy registry”); cohort policies, policy effects, per-settlement panels, and district catch-up remain open.
 
 > [!info] Cohort district summaries
 > `core_sim` now provides the cohort-side district layer for the Phase 5 dashboard. `CohortSimulation::district_summaries()` returns one `DistrictCohortSummary` per district in index order, including empty districts; `CohortSimulation::district_summary(district)` returns `Option<DistrictCohortSummary>` for a single index. Each summary reports district id, population, cohort count, employed citizens and fraction, population-weighted average happiness, need, and income, plus citizen counts by average-need band:
@@ -108,7 +108,27 @@ A city of 1M people does not need to know that citizen #481,222 is 3% hungrier t
 > | Stressed | `>= 0.4` and `< 0.75` |
 > | Critical | `< 0.4` |
 >
-> Bands are assigned per cohort from `Cohort::average_need()` and counted by population, so `content + stressed + critical` equals the district population. Averages are weighted by cohort population; an empty district reports zero counts and `0.0` averages. The summary is deterministic, derived on demand, read-only, and adds no save field. It has no bridge or UI yet; migration, heatmaps, district catch-up, and policies remain open.
+> Bands are assigned per cohort from `Cohort::average_need()` and counted by population, so `content + stressed + critical` equals the district population. Averages are weighted by cohort population; an empty district reports zero counts and `0.0` averages. The summary is deterministic, derived on demand, read-only, and adds no save field. It has no bridge or UI yet; migration, heatmaps, district catch-up, and policy effects remain open.
+
+> [!info] District policy registry (data only)
+> `core_city::policy` adds a persisted **data layer** for future district policies: named XZ circles with a stable id, a tax multiplier, a service-funding multiplier, a construction switch, and a blueprint allowlist. The registry is deliberately inert in this slice:
+>
+> - no simulation, cohort, household, traffic, construction, treasury, or economy code reads a policy;
+> - no UI or bridge consumer displays or edits one (the bridge has CRUD calls, but nothing in the shell calls them yet);
+> - `DistrictPolicyStore` is **not** composed into the world-save envelope, so existing world saves and their checksums are unchanged.
+>
+> | Bound | Value |
+> |---|---|
+> | Policies per registry | 4,096 |
+> | Ids | assigned from 1; largest assignable is `i64::MAX - 1` |
+> | Centre | finite XZ metres, each axis within ±1,000,000 m |
+> | Radius | 16–4,096 m, inclusive |
+> | Tax multiplier | 0.25–4.0 |
+> | Service funding | 0–2.0 |
+> | Name | 1–64 trimmed characters, no control characters; trimmed on create/update |
+> | Blueprint allowlist | at most 256 entries matching `^[a-z0-9_]+:[a-z0-9_./-]+$` |
+>
+> Circles include their radius. Overlaps are allowed and reported by a query helper rather than rejected; `policy_at(point)` deterministically returns the smallest containing id. Format v1 JSON validates the version, seed, `next_id`, record ids, and every field, and carries an FNV-1a checksum for bridge payloads and regression tests. Composition into the save, overlap priority, and the actual tax/funding/construction/allowlist effects need a later ADR.
 
 Think of it like traffic: you do not simulate every car's engine to know that a highway is congested. You track how many cars are in each speed band and move them between bands. Cohorts do the same for people and needs.
 

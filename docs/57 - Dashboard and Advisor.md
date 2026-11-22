@@ -136,6 +136,43 @@ checksum
 
 The grid is square (`cols == rows`), derived as `ceil(2 * radius_m / cell_m)`, bounded to **4,096 cells**; `cell_m` must be 4–256 m. Cell `x,z` is the cell centre in metres. Placements outside the circle are zeroed rather than omitted, so `cells.len() == cols * rows` always. Only completed sites contribute, households are attributed by home placement, and needs are resident-weighted per cell. Invalid arguments return `ok=false` (`invalid_seed`, `invalid_center`, `invalid_radius`, `invalid_cell_size`, `invalid_grid`, `seed_mismatch`). The call is read-only and adds no save field. The `F7` overlay reads it; see §5.1.
 
+### 4.1 District policy registry (data only)
+
+`core_city::policy` provides a `DistrictPolicyStore`; the bridge exposes CRUD over one optional in-memory registry. **This is a data contract only.** No dashboard, advisor, economy, simulation, or world-save path reads or writes it yet, and the store is not part of the world-save envelope. The dashboard does not show policies, and nothing calls these methods from GDScript in this slice.
+
+```text
+TownsmithCore.district_policy_create(seed, name, center_x, center_z, radius_m,
+    tax_multiplier, service_funding, construction_allowed, allowlist)
+  -> { ok, seed, policy }
+
+TownsmithCore.district_policy_update(seed, id, name, center_x, center_z, radius_m,
+    tax_multiplier, service_funding, construction_allowed, allowlist)
+  -> { ok, seed, policy }
+
+TownsmithCore.district_policy_remove(seed, id)
+  -> { ok, seed, id, count, checksum }
+
+TownsmithCore.district_policies_state(seed)
+  -> { ok, seed, count, policies:[policy], checksum }
+```
+
+A `policy` is `{ id, name, center:[x,z], radius_m, tax_multiplier, service_funding, construction_allowed, blueprint_allowlist:[id] }`, in ascending id order in `policies`. The allowlist is a `PackedStringArray`; the state array is a Godot array of dictionaries. Ids are assigned by the store and never change on update. The registry is created lazily by the first successful `create` for a seed. A failed first create removes the lazy registry again (no empty store is left behind), while a failed create on an open registry keeps it; failed updates leave the record untouched. `seed` must be non-negative. A registry opened for one seed rejects `create`, `update`, `remove`, and `state` with `seed_mismatch` instead of switching seeds. `update`/`remove` on a missing registry or id return `not_found`. `state` for a seed with no registry is not an error: it reports `count: 0`, an empty `policies` array, and checksum `0000000000000000`.
+
+Validated bounds:
+
+| Field | Bound |
+|---|---|
+| Policies | 4,096 per registry |
+| `id` | 1…`i64::MAX - 1` |
+| `center` | finite, each axis within ±1,000,000 m |
+| `radius_m` | 16–4,096 m, inclusive |
+| `tax_multiplier` | 0.25–4.0 |
+| `service_funding` | 0–2.0 |
+| `name` | 1–64 trimmed characters, no control characters |
+| `blueprint_allowlist` | ≤256 namespaced ids, `^[a-z0-9_]+:[a-z0-9_./-]+$` |
+
+Invalid input returns the core error code as `code` (for example `invalid_radius`, `invalid_tax_multiplier`, `invalid_name`, `invalid_allowlist_entry`, `too_many_allowlist_entries`, `full`, `id_exhausted`). The FNV-1a `checksum` covers the format version, seed, next id, and every policy field; it is a deterministic bridge value, not the world-save checksum. The core store validates v1 JSON on load (version, seed, `next_id`, map-key/record-id agreement, and every field) and rejects a registry loaded for a different world seed. Overlapping circles are allowed; `policy_at` returns the smallest containing id. Save composition, overlap priority, and the actual tax/funding/construction/allowlist effects remain open design work.
+
 ## 5. Dashboard
 
 `F1` toggles a right-side panel. It shows:
@@ -204,15 +241,16 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 ## 7. Tests
 
 - `core_city::advisor`: 9 tests — healthy, service shortages, missing stores, budget/debt, bankruptcy ordering, vacancies/unemployment, disconnected roads/long commutes, empty city, cap/determinism.
-- `core_city` total: **482 tests**.
-- Bridge: **87 tests** (advisor is covered by the scene smoke; a bridge unit test would need a live Godot engine for `VarDictionary`).
-- Workspace: **1019 tests** (1014 unit/integration + 5 doctests).
+- `core_city`: **502 lib tests + 3 doctests**, including 20 district-policy tests.
+- Bridge: **108 tests** (advisor is covered by the scene smoke; a bridge unit test would need a live Godot engine for `VarDictionary`). Six district-policy tests exercise the lazy registry, create/update/remove/state, seed mismatch, and rollback through pure payload/helper types.
+- Workspace: **1045 tests** (1040 unit/integration + 5 doctests).
 - `cargo run --release -p townsmith-bench --bin city_loop -- --scenario mid` — checksum `623f39c61b71b68a`; the 3.9 matrix is in [[58 - Runner Matrix]].
 
 ## 8. Limits
 
 - Advisor advice is city-wide; the dashboard District section is read-only and camera- or selection-centred (256 m), not a selectable settlement/district panel. It follows the selected building but does not persist the focus choice or follow a moving citizen. No building drill-down from advice.
 - The heatmap is camera/selection-centred (`_materialization_center`, 512 m), read-only, and does not aggregate cohorts, settlements, or off-screen districts. It draws one density metric (population) and only nonzero cells; needs, jobs, and happiness are in the bridge payload but not rendered yet. The F7 overlay, status line, legend, and unavailable/empty text are localized and pooled through one `MultiMesh`.
+- District policies are data only: the bridge can create, update, remove, and list them, but no UI, simulation, advisor, treasury, or world save consumes them. There is no policy overlay, selection, priority rule, or effect on tax, funding, construction, or blueprint placement.
 - Thresholds are fixed; no difficulty, policy, or player preference.
 - Advice is not persisted, acknowledged, or suppressed.
 - No click-to-select, camera focus, or one-click policy action.
