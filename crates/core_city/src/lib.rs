@@ -38,6 +38,7 @@ pub mod industry;
 pub mod library;
 pub mod lot;
 pub mod metrics;
+pub mod movement;
 pub mod named;
 pub mod placement;
 pub mod population;
@@ -65,13 +66,13 @@ pub use construction::{
 };
 pub use core_structure::{StructuralSystem, StructureError, StructureSpec, StructureSummary};
 pub use economy::{
-    Economy, EconomyError, EconomyTick, Loan, BANKRUPTCY_THRESHOLD, DAY_SECONDS,
-    DEFAULT_BUSINESS_TAX_PER_JOB_PER_DAY, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS,
-    DEFAULT_SERVICE_UPKEEP_PER_SITE_PER_DAY, DEFAULT_TAX_PER_RESIDENT_PER_DAY,
-    DEFAULT_UPKEEP_PER_BUILDING_PER_DAY, DEFAULT_UTILITY_UPKEEP_PER_SITE_PER_DAY,
-    ECONOMY_FORMAT_VERSION, MAX_ECONOMY_TICK_SECONDS, MAX_INFRASTRUCTURE_UPKEEP_PER_SITE_PER_DAY,
-    MAX_LOAN, MAX_LOANS, MAX_LOAN_RATE_PER_DAY, MAX_LOAN_TERM_DAYS, MAX_TOTAL_DEBT,
-    STARTING_BALANCE,
+    Economy, EconomyError, EconomyTick, InfrastructureCosts, Loan, BANKRUPTCY_THRESHOLD,
+    DAY_SECONDS, DEFAULT_BUSINESS_TAX_PER_JOB_PER_DAY, DEFAULT_LOAN_RATE_PER_DAY,
+    DEFAULT_LOAN_TERM_DAYS, DEFAULT_SERVICE_UPKEEP_PER_SITE_PER_DAY,
+    DEFAULT_TAX_PER_RESIDENT_PER_DAY, DEFAULT_UPKEEP_PER_BUILDING_PER_DAY,
+    DEFAULT_UTILITY_UPKEEP_PER_SITE_PER_DAY, ECONOMY_FORMAT_VERSION, MAX_ECONOMY_TICK_SECONDS,
+    MAX_INFRASTRUCTURE_UPKEEP_PER_SITE_PER_DAY, MAX_LOAN, MAX_LOANS, MAX_LOAN_RATE_PER_DAY,
+    MAX_LOAN_TERM_DAYS, MAX_TOTAL_DEBT, STARTING_BALANCE,
 };
 pub use industry::{
     IndustryError, IndustryKind, IndustrySite, IndustryStore, IndustryTick, Stockpile,
@@ -87,6 +88,10 @@ pub use lot::{
     MAX_LOT_AREA_M2, MAX_LOT_SIDE_M, MAX_LOT_SLOPE_M, MIN_LOT_AREA_M2, MIN_LOT_SIDE_M,
 };
 pub use metrics::{summarize, CitySummary};
+pub use movement::{
+    phase_offset_s, CitizenMotion, CitizenPosition, MotionCacheStats, MotionLeg,
+    MIN_MOVEMENT_CYCLE_S,
+};
 pub use named::{
     age_years, age_years_from_days, citizen_id, diff_selection, mix64, name_for, LifecycleOutcome,
     LifecycleTick, MaterializationBudget, MaterializationDiff, MaterializationSelection,

@@ -77,7 +77,7 @@ bankrupt = balance <= −50,000
 
 Each loan's balance falls by its principal payment; interest is paid from the treasury and does not capitalize. A paid-off loan is removed.
 
-`tick()` keeps the legacy zero-infrastructure path so pinned city-loop checksums stay unchanged. The Industrial and Modern probes call `tick_with_infrastructure(...)`, which includes utility/service site upkeep and reports it as `infrastructure` in `EconomyTick`. `daily_net_with_infrastructure` includes the same cost. The bridge `economy_tick` now counts utility/service sites and applies the same infrastructure upkeep; `economy_state` exposes `infrastructure_per_day`, `utility_sites`, and `service_sites`. The scene HUD therefore reflects the charged cost.
+`tick()` keeps the legacy zero-infrastructure path so pinned city-loop checksums stay unchanged. The Industrial and Modern probes call `tick_with_infrastructure(...)`, which includes utility/service site upkeep and reports it as `infrastructure` in `EconomyTick`. `daily_net_with_infrastructure` includes the same cost. The bridge `economy_tick` reads each store's real `total_upkeep_per_day()` (per-kind utilities, per-kind/tier services), builds `InfrastructureCosts`, and calls `tick_with_infrastructure_costs`; `economy_state` exposes `infrastructure_per_day`, `utility_sites`, `service_sites`, `utility_upkeep`, and `service_upkeep`. The scene HUD therefore reflects the charged per-kind cost.
 
 ## 4. Construction
 

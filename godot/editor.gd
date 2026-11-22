@@ -68,7 +68,6 @@ const SMOKE_FLOOR_SOLID := 256
 const SMOKE_RAY_LOCAL := Vector3(0.83, 2.03, 0.83)
 const SMOKE_RAY_CELL := Vector3i(8, 0, 8)
 const SMOKE_RAY_PLACE := Vector3i(8, 1, 8)
-const DEFAULT_BLUEPRINT_NAME := "River House"
 const BLUEPRINT_DIR := "user://blueprints"
 const BLUEPRINT_EXT := "tsbp"
 const ROOM_OVERLAY_HEIGHT_M := 2.8
@@ -96,6 +95,7 @@ var _active_material := 1
 var _remesh_pending := false
 var _remesh_due_msec := 0
 var _blueprint_name: LineEdit
+var _default_blueprint_name := ""
 var _save_dialog: FileDialog
 var _load_dialog: FileDialog
 var _room_overlay: Node3D
@@ -914,7 +914,8 @@ func _build_ui() -> void:
 	ui.add_child(blueprint_bar)
 
 	_blueprint_name = LineEdit.new()
-	_blueprint_name.text = DEFAULT_BLUEPRINT_NAME
+	_default_blueprint_name = _i18n.t("base.editor.blueprint.default_name")
+	_blueprint_name.text = _default_blueprint_name
 	_blueprint_name.custom_minimum_size = Vector2(220.0, 0.0)
 	blueprint_bar.add_child(_blueprint_name)
 
@@ -999,7 +1000,8 @@ func _cycle_structure() -> void:
 	var next_index := (index + 1) % STRUCTURES.size()
 	var selected: Dictionary = _core.editor_set_structure(STRUCTURES[next_index])
 	if not bool(selected.get("ok", false)):
-		_set_status("Structure: " + str(selected.get("error", "unknown error")))
+		var error := str(selected.get("error", _i18n.t("base.editor.generic.unknown_error")))
+		_status("base.editor.status.structure_failed", [error])
 		return
 	_update_palette_label()
 	_refresh_stats_label()
@@ -1012,24 +1014,28 @@ func _update_palette_label() -> void:
 	for entry in MATERIALS:
 		var id := int(entry["id"])
 		var marker := ">" if id == _active_material and _active_prop < 0 else " "
-		lines.append("%s %d  %s" % [marker, id, _material_name(id)])
+		lines.append(_i18n.t("base.editor.palette.material_row", [
+			marker, id, _material_name(id)]))
 	var structure: Dictionary = _core.editor_structure_state()
 	if bool(structure.get("ok", false)):
 		var limit := int(structure.get("effective_max_stories", 0))
 		var structure_line: String = _i18n.t("base.editor.palette.structure", [
-			str(structure.get("system_name", "?")),
+			_structure_name(str(structure.get("system", "")),
+				str(structure.get("system_name", "?"))),
 			int(structure.get("stories", 0)),
 			limit,
 		])
 		if not bool(structure.get("valid", false)):
-			structure_line += " — " + str(structure.get("error", ""))
+			structure_line += _i18n.t("base.editor.palette.structure_invalid", [
+				str(structure.get("error", ""))])
 		lines.append(structure_line)
 	lines.append(_i18n.t("base.editor.palette.props"))
 	for index in PROPS.size():
 		var entry: Dictionary = PROPS[index]
 		var kind := int(entry["kind"])
 		var marker := ">" if kind == _active_prop else " "
-		lines.append("%s %d  %s" % [marker, 6 + index, _prop_name(kind)])
+		lines.append(_i18n.t("base.editor.palette.prop_row", [
+			marker, 6 + index, _prop_name(kind)]))
 	_palette_label.text = "\n".join(lines)
 
 func _refresh_stats_label(build_ms: float = -1.0) -> void:
@@ -1081,6 +1087,10 @@ func _apply_locale(update_status: bool = true) -> void:
 	if _blueprint_name != null:
 		_blueprint_name.placeholder_text = _i18n.t("base.editor.blueprint.name_placeholder")
 		_blueprint_name.tooltip_text = _i18n.t("base.editor.blueprint.name_tooltip")
+		var default_name: String = _i18n.t("base.editor.blueprint.default_name")
+		if _blueprint_name.text == _default_blueprint_name:
+			_blueprint_name.text = default_name
+		_default_blueprint_name = default_name
 	if _save_button != null:
 		_save_button.text = _i18n.t("base.editor.blueprint.save")
 		_save_button.tooltip_text = _i18n.t("base.editor.blueprint.save_tooltip")
@@ -1121,6 +1131,14 @@ func _prop_name(kind: int) -> String:
 			var key := "base.editor.prop.%s" % str(entry["name"])
 			return _i18n.t(key) if _i18n.has_key(key) else str(entry["name"])
 	return _i18n.t("base.editor.generic.prop")
+
+## Localized structure display name. `fallback` is the core's readable name,
+## used when a mod or future system id has no key yet.
+func _structure_name(id: String, fallback: String = "") -> String:
+	var key := "base.editor.structure.%s" % id
+	if _i18n.has_key(key):
+		return _i18n.t(key)
+	return fallback if not fallback.is_empty() else _i18n.t("base.editor.generic.unknown")
 
 func _world_to_cell(world: Vector3) -> Vector3i:
 	var local := (world - _volume_origin) / _voxel_size_m
@@ -1269,6 +1287,8 @@ func _run_locale_smoke() -> void:
 		"base.editor.room_type.office",
 		"base.editor.room_type.living_dining",
 		"base.editor.room_type.empty",
+		"base.editor.room_type.room",
+		"base.editor.structure.timber_frame",
 	]
 	for key in required:
 		if status == "ok" and not en.has_key(key, "en"):

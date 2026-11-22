@@ -4,5 +4,6 @@
 /godot/bin/*.dll
 /godot/bin/*.dylib
 /benchmarks/results/
+/playtest_sessions/
 *.swp
 .DS_Store
