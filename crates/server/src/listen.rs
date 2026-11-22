@@ -66,6 +66,10 @@ pub fn run_listen(
         let (mut stream, _peer) = listener.accept()?;
         configure_stream(&stream)?;
         sessions += 1;
+        // A reconnect reuses the same in-memory world. This clears the closed
+        // flag from the previous connection and, for a dropped socket, opens
+        // the resume grace window.
+        world.begin_connection();
 
         serve_session(
             &mut stream,
@@ -123,12 +127,15 @@ fn serve_session(
         *commands += 1;
 
         let tick_before = world.tick;
-        let response = match decode_client_command(&payload) {
-            Ok(command) => world.apply(&command),
-            Err(rejection) => rejection.into_message(),
+        let responses = match decode_client_command(&payload) {
+            Ok(command) => world.apply_all(&command),
+            Err(rejection) => vec![rejection.into_message()],
         };
-        write_json_frame(stream, &response)
-            .map_err(|error| io::Error::other(format!("{}: {}", error.code(), error.message())))?;
+        for response in &responses {
+            write_json_frame(stream, response).map_err(|error| {
+                io::Error::other(format!("{}: {}", error.code(), error.message()))
+            })?;
+        }
 
         if world.is_closed() {
             return Ok(());

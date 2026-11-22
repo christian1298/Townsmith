@@ -14,7 +14,7 @@ use townsmith_server::listen::{run_listen, run_save_load_smoke, ListenConfig};
 use townsmith_server::protocol::{run_loopback_smoke, LOOPBACK_SEED};
 use townsmith_server::save::LoadedWorld;
 use townsmith_server::world::{
-    run_authority_loopback, run_roles_loopback, ClientRole, ServerWorld,
+    run_authority_loopback, run_resume_loopback, run_roles_loopback, ClientRole, ServerWorld,
 };
 
 fn arg_value(name: &str) -> Option<String> {
@@ -84,6 +84,42 @@ fn main() {
             }
             Err(error) => {
                 eprintln!("SERVER_ROLES status=error error={error}");
+                std::process::exit(1);
+            }
+        }
+        match run_resume_loopback() {
+            Ok(report) => {
+                println!(
+                    "SERVER_RESUME status=ok sessions={} commands={} frames={} resumed={} tick={} checksum={}",
+                    report.sessions,
+                    report.commands,
+                    report.frames,
+                    report.resumed,
+                    report.tick,
+                    report.checksum
+                );
+            }
+            Err(error) => {
+                eprintln!("SERVER_RESUME status=error error={error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if has_flag("--resume-smoke") {
+        match run_resume_loopback() {
+            Ok(report) => println!(
+                "SERVER_RESUME status=ok sessions={} commands={} frames={} resumed={} tick={} checksum={}",
+                report.sessions,
+                report.commands,
+                report.frames,
+                report.resumed,
+                report.tick,
+                report.checksum
+            ),
+            Err(error) => {
+                eprintln!("SERVER_RESUME status=error error={error}");
                 std::process::exit(1);
             }
         }
