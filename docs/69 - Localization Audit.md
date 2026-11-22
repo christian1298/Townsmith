@@ -88,7 +88,7 @@ The dashboard body is produced by `core_city` and passed through the bridge. Its
 | `code` | Developer-only | Stable key; never translate |
 | `severity` | Developer-only enum | Maps to color/icon, not text |
 | `title` | Player-facing, English literal | `base.advisor.<code>.title` (EN/DE); bridge title fallback |
-| `detail` | Player-facing, English literal | Needs `base.advisor.<code>.detail` with params |
+| `detail` | Player-facing, keyed by code | `base.advisor.<code>.detail` renders named params |
 
 The protocol should send the code plus parameters; each client resolves the title and detail in its own locale, per D-022.
 
