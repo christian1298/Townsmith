@@ -26,10 +26,10 @@ In:
 - a `City Dashboard` overlay with population, district, work, wellbeing, services, treasury, industry, roads, and construction sections;
 - a District section that queries `district_summary` around the Mayor camera target or the selected building with a 256 m radius once per dashboard rebuild;
 - an `F6` District focus toggle: camera focus by default, selection focus when a building is selected, with the selected placement's centre as the query centre and an F6 return action;
-- an `F7` district heatmap overlay that queries `district_heatmap` at 512 m / 32 m around the same focus, renders up to 1,024 pooled cells, and shows a localized status/legend line;
+- an `F7` district heatmap overlay that queries `district_heatmap` at 512 m / 32 m around the same focus, renders up to 1,024 pooled cells, and shows a localized status/legend line; `Shift+F7` cycles Population, Jobs, and Happiness with metric-aware colours and peak values;
 - `F1` toggles the dashboard; `Esc` closes it; entering Architect Mode closes it;
 - a world-scene smoke that checks the advisor warning, dashboard text, district values and labels, the camera/selection focus toggle, localized advisor titles, and the heatmap grid/instance/teardown contract;
-- markers `dashboard=ok`, `district_ui=ok`, `district_select=ok`, and `heatmap_ui=ok`, enforced by `scripts/smoke_world_scene.sh`.
+- markers `dashboard=ok`, `district_ui=ok`, `district_select=ok`, `heatmap_ui=ok`, and `heatmap_modes=ok`, enforced by `scripts/smoke_world_scene.sh`.
 
 Out:
 
@@ -166,6 +166,9 @@ Colors: critical red, warning amber, info green. `Esc` closes the panel before o
 ### 5.1 District heatmap overlay (`F7`)
 
 `F7` toggles a read-only in-world heatmap. It is independent of the dashboard: it does not open, close, or rebuild the panel, and the dashboard District section is unchanged.
+
+**Metric modes.** `Shift+F7` cycles the displayed metric in the order **Population → Jobs → Happiness**. Population and jobs are counted per cell; happiness is resident-weighted and shown as a percentage. The query radius/cell size stay fixed, and each mode uses its own normalisation and rebuild key, so switching never reuses the previous mode's colours. The legend reports the active metric and peak. The smoke checks all three modes, distinct rebuild keys, EN/DE labels, and teardown.
+
 
 - **Query:** `district_heatmap(SEED, center.x, center.z, 512.0, 32.0)`, where the centre is `_materialization_center()` (the selected building or the Mayor camera target). `ceil(1024 / 32) = 32`, so the grid is 32 × 32 = **1,024 cells**, exactly the renderer cap.
 - **Refresh:** opening queries immediately; while visible `_process` refreshes on a `0.5 s` accumulator. Closing frees the pooled node and clears the height/state caches.

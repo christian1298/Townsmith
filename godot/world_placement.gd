@@ -44,14 +44,24 @@ const CONSTRUCTION_MAX_STEPS := 8
 const DISTRICT_RADIUS_M := 256.0
 # F7 district heatmap overlay: one read-only query per refresh around the same
 # focus as the materialization layer. 512 m / 32 m rounds up to a 32 x 32 grid,
-# which is exactly the 1,024-cell cap the renderer accepts. Cells with no
-# residents are omitted (zero cells stay hidden), and each visible cell is a
-# flat pooled box lifted 0.15 m above the sampled terrain height.
+# which is exactly the 1,024-cell cap the renderer accepts. Cells whose active
+# metric is zero are omitted (zero cells stay hidden), and each visible cell is
+# a flat pooled box lifted 0.15 m above the sampled terrain height.
 const HEATMAP_REFRESH_SECONDS := 0.5
 const HEATMAP_RADIUS_M := 512.0
 const HEATMAP_CELL_M := 32.0
 const HEATMAP_MAX_CELLS := 1024
 const HEATMAP_LIFT_M := 0.15
+# F7 opens on population; Shift+F7 cycles these in order while the overlay is
+# visible. Jobs and population normalise against their own integer peak;
+# happiness uses the bridge's 0..1 fraction and normalises against the happiest
+# positive cell, then displays its peak as a percentage.
+const HEATMAP_METRICS := ["population", "jobs", "happiness"]
+const HEATMAP_METRIC_KEYS := {
+	"population": "base.ui.heatmap.metric.population",
+	"jobs": "base.ui.heatmap.metric.jobs",
+	"happiness": "base.ui.heatmap.metric.happiness",
+}
 # Materialization is a derived, read-only selection around the Mayor focus or
 # selected building. Rebuild on toggle/selection change and at the same 0.5 s
 # cadence as the dashboard so a panning camera follows without per-frame nodes.
@@ -176,20 +186,23 @@ var movement_time := 0.0
 var last_movement_state: Dictionary = {}
 # F7 district heatmap overlay. One MultiMesh holds up to HEATMAP_MAX_CELLS flat
 # boxes; instance_count only grows, while visible_instance_count tracks the
-# current nonzero-population cell count. The ground cache is keyed by rounded
-# cell centre and invalidated by the terrain-delta checksum.
+# current nonzero-metric cell count. The ground cache is keyed by rounded
+# cell centre and invalidated by the terrain-delta checksum. The rebuild key
+# includes the active metric so Shift+F7 forces an immediate redraw.
 var heatmap_root: Node3D
 var heatmap_mesh: BoxMesh
 var heatmap_material: StandardMaterial3D
 var heatmap_multimesh_instance: MultiMeshInstance3D
 var heatmap_multimesh: MultiMesh
 var heatmap_visible := false
+var heatmap_metric := "population"
 var heatmap_refresh_accum := 0.0
 var heatmap_ground: Dictionary = {}
 var heatmap_terrain_key := ""
+var heatmap_rebuild_key := ""
 var heatmap_last_state: Dictionary = {}
 var heatmap_cells := 0
-var heatmap_peak := 0
+var heatmap_peak := 0.0
 var heatmap_error := ""
 var industry_root: Node3D
 var industry_nodes: Dictionary = {}
@@ -475,7 +488,10 @@ func _unhandled_input(event: InputEvent) -> void:
 				KEY_F6:
 					_toggle_district_focus()
 				KEY_F7:
-					_toggle_heatmap()
+					if event.shift_pressed:
+						_cycle_heatmap_metric()
+					else:
+						_toggle_heatmap()
 				KEY_F8:
 					_toggle_construction_clock()
 				KEY_T:
@@ -1108,6 +1124,44 @@ func _heatmap_color(ratio: float) -> Color:
 		return low.lerp(mid, value * 2.0)
 	return mid.lerp(high, (value - 0.5) * 2.0)
 
+func _heatmap_metric_value(cell: Dictionary) -> float:
+	if heatmap_metric == "jobs":
+		return float(int(cell.get("jobs", 0)))
+	if heatmap_metric == "happiness":
+		var happiness := float(cell.get("happiness", 0.0))
+		if not is_finite(happiness):
+			return 0.0
+		return clampf(happiness, 0.0, 1.0)
+	return float(int(cell.get("population", 0)))
+
+func _heatmap_peak_value(cells: Array) -> float:
+	var peak := 0.0
+	for cell in cells:
+		peak = maxf(peak, _heatmap_metric_value(cell))
+	return peak
+
+func _heatmap_peak_text() -> String:
+	# Happiness is a 0..1 fraction, so its legend shows a percentage. An
+	# empty metric renders the shared not-available dash instead of a
+	# misleading zero.
+	if heatmap_peak <= 0.0:
+		return i18n.NOT_AVAILABLE if heatmap_metric == "happiness" else i18n.format_int(0)
+	if heatmap_metric == "happiness":
+		return i18n.format_float(heatmap_peak * 100.0, 0) + "%"
+	return i18n.format_int(roundi(heatmap_peak))
+
+func _cycle_heatmap_metric() -> String:
+	# Shift+F7 only cycles while the overlay is visible; a hidden overlay
+	# keeps its selected metric for the next F7 open.
+	if not heatmap_visible:
+		return heatmap_metric
+	var index := HEATMAP_METRICS.find(heatmap_metric)
+	heatmap_metric = HEATMAP_METRICS[(index + 1) % HEATMAP_METRICS.size()]
+	heatmap_refresh_accum = 0.0
+	_refresh_heatmap()
+	_update_hud()
+	return heatmap_metric
+
 func _heatmap_ground_at(x: float, z: float) -> float:
 	var key := Vector2i(roundi(x), roundi(z))
 	if heatmap_ground.has(key):
@@ -1132,9 +1186,10 @@ func _clear_heatmap() -> void:
 	heatmap_multimesh = null
 	heatmap_ground.clear()
 	heatmap_terrain_key = ""
+	heatmap_rebuild_key = ""
 	heatmap_last_state = {}
 	heatmap_cells = 0
-	heatmap_peak = 0
+	heatmap_peak = 0.0
 	heatmap_error = ""
 
 func _refresh_heatmap() -> void:
@@ -1146,8 +1201,11 @@ func _refresh_heatmap() -> void:
 	)
 	heatmap_last_state = state
 	heatmap_cells = 0
-	heatmap_peak = 0
+	heatmap_peak = 0.0
 	heatmap_error = ""
+	# The key includes the active metric (plus the query centre), so a mode
+	# change is a new layer rather than a stale redraw of the old colours.
+	heatmap_rebuild_key = "%s|%.1f|%.1f" % [heatmap_metric, center.x, center.z]
 	if not bool(state.get("ok", false)):
 		heatmap_error = str(state.get("error_code", "unavailable"))
 		_ensure_heatmap_pool()
@@ -1156,9 +1214,7 @@ func _refresh_heatmap() -> void:
 			heatmap_multimesh.custom_aabb = AABB()
 		return
 	var cells: Array = state.get("cells", [])
-	var peak := 0
-	for cell in cells:
-		peak = maxi(peak, int(cell.get("population", 0)))
+	var peak := _heatmap_peak_value(cells)
 	heatmap_peak = peak
 	# A terrain edit changes the sampled heights, so keep the cache honest
 	# without querying the height field for every cell on every refresh.
@@ -1175,8 +1231,8 @@ func _refresh_heatmap() -> void:
 	var min_y := INF
 	var max_y := -INF
 	for cell in cells:
-		var population := int(cell.get("population", 0))
-		if population <= 0:
+		var value := _heatmap_metric_value(cell)
+		if value <= 0.0:
 			continue
 		var x := float(cell.get("x", 0.0))
 		var z := float(cell.get("z", 0.0))
@@ -1184,7 +1240,7 @@ func _refresh_heatmap() -> void:
 		if ground < 0.0:
 			continue
 		var y := ground + HEATMAP_LIFT_M
-		var ratio := float(population) / float(maxi(peak, 1))
+		var ratio := value / peak if peak > 0.0 else 0.0
 		transforms.append(Transform3D(Basis.IDENTITY, Vector3(x, y, z)))
 		colors.append(_heatmap_color(ratio))
 		min_x = minf(min_x, x)
@@ -2691,13 +2747,17 @@ func _update_hud() -> void:
 	status_label.text += "\n" + i18n.t("base.ui.heatmap.status", {
 		"state": heatmap_state,
 		"cells": i18n.format_int(heatmap_cells),
-		"peak": i18n.format_int(heatmap_peak),
+		"peak": _heatmap_peak_text(),
 	})
 	if heatmap_visible:
+		status_label.text += "\n" + i18n.t("base.ui.heatmap.metric_line", {
+			"metric": i18n.t(HEATMAP_METRIC_KEYS.get(heatmap_metric, "base.ui.heatmap.metric.population")),
+			"peak": _heatmap_peak_text(),
+		})
 		status_label.text += "\n" + i18n.t("base.ui.heatmap.legend")
 		if heatmap_error != "":
 			status_label.text += "\n" + i18n.t("base.ui.heatmap.unavailable", {"code": heatmap_error})
-		elif heatmap_peak == 0:
+		elif heatmap_peak <= 0.0:
 			status_label.text += "\n" + i18n.t("base.ui.heatmap.empty")
 
 func _toggle_citizen_panel() -> bool:
@@ -3893,6 +3953,7 @@ func _run_scene_smoke() -> void:
 	var district_ui_ok := false
 	var district_select_ok := false
 	var heatmap_ui_ok := false
+	var heatmap_modes_ok := false
 	var advisor_i18n_ok := false
 	var advisor_detail_i18n_ok := false
 	var hud_i18n_ok := false
@@ -4688,14 +4749,14 @@ func _run_scene_smoke() -> void:
 				heatmap_ui_ok = heatmap_ui_ok and heatmap_cell_list.size() == heatmap_cols * heatmap_rows
 				heatmap_ui_ok = heatmap_ui_ok and heatmap_cell_list.size() <= HEATMAP_MAX_CELLS
 				var heatmap_nonzero := 0
-				var heatmap_expected_peak := 0
+				var heatmap_expected_peak := 0.0
 				for heatmap_cell in heatmap_cell_list:
-					var heatmap_population := int(heatmap_cell.get("population", 0))
-					if heatmap_population > 0:
+					var heatmap_population := float(int(heatmap_cell.get("population", 0)))
+					if heatmap_population > 0.0:
 						heatmap_nonzero += 1
-						heatmap_expected_peak = maxi(heatmap_expected_peak, heatmap_population)
+						heatmap_expected_peak = maxf(heatmap_expected_peak, heatmap_population)
 				heatmap_ui_ok = heatmap_ui_ok and heatmap_nonzero == heatmap_cells
-				heatmap_ui_ok = heatmap_ui_ok and heatmap_expected_peak == heatmap_peak
+				heatmap_ui_ok = heatmap_ui_ok and is_equal_approx(heatmap_expected_peak, heatmap_peak)
 				heatmap_ui_ok = heatmap_ui_ok and heatmap_root.get_child_count() == 1
 				var heatmap_pool: MultiMeshInstance3D = heatmap_multimesh_instance
 				heatmap_ui_ok = heatmap_ui_ok and heatmap_pool != null and is_instance_valid(heatmap_pool)
@@ -4707,7 +4768,7 @@ func _run_scene_smoke() -> void:
 				heatmap_ui_ok = heatmap_ui_ok and heatmap_multimesh.use_colors
 				heatmap_checksum = str(heatmap_state.get("checksum", ""))
 				heatmap_ui_ok = heatmap_ui_ok and heatmap_checksum.length() == 16
-				print("HEATMAP_UI cells=%d instances=%d peak=%d checksum=%s" % [
+				print("HEATMAP_UI cells=%d instances=%d peak=%.3f checksum=%s" % [
 					heatmap_nonzero,
 					heatmap_multimesh.visible_instance_count if heatmap_multimesh != null else -1,
 					heatmap_peak,
@@ -4734,9 +4795,98 @@ func _run_scene_smoke() -> void:
 				heatmap_ui_ok = heatmap_ui_ok and status_label.text.contains(i18n.t("base.ui.heatmap.status", {
 					"state": i18n.t("base.ui.heatmap.on"),
 					"cells": i18n.format_int(heatmap_nonzero),
-					"peak": i18n.format_int(heatmap_peak),
+					"peak": _heatmap_peak_text(),
 				}))
 				heatmap_ui_ok = heatmap_ui_ok and hud.text.contains("F7 heatmap")
+				# Heatmap modes: F7 opens on population, Shift+F7 cycles
+				# jobs -> happiness -> population. Each mode redraws through
+				# the same bounded pool, the metric line names the active
+				# metric, and the colour/peak contract is recomputed from the
+				# bridge payload rather than trusting the renderer.
+				heatmap_modes_ok = heatmap_metric == "population"
+				heatmap_modes_ok = heatmap_modes_ok and status_label.text.contains(i18n.t("base.ui.heatmap.metric_line", {
+					"metric": i18n.t("base.ui.heatmap.metric.population"),
+					"peak": _heatmap_peak_text(),
+				}))
+				heatmap_modes_ok = heatmap_modes_ok and status_label.text.contains("Shift+F7")
+				var heatmap_mode_keys: Array[String] = [heatmap_rebuild_key]
+				for heatmap_mode in ["jobs", "happiness"]:
+					var heatmap_previous_key := heatmap_rebuild_key
+					var heatmap_cycled: String = _cycle_heatmap_metric()
+					var heatmap_cycle_ok := heatmap_cycled == heatmap_mode
+					var heatmap_metric_ok := heatmap_metric == heatmap_mode
+					var heatmap_key_ok := heatmap_rebuild_key != heatmap_previous_key \
+						and heatmap_rebuild_key.begins_with(heatmap_mode + "|")
+					var heatmap_mode_nonzero := 0
+					var heatmap_mode_peak := 0.0
+					for heatmap_cell in heatmap_cell_list:
+						var heatmap_value := _heatmap_metric_value(heatmap_cell)
+						if heatmap_value > 0.0:
+							heatmap_mode_nonzero += 1
+							heatmap_mode_peak = maxf(heatmap_mode_peak, heatmap_value)
+					var heatmap_peak_ok := is_finite(heatmap_peak) and heatmap_peak >= 0.0 \
+						and is_equal_approx(heatmap_mode_peak, heatmap_peak)
+					var heatmap_mode_instances := heatmap_multimesh.visible_instance_count if heatmap_multimesh != null else -1
+					var heatmap_instances_ok := heatmap_mode_instances == heatmap_mode_nonzero \
+						and heatmap_mode_instances <= HEATMAP_MAX_CELLS
+					var heatmap_mode_label: String = str(i18n.t(HEATMAP_METRIC_KEYS.get(heatmap_mode, "base.ui.heatmap.metric.population")))
+					var heatmap_label_ok := status_label.text.contains(i18n.t("base.ui.heatmap.metric_line", {
+						"metric": heatmap_mode_label,
+						"peak": _heatmap_peak_text(),
+					}))
+					heatmap_label_ok = heatmap_label_ok and not status_label.text.contains("!base.ui.")
+					# Colour determinism: the first pooled instance must map
+					# back to a bridge cell and carry the colour implied by
+					# that cell's value over the active metric peak.
+					var heatmap_color_ok := true
+					if heatmap_mode_instances > 0:
+						var heatmap_first := heatmap_multimesh.get_instance_transform(0)
+						var heatmap_first_value := -1.0
+						for heatmap_cell in heatmap_cell_list:
+							if absf(float(heatmap_cell.get("x", 0.0)) - heatmap_first.origin.x) < 0.01 \
+									and absf(float(heatmap_cell.get("z", 0.0)) - heatmap_first.origin.z) < 0.01:
+								heatmap_first_value = _heatmap_metric_value(heatmap_cell)
+								break
+						heatmap_color_ok = heatmap_first_value > 0.0
+						if heatmap_color_ok:
+							var heatmap_expected_color := _heatmap_color(heatmap_first_value / heatmap_peak)
+							heatmap_color_ok = heatmap_multimesh.get_instance_color(0).is_equal_approx(heatmap_expected_color)
+					heatmap_modes_ok = heatmap_modes_ok and heatmap_cycle_ok and heatmap_metric_ok \
+						and heatmap_key_ok and heatmap_mode_nonzero == heatmap_cells \
+						and heatmap_peak_ok and heatmap_instances_ok and heatmap_label_ok \
+						and heatmap_color_ok and (heatmap_mode_instances > 0 or heatmap_mode_nonzero == 0)
+					heatmap_mode_keys.append(heatmap_rebuild_key)
+					print("HEATMAP_MODE metric=%s cells=%d instances=%d peak=%.3f key=%s cycle=%s key_ok=%s peak_ok=%s label_ok=%s color_ok=%s" % [
+						heatmap_mode,
+						heatmap_mode_nonzero,
+						heatmap_mode_instances,
+						heatmap_peak,
+						heatmap_rebuild_key,
+						heatmap_cycle_ok,
+						heatmap_key_ok,
+						heatmap_peak_ok,
+						heatmap_label_ok,
+						heatmap_color_ok,
+					])
+				heatmap_modes_ok = heatmap_modes_ok and heatmap_mode_keys[0] != heatmap_mode_keys[1]
+				heatmap_modes_ok = heatmap_modes_ok and heatmap_mode_keys[1] != heatmap_mode_keys[2]
+				heatmap_modes_ok = heatmap_modes_ok and heatmap_mode_keys[0] != heatmap_mode_keys[2]
+				# Localized metric labels resolve in DE and EN.
+				i18n.set_locale("de")
+				_update_hud()
+				heatmap_modes_ok = heatmap_modes_ok and status_label.text.contains("Kennzahl: Zufriedenheit")
+				heatmap_modes_ok = heatmap_modes_ok and status_label.text.contains("Umschalt+F7")
+				heatmap_modes_ok = heatmap_modes_ok and not status_label.text.contains("!base.ui.")
+				i18n.set_locale("en")
+				_update_hud()
+				heatmap_modes_ok = heatmap_modes_ok and status_label.text.contains("Metric: Happiness")
+				heatmap_modes_ok = heatmap_modes_ok and status_label.text.contains("Shift+F7")
+				heatmap_modes_ok = heatmap_modes_ok and not status_label.text.contains("!base.ui.")
+				# Wrap back to population so the off-state check stays the
+				# same numeric contract as the pre-modes smoke.
+				var heatmap_wrapped: String = _cycle_heatmap_metric()
+				heatmap_modes_ok = heatmap_modes_ok and heatmap_wrapped == "population"
+				heatmap_modes_ok = heatmap_modes_ok and heatmap_metric == "population"
 				i18n.set_locale("de")
 				_update_hud()
 				heatmap_ui_ok = heatmap_ui_ok and status_label.text.contains("Stadtteil-Heatmap: an")
@@ -4749,10 +4899,15 @@ func _run_scene_smoke() -> void:
 				heatmap_ui_ok = heatmap_ui_ok and heatmap_multimesh == null
 				heatmap_ui_ok = heatmap_ui_ok and heatmap_ground.is_empty()
 				heatmap_ui_ok = heatmap_ui_ok and heatmap_last_state.is_empty()
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_rebuild_key == ""
+				heatmap_modes_ok = heatmap_modes_ok and heatmap_root.get_child_count() == 0
+				heatmap_modes_ok = heatmap_modes_ok and heatmap_multimesh == null
+				heatmap_modes_ok = heatmap_modes_ok and heatmap_ground.is_empty()
+				heatmap_modes_ok = heatmap_modes_ok and heatmap_rebuild_key == ""
 				heatmap_ui_ok = heatmap_ui_ok and status_label.text.contains(i18n.t("base.ui.heatmap.status", {
 					"state": i18n.t("base.ui.heatmap.off"),
 					"cells": i18n.format_int(0),
-					"peak": i18n.format_int(0),
+					"peak": _heatmap_peak_text(),
 				}))
 				i18n.set_locale("de")
 				_update_dashboard()
@@ -4994,6 +5149,8 @@ func _run_scene_smoke() -> void:
 					status = "district_ui_failed"
 				elif not heatmap_ui_ok:
 					status = "heatmap_ui_failed"
+				elif not heatmap_modes_ok:
+					status = "heatmap_modes_failed"
 			if not load_ok:
 				status = "load_failed"
 
@@ -5094,7 +5251,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s district_select=%s heatmap_ui=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s district_select=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -5137,6 +5294,7 @@ func _run_scene_smoke() -> void:
 		"ok" if district_ui_ok else "failed",
 		"ok" if district_select_ok else "failed",
 		"ok" if heatmap_ui_ok else "failed",
+		"ok" if heatmap_modes_ok else "failed",
 		"ok" if hud_i18n_ok else "failed",
 		"ok" if hud_body_i18n_ok else "failed",
 		"ok" if hud_status_i18n_ok else "failed",
