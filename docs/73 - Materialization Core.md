@@ -28,7 +28,7 @@ In:
 
 Out:
 
-- materialized agents, movement, or route visuals;
+- materialized agents, movement visuals, or route visuals;
 - applying the change diff incrementally, dwell time, anti-starvation, or a saved materialized set; the bridge computes the bounded diff, but the scene rebuilds markers from the selection;
 - route caching, pathfinding, traffic, schedules, or needs simulation;
 - final art or per-citizen crowd animation;
@@ -98,7 +98,7 @@ A pinned citizen outside the active cap replaces the furthest non-pinned citizen
 
 The call is read-only: it does not mutate the live named pool, population, save state, or checksums. Detailed is a prefix of active. The bridge test checks ordering, counts, names, and the prefix invariant.
 
-`route_preview`/`route_cache_state` expose the road polyline and bounded LRU described in [[56 - Traffic]]; routes are not yet attached to materialized citizens or movement.
+`route_preview`/`route_cache_state` expose the road polyline and bounded LRU described in [[56 - Traffic]]. `core_city::movement` now attaches one cached route per household to the selection and returns deterministic per-citizen positions; the bridge and scene still need to surface and drive them.
 
 ### Stateful bridge scheduler
 
@@ -152,6 +152,10 @@ pub struct MaterializationDiff {
 - caps, the detailed prefix, and invalid hysteresis radii;
 - change diff: no change, distance-only refresh, add/remove/update, cap truncation, id tie-break, empty/missing previous.
 
+## 7.1 Movement tests
+
+`core_city::movement` has 8 deterministic tests: empty inputs, one household with three residents sharing one route but distinct phase offsets, route-cache reuse across households, disconnected-pair fallback, nearest-workplace tie-break, cycle wrap, and invalid time. The layer is core-only; no checksum or save field yet.
+
 ## 8. Limits
 
 - Home positions are an input map; there is no live spatial index yet.
@@ -159,8 +163,8 @@ pub struct MaterializationDiff {
 - The bridge stores a single previous selection, not a full scheduler history; no dwell time or anti-starvation yet.
 - The scene rebuilds markers from `active`/`detailed`; it does not yet apply `changed` incrementally.
 - One pinned id is supported; the full selection/story priority list and dwell time are later.
-- `core_city::route_cache` now provides bounded route polylines, but materialization does not use it yet.
-- The world scene has fading debug markers only; there are no materialized agents, movement, or route visuals yet.
+- `core_city::movement` uses the bounded route cache: one route per household, shared by its residents, with deterministic phase offsets. Workplace choice is nearest reachable by road distance; households with no reachable workplace get no route.
+- The world scene has fading debug markers only; it does not call the movement layer or draw routes yet.
 - Fade materials are per-node duplicates; a 2k-active route needs shared materials or a pooling strategy.
 - Removed markers free after a bounded fade deadline; the node map is keyed by citizen id.
 - No save field: the selected set is derived on demand.
@@ -172,7 +176,7 @@ pub struct MaterializationDiff {
 
 The HUD and dashboard `Citizens near` lines read the step counts (`active`/`detailed`). The `--scene-smoke` route calls the step, moves the centre by 1 m, calls it again, and checks that `diff`, `checksum`, and bounded `changed`/`truncated` fields are present.
 
-Limits: the overlay applies added/updated/removed entries from the 64-change diff, fades markers, and reconciles deferred entries under the same budget. It keeps only debug markers; no route cache, agents, or movement yet.
+Limits: the overlay applies added/updated/removed entries from the 64-change diff, fades markers, and reconciles deferred entries under the same budget. It keeps only debug markers; it does not use the core movement layer yet.
 
 ## 10. Benchmark
 
@@ -221,7 +225,7 @@ not a CI gate.
 
 ## 11. Next
 
-1. Add a bounded home-work route cache and per-citizen movement.
+1. ~~Add a bounded home-work route cache and per-citizen movement.~~ Core landed in `core_city::movement`; bridge payload and scene drive are next.
 2. Replace debug markers with pooled materialized agents and add the 2k-active/200-detailed render route.
 3. Add crowd LOD and fade pooling to avoid per-node material duplicates.
 3. Add per-client interest filtering.
