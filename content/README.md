@@ -2,7 +2,7 @@
 
 This directory holds the first data-first content contracts from
 [[06 - Modding and Resource Packs]] (D-006, proposed). The runtime registry,
-mod loader, and save integration are **not implemented yet**; these files are
+filesystem loading (`ContentPack::from_dir`) is implemented; packaging, Workshop, scripts, save integration are **not implemented yet**; these files are
 a validated starting point for that work.
 
 ## Layout

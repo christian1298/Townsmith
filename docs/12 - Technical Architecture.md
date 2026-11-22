@@ -544,3 +544,4 @@ The `bench` crate loads the scene, applies settings, runs the fixed route, sampl
 See [[09 - Open Questions]] and [[10 - Decisions]].
 
 Reconnect state lives in `ServerWorld` (`session_token`, 300-tick grace window, `Resume`) and is deliberately excluded from the world checksum. The save file restores the world state but not a resumable connection.
+Time-control votes live in `crates/server/src/vote.rs`; the pure state machine is deterministic and the world applies a passed pause/resume once. Protocol framing/authority remain in `protocol.rs`/`world.rs`.

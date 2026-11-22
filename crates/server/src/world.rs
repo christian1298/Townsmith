@@ -11,7 +11,7 @@
 //! explicit [`ServerWorld::advance_day`] call, so transcripts are
 //! deterministic.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::thread;
@@ -20,10 +20,10 @@ use core_city::economy::{Economy, EconomyTick, DAY_SECONDS, STARTING_BALANCE};
 use core_city::road::{RoadError, RoadRequest, RoadStore};
 
 use crate::protocol::{
-    codes as protocol_codes, configure_stream, decode_client_command, frame_to_io, read_frame,
-    read_json_frame, session_id_for_seed, validate_hello, validate_road, validate_tax_rates,
-    write_json_frame, ClientCommand, FrameError, Rejection, ServerMessage, SessionConfig,
-    TimeAction, LOOPBACK_SEED, PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
+    configure_stream, decode_client_command, frame_to_io, read_frame, read_json_frame,
+    session_id_for_seed, validate_hello, validate_road, validate_tax_rates, write_json_frame,
+    ClientCommand, FrameError, Rejection, ServerMessage, SessionConfig, TimeAction, LOOPBACK_SEED,
+    PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
 };
 
 /// Fixed road width for v0 placement commands.
@@ -112,6 +112,8 @@ pub mod codes {
     pub const ROAD_ID_EXHAUSTED: &str = "road.id_exhausted";
     /// A store-level rejection not covered by a narrower code.
     pub const ROAD_REJECTED: &str = "road.rejected";
+    /// Time-vote commands are unavailable in the transport-only session.
+    pub const VOTE_UNAVAILABLE: &str = "vote.unavailable";
 }
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -185,6 +187,10 @@ impl ClientRole {
         match command {
             ClientCommand::TimeControl {
                 action: TimeAction::Step,
+            } => Self::Admin,
+            ClientCommand::TimeVote {
+                action: crate::protocol::VoteAction::Cancel,
+                ..
             } => Self::Admin,
             other => Self::required_role(other.tag()),
         }
@@ -324,6 +330,12 @@ pub struct ServerWorld {
     pub roads: RoadStore,
     /// Whether `advance_day` is frozen.
     pub paused: bool,
+    /// Deterministic time-control vote state (D-021).
+    pub vote: crate::vote::TimeVote,
+    /// Players currently online in this process.
+    online: BTreeSet<String>,
+    /// Hello player name for the session.
+    player: Option<String>,
     /// Checksum of the last accepted state, refreshed after each mutation.
     pub session_checksum: String,
     role: ClientRole,
@@ -381,6 +393,9 @@ impl ServerWorld {
             economy: Economy::new(seed),
             roads: RoadStore::new(seed),
             paused: false,
+            vote: crate::vote::TimeVote::default(),
+            online: BTreeSet::new(),
+            player: None,
             session_checksum: String::new(),
             role,
             commands: 0,
@@ -432,6 +447,9 @@ impl ServerWorld {
             economy: save.economy,
             roads: save.roads,
             paused: save.paused,
+            vote: crate::vote::TimeVote::default(),
+            online: BTreeSet::new(),
+            player: None,
             session_checksum: String::new(),
             role: ClientRole::Mayor,
             commands: 0,
@@ -638,15 +656,19 @@ impl ServerWorld {
 
     fn evaluate(&mut self, command: &ClientCommand) -> (ServerMessage, &'static str) {
         if self.closed {
-            return reject_with(protocol_codes::SESSION_CLOSED, "session is already closed");
+            return reject_with(
+                crate::protocol::codes::SESSION_CLOSED,
+                "session is already closed",
+            );
         }
 
         // Handshake sequencing comes before role and rate checks so a
         // duplicate, resumable, or pre-hello command keeps its stable code.
+        self.tick_vote();
         match command {
             ClientCommand::Hello { .. } if self.hello => {
                 return reject_with(
-                    protocol_codes::HELLO_DUPLICATE,
+                    crate::protocol::codes::HELLO_DUPLICATE,
                     "hello was already accepted",
                 );
             }
@@ -709,6 +731,7 @@ impl ServerWorld {
             );
         }
 
+        self.tick_vote();
         match command {
             ClientCommand::Hello {
                 protocol_version,
@@ -720,6 +743,8 @@ impl ServerWorld {
                     return from_rejection(rejection);
                 }
                 self.hello = true;
+                self.player = Some(player_name.clone());
+                self.online.insert(player_name.clone());
                 self.closed = false;
                 self.resume_window = None;
                 self.last_seen_tick = self.tick;
@@ -732,6 +757,9 @@ impl ServerWorld {
             } => self.apply_resume(session_id, *last_tick),
             ClientCommand::Disconnect => {
                 let was_active = self.hello;
+                if let Some(player) = self.player.take() {
+                    self.online.remove(&player);
+                }
                 self.closed = true;
                 self.hello = false;
                 if was_active {
@@ -755,6 +783,75 @@ impl ServerWorld {
                 accepted(self.snapshot())
             }
             ClientCommand::PlaceRoad { start, end } => self.apply_place_road(*start, *end),
+            ClientCommand::TimeVote { action, time } => self.apply_time_vote(*action, *time),
+        }
+    }
+
+    fn apply_time_vote(
+        &mut self,
+        action: crate::protocol::VoteAction,
+        time: Option<TimeAction>,
+    ) -> (ServerMessage, &'static str) {
+        let Some(player) = self.player.clone() else {
+            return reject_with(codes::NOT_HELLO, "send `hello` before voting");
+        };
+        let result = match action {
+            crate::protocol::VoteAction::Call => match time {
+                Some(time) => self
+                    .vote
+                    .call(&player, time, self.online.iter().cloned(), self.tick),
+                None => return reject_with(codes::VOTE_UNAVAILABLE, "`call` requires `time`"),
+            },
+            crate::protocol::VoteAction::Yes => self.vote.vote(&player, true, self.tick),
+            crate::protocol::VoteAction::No => self.vote.vote(&player, false, self.tick),
+            crate::protocol::VoteAction::Cancel => self.vote.cancel(self.tick),
+        };
+        if let Err(error) = result {
+            let rejection = error.into_rejection();
+            return reject_with(rejection.code, rejection.message);
+        }
+        self.tick_vote();
+        accepted(self.vote_status())
+    }
+
+    fn tick_vote(&mut self) {
+        if let Some(outcome) = self.vote.tick(self.tick, self.online.iter().cloned()) {
+            self.apply_vote_outcome(&outcome);
+        }
+    }
+
+    fn apply_vote_outcome(&mut self, outcome: &crate::vote::VoteOutcome) {
+        if outcome.result != crate::vote::VoteState::Passed {
+            return;
+        }
+        match outcome.action {
+            TimeAction::Pause => self.paused = true,
+            TimeAction::Resume => self.paused = false,
+            _ => return,
+        }
+        self.vote.mark_effect_applied();
+        self.refresh_checksum();
+    }
+
+    fn vote_status(&self) -> ServerMessage {
+        ServerMessage::TimeVoteStatus {
+            vote_id: self.vote.vote_id(),
+            state: self.vote.state().as_str().to_string(),
+            action: self
+                .vote
+                .action
+                .map(crate::vote::action_name)
+                .map(str::to_string),
+            initiator: self.vote.initiator.clone(),
+            yes: u32::try_from(self.vote.yes.len()).unwrap_or(u32::MAX),
+            no: u32::try_from(self.vote.no.len()).unwrap_or(u32::MAX),
+            online: u32::try_from(self.vote.online_at_start.len()).unwrap_or(u32::MAX),
+            started_tick: self.vote.started_tick,
+            ends_tick: self.vote.ends_tick,
+            cooldown_until: self.vote.cooldown_until,
+            paused: self.paused,
+            clock: self.tick,
+            checksum: self.vote.checksum(),
         }
     }
 
@@ -851,7 +948,7 @@ impl ServerWorld {
         let length = dx.abs() + dz.abs();
         if length > i64::from(MAX_WORLD_ROAD_LENGTH) {
             return reject_with(
-                protocol_codes::ROAD_TOO_LONG,
+                crate::protocol::codes::ROAD_TOO_LONG,
                 format!(
                     "road length {length} exceeds the v0 maximum of {MAX_WORLD_ROAD_LENGTH} cells"
                 ),
@@ -1016,9 +1113,9 @@ fn reject_road_error(error: RoadError) -> (ServerMessage, &'static str) {
     let code = match error {
         RoadError::TooMany => codes::ROAD_STORE_FULL,
         RoadError::IdExhausted => codes::ROAD_ID_EXHAUSTED,
-        RoadError::ZeroLength => protocol_codes::ROAD_EMPTY,
-        RoadError::TooLong { .. } => protocol_codes::ROAD_TOO_LONG,
-        RoadError::CoordinateOutOfRange => protocol_codes::ROAD_OUT_OF_BOUNDS,
+        RoadError::ZeroLength => crate::protocol::codes::ROAD_EMPTY,
+        RoadError::TooLong { .. } => crate::protocol::codes::ROAD_TOO_LONG,
+        RoadError::CoordinateOutOfRange => crate::protocol::codes::ROAD_OUT_OF_BOUNDS,
         _ => codes::ROAD_REJECTED,
     };
     reject_with(code, error.to_string())

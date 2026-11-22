@@ -451,3 +451,8 @@ See [[09 - Open Questions]] and [[10 - Decisions]].
 A disconnected client can resume the same in-memory world with `resume {session_id, last_tick}` inside a 300-tick grace window. The token is the seed-derived session id returned in `welcome`; it is **not** authentication. Success returns `welcome {resumed:true}` plus a snapshot and preserves the dev role. Unknown/empty token, a last tick ahead of the authority, an expired window, or resuming while a session is active are rejected (`resume.*`). Reconnect state is process-local and is not restored by `ServerSave`; a fresh `hello` after expiry starts a new session.
 
 `cargo run --release -p townsmith-server -- --resume-smoke` prints `SERVER_RESUME status=ok ...`.
+### Time-control vote v0
+
+`core`/server state machine: `TimeVote` implements D-021's 60-second window, simple majority of the online roster at vote start, minimum two online, one vote per player, initiator auto-yes, 300-tick failed/cancelled cooldown and 120-tick success cooldown. Passing `pause`/`resume` applies the effect once through `ServerWorld`; tie/expiry fails, losing quorum cancels. `time_vote` is a protocol command and returns `TimeVoteStatus` (state, counts, window, cooldown, paused, checksum).
+
+Limits: the multi-connection vote loopback/smoke is deferred because the v0 world still assumes one hello session; the pure state machine and single-world command path are tested (18 vote tests). No persistence of vote state, proxies, weighted votes, or UI. Q-078 tuning remains open.
