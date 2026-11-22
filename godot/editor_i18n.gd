@@ -55,6 +55,7 @@ const TABLES := {
 		"base.editor.status.nothing_to_redo": "Nothing to redo",
 		"base.editor.status.redo_failed": "Redo failed at {0}",
 		"base.editor.status.redo": "Redo",
+		"base.editor.status.structure_failed": "Structure change failed: {0}",
 		"base.editor.status.room_view_off": "Room view off",
 		"base.editor.status.room_overlay_failed": "Room overlay failed: {0}",
 		"base.editor.status.room_view_summary": "Room view: {0} room(s), capacity {1}, jobs {2}  ([ ] select, R hide)",
@@ -71,8 +72,11 @@ const TABLES := {
 
 		# Palette labels and content names.
 		"base.editor.palette.materials": "Materials  (keys 1-5)",
+		"base.editor.palette.material_row": "{0} {1}  {2}",
 		"base.editor.palette.structure": "H  structure: {0} ({1}/{2} stories)",
+		"base.editor.palette.structure_invalid": " — {0}",
 		"base.editor.palette.props": "Props  (keys 6-9)",
+		"base.editor.palette.prop_row": "{0} {1}  {2}",
 		"base.editor.material.timber": "timber",
 		"base.editor.material.stone": "stone",
 		"base.editor.material.roof": "roof",
@@ -98,6 +102,7 @@ const TABLES := {
 		# Blueprint bar and dialogs.
 		"base.editor.blueprint.name_placeholder": "Blueprint name",
 		"base.editor.blueprint.name_tooltip": "Name used for the saved .tsbp package",
+		"base.editor.blueprint.default_name": "River House",
 		"base.editor.blueprint.save": "Save",
 		"base.editor.blueprint.save_tooltip": "Save the current volume (F5)",
 		"base.editor.blueprint.load": "Load",
@@ -119,6 +124,17 @@ const TABLES := {
 		"base.editor.rooms.detail_bounds": "bounds x {0}–{1} m · z {2}–{3} m · y {4}–{5} m",
 		"base.editor.rooms.label": "{0}{1}\n{2}\n{3} m²",
 
+		# Structure names resolved from internal ids.
+		"base.editor.structure.timber_frame": "Timber-frame",
+		"base.editor.structure.timber_shed": "Timber shed",
+		"base.editor.structure.tent": "Tent",
+		"base.editor.structure.load_bearing_stone": "Load-bearing stone",
+		"base.editor.structure.half_timber": "Half-timber",
+		"base.editor.structure.load_bearing_brick": "Load-bearing brick",
+		"base.editor.structure.reinforced_concrete": "Reinforced concrete",
+		"base.editor.structure.steel_frame": "Steel frame",
+		"base.editor.structure.composite_core": "Composite core",
+
 		# Content names resolved from internal ids.
 		"base.editor.room_type.bedroom": "bedroom",
 		"base.editor.room_type.kitchen": "kitchen",
@@ -126,6 +142,7 @@ const TABLES := {
 		"base.editor.room_type.office": "office",
 		"base.editor.room_type.living_dining": "living/dining",
 		"base.editor.room_type.empty": "empty",
+		"base.editor.room_type.room": "room",
 		"base.editor.room_class.lower_middle": "lower middle",
 		"base.editor.room_class.middle": "middle",
 		"base.editor.room_class.upper": "upper",
@@ -170,6 +187,7 @@ const TABLES := {
 		"base.editor.status.nothing_to_redo": "Keine Änderung zum Wiederholen",
 		"base.editor.status.redo_failed": "Wiederholen bei {0} fehlgeschlagen",
 		"base.editor.status.redo": "Wiederholen",
+		"base.editor.status.structure_failed": "Tragwerk konnte nicht geändert werden: {0}",
 		"base.editor.status.room_view_off": "Raumansicht aus",
 		"base.editor.status.room_overlay_failed": "Raumansicht fehlgeschlagen: {0}",
 		"base.editor.status.room_view_summary": "Raumansicht: {0} Raum/Räume erkannt · Kapazität {1} · Arbeitsplätze {2}  ([ ] wechseln, R ausblenden)",
@@ -186,8 +204,11 @@ const TABLES := {
 
 		# Palette und Inhaltsnamen.
 		"base.editor.palette.materials": "Materialien  (Tasten 1–5)",
+		"base.editor.palette.material_row": "{0} {1}  {2}",
 		"base.editor.palette.structure": "H  Tragwerk: {0} ({1}/{2} Geschosse)",
+		"base.editor.palette.structure_invalid": " — {0}",
 		"base.editor.palette.props": "Objekte  (Tasten 6–9)",
+		"base.editor.palette.prop_row": "{0} {1}  {2}",
 		"base.editor.material.timber": "Holz",
 		"base.editor.material.stone": "Stein",
 		"base.editor.material.roof": "Dach",
@@ -213,6 +234,7 @@ const TABLES := {
 		# Blaupausenleiste und Dialoge.
 		"base.editor.blueprint.name_placeholder": "Blaupausenname",
 		"base.editor.blueprint.name_tooltip": "Name der gespeicherten .tsbp-Datei",
+		"base.editor.blueprint.default_name": "Flusshaus",
 		"base.editor.blueprint.save": "Speichern",
 		"base.editor.blueprint.save_tooltip": "Aktuelles Volumen speichern (F5)",
 		"base.editor.blueprint.load": "Laden",
@@ -234,6 +256,17 @@ const TABLES := {
 		"base.editor.rooms.detail_bounds": "Ausdehnung x {0}–{1} m · z {2}–{3} m · y {4}–{5} m",
 		"base.editor.rooms.label": "{0}{1}\n{2}\n{3} m²",
 
+		# Tragwerksnamen aus internen IDs.
+		"base.editor.structure.timber_frame": "Holzrahmen",
+		"base.editor.structure.timber_shed": "Holzschuppen",
+		"base.editor.structure.tent": "Zelt",
+		"base.editor.structure.load_bearing_stone": "Tragendes Steinmauerwerk",
+		"base.editor.structure.half_timber": "Fachwerk",
+		"base.editor.structure.load_bearing_brick": "Tragendes Ziegelmauerwerk",
+		"base.editor.structure.reinforced_concrete": "Stahlbeton",
+		"base.editor.structure.steel_frame": "Stahlrahmen",
+		"base.editor.structure.composite_core": "Verbundkern",
+
 		# Inhaltsnamen aus internen IDs.
 		"base.editor.room_type.bedroom": "Schlafzimmer",
 		"base.editor.room_type.kitchen": "Küche",
@@ -241,6 +274,7 @@ const TABLES := {
 		"base.editor.room_type.office": "Büro",
 		"base.editor.room_type.living_dining": "Wohn-/Essbereich",
 		"base.editor.room_type.empty": "Leer",
+		"base.editor.room_type.room": "Raum",
 		"base.editor.room_class.lower_middle": "untere Mittelschicht",
 		"base.editor.room_class.middle": "Mittelschicht",
 		"base.editor.room_class.upper": "Oberschicht",
