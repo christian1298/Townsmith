@@ -22,6 +22,17 @@ pub const MAX_TICK_SECONDS: f64 = 3600.0;
 /// Maximum construction sites in one save, a guard against malformed input.
 pub const MAX_SITES: usize = 100_000;
 
+/// Upper bound for one construction site's total placement price.
+pub const MAX_SITE_COST: f64 = 1_000_000_000.0;
+
+fn is_zero_cost(value: &f64) -> bool {
+    *value == 0.0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// One construction phase, in execution order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,6 +124,25 @@ impl ConstructionPhase {
         }
     }
 
+    /// Share of the placement price billed for this phase (D-028).
+    ///
+    /// The installments mirror the build-time weights: Survey 3%, Foundation
+    /// 17%, Structure 35%, Envelope 20%, Utilities 10%, Finish 12%, Inspection
+    /// 3%, and Complete 0%.
+    #[must_use]
+    pub const fn billing_weight(self) -> f64 {
+        match self {
+            Self::Survey => 0.03,
+            Self::Foundation => 0.17,
+            Self::Structure => 0.35,
+            Self::Envelope => 0.20,
+            Self::Utilities => 0.10,
+            Self::Finish => 0.12,
+            Self::Inspection => 0.03,
+            Self::Complete => 0.0,
+        }
+    }
+
     /// Preferred trade for this phase.
     #[must_use]
     pub const fn preferred_trade(self) -> Trade {
@@ -177,6 +207,20 @@ pub struct ConstructionSite {
     /// Why the site did not advance, if it stalled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stall_reason: Option<String>,
+    /// Total placement price split across the construction phases.
+    ///
+    /// Zero is the legacy fully prepaid path: the site is never charged and
+    /// the field is omitted from the save so existing checksums stay pinned.
+    #[serde(default, skip_serializing_if = "is_zero_cost")]
+    pub cost_total: f64,
+    /// Placement price paid so far.
+    ///
+    /// Omitted from the save while zero, keeping legacy saves byte-identical.
+    #[serde(default, skip_serializing_if = "is_zero_cost")]
+    pub cost_paid: f64,
+    /// Whether an unpaid installment stopped the site at a phase boundary.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub payment_stalled: bool,
 }
 
 impl ConstructionSite {
@@ -195,6 +239,9 @@ impl ConstructionSite {
             crew_required: ConstructionPhase::Survey.crew_required(),
             crew_assigned: 0,
             stall_reason: None,
+            cost_total: 0.0,
+            cost_paid: 0.0,
+            payment_stalled: false,
         }
     }
 
@@ -233,6 +280,69 @@ impl ConstructionSite {
     #[must_use]
     pub fn is_complete(&self) -> bool {
         self.phase.is_complete()
+    }
+
+    /// Cumulative price that should be paid through the current phase.
+    ///
+    /// The Survey installment is due at placement; each later installment
+    /// becomes due when the previous phase completes. At [`Complete`] the
+    /// target is the full placement price.
+    ///
+    /// [`Complete`]: ConstructionPhase::Complete
+    #[must_use]
+    pub fn target_paid(&self) -> f64 {
+        if self.cost_total <= 0.0 || self.phase.is_complete() {
+            return self.cost_total;
+        }
+        let mut fraction = 0.0;
+        for phase in ConstructionPhase::ALL {
+            fraction += phase.billing_weight();
+            if phase == self.phase {
+                break;
+            }
+        }
+        (self.cost_total * fraction).clamp(0.0, self.cost_total)
+    }
+
+    /// Price still owed for the current phase, never negative.
+    #[must_use]
+    pub fn payment_due(&self) -> f64 {
+        (self.target_paid() - self.cost_paid).max(0.0)
+    }
+
+    /// Record an installment payment up to the amount currently due.
+    ///
+    /// The amount must be finite and within `0.0..=payment_due()`. Paying
+    /// clears a payment stall; a zero-cost site always accepts zero.
+    pub fn mark_paid(&mut self, amount: f64) -> Result<(), ConstructionError> {
+        let due = self.payment_due();
+        if !amount.is_finite() || amount < 0.0 || amount > due {
+            return Err(ConstructionError::InvalidSite(
+                "payment amount must be finite and within the amount due",
+            ));
+        }
+        self.cost_paid = (self.cost_paid + amount).min(self.target_paid());
+        self.resume_payment();
+        Ok(())
+    }
+
+    /// Stop the site at a phase boundary because its installment is unpaid.
+    ///
+    /// Zero-cost and fully paid sites have nothing due, so this is a no-op.
+    pub fn stall_for_payment(&mut self) {
+        if self.is_complete() || self.payment_due() <= 0.0 {
+            return;
+        }
+        self.payment_stalled = true;
+        self.stall_reason = Some("payment".to_string());
+    }
+
+    /// Clear a payment stall after the installment has been paid.
+    pub fn resume_payment(&mut self) {
+        self.payment_stalled = false;
+        if self.stall_reason.as_deref() == Some("payment") {
+            self.stall_reason = None;
+        }
     }
 
     fn set_phase(&mut self, phase: ConstructionPhase) {
@@ -314,12 +424,39 @@ impl ConstructionStore {
         self.sites.get(&placement_id)
     }
 
-    /// Add a site for a placement. Repeating an id is rejected.
+    /// One site, mutable, for recording payments and stalls.
+    #[must_use]
+    pub fn site_mut(&mut self, placement_id: u64) -> Option<&mut ConstructionSite> {
+        self.sites.get_mut(&placement_id)
+    }
+
+    /// Add a site for a placement with no placement price. Repeating an id is rejected.
+    ///
+    /// This is the legacy fully prepaid path; use [`Self::add_priced_site`] to
+    /// track the phased billing schedule.
     pub fn add_site(
         &mut self,
         placement_id: u64,
         solid_voxels: u64,
     ) -> Result<&ConstructionSite, ConstructionError> {
+        self.add_priced_site(placement_id, solid_voxels, 0.0)
+    }
+
+    /// Add a site with a placement price split across construction phases.
+    ///
+    /// A zero `cost_total` keeps the legacy prepaid behavior and is never
+    /// charged. Repeating an id is rejected.
+    pub fn add_priced_site(
+        &mut self,
+        placement_id: u64,
+        solid_voxels: u64,
+        cost_total: f64,
+    ) -> Result<&ConstructionSite, ConstructionError> {
+        if !cost_total.is_finite() || cost_total < 0.0 || cost_total > MAX_SITE_COST {
+            return Err(ConstructionError::InvalidSite(
+                "site cost must be finite and within the supported range",
+            ));
+        }
         if placement_id == 0 {
             return Err(ConstructionError::InvalidSite(
                 "placement id must be positive",
@@ -331,11 +468,24 @@ impl ConstructionStore {
         if self.sites.len() >= MAX_SITES {
             return Err(ConstructionError::TooManySites(MAX_SITES));
         }
-        self.sites.insert(
-            placement_id,
-            ConstructionSite::new(placement_id, solid_voxels),
-        );
+        let mut site = ConstructionSite::new(placement_id, solid_voxels);
+        site.cost_total = cost_total;
+        self.sites.insert(placement_id, site);
         Ok(self.sites.get(&placement_id).expect("just inserted"))
+    }
+
+    /// Price due for one site; zero when the site is missing.
+    #[must_use]
+    pub fn payment_due(&self, placement_id: u64) -> f64 {
+        self.sites
+            .get(&placement_id)
+            .map_or(0.0, ConstructionSite::payment_due)
+    }
+
+    /// Total price due across every site, in ascending placement order.
+    #[must_use]
+    pub fn total_payment_due(&self) -> f64 {
+        self.sites.values().map(ConstructionSite::payment_due).sum()
     }
 
     /// Remove a site.
@@ -408,6 +558,12 @@ impl ConstructionStore {
             if site.is_complete() {
                 site.crew_assigned = 0;
                 site.stall_reason = None;
+                continue;
+            }
+
+            if site.payment_stalled {
+                site.crew_assigned = 0;
+                site.stall_reason = Some("payment".to_string());
                 continue;
             }
 
@@ -556,6 +712,22 @@ impl ConstructionStore {
             if !site.total_s.is_finite() || site.total_s <= 0.0 {
                 return Err(ConstructionError::InvalidSite(
                     "build time must be positive",
+                ));
+            }
+            if !site.cost_total.is_finite()
+                || site.cost_total < 0.0
+                || site.cost_total > MAX_SITE_COST
+            {
+                return Err(ConstructionError::InvalidSite(
+                    "site cost must be finite and within the supported range",
+                ));
+            }
+            if !site.cost_paid.is_finite()
+                || site.cost_paid < 0.0
+                || site.cost_paid > site.cost_total
+            {
+                return Err(ConstructionError::InvalidSite(
+                    "paid cost must be finite and within the site cost",
                 ));
             }
             if !site.phase_progress.is_finite() || !(0.0..=1.0).contains(&site.phase_progress) {
@@ -816,5 +988,281 @@ mod tests {
         store.sites.get_mut(&1).expect("site").materials_delivered = 10_001;
         assert!(store.validate().is_err());
         assert!(ConstructionStore::from_json("{}").is_err());
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn billing_weights_match_the_phase_split() {
+        let sum: f64 = ConstructionPhase::ALL
+            .iter()
+            .map(|phase| phase.billing_weight())
+            .sum();
+        assert!((sum - 1.0).abs() < 1e-12);
+        assert_eq!(ConstructionPhase::Survey.billing_weight(), 0.03);
+        assert_eq!(ConstructionPhase::Foundation.billing_weight(), 0.17);
+        assert_eq!(ConstructionPhase::Structure.billing_weight(), 0.35);
+        assert_eq!(ConstructionPhase::Envelope.billing_weight(), 0.20);
+        assert_eq!(ConstructionPhase::Utilities.billing_weight(), 0.10);
+        assert_eq!(ConstructionPhase::Finish.billing_weight(), 0.12);
+        assert_eq!(ConstructionPhase::Inspection.billing_weight(), 0.03);
+        assert_eq!(ConstructionPhase::Complete.billing_weight(), 0.0);
+    }
+
+    #[test]
+    fn survey_installment_is_due_at_placement() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_priced_site(1, 10_000, 100_000.0).expect("site");
+        let site = site(&store, 1);
+        assert_eq!(site.cost_total, 100_000.0);
+        assert_eq!(site.cost_paid, 0.0);
+        assert!(!site.payment_stalled);
+        assert_close(site.target_paid(), 3_000.0);
+        assert_close(site.payment_due(), 3_000.0);
+        assert_close(store.payment_due(1), 3_000.0);
+        assert_close(store.total_payment_due(), 3_000.0);
+        assert_close(store.payment_due(99), 0.0);
+    }
+
+    #[test]
+    fn payment_due_grows_at_each_phase_boundary() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_priced_site(1, 10_000, 100_000.0).expect("site");
+        let mut previous = store.payment_due(1);
+        for phase in [
+            ConstructionPhase::Foundation,
+            ConstructionPhase::Structure,
+            ConstructionPhase::Envelope,
+            ConstructionPhase::Utilities,
+            ConstructionPhase::Finish,
+            ConstructionPhase::Inspection,
+        ] {
+            store.site_mut(1).expect("site").phase = phase;
+            let due = store.payment_due(1);
+            assert!(due > previous, "{phase:?} due {due} <= {previous}");
+            previous = due;
+        }
+        assert_close(previous, 100_000.0);
+        store.site_mut(1).expect("site").phase = ConstructionPhase::Complete;
+        assert_close(store.site(1).expect("site").target_paid(), 100_000.0);
+        assert_close(store.payment_due(1), 100_000.0);
+    }
+
+    #[test]
+    fn tick_transition_moves_to_the_next_installment() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_priced_site(1, 10_000, 100_000.0).expect("site");
+        assert_close(store.payment_due(1), 3_000.0);
+        let report = store.tick(1.0);
+        assert_eq!(report.phase_changed, vec![1]);
+        assert_eq!(site(&store, 1).phase, ConstructionPhase::Foundation);
+        assert_close(store.payment_due(1), 20_000.0);
+    }
+
+    #[test]
+    fn mark_paid_clears_the_due_and_the_payment_stall() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_priced_site(1, 10_000, 100_000.0).expect("site");
+        let site = store.site_mut(1).expect("site");
+        site.stall_for_payment();
+        assert!(site.payment_stalled);
+        assert_eq!(site.stall_reason.as_deref(), Some("payment"));
+        let due = site.payment_due();
+        site.mark_paid(due).expect("pay");
+        assert_close(site.cost_paid, 3_000.0);
+        assert_close(site.payment_due(), 0.0);
+        assert!(!site.payment_stalled);
+        assert!(site.stall_reason.is_none());
+        assert!(site.mark_paid(-1.0).is_err());
+        assert!(site.mark_paid(f64::NAN).is_err());
+        assert!(site.mark_paid(1.0).is_err());
+        assert_close(site.cost_paid, 3_000.0);
+    }
+
+    #[test]
+    fn mark_paid_accepts_a_partial_installment() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_priced_site(1, 10_000, 100_000.0).expect("site");
+        let site = store.site_mut(1).expect("site");
+        site.mark_paid(1_000.0).expect("pay");
+        assert_close(site.cost_paid, 1_000.0);
+        assert_close(site.payment_due(), 2_000.0);
+    }
+
+    #[test]
+    fn payment_stalled_site_does_not_work_or_consume_materials() {
+        let mut store = ConstructionStore::new(4, 100_000);
+        store.add_priced_site(1, 10_000, 50_000.0).expect("site");
+        store.site_mut(1).expect("site").stall_for_payment();
+        let report = store.tick(1_000.0);
+        assert!(report.completed.is_empty());
+        assert!(report.phase_changed.is_empty());
+        assert_eq!(report.stalled, 1);
+        assert_eq!(store.materials_stock, 100_000);
+        let site = site(&store, 1);
+        assert_eq!(site.phase, ConstructionPhase::Survey);
+        assert_eq!(site.phase_progress, 0.0);
+        assert_eq!(site.materials_delivered, 0);
+        assert_eq!(site.crew_assigned, 0);
+        assert_eq!(site.stall_reason.as_deref(), Some("payment"));
+    }
+
+    #[test]
+    fn stall_after_a_transition_holds_the_next_phase() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_priced_site(1, 10_000, 100_000.0).expect("site");
+        store.tick(1.0);
+        assert_eq!(site(&store, 1).phase, ConstructionPhase::Foundation);
+        let delivered = site(&store, 1).materials_delivered;
+        let stock = store.materials_stock;
+        store.site_mut(1).expect("site").stall_for_payment();
+        let report = store.tick(1_000.0);
+        assert!(report.completed.is_empty());
+        assert!(report.phase_changed.is_empty());
+        assert_eq!(report.stalled, 1);
+        let site = site(&store, 1);
+        assert_eq!(site.phase, ConstructionPhase::Foundation);
+        assert_eq!(site.materials_delivered, delivered);
+        assert_eq!(store.materials_stock, stock);
+        assert_eq!(site.stall_reason.as_deref(), Some("payment"));
+    }
+
+    #[test]
+    fn resume_payment_restores_construction() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_priced_site(1, 10_000, 100_000.0).expect("site");
+        store.site_mut(1).expect("site").stall_for_payment();
+        store.tick(1_000.0);
+        assert_eq!(site(&store, 1).phase, ConstructionPhase::Survey);
+        store.site_mut(1).expect("site").resume_payment();
+        let resumed = store.site(1).expect("site");
+        assert!(!resumed.payment_stalled);
+        assert!(resumed.stall_reason.is_none());
+        let report = store.tick(1_000.0);
+        assert_eq!(report.completed, vec![1]);
+        assert!(site(&store, 1).is_complete());
+    }
+
+    #[test]
+    fn legacy_zero_cost_sites_are_never_charged() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_site(1, 10_000).expect("site");
+        let legacy = site(&store, 1);
+        assert_eq!(legacy.cost_total, 0.0);
+        assert_eq!(legacy.cost_paid, 0.0);
+        assert!(!legacy.payment_stalled);
+        assert_eq!(legacy.target_paid(), 0.0);
+        assert_eq!(legacy.payment_due(), 0.0);
+        assert_eq!(store.payment_due(1), 0.0);
+        assert_eq!(store.total_payment_due(), 0.0);
+        store.site_mut(1).expect("site").stall_for_payment();
+        assert!(!site(&store, 1).payment_stalled);
+        assert!(store.site_mut(1).expect("site").mark_paid(0.0).is_ok());
+        assert!(store.site_mut(1).expect("site").mark_paid(1.0).is_err());
+        let report = store.tick(1_000.0);
+        assert_eq!(report.completed, vec![1]);
+    }
+
+    #[test]
+    fn invalid_site_costs_are_rejected() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        for cost in [
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            MAX_SITE_COST + 1.0,
+        ] {
+            assert!(
+                store.add_priced_site(1, 10_000, cost).is_err(),
+                "cost {cost} was accepted"
+            );
+        }
+        assert_eq!(store.site_count(), 0);
+        store.add_priced_site(1, 10_000, 10_000.0).expect("site");
+        store.site_mut(1).expect("site").cost_total = f64::NAN;
+        assert!(store.validate().is_err());
+        store.site_mut(1).expect("site").cost_total = 10_000.0;
+        store.site_mut(1).expect("site").cost_paid = -1.0;
+        assert!(store.validate().is_err());
+        store.site_mut(1).expect("site").cost_paid = 10_001.0;
+        assert!(store.validate().is_err());
+    }
+
+    #[test]
+    fn priced_site_round_trips_through_json() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_priced_site(1, 10_000, 50_000.0).expect("site");
+        store
+            .site_mut(1)
+            .expect("site")
+            .mark_paid(1_500.0)
+            .expect("pay");
+        let json = store.to_json_pretty().expect("json");
+        assert!(json.contains("cost_total"));
+        assert!(json.contains("cost_paid"));
+        let decoded = ConstructionStore::from_json(&json).expect("decode");
+        assert_eq!(decoded, store);
+        assert_eq!(decoded.checksum(), store.checksum());
+    }
+
+    #[test]
+    fn old_json_without_cost_fields_loads_as_legacy() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_priced_site(1, 10_000, 50_000.0).expect("site");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&store.to_json_pretty().expect("json")).expect("value");
+        let site = value
+            .get_mut("sites")
+            .and_then(|sites| sites.get_mut("1"))
+            .and_then(|site| site.as_object_mut())
+            .expect("site object");
+        site.remove("cost_total");
+        site.remove("cost_paid");
+        site.remove("payment_stalled");
+        let legacy = ConstructionStore::from_json(&value.to_string()).expect("legacy");
+        let site = legacy.site(1).expect("site");
+        assert_eq!(site.cost_total, 0.0);
+        assert_eq!(site.cost_paid, 0.0);
+        assert!(!site.payment_stalled);
+        assert_eq!(site.payment_due(), 0.0);
+        assert_eq!(legacy.total_payment_due(), 0.0);
+    }
+
+    #[test]
+    fn total_payment_due_is_deterministic_by_placement_order() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_priced_site(2, 10_000, 100_000.0).expect("site");
+        store.add_priced_site(1, 10_000, 50_000.0).expect("site");
+        let order: Vec<u64> = store.sites.keys().copied().collect();
+        assert_eq!(order, vec![1, 2]);
+        assert_close(store.payment_due(1), 1_500.0);
+        assert_close(store.payment_due(2), 3_000.0);
+        assert_close(store.total_payment_due(), 4_500.0);
+    }
+
+    #[test]
+    fn zero_cost_json_and_checksum_stay_pinned() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_site(1, 64_224).expect("site");
+        store.tick(10.0);
+        let json = store.to_json_pretty().expect("json");
+        assert!(!json.contains("cost_total"));
+        assert!(!json.contains("cost_paid"));
+        assert!(!json.contains("payment_stalled"));
+        assert_eq!(store.checksum(), 0xc29e_763e_7663_87f4);
+        let decoded = ConstructionStore::from_json(&json).expect("decode");
+        assert_eq!(decoded, store);
+        assert_eq!(decoded.checksum(), store.checksum());
+
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_site(1, 10_000).expect("site");
+        store.tick(1.0);
+        assert_eq!(store.checksum(), 0xefbc_5502_6c81_24d7);
     }
 }

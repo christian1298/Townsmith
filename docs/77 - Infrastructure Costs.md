@@ -69,7 +69,7 @@ Output is deterministic; smoke checksum `a920cf0c4eb9a4f1`.
 
 - Site construction is charged on add; re-adding/replacing a site charges again. Removing a site does not refund.
 - The bridge now charges per-kind/per-tier totals, but the core count-based `tick_with_infrastructure` wrapper remains for pinned balance probes and legacy callers.
-- No construction schedule or phased payment; the full site cost is charged immediately.
+- No phased payment for infrastructure sites; the full site cost is charged immediately. The core construction schedule for buildings is in D-028, but the bridge still prepays it.
 - If no treasury is open, the site is added with `charged=false` (legacy/dev path).
 - Site counts are fixed probe fixtures; real cities may have different coverage/site mixes.
 - No land, road, maintenance, staffing, or replacement cost.
@@ -80,3 +80,4 @@ Output is deterministic; smoke checksum `a920cf0c4eb9a4f1`.
 1. ~~Wire per-kind operating upkeep into `economy_tick`.~~ Done: the bridge passes store totals through `InfrastructureCosts`.
 2. ~~Feed the site upkeep into the bridge economy tick instead of the legacy count path.~~ Done.
 3. Add site replacement/refund rules and service-quality funding.
+4. Wire the D-028 building installment schedule through the bridge and construction tick.
