@@ -7,6 +7,13 @@ extends Control
 ## invalid set_tax -> reject, place_road -> snapshot, set_interest ->
 ## snapshot + interest_view, disconnect -> goodbye.
 ##
+## `--reconnect` runs the session-resume path instead: the first connection
+## sends hello, ping, and place_road, captures the session token and last tick,
+## then disconnects. A second connection to the same server process sends
+## `resume {session_id, last_tick}`, expects `welcome {resumed:true}` followed
+## by a snapshot at or past `last_tick`, pings, and disconnects again. The
+## server must be started with `--sessions 2` (or left uncapped).
+##
 ## The client is deliberately a protocol probe, not a game client: it has no
 ## production render integration, auth, roles, entity streaming, or delta
 ## snapshots. The one visual is a bounded flat top-down preview of the received
@@ -17,14 +24,18 @@ extends Control
 ## Run:
 ##   godot --headless --path godot res://mp_client.tscn -- \
 ##     --smoke --port 47015
+##   godot --headless --path godot res://mp_client.tscn -- \
+##     --smoke --reconnect --port 47015
 ##   godot --headless --path godot res://mp_client.tscn -- --self-test
 ##
 ## `scripts/smoke_mp_client.sh` runs the pure-helper self-test first, then starts
 ## `townsmith-server --listen PORT`, waits for the port with a bounded connect
 ## loop, runs the headless smoke, and asserts the `MP_CLIENT status=ok ...`
-## marker including `interest_render=ok roads=N checksum=<16hex>`.
+## marker including `interest_render=ok roads=N checksum=<16hex>`. It then
+## starts a second server with `--sessions 2`, runs `--reconnect`, and asserts
+## `MP_CLIENT_RECONNECT status=ok resumed=true tick=... checksum=...`.
 ##
-## See docs/05 - Multiplayer.md §Protocol v0.
+## See docs/05 - Multiplayer.md §Protocol v0 and §Session resume v0.
 
 const InterestRender = preload("res://mp_interest_render.gd")
 const InterestCanvas = preload("res://mp_interest_canvas.gd")
@@ -39,6 +50,11 @@ enum Phase {
 	INTEREST_SENT,
 	INTEREST_VIEW_WAIT,
 	DISCONNECT_SENT,
+	RECONNECT_CONNECTING,
+	RESUME_WELCOME_WAIT,
+	RESUME_SNAPSHOT_WAIT,
+	RESUME_PING_WAIT,
+	RESUME_DISCONNECT_WAIT,
 }
 
 const PROTOCOL_VERSION := 0
@@ -59,6 +75,7 @@ var _deadline_ms := 0
 var _finished := false
 
 var _smoke := false
+var _reconnect := false
 var _host := DEFAULT_HOST
 var _port := DEFAULT_PORT
 var _player_name := DEFAULT_NAME
@@ -72,12 +89,16 @@ var _ok_snapshot := false
 var _ok_reject := false
 var _ok_road := false
 var _ok_interest := false
+var _ok_resumed := false
+var _ok_resume_snapshot := false
+var _ok_resume_ping := false
 var _interest_roads := -1
 var _interest_truncated := true
 var _interest_render_checksum := ""
 var _interest_rendered := -1
 var _interest_cleared := false
 var _session_id := ""
+var _session_token := ""
 var _last_tick := -1
 var _last_population := -1
 var _last_balance := 0
@@ -97,6 +118,7 @@ var _interest_canvas
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
 	_smoke = args.has("--smoke")
+	_reconnect = args.has("--reconnect")
 	_host = _arg(args, "--host", DEFAULT_HOST)
 	_player_name = _arg(args, "--name", DEFAULT_NAME)
 	_timeout_ms = _positive_int(_arg(args, "--timeout-ms", ""), STEP_TIMEOUT_MS)
@@ -136,18 +158,28 @@ func _process(_delta: float) -> void:
 		return
 
 	_peer.poll()
-	if _phase == Phase.CONNECTING:
+	if _phase == Phase.CONNECTING or _phase == Phase.RECONNECT_CONNECTING:
 		match _peer.get_status():
 			StreamPeerTCP.STATUS_CONNECTED:
 				_on_connected()
 			StreamPeerTCP.STATUS_ERROR:
-				_fail("connect_failed")
+				_fail(
+					"connect_failed"
+					if _phase == Phase.CONNECTING
+					else "reconnect_failed"
+				)
 			StreamPeerTCP.STATUS_NONE:
-				_fail("connect_lost")
+				_fail(
+					"connect_lost"
+					if _phase == Phase.CONNECTING
+					else "reconnect_lost"
+				)
 		return
 
 	_drain()
-	if _finished:
+	if _finished or _phase == Phase.RECONNECT_CONNECTING:
+		# A goodbye in reconnect mode already replaced the peer; the next
+		# poll connects the new socket.
 		return
 	if _peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:
 		# Read the goodbye or final reject before treating FIN as a failure.
@@ -156,6 +188,17 @@ func _process(_delta: float) -> void:
 			_fail("connection_lost_%s" % _phase_name())
 
 func _on_connected() -> void:
+	if _phase == Phase.RECONNECT_CONNECTING:
+		_set_status("Reconnected; sending resume for tick %d." % _last_tick)
+		if not _send({
+			"type": "resume",
+			"session_id": _session_token,
+			"last_tick": _last_tick,
+		}):
+			return
+		_phase = Phase.RESUME_WELCOME_WAIT
+		_arm_deadline(_timeout_ms)
+		return
 	_set_status("Connected; sending hello.")
 	if not _send({
 		"type": "hello",
@@ -214,6 +257,9 @@ func _handle_message(message: Dictionary) -> void:
 			_fail("unexpected_message_%s" % (tag if tag != "" else "missing_type"))
 
 func _on_welcome(message: Dictionary) -> void:
+	if _phase == Phase.RESUME_WELCOME_WAIT:
+		_on_resume_welcome(message)
+		return
 	if _phase != Phase.HELLO_SENT:
 		_fail("welcome_in_%s" % _phase_name())
 		return
@@ -225,6 +271,13 @@ func _on_welcome(message: Dictionary) -> void:
 	if _session_id.is_empty():
 		_fail("welcome_session")
 		return
+	_session_token = str(message.get("session_token", ""))
+	if _reconnect and _session_token.is_empty():
+		_fail("welcome_session_token")
+		return
+	if bool(message.get("resumed", false)):
+		_fail("unexpected_resumed_welcome")
+		return
 	_ok_welcome = true
 	_set_status("Welcome %s; pinging." % _session_id)
 	_refresh_ui()
@@ -233,7 +286,43 @@ func _on_welcome(message: Dictionary) -> void:
 	_phase = Phase.PING_SENT
 	_arm_deadline(_timeout_ms)
 
+func _on_resume_welcome(message: Dictionary) -> void:
+	if not bool(message.get("resumed", false)):
+		_fail("resume_not_resumed")
+		return
+	var protocol_version := int(message.get("protocol_version", -1))
+	if protocol_version != PROTOCOL_VERSION:
+		_fail("resume_protocol_version_%d" % protocol_version)
+		return
+	if str(message.get("session_id", "")) != _session_id:
+		_fail("resume_session_id")
+		return
+	if str(message.get("session_token", "")) != _session_token:
+		_fail("resume_session_token")
+		return
+	var tick := int(message.get("tick", -1))
+	if tick < _last_tick:
+		_fail("resume_welcome_tick_%d" % tick)
+		return
+	_ok_resumed = true
+	_set_status("Resumed at tick %d; awaiting the snapshot." % tick)
+	_refresh_ui()
+	_phase = Phase.RESUME_SNAPSHOT_WAIT
+	_arm_deadline(_timeout_ms)
+
 func _on_pong(message: Dictionary) -> void:
+	if _phase == Phase.RESUME_PING_WAIT:
+		if int(message.get("nonce", -1)) != PING_NONCE:
+			_fail("resume_pong_nonce")
+			return
+		_ok_resume_ping = true
+		_set_status("Resumed pong; disconnecting.")
+		_refresh_ui()
+		if not _send({"type": "disconnect"}):
+			return
+		_phase = Phase.RESUME_DISCONNECT_WAIT
+		_arm_deadline(_timeout_ms)
+		return
 	if _phase != Phase.PING_SENT:
 		_fail("pong_in_%s" % _phase_name())
 		return
@@ -241,8 +330,14 @@ func _on_pong(message: Dictionary) -> void:
 		_fail("pong_nonce")
 		return
 	_ok_ping = true
-	_set_status("Pong; setting tax.")
+	_set_status("Pong; setting tax." if not _reconnect else "Pong; placing a road.")
 	_refresh_ui()
+	if _reconnect:
+		if not _send({"type": "place_road", "start": [0, 0], "end": [8, 0]}):
+			return
+		_phase = Phase.ROAD_SENT
+		_arm_deadline(_timeout_ms)
+		return
 	if not _send({"type": "set_tax", "resident_rate": 10, "business_rate": 15}):
 		return
 	_phase = Phase.TAX_SENT
@@ -255,6 +350,25 @@ func _on_snapshot(message: Dictionary) -> void:
 	var checksum := str(message.get("checksum", ""))
 	if tick < 1 or population < 1 or not _is_hex16(checksum):
 		_fail("snapshot_fields")
+		return
+
+	if _phase == Phase.RESUME_SNAPSHOT_WAIT:
+		# `resume` must answer with a snapshot at or past the tick the client
+		# last saw; it may not rewind the world.
+		if tick < _last_tick:
+			_fail("resume_snapshot_tick_%d" % tick)
+			return
+		_ok_resume_snapshot = true
+		_last_tick = tick
+		_last_population = population
+		_last_balance = balance
+		_last_checksum = checksum
+		_set_status("Resumed snapshot at tick %d; pinging." % tick)
+		_refresh_ui()
+		if not _send({"type": "ping", "nonce": PING_NONCE}):
+			return
+		_phase = Phase.RESUME_PING_WAIT
+		_arm_deadline(_timeout_ms)
 		return
 
 	if _phase == Phase.TAX_SENT:
@@ -281,6 +395,16 @@ func _on_snapshot(message: Dictionary) -> void:
 		_last_population = population
 		_last_balance = balance
 		_last_checksum = checksum
+		if _reconnect:
+			# The first connection establishes the token and tick. Close it
+			# cleanly so the server opens the resume window, then reconnect.
+			_set_status("Road accepted; disconnecting to resume the session.")
+			_refresh_ui()
+			if not _send({"type": "disconnect"}):
+				return
+			_phase = Phase.DISCONNECT_SENT
+			_arm_deadline(_timeout_ms)
+			return
 		_set_status("Road accepted; requesting the interest view.")
 		_refresh_ui()
 		if not _send({"type": "set_interest", "center_x": 0.0, "center_z": 0.0, "radius_m": 16.0}):
@@ -402,10 +526,71 @@ func _on_reject(message: Dictionary) -> void:
 	_arm_deadline(_timeout_ms)
 
 func _on_goodbye() -> void:
+	if _phase == Phase.RESUME_DISCONNECT_WAIT:
+		_finish_reconnect_ok()
+		return
 	if _phase != Phase.DISCONNECT_SENT:
 		_fail("goodbye_in_%s" % _phase_name())
 		return
+	if _reconnect:
+		_start_reconnect()
+		return
 	_finish_ok()
+
+func _start_reconnect() -> void:
+	if _session_token.is_empty() or _last_tick < 0:
+		_fail("reconnect_state_missing")
+		return
+	if _peer != null:
+		_peer.disconnect_from_host()
+	_peer = StreamPeerTCP.new()
+	_rx = PackedByteArray()
+	var error := _peer.connect_to_host(_host, _port)
+	if error != OK:
+		_fail("reconnect_start_%s" % error_string(error))
+		return
+	_phase = Phase.RECONNECT_CONNECTING
+	_arm_deadline(CONNECT_TIMEOUT_MS)
+	_set_status("Reconnecting to %s:%d for tick %d..." % [_host, _port, _last_tick])
+
+func _finish_reconnect_ok() -> void:
+	if _finished:
+		return
+	if not (
+		_ok_welcome
+		and _ok_ping
+		and _ok_road
+		and _ok_resumed
+		and _ok_resume_snapshot
+		and _ok_resume_ping
+	):
+		_fail("reconnect_incomplete")
+		return
+	_finished = true
+	set_process(false)
+	_set_status("Session resumed and closed.")
+	_refresh_ui()
+	if _peer != null:
+		_peer.disconnect_from_host()
+	var frames := _frames_sent + _frames_received
+	print(
+		(
+			"MP_CLIENT_RECONNECT status=ok resumed=true"
+			+ " token=%s session=%s tick=%d snapshot_checksum=%s"
+			+ " frames_sent=%d frames_received=%d frames=%d"
+		)
+		% [
+			_session_token,
+			_session_id,
+			_last_tick,
+			_last_checksum,
+			_frames_sent,
+			_frames_received,
+			frames,
+		]
+	)
+	if _smoke:
+		get_tree().quit(0)
 
 func _send(message: Dictionary) -> bool:
 	if _peer == null or _peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:
@@ -495,7 +680,7 @@ func _fail(reason: String) -> void:
 		get_tree().quit(1)
 
 func _flags_text() -> String:
-	return "welcome=%s ping=%s snapshot=%s reject=%s road=%s interest=%s" % [
+	var text := "welcome=%s ping=%s snapshot=%s reject=%s road=%s interest=%s" % [
 		_ok_text(_ok_welcome),
 		_ok_text(_ok_ping),
 		_ok_text(_ok_snapshot),
@@ -503,6 +688,13 @@ func _flags_text() -> String:
 		_ok_text(_ok_road),
 		_ok_text(_ok_interest),
 	]
+	if _reconnect:
+		text += " resumed=%s resume_snapshot=%s resume_ping=%s" % [
+			_ok_text(_ok_resumed),
+			_ok_text(_ok_resume_snapshot),
+			_ok_text(_ok_resume_ping),
+		]
+	return text
 
 func _ok_text(ok: bool) -> String:
 	return "ok" if ok else "pending"
@@ -527,6 +719,16 @@ func _phase_name() -> String:
 			return "interest_view_wait"
 		Phase.DISCONNECT_SENT:
 			return "disconnect_sent"
+		Phase.RECONNECT_CONNECTING:
+			return "reconnect_connecting"
+		Phase.RESUME_WELCOME_WAIT:
+			return "resume_welcome_wait"
+		Phase.RESUME_SNAPSHOT_WAIT:
+			return "resume_snapshot_wait"
+		Phase.RESUME_PING_WAIT:
+			return "resume_ping_wait"
+		Phase.RESUME_DISCONNECT_WAIT:
+			return "resume_disconnect_wait"
 		_:
 			return "unknown"
 

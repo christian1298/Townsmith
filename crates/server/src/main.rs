@@ -2,8 +2,8 @@
 //!
 //! Phase 0: builds a cohort-scale city, runs a fixed number of ticks on the
 //! CPU, and emits JSON. `--loopback-smoke` exercises protocol v0 over a local
-//! socket, and `--listen PORT` serves the authoritative world with optional
-//! persistence.
+//! socket, and `--listen PORT [--sessions N]` serves the authoritative world
+//! with optional persistence. `--once` is shorthand for `--sessions 1`.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -226,7 +226,21 @@ fn run_listen_mode(port: &str) {
         std::process::exit(1);
     };
     let autosave_ticks = parse_u64_arg("--autosave-ticks", 0);
-    let once = has_flag("--once");
+    // `--sessions N` caps an `--listen` run at N accepted sessions; without it
+    // the server serves until stopped. `--once` stays as the `--sessions 1`
+    // shorthand so existing scripts keep working.
+    let max_sessions = match arg_value("--sessions") {
+        Some(value) => match value.parse::<u64>() {
+            Ok(parsed) if parsed > 0 => Some(parsed),
+            _ => {
+                eprintln!(
+                    "SERVER_LISTEN status=error error=--sessions must be a positive integer, got `{value}`"
+                );
+                std::process::exit(2);
+            }
+        },
+        None => has_flag("--once").then_some(1),
+    };
 
     let world = match &load_path {
         Some(path) => match ServerWorld::load_from(path) {
@@ -281,7 +295,7 @@ fn run_listen_mode(port: &str) {
     };
 
     println!(
-        "SERVER_LISTEN status=ok address={address} seed={} tick={} checksum={} role={} save={} autosave_ticks={}",
+        "SERVER_LISTEN status=ok address={address} seed={} tick={} checksum={} role={} save={} autosave_ticks={} sessions={}",
         world.seed,
         world.tick,
         world.checksum(),
@@ -289,14 +303,15 @@ fn run_listen_mode(port: &str) {
         save_path
             .as_ref()
             .map_or_else(|| "none".to_string(), |path| path.display().to_string()),
-        autosave_ticks
+        autosave_ticks,
+        max_sessions.map_or_else(|| "unlimited".to_string(), |limit| limit.to_string())
     );
 
     let config = ListenConfig {
         save_path,
         autosave_ticks,
     };
-    match run_listen(listener, world, config, once.then_some(1)) {
+    match run_listen(listener, world, config, max_sessions) {
         Ok(report) => println!(
             "SERVER_LISTEN status=ok sessions={} commands={} saves={} tick={} checksum={}",
             report.sessions, report.commands, report.saves, report.tick, report.checksum
