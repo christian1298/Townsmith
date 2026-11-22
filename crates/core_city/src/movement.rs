@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::named::{mix64, MaterializationSelection, MaterializedCitizen};
 use crate::population::Workplace;
 use crate::route_cache::{CachedRoute, RouteCache};
-use crate::traffic::{fnv1a_feed, RoadGraph, FNV_OFFSET_BASIS};
+use crate::traffic::{fnv1a_feed, FlowField, RoadGraph, FNV_OFFSET_BASIS};
 
 /// Shortest round-trip cycle used by [`CitizenMotion::positions_at`].
 ///
@@ -235,6 +235,19 @@ impl CitizenMotion {
                 .or_insert(citizen);
         }
 
+        // One shortest-path field per workplace is far cheaper than running a
+        // pair query for every home/workplace combination. Flow distance uses
+        // the same access legs and integer path weights as `distance_m`.
+        let fields: Vec<Option<FlowField>> = workplaces
+            .iter()
+            .map(|workplace| {
+                if workplace.slots == 0 || !workplace.center.iter().all(|value| value.is_finite()) {
+                    None
+                } else {
+                    graph.flow_to(workplace.center)
+                }
+            })
+            .collect();
         let mut cache = RouteCache::new(route_cache_capacity);
         let mut routes = Vec::new();
         let mut citizens = Vec::new();
@@ -253,7 +266,8 @@ impl CitizenMotion {
             if !home.iter().all(|value| value.is_finite()) {
                 continue;
             }
-            let Some(route) = choose_route(placement_id, home, workplaces, graph, &mut cache)
+            let Some(route) =
+                choose_route(placement_id, home, workplaces, &fields, graph, &mut cache)
             else {
                 continue;
             };
@@ -437,18 +451,18 @@ fn choose_route(
     placement_id: u64,
     home: [f32; 2],
     workplaces: &[Workplace],
+    fields: &[Option<FlowField>],
     graph: &RoadGraph,
     cache: &mut RouteCache,
 ) -> Option<HouseholdRoute> {
     let mut candidates: Vec<(f32, u64, usize)> = workplaces
         .iter()
         .enumerate()
-        .filter(|(_, workplace)| {
-            workplace.slots > 0 && workplace.center.iter().all(|value| value.is_finite())
-        })
+        .filter(|(_, workplace)| workplace.slots > 0)
         .filter_map(|(index, workplace)| {
+            let field = fields.get(index)?.as_ref()?;
             graph
-                .distance_m(home, workplace.center)
+                .flow_distance_m(home, field)
                 .filter(|distance| distance.is_finite())
                 .map(|distance| (distance, workplace.id, index))
         })
@@ -659,19 +673,18 @@ mod tests {
     fn nearest_workplace_uses_road_distance_then_workplace_id() {
         let graph = straight_graph();
         // Both are 20 m away. The lower id wins the tie.
+        let workplaces = [
+            workplace(20, 1, [20.0, 0.0]),
+            workplace(10, 1, [-20.0, 0.0]),
+            workplace(1, 0, [1.0, 0.0]),
+        ];
+        let fields: Vec<Option<FlowField>> = workplaces
+            .iter()
+            .map(|workplace| graph.flow_to(workplace.center))
+            .collect();
         let mut cache = RouteCache::new(4);
-        let route = choose_route(
-            7,
-            [0.0, 0.0],
-            &[
-                workplace(20, 1, [20.0, 0.0]),
-                workplace(10, 1, [-20.0, 0.0]),
-                workplace(1, 0, [1.0, 0.0]),
-            ],
-            &graph,
-            &mut cache,
-        )
-        .expect("route");
+        let route =
+            choose_route(7, [0.0, 0.0], &workplaces, &fields, &graph, &mut cache).expect("route");
         assert_eq!(route.workplace_id, 10);
         assert_eq!(cache.misses(), 1);
     }

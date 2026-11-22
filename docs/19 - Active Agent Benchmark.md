@@ -147,7 +147,28 @@ The tests use fixed seeds and simulated ticks only: no wall-clock sleeps, networ
 - No snapshot interpolation. The shell will need render-state interpolation and double buffering.
 - The benchmark is now wired into `scripts/bench_core.sh`; it runs once per core benchmark repetition.
 
-## 7. Related
+## 7. Movement route benchmark
+
+`crates/bench/src/bin/movement.rs` measures the N3 presentation layer separately: 400 homes × 5 residents (2,000 citizens) and 200 workplaces on a 64×64 road grid. `CitizenMotion::new` precomputes one shortest-path field per workplace, chooses the nearest reachable workplace per household, and builds one cached polyline per household. Sampling is periodic and does not allocate routes.
+
+```bash
+cargo run --release -p townsmith-bench --bin movement -- --smoke
+```
+
+Measured on the development machine:
+
+| Metric | Value |
+|---|---:|
+| Route build (`CitizenMotion::new`) | ~737 ms |
+| `positions_at` (2,000 citizens) | ~0.12 ms |
+| Routes / cache entries | 400 / 400 |
+| Cache hits / misses | 0 / 400 |
+| Checksum | `b50a763030007ef1` |
+| Position checksum at 30 s | `ca36728e0c3074cf` |
+
+The build is a one-time camera-selection cost, not a per-frame cost. It is still above the 4 ms pathfinding budget: the next step is predecessor trees or lazy per-workplace route reconstruction, so 400 polylines do not each run a fresh Dijkstra. The flow-field precompute replaced the original pairwise `distance_m` scan (35.7 s → 737 ms).
+
+## 8. Related
 
 - [[07 - Simulation and AI]] — tiers, tick budgets, and the 2,000-agent target.
 - [[18 - Phase 0 Implementation]] — workspace state and the cohort benchmark.
