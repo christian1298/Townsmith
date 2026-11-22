@@ -446,6 +446,42 @@ fn unsafe_relative_path(path: &str) -> Option<&'static str> {
     None
 }
 
+/// Whether a canonical path is inside a canonical root.
+///
+/// Windows canonical paths are case-insensitive and can mix an 8.3 short name
+/// with its long form, so a component prefix is compared case-insensitively
+/// and the unique root directory name is checked at the expected depth.
+fn path_is_within(root: &Path, resolved: &Path, relative: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let eq = |a: &std::ffi::OsStr, b: &std::ffi::OsStr| {
+            a.to_string_lossy()
+                .eq_ignore_ascii_case(&b.to_string_lossy())
+        };
+        let Some(root_name) = root.file_name() else {
+            return false;
+        };
+        let resolved_components: Vec<_> = resolved.components().collect();
+        let relative_components: Vec<_> = Path::new(relative).components().collect();
+        if relative_components.is_empty() || resolved_components.len() <= relative_components.len()
+        {
+            return false;
+        }
+        let relative_start = resolved_components.len() - relative_components.len();
+        let root_index = relative_start - 1;
+        eq(resolved_components[root_index].as_os_str(), root_name)
+            && resolved_components[relative_start..]
+                .iter()
+                .zip(relative_components.iter())
+                .all(|(actual, expected)| eq(actual.as_os_str(), expected.as_os_str()))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = relative;
+        resolved.starts_with(root)
+    }
+}
+
 /// Read one UTF-8 pack file, enforcing path, size, and total-budget rules.
 fn read_pack_file(
     root: &Path,
@@ -475,7 +511,7 @@ fn read_pack_file(
             }
         }
     })?;
-    if !resolved.starts_with(root) {
+    if !path_is_within(root, &resolved, relative) {
         return Err(PackError::PathEscape {
             field,
             path: candidate,
