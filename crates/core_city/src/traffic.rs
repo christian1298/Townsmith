@@ -53,6 +53,65 @@ pub fn travel_time_seconds(distance_m: f32, speed_mps: f32) -> Option<f32> {
     seconds.is_finite().then_some(seconds.max(0.0))
 }
 
+/// Convert a free-flow travel time into a congested travel time.
+///
+/// `factor` is an edge or report multiplier from the congestion model, where
+/// `1.0` is free flow. A factor of exactly `1.0` returns the same value as
+/// [`travel_time_seconds`] bit-for-bit, so enabling congestion does not change
+/// the baseline measurement when nothing is loaded.
+///
+/// # Returns
+///
+/// `None` when `factor` is non-finite or below `1.0`, in addition to every
+/// rejection rule of [`travel_time_seconds`]. A finite product that overflows
+/// to infinity is also rejected.
+///
+/// Congestion here is a measurement layer: it does not feed job allocation,
+/// routing weights, or the happiness formula.
+#[must_use]
+pub fn travel_time_seconds_congested(distance_m: f32, speed_mps: f32, factor: f32) -> Option<f32> {
+    if !factor.is_finite() || factor < 1.0 {
+        return None;
+    }
+    let seconds = travel_time_seconds(distance_m, speed_mps)? * factor;
+    seconds.is_finite().then_some(seconds)
+}
+
+/// Maximum commute flows accepted by one congestion report.
+///
+/// Flows past this cap, or past the caller's `max_flows`, are counted in
+/// [`CongestionReport::skipped_flows`] and never routed.
+pub const MAX_CONGESTION_FLOWS: usize = 4_096;
+
+/// Maximum distinct road edges one congestion report may touch.
+///
+/// The graph node cap already bounds a planar road graph below this value; the
+/// check is a defensive work bound so a report can never grow an unbounded
+/// load map. Exceeding it returns [`TrafficError::TooManyCongestionEdges`].
+pub const MAX_CONGESTION_EDGES: usize = 65_536;
+
+/// Fixed daily capacity of one road-graph edge, in one-way commute trips.
+///
+/// The graph does not carry width or lane data, so congestion v0 gives every
+/// link the same capacity. It is a diagnostic constant for the
+/// `1 + load / capacity` factor, not an economic or routing input. A
+/// length- or width-scaled capacity is future work.
+pub const DEFAULT_EDGE_DAILY_CAPACITY: u64 = 1_000;
+
+/// Largest trip count one [`CommuteFlow`] can charge to the graph.
+///
+/// Larger counts saturate here so loads and factors stay in a bounded range.
+pub const MAX_CONGESTION_TRIPS_PER_FLOW: u32 = 1_000_000;
+
+/// Upper bound for one edge congestion factor.
+///
+/// A link at or beyond three times its daily capacity reports this ceiling
+/// rather than growing without limit.
+pub const MAX_CONGESTION_FACTOR: f32 = 4.0;
+
+/// Highest-load edges retained by a [`CongestionReport`].
+pub const CONGESTION_TOP_EDGES: usize = 8;
+
 /// Maximum graph nodes accepted by one traffic graph.
 pub const MAX_TRAFFIC_NODES: usize = 20_000;
 
@@ -134,6 +193,243 @@ impl TrafficStats {
     }
 }
 
+/// One aggregated commute pair presented to the congestion model.
+///
+/// `trips` is the number of one-way commute journeys per day carried by this
+/// pair. The model treats a flow as a group, not as one agent, so a workplace
+/// with 200 commuters from the same neighbourhood is one flow with
+/// `trips = 200`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CommuteFlow {
+    /// Home or origin point in metres.
+    pub from: [f32; 2],
+    /// Workplace or destination point in metres.
+    pub to: [f32; 2],
+    /// One-way commute trips per day.
+    pub trips: u32,
+}
+
+impl CommuteFlow {
+    /// Create a commute flow.
+    #[must_use]
+    pub const fn new(from: [f32; 2], to: [f32; 2], trips: u32) -> Self {
+        Self { from, to, trips }
+    }
+}
+
+/// One loaded road edge in a [`CongestionReport`].
+///
+/// `from` and `to` are stored in canonical order (`from < to`), so a route in
+/// either direction charges the same undirected edge. `factor` is
+/// `1 + load / capacity`, clamped to [`MAX_CONGESTION_FACTOR`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CongestionEdge {
+    /// Lower graph node of the undirected edge.
+    pub from: RoadNode,
+    /// Upper graph node of the undirected edge.
+    pub to: RoadNode,
+    /// Edge length in integer metres.
+    pub length_m: u32,
+    /// One-way commute trips routed through this edge per day.
+    pub load: u64,
+    /// Daily capacity used for the factor.
+    pub capacity: u64,
+    /// Congestion multiplier for this edge, `1.0..=MAX_CONGESTION_FACTOR`.
+    pub factor: f32,
+}
+
+/// Deterministic edge-load summary for a batch of commute flows.
+///
+/// The report is derived diagnostic state. It does not change routing, job
+/// assignment, travel-time storage, or save data. Its checksum is stable for
+/// the same graph and the same multiset of accepted flows: input order and
+/// flow direction do not matter, because loads are undirected and reports
+/// iterate a sorted edge map.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CongestionReport {
+    /// Input flows that were routed and charged to the graph.
+    pub routed_flows: usize,
+    /// Input flows skipped for the cap, invalid coordinates, zero trips, or no
+    /// road path. `routed_flows + skipped_flows` equals the input length.
+    pub skipped_flows: usize,
+    /// Sum of routed trips after the per-flow saturation clamp.
+    pub total_trips: u64,
+    /// Sum of routed polyline lengths in metres (walking legs included, not
+    /// multiplied by trips).
+    pub total_route_length_m: f64,
+    /// Distinct road edges touched by at least one accepted route.
+    pub edges: usize,
+    /// Load-weighted mean edge factor: the factor an average trip encounters.
+    /// `1.0` when no edge was touched.
+    pub average_factor: f32,
+    /// Highest edge factor, `1.0` when no edge was touched.
+    pub peak_factor: f32,
+    /// Highest edge load, zero when no edge was touched.
+    pub peak_load: u64,
+    /// Highest-load edge, if any.
+    pub peak_edge: Option<CongestionEdge>,
+    /// Edges whose load exceeds [`DEFAULT_EDGE_DAILY_CAPACITY`] (factor above
+    /// `2.0`).
+    pub overloaded_edges: usize,
+    /// Up to [`CONGESTION_TOP_EDGES`] highest-load edges, ranked by load
+    /// descending and then canonical node order.
+    pub top_edges: Vec<CongestionEdge>,
+    checksum: u64,
+}
+
+impl CongestionReport {
+    /// FNV-1a checksum over the report counters and every touched edge.
+    ///
+    /// Covers all edges, not only [`Self::top_edges`], plus routed/skipped/trip
+    /// counts and total route length. It is the benchmark's determinism check.
+    #[must_use]
+    pub const fn checksum(&self) -> u64 {
+        self.checksum
+    }
+
+    /// Whether the report touched no road edge.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.edges == 0
+    }
+
+    /// Congested travel time for `distance_m` at the report's average factor.
+    ///
+    /// Applies [`Self::average_factor`] through
+    /// [`travel_time_seconds_congested`]. A report with no loaded edge has an
+    /// average factor of `1.0`, so this equals [`travel_time_seconds`].
+    #[must_use]
+    pub fn travel_time_seconds(&self, distance_m: f32, speed_mps: f32) -> Option<f32> {
+        travel_time_seconds_congested(distance_m, speed_mps, self.average_factor)
+    }
+}
+
+fn congestion_factor(load: u64) -> f32 {
+    let ratio = load as f64 / DEFAULT_EDGE_DAILY_CAPACITY as f64;
+    (1.0 + ratio).min(f64::from(MAX_CONGESTION_FACTOR)) as f32
+}
+
+/// Rank order for [`CongestionEdge`] lists: load descending, then canonical
+/// node order ascending. Both keys are deterministic, so ties never depend on
+/// map iteration or insertion order.
+fn congestion_edge_order(left: &CongestionEdge, right: &CongestionEdge) -> std::cmp::Ordering {
+    right
+        .load
+        .cmp(&left.load)
+        .then_with(|| (left.from, left.to).cmp(&(right.from, right.to)))
+}
+
+fn congestion_edge_before(left: &CongestionEdge, right: &CongestionEdge) -> bool {
+    congestion_edge_order(left, right).is_lt()
+}
+
+/// Interpret one polyline point as a graph node when it is an exact integer
+/// coordinate. Walking legs from an off-network endpoint to its nearest node
+/// fail this test and are excluded from edge load.
+fn point_as_road_node(point: [f32; 2]) -> Option<RoadNode> {
+    if !point.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    let x = f64::from(point[0]);
+    let z = f64::from(point[1]);
+    let max = f64::from(i32::MAX);
+    let min = f64::from(i32::MIN);
+    if x.fract() != 0.0 || z.fract() != 0.0 || x < min || x > max || z < min || z > max {
+        return None;
+    }
+    Some([x as i32, z as i32])
+}
+
+fn polyline_length_m(points: &[[f32; 2]]) -> f64 {
+    points
+        .windows(2)
+        .map(|pair| {
+            let dx = f64::from(pair[1][0]) - f64::from(pair[0][0]);
+            let dz = f64::from(pair[1][1]) - f64::from(pair[0][1]);
+            (dx * dx + dz * dz).sqrt()
+        })
+        .sum()
+}
+
+fn build_congestion_report(
+    loads: &BTreeMap<[RoadNode; 2], u64>,
+    routed_flows: usize,
+    skipped_flows: usize,
+    total_trips: u64,
+    total_route_length_m: f64,
+) -> CongestionReport {
+    let mut hash = FNV_OFFSET_BASIS;
+    fnv1a_feed(&mut hash, DEFAULT_EDGE_DAILY_CAPACITY);
+    fnv1a_feed(&mut hash, u64::from(MAX_CONGESTION_FACTOR.to_bits()));
+    fnv1a_feed(&mut hash, routed_flows as u64);
+    fnv1a_feed(&mut hash, skipped_flows as u64);
+    fnv1a_feed(&mut hash, total_trips);
+    fnv1a_feed(&mut hash, total_route_length_m.to_bits());
+    fnv1a_feed(&mut hash, loads.len() as u64);
+
+    let mut top_edges: Vec<CongestionEdge> = Vec::with_capacity(CONGESTION_TOP_EDGES);
+    let mut peak_edge: Option<CongestionEdge> = None;
+    let mut overloaded_edges = 0_usize;
+    let mut factor_weighted_sum = 0_f64;
+    let mut load_weight = 0_u64;
+
+    for (&[from, to], &load) in loads {
+        let edge = CongestionEdge {
+            from,
+            to,
+            length_m: edge_length(from, to),
+            load,
+            capacity: DEFAULT_EDGE_DAILY_CAPACITY,
+            factor: congestion_factor(load),
+        };
+        fnv1a_feed(&mut hash, from[0] as u32 as u64);
+        fnv1a_feed(&mut hash, from[1] as u32 as u64);
+        fnv1a_feed(&mut hash, to[0] as u32 as u64);
+        fnv1a_feed(&mut hash, to[1] as u32 as u64);
+        fnv1a_feed(&mut hash, u64::from(edge.length_m));
+        fnv1a_feed(&mut hash, load);
+        fnv1a_feed(&mut hash, u64::from(edge.factor.to_bits()));
+
+        if load > DEFAULT_EDGE_DAILY_CAPACITY {
+            overloaded_edges += 1;
+        }
+        factor_weighted_sum += f64::from(edge.factor) * load as f64;
+        load_weight = load_weight.saturating_add(load);
+        if peak_edge
+            .as_ref()
+            .is_none_or(|current| congestion_edge_before(&edge, current))
+        {
+            peak_edge = Some(edge);
+        }
+        top_edges.push(edge);
+        top_edges.sort_by(congestion_edge_order);
+        if top_edges.len() > CONGESTION_TOP_EDGES {
+            top_edges.truncate(CONGESTION_TOP_EDGES);
+        }
+    }
+
+    let average_factor = if load_weight == 0 {
+        1.0
+    } else {
+        (factor_weighted_sum / load_weight as f64) as f32
+    };
+
+    CongestionReport {
+        routed_flows,
+        skipped_flows,
+        total_trips,
+        total_route_length_m,
+        edges: loads.len(),
+        average_factor,
+        peak_factor: peak_edge.map_or(1.0, |edge| edge.factor),
+        peak_load: peak_edge.map_or(0, |edge| edge.load),
+        peak_edge,
+        overloaded_edges,
+        top_edges,
+        checksum: hash,
+    }
+}
+
 /// Errors returned while building or extending a traffic graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrafficError {
@@ -157,6 +453,11 @@ pub enum TrafficError {
     ///
     /// Re-adding the exact same segment is a no-op instead.
     DuplicateRoadId(u64),
+    /// One congestion report would touch too many distinct edges.
+    ///
+    /// The count is the number of edges that would have been loaded. The cap
+    /// is [`MAX_CONGESTION_EDGES`].
+    TooManyCongestionEdges(usize),
 }
 
 impl std::fmt::Display for TrafficError {
@@ -179,6 +480,12 @@ impl std::fmt::Display for TrafficError {
             }
             Self::DuplicateRoadId(id) => {
                 write!(formatter, "road id {id} is already in the traffic graph")
+            }
+            Self::TooManyCongestionEdges(count) => {
+                write!(
+                    formatter,
+                    "congestion would touch {count} edges; limit is {MAX_CONGESTION_EDGES}"
+                )
             }
         }
     }
@@ -1132,6 +1439,114 @@ impl RoadGraph {
         Some(points)
     }
 
+    /// Aggregate commute routes into an undirected edge-load report.
+    ///
+    /// Every accepted flow is routed with [`Self::route_points`] and its trips
+    /// are added to every graph edge on the polyline. Load is undirected, so a
+    /// flow from A to B and one from B to A charge the same edges. Walking legs
+    /// at off-network endpoints contribute to
+    /// [`CongestionReport::total_route_length_m`] but not to edge load,
+    /// because they are access, not road capacity.
+    ///
+    /// At most `max_flows.min(MAX_CONGESTION_FLOWS)` input flows are routed.
+    /// Every other input flow is counted in
+    /// [`CongestionReport::skipped_flows`], as are flows with a non-finite
+    /// endpoint, zero trips, or no road path. A trip count above
+    /// [`MAX_CONGESTION_TRIPS_PER_FLOW`] saturates. The report is deterministic:
+    /// input order and flow direction do not change its loads or checksum.
+    ///
+    /// This is a diagnostic model over the derived graph. It does not feed job
+    /// allocation, route choice, stored travel time, or save data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrafficError::TooManyCongestionEdges`] when the accepted
+    /// routes touch more than [`MAX_CONGESTION_EDGES`] distinct edges.
+    pub fn congestion(
+        &self,
+        flows: &[CommuteFlow],
+        max_flows: usize,
+    ) -> Result<CongestionReport, TrafficError> {
+        self.congestion_with_edge_cap(flows, max_flows, MAX_CONGESTION_EDGES)
+    }
+
+    fn congestion_with_edge_cap(
+        &self,
+        flows: &[CommuteFlow],
+        max_flows: usize,
+        max_edges: usize,
+    ) -> Result<CongestionReport, TrafficError> {
+        let flow_limit = max_flows.min(MAX_CONGESTION_FLOWS);
+        let mut loads: BTreeMap<[RoadNode; 2], u64> = BTreeMap::new();
+        let mut route_lengths: Vec<f64> = Vec::new();
+        let mut routed_flows = 0_usize;
+        let mut total_trips = 0_u64;
+
+        for flow in flows.iter().take(flow_limit) {
+            if flow.trips == 0
+                || !flow
+                    .from
+                    .iter()
+                    .chain(flow.to.iter())
+                    .all(|value| value.is_finite())
+            {
+                continue;
+            }
+            let Some(points) = self.route_points(flow.from, flow.to) else {
+                continue;
+            };
+            let trips = u64::from(flow.trips.min(MAX_CONGESTION_TRIPS_PER_FLOW));
+            self.accumulate_congestion_route(&points, trips, &mut loads, max_edges)?;
+            routed_flows += 1;
+            total_trips = total_trips.saturating_add(trips);
+            route_lengths.push(polyline_length_m(&points));
+        }
+
+        // Sorting makes the total independent of input order even when the
+        // f64 sum rounds, so the checksum is a pure function of the flow
+        // multiset.
+        route_lengths.sort_by(f64::total_cmp);
+        let total_route_length_m = route_lengths.into_iter().sum();
+        Ok(build_congestion_report(
+            &loads,
+            routed_flows,
+            flows.len().saturating_sub(routed_flows),
+            total_trips,
+            total_route_length_m,
+        ))
+    }
+
+    fn accumulate_congestion_route(
+        &self,
+        points: &[[f32; 2]],
+        trips: u64,
+        loads: &mut BTreeMap<[RoadNode; 2], u64>,
+        max_edges: usize,
+    ) -> Result<(), TrafficError> {
+        for pair in points.windows(2) {
+            let (Some(from), Some(to)) = (point_as_road_node(pair[0]), point_as_road_node(pair[1]))
+            else {
+                continue;
+            };
+            if from == to || !self.has_edge(from, to) {
+                continue;
+            }
+            let key = if from < to { [from, to] } else { [to, from] };
+            match loads.get_mut(&key) {
+                Some(load) => *load = load.saturating_add(trips),
+                None => {
+                    if loads.len() >= max_edges {
+                        return Err(TrafficError::TooManyCongestionEdges(
+                            loads.len().saturating_add(1),
+                        ));
+                    }
+                    loads.insert(key, trips);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Build a flow field from the goal to every reachable node.
     ///
     /// This is the shared-destination primitive: one Dijkstra per workplace,
@@ -1954,6 +2369,228 @@ mod tests {
             None,
             "overflow must not produce an infinite travel time"
         );
+    }
+
+    #[test]
+    fn congested_travel_time_preserves_factor_one() {
+        assert_eq!(
+            travel_time_seconds_congested(136.4, DEFAULT_TRAVEL_SPEED_MPS, 1.0),
+            travel_time_seconds(136.4, DEFAULT_TRAVEL_SPEED_MPS)
+        );
+        assert_eq!(
+            travel_time_seconds_congested(0.0, DEFAULT_TRAVEL_SPEED_MPS, 1.0),
+            Some(0.0)
+        );
+        assert_eq!(travel_time_seconds_congested(80.0, 8.0, 2.0), Some(20.0));
+        assert_eq!(
+            travel_time_seconds_congested(10.0, 8.0, 0.5),
+            None,
+            "congestion must not speed traffic up"
+        );
+        assert_eq!(travel_time_seconds_congested(10.0, 8.0, f32::NAN), None);
+        assert_eq!(
+            travel_time_seconds_congested(10.0, 8.0, f32::INFINITY),
+            None
+        );
+        assert_eq!(travel_time_seconds_congested(-1.0, 8.0, 1.5), None);
+        assert_eq!(
+            travel_time_seconds_congested(f32::MAX, f32::MIN_POSITIVE, 4.0),
+            None,
+            "overflow must not produce an infinite congested time"
+        );
+    }
+
+    #[test]
+    fn an_empty_congestion_report_is_free_flow() {
+        let graph = RoadGraph::build(&[road(1, [0, 0], [20, 0])]).expect("build");
+        let report = graph.congestion(&[], 16).expect("report");
+        assert_eq!(report.routed_flows, 0);
+        assert_eq!(report.skipped_flows, 0);
+        assert_eq!(report.total_trips, 0);
+        assert_eq!(report.total_route_length_m, 0.0);
+        assert_eq!(report.edges, 0);
+        assert_eq!(report.average_factor, 1.0);
+        assert_eq!(report.peak_factor, 1.0);
+        assert_eq!(report.peak_load, 0);
+        assert_eq!(report.peak_edge, None);
+        assert_eq!(report.overloaded_edges, 0);
+        assert!(report.top_edges.is_empty());
+        assert!(report.is_empty());
+        assert_eq!(
+            report.travel_time_seconds(80.0, DEFAULT_TRAVEL_SPEED_MPS),
+            travel_time_seconds(80.0, DEFAULT_TRAVEL_SPEED_MPS)
+        );
+
+        let again = graph.congestion(&[], 16).expect("report");
+        assert_eq!(report.checksum(), again.checksum());
+        let wide = graph.congestion(&[], usize::MAX).expect("report");
+        assert_eq!(report.checksum(), wide.checksum());
+    }
+
+    #[test]
+    fn one_flow_loads_its_route() {
+        let graph = RoadGraph::build(&[road(1, [0, 0], [20, 0])]).expect("build");
+        let flows = [CommuteFlow::new([0.0, 0.0], [20.0, 0.0], 10)];
+        let report = graph.congestion(&flows, 8).expect("report");
+
+        assert_eq!(report.routed_flows, 1);
+        assert_eq!(report.skipped_flows, 0);
+        assert_eq!(report.total_trips, 10);
+        assert!((report.total_route_length_m - 20.0).abs() < 0.001);
+        assert_eq!(report.edges, 1);
+        assert_eq!(report.peak_load, 10);
+        let peak = report.peak_edge.expect("peak edge");
+        assert_eq!(peak.from, [0, 0]);
+        assert_eq!(peak.to, [20, 0]);
+        assert_eq!(peak.length_m, 20);
+        assert_eq!(peak.capacity, DEFAULT_EDGE_DAILY_CAPACITY);
+        assert!((peak.factor - 1.01).abs() < 0.000_1);
+        assert!((report.average_factor - 1.01).abs() < 0.000_1);
+        assert_eq!(report.top_edges, vec![peak]);
+        assert_eq!(report.overloaded_edges, 0);
+        let flat = travel_time_seconds(20.0, DEFAULT_TRAVEL_SPEED_MPS).expect("flat time");
+        let congested = report
+            .travel_time_seconds(20.0, DEFAULT_TRAVEL_SPEED_MPS)
+            .expect("congested time");
+        assert!((congested - flat * 1.01).abs() < 0.000_1);
+    }
+
+    #[test]
+    fn a_shared_corridor_doubles_edge_load() {
+        let graph = RoadGraph::build(&[road(1, [0, 0], [20, 0])]).expect("build");
+        let single = [CommuteFlow::new([0.0, 0.0], [20.0, 0.0], 5)];
+        let shared = [
+            CommuteFlow::new([0.0, 0.0], [20.0, 0.0], 5),
+            CommuteFlow::new([0.0, 0.0], [20.0, 0.0], 5),
+        ];
+        let one = graph.congestion(&single, 8).expect("one flow");
+        let two = graph.congestion(&shared, 8).expect("two flows");
+        assert_eq!(one.edges, 1);
+        assert_eq!(one.peak_load, 5);
+        assert_eq!(two.edges, 1);
+        assert_eq!(two.peak_load, 10);
+        assert_eq!(two.total_trips, 10);
+        assert!((two.total_route_length_m - 40.0).abs() < 0.001);
+        assert!((two.peak_factor - 1.01).abs() < 0.000_1);
+        assert!((two.average_factor - 1.01).abs() < 0.000_1);
+    }
+
+    #[test]
+    fn walking_legs_add_length_but_not_edge_load() {
+        let graph = RoadGraph::build(&[road(1, [0, 0], [20, 0])]).expect("build");
+        let flows = [CommuteFlow::new([-3.0, 4.0], [23.0, 4.0], 5)];
+        let report = graph.congestion(&flows, 4).expect("report");
+        assert_eq!(report.routed_flows, 1);
+        assert_eq!(report.edges, 1);
+        assert_eq!(report.peak_load, 5);
+        assert!((report.total_route_length_m - 30.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn disconnected_and_invalid_flows_are_skipped() {
+        let graph = RoadGraph::build(&[road(1, [0, 0], [10, 0]), road(2, [50, 50], [60, 50])])
+            .expect("build");
+        let flows = [
+            CommuteFlow::new([0.0, 0.0], [10.0, 0.0], 2),
+            CommuteFlow::new([0.0, 0.0], [50.0, 50.0], 3),
+            CommuteFlow::new([f32::NAN, 0.0], [0.0, 0.0], 1),
+            CommuteFlow::new([0.0, 0.0], [10.0, 0.0], 0),
+            CommuteFlow::new([0.0, f32::INFINITY], [10.0, 0.0], 1),
+        ];
+        let report = graph.congestion(&flows, 8).expect("report");
+        assert_eq!(report.routed_flows, 1);
+        assert_eq!(report.skipped_flows, 4);
+        assert_eq!(report.total_trips, 2);
+        assert_eq!(report.edges, 1);
+        assert_eq!(report.peak_load, 2);
+    }
+
+    #[test]
+    fn the_congestion_factor_is_capped() {
+        let graph = RoadGraph::build(&[road(1, [0, 0], [20, 0])]).expect("build");
+        let flows = [CommuteFlow::new([0.0, 0.0], [20.0, 0.0], 5_000)];
+        let report = graph.congestion(&flows, 4).expect("report");
+        assert_eq!(report.peak_load, 5_000);
+        assert_eq!(report.peak_factor, MAX_CONGESTION_FACTOR);
+        assert_eq!(report.average_factor, MAX_CONGESTION_FACTOR);
+        assert_eq!(report.overloaded_edges, 1);
+        assert_eq!(
+            report.travel_time_seconds(20.0, DEFAULT_TRAVEL_SPEED_MPS),
+            Some(10.0)
+        );
+
+        let saturated = [CommuteFlow::new(
+            [0.0, 0.0],
+            [20.0, 0.0],
+            MAX_CONGESTION_TRIPS_PER_FLOW.saturating_add(1),
+        )];
+        let report = graph.congestion(&saturated, 4).expect("report");
+        assert_eq!(report.total_trips, u64::from(MAX_CONGESTION_TRIPS_PER_FLOW));
+        assert_eq!(report.peak_factor, MAX_CONGESTION_FACTOR);
+    }
+
+    #[test]
+    fn the_flow_cap_limits_routed_flows() {
+        let graph = RoadGraph::build(&[road(1, [0, 0], [20, 0])]).expect("build");
+        let flows = [
+            CommuteFlow::new([0.0, 0.0], [20.0, 0.0], 1),
+            CommuteFlow::new([0.0, 0.0], [20.0, 0.0], 1),
+            CommuteFlow::new([0.0, 0.0], [20.0, 0.0], 1),
+        ];
+        let capped = graph.congestion(&flows, 2).expect("report");
+        assert_eq!(capped.routed_flows, 2);
+        assert_eq!(capped.skipped_flows, 1);
+        assert_eq!(capped.total_trips, 2);
+
+        let none = graph.congestion(&flows, 0).expect("report");
+        assert_eq!(none.routed_flows, 0);
+        assert_eq!(none.skipped_flows, 3);
+        assert!(none.is_empty());
+
+        let all = graph
+            .congestion(&flows, MAX_CONGESTION_FLOWS + 1)
+            .expect("report");
+        assert_eq!(all.routed_flows, 3);
+        assert_eq!(all.skipped_flows, 0);
+    }
+
+    #[test]
+    fn congestion_is_order_and_direction_independent() {
+        let roads = grid_roads(4, 10, [0, 0]);
+        let flows = [
+            CommuteFlow::new([0.0, 0.0], [30.0, 30.0], 7),
+            CommuteFlow::new([30.0, 0.0], [0.0, 30.0], 3),
+            CommuteFlow::new([10.0, 10.0], [20.0, 20.0], 2),
+        ];
+        let reversed = [
+            CommuteFlow::new(flows[2].to, flows[2].from, flows[2].trips),
+            CommuteFlow::new(flows[1].to, flows[1].from, flows[1].trips),
+            CommuteFlow::new(flows[0].to, flows[0].from, flows[0].trips),
+        ];
+        let first = RoadGraph::build(&roads).expect("build");
+        let second = RoadGraph::build(&roads).expect("build");
+        let forward = first.congestion(&flows, 8).expect("report");
+        let backward = second.congestion(&reversed, 8).expect("report");
+
+        assert_eq!(forward, backward);
+        assert_eq!(forward.checksum(), backward.checksum());
+        assert_eq!(forward.top_edges, backward.top_edges);
+        assert_eq!(forward.total_route_length_m, backward.total_route_length_m);
+        assert!(forward.edges > 0);
+    }
+
+    #[test]
+    fn the_congestion_edge_cap_is_a_work_bound() {
+        let graph = RoadGraph::build(&[road(1, [0, 0], [20, 0])]).expect("build");
+        let flows = [CommuteFlow::new([0.0, 0.0], [20.0, 0.0], 1)];
+        assert!(matches!(
+            graph.congestion_with_edge_cap(&flows, 4, 0),
+            Err(TrafficError::TooManyCongestionEdges(1))
+        ));
+        let report = graph
+            .congestion_with_edge_cap(&flows, 4, 1)
+            .expect("report");
+        assert_eq!(report.edges, 1);
     }
 
     #[test]

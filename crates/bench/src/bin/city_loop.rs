@@ -10,13 +10,15 @@
 use std::collections::BTreeSet;
 
 use core_city::{
-    summarize, Age, CityRuntime, ConstructionStore, Economy, Home, IndustryKind, IndustryStore,
-    Placement, PlacementPlan, PlacementRequest, PlacementStore, RoadGraph, RoadSegment, RoadStore,
-    UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, MAX_LOAN,
+    summarize, Age, CityRuntime, ConstructionStore, ConstructionTimeScale, Economy, Home,
+    IndustryKind, IndustryStore, Placement, PlacementPlan, PlacementRequest, PlacementStore,
+    RoadGraph, RoadSegment, RoadStore, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore,
+    Workplace, MAX_LOAN,
 };
 
 const DEFAULT_DAYS: u64 = 30;
 const DEFAULT_STEP_SECONDS: f64 = 300.0;
+const DEFAULT_SECONDS_PER_GAME_DAY: f64 = 60.0;
 const CAPACITY_PER_HOUSE: u32 = 10;
 const JOBS_PER_HOUSE: u32 = 10;
 const JOBS_PER_WORKPLACE: u32 = 80;
@@ -141,9 +143,28 @@ fn main() {
     let balance = std::env::args().any(|arg| arg == "--balance");
     let degraded_matrix = std::env::args().any(|arg| arg == "--degraded-matrix");
     let degraded_name = arg_value("--degraded");
+    let campaign_days = std::env::args().any(|arg| arg == "--campaign-days");
+    let seconds_per_day_arg = arg_value("--seconds-per-day");
+    if seconds_per_day_arg.is_some() && !campaign_days {
+        eprintln!("city_loop: --seconds-per-day requires --campaign-days");
+        std::process::exit(2);
+    }
+    let campaign = if campaign_days {
+        let seconds_per_day = seconds_per_day_arg
+            .as_deref()
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(DEFAULT_SECONDS_PER_GAME_DAY);
+        if !seconds_per_day.is_finite() || !(10.0..=3600.0).contains(&seconds_per_day) {
+            eprintln!("city_loop: --seconds-per-day must be finite and within 10..=3600");
+            std::process::exit(2);
+        }
+        Some(seconds_per_day)
+    } else {
+        None
+    };
     if days == 0 || !step.is_finite() || step <= 0.0 {
         eprintln!(
-            "usage: city_loop [--scenario early|mid|late] [--days N] [--houses N] [--workplaces N] [--step SECONDS] [--matrix] [--balance] [--degraded no_water|no_power|no_industry|no_roads|no_utilities] [--degraded-matrix]"
+            "usage: city_loop [--scenario early|mid|late] [--days N] [--houses N] [--workplaces N] [--step SECONDS] [--campaign-days [--seconds-per-day 60]] [--matrix] [--balance] [--degraded no_water|no_power|no_industry|no_roads|no_utilities] [--degraded-matrix]"
         );
         std::process::exit(2);
     }
@@ -161,7 +182,8 @@ fn main() {
     if degraded_matrix {
         println!(
             "{}",
-            serde_json::to_string_pretty(&degraded_matrix_report(days, step)).expect("pretty json")
+            serde_json::to_string_pretty(&degraded_matrix_report(days, step, campaign))
+                .expect("pretty json")
         );
         return;
     }
@@ -173,7 +195,7 @@ fn main() {
             );
             std::process::exit(2);
         };
-        let output = simulate_with(&SCENARIOS[1], days, step, Some(degraded));
+        let output = simulate_with(&SCENARIOS[1], days, step, Some(degraded), campaign);
         println!(
             "{}",
             serde_json::to_string_pretty(&output).expect("pretty json")
@@ -184,7 +206,7 @@ fn main() {
     if matrix {
         let scenarios: Vec<serde_json::Value> = SCENARIOS
             .iter()
-            .map(|scenario| simulate(scenario, days, step))
+            .map(|scenario| simulate(scenario, days, step, campaign))
             .collect();
         let output = serde_json::json!({
             "scene": "city_loop_matrix",
@@ -202,7 +224,7 @@ fn main() {
     if balance {
         println!(
             "{}",
-            serde_json::to_string_pretty(&balance_report(&SCENARIOS, days, step))
+            serde_json::to_string_pretty(&balance_report(&SCENARIOS, days, step, campaign))
                 .expect("pretty json")
         );
         return;
@@ -237,15 +259,15 @@ fn main() {
         std::process::exit(2);
     }
 
-    let output = simulate(&scenario, days, step);
+    let output = simulate(&scenario, days, step, campaign);
     println!(
         "{}",
         serde_json::to_string_pretty(&output).expect("pretty json")
     );
 }
 
-fn simulate(scenario: &Scenario, days: u64, step: f64) -> serde_json::Value {
-    simulate_with(scenario, days, step, None)
+fn simulate(scenario: &Scenario, days: u64, step: f64, campaign: Option<f64>) -> serde_json::Value {
+    simulate_with(scenario, days, step, None, campaign)
 }
 
 fn simulate_with(
@@ -253,6 +275,7 @@ fn simulate_with(
     days: u64,
     step: f64,
     degraded: Option<Degraded>,
+    campaign: Option<f64>,
 ) -> serde_json::Value {
     let houses = scenario.houses;
     let workplaces_count = scenario.workplaces;
@@ -270,6 +293,13 @@ fn simulate_with(
     let seed = 2026;
     let mut placements = PlacementStore::new(seed);
     let mut construction = ConstructionStore::new(CREW_CAPACITY, MATERIALS_STOCK);
+    if let Some(seconds_per_day) = campaign {
+        construction
+            .set_time_scale(
+                ConstructionTimeScale::campaign(seconds_per_day).expect("validated campaign rate"),
+            )
+            .expect("validated campaign scale");
+    }
     for index in 0..houses {
         let id = index + 1;
         let x = 128.0 + (index % 10) as f32 * 20.0;
@@ -584,6 +614,14 @@ fn simulate_with(
         "bankrupt": economy.bankrupt,
         "economy_checksum": format!("{:016x}", economy.checksum()),
     });
+    if let Some(seconds_per_day) = campaign {
+        result["construction_time_scale"] = serde_json::Value::String("campaign_days".to_string());
+        result["campaign_seconds_per_day"] = serde_json::json!(seconds_per_day);
+        result["construction_days"] = serde_json::json!(
+            (construction.total_seconds_for_scaled(SOLID_VOXELS) / 86_400.0 * 1000.0).round()
+                / 1000.0
+        );
+    }
     if let Some(degraded) = degraded {
         result["scene"] = serde_json::Value::String("city_loop_degraded".to_string());
         result["degraded"] = serde_json::Value::String(degraded.name().to_string());
@@ -595,11 +633,11 @@ fn simulate_with(
     result
 }
 
-fn degraded_matrix_report(days: u64, step: f64) -> serde_json::Value {
-    let control = simulate(&SCENARIOS[1], days, step);
+fn degraded_matrix_report(days: u64, step: f64, campaign: Option<f64>) -> serde_json::Value {
+    let control = simulate(&SCENARIOS[1], days, step, campaign);
     let variants: Vec<serde_json::Value> = Degraded::ALL
         .iter()
-        .map(|degraded| simulate_with(&SCENARIOS[1], days, step, Some(*degraded)))
+        .map(|degraded| simulate_with(&SCENARIOS[1], days, step, Some(*degraded), campaign))
         .collect();
     serde_json::json!({
         "scene": "city_loop_degraded_matrix",
@@ -611,10 +649,15 @@ fn degraded_matrix_report(days: u64, step: f64) -> serde_json::Value {
     })
 }
 
-fn balance_report(scenarios: &[Scenario], days: u64, step: f64) -> serde_json::Value {
+fn balance_report(
+    scenarios: &[Scenario],
+    days: u64,
+    step: f64,
+    campaign: Option<f64>,
+) -> serde_json::Value {
     let scenarios: Vec<serde_json::Value> = scenarios
         .iter()
-        .map(|scenario| balance_entry(scenario, days, step))
+        .map(|scenario| balance_entry(scenario, days, step, campaign))
         .collect();
     serde_json::json!({
         "scene": "city_loop_balance",
@@ -624,8 +667,13 @@ fn balance_report(scenarios: &[Scenario], days: u64, step: f64) -> serde_json::V
     })
 }
 
-fn balance_entry(scenario: &Scenario, days: u64, step: f64) -> serde_json::Value {
-    let result = simulate(scenario, days, step);
+fn balance_entry(
+    scenario: &Scenario,
+    days: u64,
+    step: f64,
+    campaign: Option<f64>,
+) -> serde_json::Value {
+    let result = simulate(scenario, days, step, campaign);
     let population = result["population"].as_u64().expect("population");
     let final_balance = result["balance"].as_f64().expect("balance");
     let bankrupt = result["bankrupt"].as_bool().expect("bankrupt");
@@ -699,7 +747,7 @@ mod tests {
 
     #[test]
     fn a_five_house_city_completes_and_fills() {
-        let result = simulate(&test_scenario(5, 5), 1, 60.0);
+        let result = simulate(&test_scenario(5, 5), 1, 60.0, None);
         assert_eq!(result["population"], 50);
         assert_eq!(
             result["jobs"],
@@ -731,13 +779,13 @@ mod tests {
         assert!(result["traffic_edges"].as_u64().expect("edges") >= 1);
         assert_eq!(
             result["checksum"],
-            simulate(&test_scenario(5, 5), 1, 60.0)["checksum"]
+            simulate(&test_scenario(5, 5), 1, 60.0, None)["checksum"]
         );
     }
 
     #[test]
     fn houses_beyond_the_first_row_use_road_commutes() {
-        let result = simulate(&test_scenario(15, 5), 1, 60.0);
+        let result = simulate(&test_scenario(15, 5), 1, 60.0, None);
         assert_eq!(result["population"], 150);
         assert_eq!(result["jobs"], 500);
         assert!(result["average_commute_m"].as_f64().expect("commute") > 10.0);
@@ -745,37 +793,47 @@ mod tests {
     }
 
     #[test]
+    fn campaign_days_change_the_construction_timeline() {
+        let developer = simulate(&test_scenario(5, 5), 1, 60.0, None);
+        let campaign = simulate(&test_scenario(5, 5), 1, 60.0, Some(60.0));
+        assert_eq!(campaign["construction_time_scale"], "campaign_days");
+        assert_eq!(campaign["campaign_seconds_per_day"], 60.0);
+        assert!(campaign["construction_days"].as_f64().unwrap() > 0.0);
+        assert_ne!(developer["checksum"], campaign["checksum"]);
+    }
+
+    #[test]
     fn degraded_variants_are_deterministic_and_short() {
-        let no_water = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Water));
-        let no_water_again = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Water));
+        let no_water = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Water), None);
+        let no_water_again = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Water), None);
         assert_eq!(no_water["checksum"], no_water_again["checksum"]);
         assert_eq!(no_water["degraded"], "no_water");
         assert!(no_water["water_supply"].as_f64().expect("water") < 0.01);
 
-        let no_power = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Power));
+        let no_power = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Power), None);
         assert!(no_power["power_supply"].as_f64().expect("power") < 0.01);
         assert!(no_power["food_supply"].as_f64().expect("food") < 0.01);
 
-        let no_industry = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Industry));
+        let no_industry = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Industry), None);
         assert_eq!(no_industry["industry_sites"], 0);
         assert!(no_industry["food_supply"].as_f64().expect("food") < 0.01);
 
-        let no_roads = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Roads));
+        let no_roads = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Roads), None);
         assert_eq!(no_roads["traffic_nodes"], 0);
         assert_eq!(no_roads["road_segments"], 0);
         assert!(no_roads["average_commute_m"].as_f64().expect("commute") > 0.0);
 
-        let no_utilities = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Utilities));
+        let no_utilities = simulate_with(&SCENARIOS[1], 10, 300.0, Some(Degraded::Utilities), None);
         assert!(no_utilities["water_supply"].as_f64().expect("water") < 0.01);
         assert!(no_utilities["power_supply"].as_f64().expect("power") < 0.01);
     }
 
     #[test]
     fn degraded_matrix_has_one_entry_per_variant() {
-        let matrix = degraded_matrix_report(2, 3_600.0);
+        let matrix = degraded_matrix_report(2, 3_600.0, None);
         assert_eq!(matrix["scene"], "city_loop_degraded_matrix");
         assert_eq!(matrix["variants"].as_array().expect("variants").len(), 5);
-        let again = degraded_matrix_report(2, 3_600.0);
+        let again = degraded_matrix_report(2, 3_600.0, None);
         assert_eq!(matrix, again);
     }
 
@@ -793,7 +851,7 @@ mod tests {
     #[test]
     fn early_scenario_completes_and_fills() {
         let early = SCENARIOS[0];
-        let result = simulate(&early, 30, 300.0);
+        let result = simulate(&early, 30, 300.0, None);
         assert_eq!(result["scenario"], "early");
         assert_eq!(result["population"], 100);
         assert_eq!(result["jobs"], 110);
@@ -805,14 +863,17 @@ mod tests {
         assert!(result["water_supply"].as_f64().expect("water") > 0.99);
         assert!(result["power_supply"].as_f64().expect("power") > 0.99);
         assert!(result["food_supply"].as_f64().expect("food") > 0.99);
-        assert_eq!(result["checksum"], simulate(&early, 30, 300.0)["checksum"]);
+        assert_eq!(
+            result["checksum"],
+            simulate(&early, 30, 300.0, None)["checksum"]
+        );
     }
 
     #[test]
     fn balance_report_has_a_stable_shape() {
         let scenarios = [test_scenario(5, 5)];
-        let first = balance_report(&scenarios, 1, 60.0);
-        let second = balance_report(&scenarios, 1, 60.0);
+        let first = balance_report(&scenarios, 1, 60.0, None);
+        let second = balance_report(&scenarios, 1, 60.0, None);
         assert_eq!(first, second);
         assert_eq!(first["scene"], "city_loop_balance");
         assert_eq!(first["days"], 1);
