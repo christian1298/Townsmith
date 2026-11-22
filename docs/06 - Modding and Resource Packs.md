@@ -2,7 +2,7 @@
 title: Modding and Resource Packs
 project: Townsmith
 status: proposed
-updated: 2026-11-19
+updated: 2026-11-23
 tags:
   - townsmith
   - modding
@@ -77,6 +77,20 @@ Worldgen is content, but it is held to a stricter standard because saves depend 
 - **Performance:** worldgen runs on worker threads; a mod generator gets a chunk budget and must not block streaming.
 
 See Q-072.
+
+### 3.2 Content schema v1 (draft)
+
+The first data contracts are in `content/`:
+
+- `content/schema/{material,room,prop}.schema.json` — draft 2020-12 schemas with namespaced IDs (`^[a-z0-9_]+:[a-z0-9_./-]+$`), required `format_version: 1`, `name_key`, and draft markers.
+- `content/base/{materials,rooms,props}.json` — 8 materials, 7 room types, and 8 props tagged `draft: true`; prop `allowed_rooms` references room IDs.
+- `scripts/check_content_schema.py` — stdlib validator for structure, duplicate IDs, namespaced IDs, and prop -> room cross-references. `--self-test` covers valid, duplicate, bad-reference, bad-density, and bad-version fixtures.
+- `scripts/check.sh` runs it after the locale gate.
+
+Current output: `CONTENT_SCHEMA files=3 entries=23 errors=0 status=ok`.
+
+> [!warning] Contract, not runtime
+> The runtime registry, mod manifest loader, content packaging, save references, and balance tuning are still open. D-006 remains **Proposed**; these files do not make it accepted. Values in `content/base/` are placeholders, not campaign balance.
 
 ## 4. Mod package format
 

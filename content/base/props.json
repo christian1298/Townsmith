@@ -1,0 +1,142 @@
+{
+  "format_version": 1,
+  "props": [
+    {
+      "id": "base:bed",
+      "name_key": "content.prop.bed",
+      "footprint_m": [
+        1.6,
+        2.0
+      ],
+      "height_m": 0.6,
+      "cost": 120.0,
+      "allowed_rooms": [
+        "base:bedroom"
+      ],
+      "tags": [
+        "sleep"
+      ],
+      "draft": true
+    },
+    {
+      "id": "base:stove",
+      "name_key": "content.prop.stove",
+      "footprint_m": [
+        0.8,
+        0.7
+      ],
+      "height_m": 0.9,
+      "cost": 180.0,
+      "allowed_rooms": [
+        "base:kitchen"
+      ],
+      "tags": [
+        "cook",
+        "heat"
+      ],
+      "draft": true
+    },
+    {
+      "id": "base:toilet",
+      "name_key": "content.prop.toilet",
+      "footprint_m": [
+        0.5,
+        0.7
+      ],
+      "height_m": 0.8,
+      "cost": 90.0,
+      "allowed_rooms": [
+        "base:bathroom"
+      ],
+      "tags": [
+        "hygiene"
+      ],
+      "draft": true
+    },
+    {
+      "id": "base:sofa",
+      "name_key": "content.prop.sofa",
+      "footprint_m": [
+        2.0,
+        0.9
+      ],
+      "height_m": 0.8,
+      "cost": 140.0,
+      "allowed_rooms": [
+        "base:bedroom",
+        "base:office"
+      ],
+      "tags": [
+        "comfort"
+      ],
+      "draft": true
+    },
+    {
+      "id": "base:shelf",
+      "name_key": "content.prop.shelf",
+      "footprint_m": [
+        1.2,
+        0.4
+      ],
+      "height_m": 1.8,
+      "cost": 60.0,
+      "allowed_rooms": [
+        "base:storage",
+        "base:workshop",
+        "base:office"
+      ],
+      "tags": [
+        "storage"
+      ],
+      "draft": true
+    },
+    {
+      "id": "base:door",
+      "name_key": "content.prop.door",
+      "footprint_m": [
+        1.0,
+        0.2
+      ],
+      "height_m": 2.1,
+      "cost": 80.0,
+      "allowed_rooms": [],
+      "tags": [
+        "access"
+      ],
+      "draft": true
+    },
+    {
+      "id": "base:stair",
+      "name_key": "content.prop.stair",
+      "footprint_m": [
+        1.2,
+        2.4
+      ],
+      "height_m": 2.8,
+      "cost": 220.0,
+      "allowed_rooms": [],
+      "tags": [
+        "access",
+        "vertical"
+      ],
+      "draft": true
+    },
+    {
+      "id": "base:workbench",
+      "name_key": "content.prop.workbench",
+      "footprint_m": [
+        2.0,
+        0.8
+      ],
+      "height_m": 0.9,
+      "cost": 200.0,
+      "allowed_rooms": [
+        "base:workshop"
+      ],
+      "tags": [
+        "craft"
+      ],
+      "draft": true
+    }
+  ]
+}

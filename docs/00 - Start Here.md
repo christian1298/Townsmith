@@ -2,7 +2,7 @@
 title: Start Here
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-23
 tags:
   - townsmith
   - moc
@@ -158,7 +158,7 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 2. Implement the first Phase 2 slice from [[41 - Phase 2 Slice Plan]]: placement validation, world save/load, then terrain deltas and Mayor Mode.
 3. Finish deferred editor work: paint/pick, brushes, selection/copy/rotate/mirror, structural v0, thumbnails, AO/texture arrays.
 4. Keep the 3060-class 1M performance gate open for Phase 5; D-003 is accepted for the architecture.
-5. Write the first content schemas (materials, rooms, props) from [[06 - Modding and Resource Packs]].
+5. ~~Write the first content schemas (materials, rooms, props).~~ Material/room/prop schema v1, base data, and the `content_schema` gate are in; runtime registry, mod manifest loading, and save references remain.
 
 ## Document map
 

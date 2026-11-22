@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://townsmith.local/schema/material.schema.json",
+  "title": "Townsmith material content v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format_version", "materials"],
+  "properties": {
+    "format_version": { "const": 1 },
+    "materials": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/material" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]+:[a-z0-9_./-]+$"
+    },
+    "material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name_key", "category", "density_kg_m3", "color", "cost_per_litre", "tags"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name_key": { "type": "string", "minLength": 1 },
+        "category": {
+          "type": "string",
+          "enum": ["wood", "masonry", "concrete", "metal", "glass", "earth", "other"]
+        },
+        "density_kg_m3": { "type": "number", "exclusiveMinimum": 0 },
+        "color": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "type": "number", "minimum": 0, "maximum": 1 }
+        },
+        "cost_per_litre": { "type": "number", "minimum": 0 },
+        "tags": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9_./-]+$" }
+        },
+        "draft": { "type": "boolean" }
+      }
+    }
+  }
+}
