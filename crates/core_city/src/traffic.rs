@@ -15,7 +15,9 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
+use std::ops::Bound::{Excluded, Unbounded};
 
+use crate::placement::MAX_WORLD_COORD_M;
 use crate::road::RoadSegment;
 
 /// Maximum road segments accepted by one traffic graph.
@@ -121,13 +123,29 @@ impl TrafficStats {
     }
 }
 
-/// Errors returned while building a traffic graph.
+/// Errors returned while building or extending a traffic graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrafficError {
     /// Too many road segments for one graph.
     TooManyRoads(usize),
     /// Too many split nodes for one graph.
     TooManyNodes(usize),
+    /// A segment cannot be appended to the graph.
+    ///
+    /// `reason` is one of `zero_length`, `not_axis_aligned`, or
+    /// `coordinate_out_of_range`. [`RoadGraph::build`] stays lenient and skips
+    /// such records; [`RoadGraph::add_segment`] rejects them so a partially
+    /// inserted segment can never corrupt the derived graph.
+    InvalidSegment {
+        /// Segment id.
+        id: u64,
+        /// Short machine-readable reason.
+        reason: &'static str,
+    },
+    /// A segment reuses an existing id with different geometry.
+    ///
+    /// Re-adding the exact same segment is a no-op instead.
+    DuplicateRoadId(u64),
 }
 
 impl std::fmt::Display for TrafficError {
@@ -144,6 +162,12 @@ impl std::fmt::Display for TrafficError {
                     formatter,
                     "traffic graph has {count} nodes; limit is {MAX_TRAFFIC_NODES}"
                 )
+            }
+            Self::InvalidSegment { id, reason } => {
+                write!(formatter, "road {id} cannot be appended: {reason}")
+            }
+            Self::DuplicateRoadId(id) => {
+                write!(formatter, "road id {id} is already in the traffic graph")
             }
         }
     }
@@ -167,26 +191,29 @@ struct NodeGrid {
 }
 
 impl NodeGrid {
-    fn build(nodes: &[RoadNode]) -> Self {
-        let mut grid = Self::default();
-        let Some(&first) = nodes.first() else {
-            return grid;
-        };
-        grid.min_cell = [node_cell(first[0]), node_cell(first[1])];
-        grid.max_cell = grid.min_cell;
-        for &node in nodes {
-            let cell = [node_cell(node[0]), node_cell(node[1])];
-            grid.cells.entry((cell[0], cell[1])).or_default().push(node);
-            grid.min_cell[0] = grid.min_cell[0].min(cell[0]);
-            grid.min_cell[1] = grid.min_cell[1].min(cell[1]);
-            grid.max_cell[0] = grid.max_cell[0].max(cell[0]);
-            grid.max_cell[1] = grid.max_cell[1].max(cell[1]);
-            grid.max_abs_coord = grid
-                .max_abs_coord
-                .max(f64::from(node[0].unsigned_abs()))
-                .max(f64::from(node[1].unsigned_abs()));
+    /// Add one node to its cell, keeping bucket order lexicographic.
+    ///
+    /// This is the incremental twin of [`Self::build`]: the same node set
+    /// produces the same cells, bounds, and `max_abs_coord` regardless of
+    /// insertion order.
+    fn insert(&mut self, node: RoadNode) {
+        let cell = [node_cell(node[0]), node_cell(node[1])];
+        if self.cells.is_empty() {
+            self.min_cell = cell;
+            self.max_cell = cell;
+        } else {
+            self.min_cell[0] = self.min_cell[0].min(cell[0]);
+            self.min_cell[1] = self.min_cell[1].min(cell[1]);
+            self.max_cell[0] = self.max_cell[0].max(cell[0]);
+            self.max_cell[1] = self.max_cell[1].max(cell[1]);
         }
-        grid
+        let cell_nodes = self.cells.entry((cell[0], cell[1])).or_default();
+        let index = cell_nodes.partition_point(|&existing| existing < node);
+        cell_nodes.insert(index, node);
+        self.max_abs_coord = self
+            .max_abs_coord
+            .max(f64::from(node[0].unsigned_abs()))
+            .max(f64::from(node[1].unsigned_abs()));
     }
 
     fn is_empty(&self) -> bool {
@@ -208,6 +235,15 @@ impl NodeGrid {
 
 fn node_cell(value: i32) -> i32 {
     value.div_euclid(NEAREST_CELL_M)
+}
+
+/// Manhattan length of an axis-aligned graph edge.
+fn edge_length(a: RoadNode, b: RoadNode) -> u32 {
+    u32::try_from(
+        (i64::from(b[0]) - i64::from(a[0])).unsigned_abs()
+            + (i64::from(b[1]) - i64::from(a[1])).unsigned_abs(),
+    )
+    .unwrap_or(u32::MAX)
 }
 
 fn query_cell(value: f32) -> i32 {
@@ -261,11 +297,22 @@ fn ring_proves_nearest(
 }
 
 /// A derived graph over the saved road network.
+///
+/// The graph is normally built once with [`Self::build`]. When roads are only
+/// appended, [`Self::add_segment`] updates the adjacency, node list, nearest
+/// node index, and road count in place instead of rebuilding. Removing or
+/// changing a road still requires a full rebuild.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RoadGraph {
     adjacency: BTreeMap<RoadNode, Vec<(RoadNode, u32)>>,
     nodes: Vec<RoadNode>,
     grid: NodeGrid,
+    /// Accepted segments keyed by id, used to detect duplicate appends.
+    roads: BTreeMap<u64, RoadSegment>,
+    /// Graph nodes keyed by row (`z`) for constant-time split-point scans.
+    row_nodes: BTreeMap<i32, BTreeSet<i32>>,
+    /// Graph nodes keyed by column (`x`) for constant-time split-point scans.
+    column_nodes: BTreeMap<i32, BTreeSet<i32>>,
     road_count: usize,
 }
 
@@ -480,8 +527,7 @@ impl RoadGraph {
             }
         }
 
-        let mut edges: BTreeMap<(RoadNode, RoadNode), u32> = BTreeMap::new();
-        let mut contributing_roads = 0_usize;
+        let mut graph = Self::default();
 
         for road in roads {
             let start = road.start;
@@ -491,7 +537,8 @@ impl RoadGraph {
             if horizontal == vertical {
                 continue;
             }
-            contributing_roads += 1;
+            graph.road_count += 1;
+            graph.roads.insert(road.id, road.clone());
 
             let mut points = vec![start, end];
             if horizontal {
@@ -540,44 +587,322 @@ impl RoadGraph {
                 left[0].cmp(&right[0]).then(left[1].cmp(&right[1]))
             });
             points.dedup();
-            for pair in points.windows(2) {
-                let a = pair[0];
-                let b = pair[1];
-                if a == b {
-                    continue;
-                }
-                let length = u32::try_from(
-                    (i64::from(b[0]) - i64::from(a[0])).unsigned_abs()
-                        + (i64::from(b[1]) - i64::from(a[1])).unsigned_abs(),
-                )
-                .unwrap_or(u32::MAX);
-                let key = if a <= b { (a, b) } else { (b, a) };
-                edges
-                    .entry(key)
-                    .and_modify(|existing| *existing = (*existing).min(length))
-                    .or_insert(length);
-            }
+            graph.connect_points(&points);
         }
 
-        let mut adjacency: BTreeMap<RoadNode, Vec<(RoadNode, u32)>> = BTreeMap::new();
-        for (&(a, b), &length) in &edges {
-            adjacency.entry(a).or_default().push((b, length));
-            adjacency.entry(b).or_default().push((a, length));
+        if graph.adjacency.len() > MAX_TRAFFIC_NODES {
+            return Err(TrafficError::TooManyNodes(graph.adjacency.len()));
         }
-        if adjacency.len() > MAX_TRAFFIC_NODES {
-            return Err(TrafficError::TooManyNodes(adjacency.len()));
+        Ok(graph)
+    }
+
+    /// Append one saved road segment to an already-built graph.
+    ///
+    /// The split points are recomputed against the current node index: the new
+    /// segment is divided at every existing graph node on its line, at every
+    /// perpendicular crossing, and at its own endpoints. Existing edges that
+    /// contain a new point are split, so the result is identical (checksum,
+    /// nearest-node choice, and routes) to a fresh [`Self::build`] over the
+    /// previous segments followed by this one.
+    ///
+    /// Returns `Ok(true)` when at least one new node or edge was inserted. An
+    /// exact duplicate id/geometry, or a segment whose geometry is already
+    /// fully covered by the graph, is accepted as a no-op and returns
+    /// `Ok(false)`; the record still counts toward [`MAX_TRAFFIC_ROADS`], which
+    /// mirrors `build`'s segment count.
+    ///
+    /// Only appends are incremental. Removing a road, changing its geometry,
+    /// or re-adding an existing id with different coordinates needs a full
+    /// rebuild.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrafficError::InvalidSegment`] for a zero-length,
+    /// non-axis-aligned, or out-of-world segment,
+    /// [`TrafficError::DuplicateRoadId`] when the id exists with different
+    /// geometry, and the cap errors when the graph would exceed
+    /// [`MAX_TRAFFIC_ROADS`] or [`MAX_TRAFFIC_NODES`]. Every error leaves the
+    /// graph unchanged.
+    pub fn add_segment(&mut self, road: &RoadSegment) -> Result<bool, TrafficError> {
+        Self::validate_appended_segment(road)?;
+        if let Some(existing) = self.roads.get(&road.id) {
+            return if existing == road {
+                Ok(false)
+            } else {
+                Err(TrafficError::DuplicateRoadId(road.id))
+            };
         }
-        for neighbors in adjacency.values_mut() {
-            neighbors.sort_unstable_by_key(|left| left.0);
+        if self.road_count >= MAX_TRAFFIC_ROADS {
+            return Err(TrafficError::TooManyRoads(self.road_count + 1));
         }
-        let nodes: Vec<RoadNode> = adjacency.keys().copied().collect();
-        let grid = NodeGrid::build(&nodes);
-        Ok(Self {
-            adjacency,
-            nodes,
-            grid,
-            road_count: contributing_roads,
+
+        let points = self.append_split_points(road);
+        let new_nodes = points
+            .iter()
+            .filter(|&&node| !self.adjacency.contains_key(&node))
+            .count();
+        let resulting_nodes = self.adjacency.len().saturating_add(new_nodes);
+        if resulting_nodes > MAX_TRAFFIC_NODES {
+            return Err(TrafficError::TooManyNodes(resulting_nodes));
+        }
+
+        for &point in &points {
+            self.split_at(point);
+        }
+        let changed = self.connect_points(&points);
+        self.roads.insert(road.id, road.clone());
+        self.road_count += 1;
+        Ok(changed)
+    }
+
+    /// Append many saved segments, stopping at the first error.
+    ///
+    /// Returns the number of segments that inserted at least one new node or
+    /// edge. Additions before the error remain applied; callers that need
+    /// all-or-nothing behavior should rebuild with [`Self::build`], clone the
+    /// graph, or validate first. The caps are enforced on every append.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`TrafficError`] from [`Self::add_segment`].
+    pub fn extend_segments(&mut self, roads: &[RoadSegment]) -> Result<usize, TrafficError> {
+        let mut added = 0;
+        for road in roads {
+            if self.add_segment(road)? {
+                added += 1;
+            }
+        }
+        Ok(added)
+    }
+
+    fn validate_appended_segment(road: &RoadSegment) -> Result<(), TrafficError> {
+        let limit = MAX_WORLD_COORD_M as i64;
+        if road
+            .start
+            .iter()
+            .chain(road.end.iter())
+            .any(|value| i64::from(*value).abs() > limit)
+        {
+            return Err(TrafficError::InvalidSegment {
+                id: road.id,
+                reason: "coordinate_out_of_range",
+            });
+        }
+        let dx = i64::from(road.end[0]) - i64::from(road.start[0]);
+        let dz = i64::from(road.end[1]) - i64::from(road.start[1]);
+        if dx == 0 && dz == 0 {
+            return Err(TrafficError::InvalidSegment {
+                id: road.id,
+                reason: "zero_length",
+            });
+        }
+        if dx != 0 && dz != 0 {
+            return Err(TrafficError::InvalidSegment {
+                id: road.id,
+                reason: "not_axis_aligned",
+            });
+        }
+        Ok(())
+    }
+
+    /// Split points for a segment appended to this graph.
+    ///
+    /// Every existing graph node on the segment's line is a split point, as is
+    /// every perpendicular edge crossing it. That matches `build`, where the
+    /// global endpoint and crossing tables already contain those points.
+    fn append_split_points(&self, road: &RoadSegment) -> Vec<RoadNode> {
+        let mut points = BTreeSet::new();
+        points.insert(road.start);
+        points.insert(road.end);
+        if road.start[1] == road.end[1] {
+            let z = road.start[1];
+            let min_x = road.start[0].min(road.end[0]);
+            let max_x = road.start[0].max(road.end[0]);
+            if let Some(xs) = self.row_nodes.get(&z) {
+                for &x in xs.range(min_x..=max_x) {
+                    points.insert([x, z]);
+                }
+            }
+            for (&x, _) in self.column_nodes.range(min_x..=max_x) {
+                if self.column_crossing(x, z) {
+                    points.insert([x, z]);
+                }
+            }
+        } else {
+            let x = road.start[0];
+            let min_z = road.start[1].min(road.end[1]);
+            let max_z = road.start[1].max(road.end[1]);
+            if let Some(zs) = self.column_nodes.get(&x) {
+                for &z in zs.range(min_z..=max_z) {
+                    points.insert([x, z]);
+                }
+            }
+            for (&z, _) in self.row_nodes.range(min_z..=max_z) {
+                if self.row_crossing(x, z) {
+                    points.insert([x, z]);
+                }
+            }
+        }
+        points.into_iter().collect()
+    }
+
+    /// Whether a vertical edge at `x` strictly spans `z`.
+    fn column_crossing(&self, x: i32, z: i32) -> bool {
+        let Some(zs) = self.column_nodes.get(&x) else {
+            return false;
+        };
+        let Some(&lower) = zs.range(..z).next_back() else {
+            return false;
+        };
+        let Some(&upper) = zs.range((Excluded(z), Unbounded)).next() else {
+            return false;
+        };
+        self.has_edge([x, lower], [x, upper])
+    }
+
+    /// Whether a horizontal edge at `z` strictly spans `x`.
+    fn row_crossing(&self, x: i32, z: i32) -> bool {
+        let Some(xs) = self.row_nodes.get(&z) else {
+            return false;
+        };
+        let Some(&lower) = xs.range(..x).next_back() else {
+            return false;
+        };
+        let Some(&upper) = xs.range((Excluded(x), Unbounded)).next() else {
+            return false;
+        };
+        self.has_edge([lower, z], [upper, z])
+    }
+
+    fn has_edge(&self, a: RoadNode, b: RoadNode) -> bool {
+        self.adjacency.get(&a).is_some_and(|neighbors| {
+            neighbors
+                .binary_search_by_key(&b, |&(node, _)| node)
+                .is_ok()
         })
+    }
+
+    /// Split every existing horizontal or vertical edge that contains `point`.
+    fn split_at(&mut self, point: RoadNode) {
+        if let Some((lower, upper)) = self.edge_containing(point, true) {
+            self.split_edge(lower, upper, point);
+        }
+        if let Some((lower, upper)) = self.edge_containing(point, false) {
+            self.split_edge(lower, upper, point);
+        }
+    }
+
+    /// The existing edge on `point`'s row or column that strictly contains it.
+    fn edge_containing(&self, point: RoadNode, horizontal: bool) -> Option<(RoadNode, RoadNode)> {
+        let (line, coordinate) = if horizontal {
+            (point[1], point[0])
+        } else {
+            (point[0], point[1])
+        };
+        let coordinates = if horizontal {
+            self.row_nodes.get(&line)?
+        } else {
+            self.column_nodes.get(&line)?
+        };
+        let lower = *coordinates.range(..coordinate).next_back()?;
+        let upper = *coordinates
+            .range((Excluded(coordinate), Unbounded))
+            .next()?;
+        let (a, b) = if horizontal {
+            ([lower, line], [upper, line])
+        } else {
+            ([line, lower], [line, upper])
+        };
+        self.has_edge(a, b).then_some((a, b))
+    }
+
+    fn split_edge(&mut self, lower: RoadNode, upper: RoadNode, point: RoadNode) {
+        self.remove_edge(lower, upper);
+        self.insert_edge(lower, point);
+        self.insert_edge(point, upper);
+    }
+
+    fn remove_edge(&mut self, a: RoadNode, b: RoadNode) {
+        if let Some(neighbors) = self.adjacency.get_mut(&a) {
+            if let Ok(index) = neighbors.binary_search_by_key(&b, |&(node, _)| node) {
+                neighbors.remove(index);
+            }
+        }
+        if let Some(neighbors) = self.adjacency.get_mut(&b) {
+            if let Ok(index) = neighbors.binary_search_by_key(&a, |&(node, _)| node) {
+                neighbors.remove(index);
+            }
+        }
+    }
+
+    /// Add an undirected edge, keeping neighbor lists sorted by node.
+    ///
+    /// Returns whether the edge was new. The length is fixed by the endpoint
+    /// geometry, so an existing duplicate keeps its value.
+    fn insert_edge(&mut self, a: RoadNode, b: RoadNode) -> bool {
+        self.ensure_node(a);
+        self.ensure_node(b);
+        let length = edge_length(a, b);
+        let inserted = {
+            let neighbors = self
+                .adjacency
+                .get_mut(&a)
+                .expect("insert_edge ensures both endpoints");
+            match neighbors.binary_search_by_key(&b, |&(node, _)| node) {
+                Ok(index) => {
+                    neighbors[index].1 = neighbors[index].1.min(length);
+                    false
+                }
+                Err(index) => {
+                    neighbors.insert(index, (b, length));
+                    true
+                }
+            }
+        };
+        if inserted {
+            let neighbors = self
+                .adjacency
+                .get_mut(&b)
+                .expect("insert_edge ensures both endpoints");
+            if let Err(index) = neighbors.binary_search_by_key(&a, |&(node, _)| node) {
+                neighbors.insert(index, (a, length));
+            }
+        }
+        inserted
+    }
+
+    /// Ensure a node exists in the adjacency, sorted node list, grid, and
+    /// row/column indexes.
+    fn ensure_node(&mut self, node: RoadNode) -> bool {
+        if self.adjacency.contains_key(&node) {
+            return false;
+        }
+        self.adjacency.insert(node, Vec::new());
+        let index = self.nodes.partition_point(|&existing| existing < node);
+        self.nodes.insert(index, node);
+        self.grid.insert(node);
+        self.row_nodes.entry(node[1]).or_default().insert(node[0]);
+        self.column_nodes
+            .entry(node[0])
+            .or_default()
+            .insert(node[1]);
+        true
+    }
+
+    /// Insert consecutive edges along one segment's sorted split points.
+    ///
+    /// Returns whether any node or edge was new. `build` and `add_segment`
+    /// share this step, which is what keeps an appended graph identical to a
+    /// fresh build.
+    fn connect_points(&mut self, points: &[RoadNode]) -> bool {
+        let Some(&first) = points.first() else {
+            return false;
+        };
+        let mut changed = self.ensure_node(first);
+        for pair in points.windows(2) {
+            changed |= self.insert_edge(pair[0], pair[1]);
+        }
+        changed
     }
 
     /// Derived graph statistics.
@@ -1469,5 +1794,244 @@ mod tests {
             ]);
         }
         assert_matches_linear(&graph, &points);
+    }
+
+    /// Assert that an appended graph is indistinguishable from a fresh build:
+    /// checksum, statistics, node list, every nearest-node lookup, and every
+    /// ordered node-pair route and distance.
+    fn assert_equivalent(incremental: &RoadGraph, fresh: &RoadGraph) {
+        assert_eq!(incremental.checksum(), fresh.checksum(), "checksum");
+        assert_eq!(incremental.stats(), fresh.stats(), "stats");
+        assert_eq!(incremental.nodes, fresh.nodes, "nodes");
+        for &node in &fresh.nodes {
+            let point = [node[0] as f32, node[1] as f32];
+            assert_eq!(
+                incremental.nearest_node(point),
+                fresh.nearest_node(point),
+                "nearest at {point:?}"
+            );
+            assert_eq!(
+                incremental.nearest_node_linear(point),
+                fresh.nearest_node_linear(point),
+                "linear nearest at {point:?}"
+            );
+        }
+        for &from_node in &fresh.nodes {
+            for &to_node in &fresh.nodes {
+                let from = [from_node[0] as f32, from_node[1] as f32];
+                let to = [to_node[0] as f32, to_node[1] as f32];
+                assert_eq!(
+                    incremental.distance_m(from, to).map(f32::to_bits),
+                    fresh.distance_m(from, to).map(f32::to_bits),
+                    "distance {from:?} -> {to:?}"
+                );
+                assert_eq!(
+                    incremental.route_points(from, to),
+                    fresh.route_points(from, to),
+                    "route {from:?} -> {to:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn appending_one_segment_to_an_empty_graph_matches_build() {
+        let segment = road(7, [0, 0], [20, 0]);
+        let mut graph = RoadGraph::build(&[]).expect("build");
+        assert!(graph.add_segment(&segment).expect("append"));
+        let fresh = RoadGraph::build(&[segment]).expect("build");
+        assert_equivalent(&graph, &fresh);
+        assert_eq!(graph.stats().roads, 1);
+    }
+
+    #[test]
+    fn appending_a_grid_matches_a_fresh_build() {
+        let roads = grid_roads(6, 16, [-40, -40]);
+        let mut incremental = RoadGraph::build(&[]).expect("build");
+        for (index, segment) in roads.iter().enumerate() {
+            assert!(
+                incremental.add_segment(segment).expect("append"),
+                "segment {index} should be new"
+            );
+        }
+        let fresh = RoadGraph::build(&roads).expect("build");
+        assert_equivalent(&incremental, &fresh);
+        assert_eq!(incremental.stats().components, 1);
+    }
+
+    #[test]
+    fn appending_collinear_and_crossing_segments_matches_build() {
+        let roads = [
+            road(1, [0, 0], [20, 0]),
+            road(2, [5, 0], [15, 0]),
+            road(3, [10, 0], [10, 10]),
+            road(4, [0, 5], [20, 5]),
+            road(5, [10, 5], [10, 15]),
+            road(6, [20, 0], [20, 20]),
+            road(7, [-10, 10], [30, 10]),
+        ];
+        let mut incremental = RoadGraph::build(&[]).expect("build");
+        for (index, segment) in roads.iter().enumerate() {
+            incremental.add_segment(segment).expect("append");
+            let fresh = RoadGraph::build(&roads[..=index]).expect("build");
+            assert_equivalent(&incremental, &fresh);
+        }
+    }
+
+    #[test]
+    fn duplicate_appends_are_no_ops() {
+        let first = road(1, [0, 0], [10, 0]);
+        let mut graph = RoadGraph::build(&[]).expect("build");
+        assert!(graph.add_segment(&first).expect("append"));
+        let checksum = graph.checksum();
+        let stats = graph.stats();
+
+        // Exact id and geometry: no graph change and no extra record.
+        assert!(!graph.add_segment(&first).expect("duplicate"));
+        assert_eq!(graph.checksum(), checksum);
+        assert_eq!(graph.stats(), stats);
+
+        // Same geometry under a new id: the graph is unchanged, but the
+        // record counts exactly as `build` would count it.
+        let duplicate_geometry = road(2, [0, 0], [10, 0]);
+        assert!(!graph.add_segment(&duplicate_geometry).expect("duplicate"));
+        assert_eq!(graph.checksum(), checksum);
+        assert_eq!(graph.stats().roads, 2);
+
+        let fresh = RoadGraph::build(&[first, duplicate_geometry]).expect("build");
+        assert_eq!(graph.checksum(), fresh.checksum());
+        assert_eq!(graph.stats(), fresh.stats());
+    }
+
+    #[test]
+    fn invalid_appends_leave_the_graph_unchanged() {
+        let mut graph = RoadGraph::build(&[road(1, [0, 0], [10, 0]), road(2, [10, 0], [10, 10])])
+            .expect("build");
+        let before = graph.clone();
+        for (segment, reason) in [
+            (road(99, [0, 0], [0, 0]), "zero_length"),
+            (road(99, [0, 0], [5, 5]), "not_axis_aligned"),
+            (
+                road(99, [1_000_001, 0], [1_000_010, 0]),
+                "coordinate_out_of_range",
+            ),
+            (
+                road(99, [-1_000_001, 0], [-1_000_010, 0]),
+                "coordinate_out_of_range",
+            ),
+        ] {
+            assert_eq!(
+                graph.add_segment(&segment),
+                Err(TrafficError::InvalidSegment { id: 99, reason }),
+                "segment {segment:?}"
+            );
+            assert_eq!(graph, before, "graph changed after rejecting {segment:?}");
+        }
+
+        let conflicting_id = road(1, [0, 0], [5, 0]);
+        assert_eq!(
+            graph.add_segment(&conflicting_id),
+            Err(TrafficError::DuplicateRoadId(1))
+        );
+        assert_eq!(graph, before);
+    }
+
+    #[test]
+    fn appending_respects_the_road_cap() {
+        let mut graph = RoadGraph::build(&[]).expect("build");
+        // Poke the private counter instead of appending 10,000 roads.
+        graph.road_count = MAX_TRAFFIC_ROADS;
+        assert_eq!(
+            graph.add_segment(&road(1, [0, 0], [10, 0])),
+            Err(TrafficError::TooManyRoads(MAX_TRAFFIC_ROADS + 1))
+        );
+        assert!(graph.is_empty());
+        assert_eq!(graph.stats().roads, MAX_TRAFFIC_ROADS);
+    }
+
+    #[test]
+    fn appending_respects_the_node_cap() {
+        let mut graph = RoadGraph::build(&[road(1, [0, 0], [10, 0])]).expect("build");
+        for index in 0..MAX_TRAFFIC_NODES {
+            graph
+                .adjacency
+                .insert([1_000 + index as i32, 0], Vec::new());
+        }
+        let node_count = graph.adjacency.len();
+        assert_eq!(
+            graph.add_segment(&road(2, [0, 0], [10, 0])),
+            Err(TrafficError::TooManyNodes(MAX_TRAFFIC_NODES + 2))
+        );
+        assert_eq!(graph.adjacency.len(), node_count);
+        assert_eq!(graph.stats().roads, 1);
+    }
+
+    #[test]
+    fn appending_a_segment_connects_two_components() {
+        let first = road(1, [0, 0], [10, 0]);
+        let second = road(2, [20, 0], [30, 0]);
+        let mut graph = RoadGraph::build(&[first.clone(), second.clone()]).expect("build");
+        assert_eq!(graph.stats().components, 2);
+        assert_eq!(graph.distance_m([0.0, 0.0], [30.0, 0.0]), None);
+
+        let bridge = road(3, [10, 0], [20, 0]);
+        assert!(graph.add_segment(&bridge).expect("append"));
+        assert_eq!(graph.stats().components, 1);
+        assert!((graph.distance_m([0.0, 0.0], [30.0, 0.0]).expect("path") - 30.0).abs() < 0.001);
+        assert_equivalent(
+            &graph,
+            &RoadGraph::build(&[first, second, bridge]).expect("build"),
+        );
+    }
+
+    #[test]
+    fn extend_segments_counts_new_geometry_and_stops_on_error() {
+        let first = road(1, [0, 0], [10, 0]);
+        let second = road(2, [10, 0], [10, 10]);
+        let mut graph = RoadGraph::build(&[]).expect("build");
+        let result =
+            graph.extend_segments(&[first.clone(), road(3, [0, 0], [0, 0]), second.clone()]);
+        assert_eq!(
+            result,
+            Err(TrafficError::InvalidSegment {
+                id: 3,
+                reason: "zero_length"
+            })
+        );
+        // The first segment landed; the invalid segment stopped the batch.
+        assert_eq!(graph.stats().roads, 1);
+        assert_eq!(
+            graph.checksum(),
+            RoadGraph::build(std::slice::from_ref(&first))
+                .expect("build")
+                .checksum()
+        );
+        assert!(graph.add_segment(&second).expect("append"));
+        assert_eq!(
+            graph.checksum(),
+            RoadGraph::build(&[first, second])
+                .expect("build")
+                .checksum()
+        );
+    }
+
+    #[test]
+    fn extend_segments_does_not_count_already_covered_geometry() {
+        let first = road(1, [0, 0], [10, 0]);
+        let covered = road(2, [2, 0], [8, 0]);
+        let mut graph = RoadGraph::build(&[]).expect("build");
+        assert_eq!(
+            graph
+                .extend_segments(&[first.clone(), covered.clone()])
+                .expect("extend"),
+            1
+        );
+        assert_eq!(graph.stats().roads, 2);
+        assert_eq!(
+            graph.checksum(),
+            RoadGraph::build(&[first, covered])
+                .expect("build")
+                .checksum()
+        );
     }
 }

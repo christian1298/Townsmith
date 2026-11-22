@@ -1,4 +1,5 @@
 //! Road-graph build, pair-query, and flow-field reuse microbenchmark.
+#![recursion_limit = "256"]
 //!
 //! Builds a deterministic square road grid, then measures graph construction,
 //! a fixed batch of point-to-point commute queries, one flow field with batched
@@ -36,6 +37,42 @@ fn main() {
     let graph = RoadGraph::build(&roads).expect("traffic graph");
     let build_ms = build_start.elapsed().as_secs_f64() * 1_000.0;
     let stats = graph.stats();
+
+    // Incremental append: add 64 crossing roads one at a time and compare the
+    // result with a fresh build over the combined segment list.
+    let append_count = 64.min(grid);
+    let mut extra = Vec::with_capacity(append_count);
+    for index in 0..append_count {
+        extra.push(RoadSegment {
+            id: roads.len() as u64 + index as u64 + 1,
+            start: [0, index as i32 * SPACING_M + 8],
+            end: [extent, index as i32 * SPACING_M + 8],
+            width_m: 8,
+        });
+    }
+    let mut appended = RoadGraph::build(&roads).expect("traffic graph append base");
+    let append_start = Instant::now();
+    for road in &extra {
+        assert!(
+            appended.add_segment(road).expect("append road"),
+            "new road must add graph structure"
+        );
+    }
+    let append_ms = append_start.elapsed().as_secs_f64() * 1_000.0;
+    let mut combined = roads.clone();
+    combined.extend(extra.iter().cloned());
+    let append_rebuild_start = Instant::now();
+    let rebuilt = RoadGraph::build(&combined).expect("traffic graph combined rebuild");
+    let append_rebuild_ms = append_rebuild_start.elapsed().as_secs_f64() * 1_000.0;
+    let mut single = RoadGraph::build(&roads).expect("traffic graph single base");
+    let append_single_start = Instant::now();
+    single.add_segment(&extra[0]).expect("single append road");
+    let append_single_ms = append_single_start.elapsed().as_secs_f64() * 1_000.0;
+    assert_eq!(
+        appended.checksum(),
+        rebuilt.checksum(),
+        "incremental append changed the graph"
+    );
 
     let mut seed = 0x2545_f491_4f6c_dd1d_u64;
     let query_start = Instant::now();
@@ -204,6 +241,14 @@ fn main() {
         "goal_flow_query_ms": goal_flow_query_ms,
         "goal_flow_average_m": if goal_reached == 0 { 0.0 } else { goal_total_m / goal_reached as f64 },
         "flow_checksum": format!("{:016x}", cached_checksum),
+        "append_roads": append_count,
+        "append_ms": append_ms,
+        "append_rebuild_ms": append_rebuild_ms,
+        "append_speedup": if append_ms > 0.0 { append_rebuild_ms / append_ms } else { 0.0 },
+        "append_checksum": format!("{:016x}", appended.checksum()),
+        "append_rebuild_checksum": format!("{:016x}", rebuilt.checksum()),
+        "append_single_ms": append_single_ms,
+        "append_single_speedup": if append_single_ms > 0.0 { append_rebuild_ms / append_single_ms } else { 0.0 },
         "checksum": format!("{:016x}", graph.checksum()),
     });
     println!(
