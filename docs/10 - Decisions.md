@@ -46,6 +46,7 @@ tags:
 | D-026 | Workshop-first blueprint authoring; permissioned live editing later | Accepted | 2026-11-19 | [[02 - Game Design]], [[05 - Multiplayer]] |
 | D-027 | `.tsbp` v1 package: zip + JSON + RLE voxels + BLAKE3 hash | Accepted | 2026-11-20 | [[28 - Blueprint Package]], [[03 - Voxel and Scale]] |
 | D-028 | Construction is billed in phase installments; unaffordable work stalls | Proposed | 2026-11-22 | [[53 - Treasury and Taxes]], [[77 - Infrastructure Costs]], [[02 - Game Design]] |
+| D-029 | Construction uses a mode-selected clock; campaign builds take game days | Proposed | 2026-11-22 | [[02 - Game Design]], [[09 - Open Questions]], [[53 - Treasury and Taxes]] |
 
 ---
 
@@ -1248,6 +1249,58 @@ Placement currently checks and charges the full material price up front, while t
 ### Review trigger
 
 Bridge/economy wiring, the first playable large-city financing run, and the Q-101 playtest.
+
+---
+
+## D-029 — Construction uses a mode-selected clock; campaign builds take game days
+
+**Status:** Proposed · **Date:** 2026-11-22 · **Affects:** [[02 - Game Design]], [[09 - Open Questions]], [[53 - Treasury and Taxes]], [[77 - Infrastructure Costs]]
+
+### Context
+
+Construction currently finishes in 8–120 real seconds (`total_seconds_for`), while population, needs, taxes, and upkeep advance in game days. The mismatch makes the economy and the build visible only as separate time systems: a completed building can earn taxes for years of simulated time before the next building is placed, and the `financing` projection cannot use the live construction schedule. Q-102 asks whether phases should take game days.
+
+### Decision
+
+- Keep the existing seconds-based scale as the **developer/vertical-slice default**. It is fast for tests, smoke runs, and iteration.
+- Add a mode/config-selected **campaign clock**. The recommended default is **1 game day = 60 real seconds** at 1×.
+- Campaign phase durations are authored in game days, not wall seconds. Targets: a cottage takes **2–4 game days** total; a mid-rise takes roughly **15–40 days**; a high-rise structure/envelope phase takes **10–30 days**, with a **30-day cap per phase**. Exact numbers are content/balance data.
+- Construction advances on the **same authoritative simulated game clock** as population, needs, production, and economy. Pause stops it (D-021); multiplayer speed/time control affects it; no wall-clock or per-client timers.
+- Advancement is fixed-step and deterministic. The bridge converts real frame delta to game seconds once, then feeds construction the same clock as the city tick.
+- Fast-forward speeds (1×/2×/4×) and a developer debug multiplier are allowed; they scale the clock, not the phase data.
+- The HUD shows a phase ETA in game days, not a raw second count. Existing saves store phase progress as a fraction, so loading them under either scale is safe; a later migration may store absolute game-time deadlines.
+- The `financing` projection is replaced only after a campaign-scale run exists; until then it stays explicitly labeled as a projection.
+
+### Consequences
+
+**Positive**
+- Construction, taxes, upkeep, and financing share one time axis, so the projection can become a real schedule.
+- Build time becomes a visible, tunable cost rather than a hidden animation.
+- Multiplayer and pause semantics stay consistent because the server owns the clock.
+- Tests can keep the fast developer scale and add a campaign-scale profile.
+
+**Negative**
+- Campaign builds are slow in real time; fast-forward and ETA UI become necessary.
+- Existing balance numbers assume seconds and need a campaign re-baseline.
+- Phase durations become content data, adding schema and tuning work.
+
+### Alternatives considered
+
+- **Keep seconds everywhere:** simplest, but the economy and construction never align and the financing projection stays disconnected.
+- **Real-time minutes per phase:** closer to a city-builder feel, but long waits, poor testability, and weak multiplayer fit unless fast-forward is mandatory.
+- **Pure day ticks with no sub-day progress:** simple, but the progress bar jumps and short phases lose visible motion.
+
+### Option comparison
+
+| Option | Determinism | Server/multiplayer fit | Financing realism | Player waiting | Test cost |
+|---|---|---|---|---|---|
+| Developer seconds | High | High | Low | None | Lowest |
+| Campaign game days (recommended) | High with fixed step | High; server clock | High | Medium; fast-forward needed | Medium |
+| Real-time minutes | Medium; wall-clock risk | Low without server clock | Medium | High | High |
+
+### Review trigger
+
+Human sign-off on the campaign default, then a measured financing run using the live construction clock (Q-102). Until both land, D-028's projection remains a placeholder.
 
 ---
 
