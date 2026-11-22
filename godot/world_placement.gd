@@ -204,6 +204,17 @@ var lifecycle_deaths_total := 0
 var lifecycle_last_error := ""
 var lifecycle_last_result: Dictionary = {}
 
+# Opt-in construction clock (D-029, Proposed). The bridge store is the source
+# of truth; these fields cache the last successful read. `campaign_clock_days`
+# is presentation only: it accumulates construction-tick seconds divided by
+# the campaign rate and resets when campaign mode is entered.
+const CAMPAIGN_SECONDS_PER_DAY := 60.0
+var construction_clock_mode := "developer_seconds"
+var construction_clock_seconds_per_day := 0.0
+var construction_clock_checksum := ""
+var campaign_clock_days := 0.0
+var construction_clock_last_error := ""
+
 var blueprint_path := ""
 var save_path := ""
 var starter_index := -1
@@ -229,6 +240,7 @@ func _ready() -> void:
 	lifecycle_clock_enabled = not OS.get_cmdline_user_args().has("--scene-smoke") and DisplayServer.get_name() != "headless"
 	i18n = WorldI18n.new()
 	core = TownsmithCore.new()
+	_refresh_construction_clock_state()
 	_resolve_paths()
 	_setup_world()
 	_setup_ui()
@@ -407,6 +419,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					_toggle_materialization()
 				KEY_F7:
 					_toggle_heatmap()
+				KEY_F8:
+					_toggle_construction_clock()
 				KEY_T:
 					_cycle_tax_policy()
 				KEY_L:
@@ -2310,7 +2324,10 @@ func _update_hud() -> void:
 			structure_text,
 			i18n.t("base.ui.help.move"),
 			i18n.t("base.ui.help.edit"),
-			i18n.t("base.ui.help.tools", {"follow": i18n.t("base.ui.help.follow")}),
+			i18n.t("base.ui.help.tools", {
+				"follow": i18n.t("base.ui.help.follow"),
+				"clock": i18n.t("base.ui.help.clock"),
+			}),
 		]
 	var state: String = (
 		i18n.t("base.ui.hud.valid")
@@ -2467,6 +2484,7 @@ func _update_hud() -> void:
 			"trades": i18n.format_int(int(construction.get("trades", []).size())),
 			"materials": i18n.format_int(int(construction.get("materials_stock", 0))),
 			"save": save_path,
+			"clock": _construction_clock_text(),
 		}),
 	]
 	if not lifecycle_last_result.is_empty():
@@ -3426,6 +3444,8 @@ func _advance_construction(seconds: float) -> Dictionary:
 	if seconds <= 0.0:
 		return {}
 	core.construction_set_trades(SEED)
+	if construction_clock_mode == "campaign_days" and construction_clock_seconds_per_day > 0.0:
+		campaign_clock_days += seconds / construction_clock_seconds_per_day
 	var report: Dictionary = core.construction_tick(seconds)
 	core.utilities_refresh(SEED)
 	core.services_refresh(SEED)
@@ -3436,6 +3456,49 @@ func _advance_construction(seconds: float) -> Dictionary:
 	_refresh_construction_visuals()
 	_update_hud()
 	return report
+
+
+func _refresh_construction_clock_state() -> Dictionary:
+	var state: Dictionary = core.construction_time_scale_state()
+	if bool(state.get("ok", false)):
+		construction_clock_mode = str(state.get("mode", "developer_seconds"))
+		construction_clock_seconds_per_day = float(state.get("seconds_per_game_day", 0.0))
+		construction_clock_checksum = str(state.get("checksum", ""))
+	else:
+		var code := str(state.get("error_code", "clock_state_failed"))
+		if code != construction_clock_last_error:
+			construction_clock_last_error = code
+			push_warning("Construction clock state failed: " + code)
+	return state
+
+
+func _construction_clock_text() -> String:
+	if construction_clock_mode == "campaign_days":
+		return i18n.t("base.ui.hud.clock_campaign", {
+			"seconds": i18n.format_float(construction_clock_seconds_per_day, 0),
+			"day": i18n.format_int(floori(campaign_clock_days)),
+		})
+	return i18n.t("base.ui.hud.clock_developer")
+
+
+func _toggle_construction_clock() -> bool:
+	var next_mode := "developer" if construction_clock_mode == "campaign_days" else "campaign"
+	var seconds := 0.0 if next_mode == "developer" else CAMPAIGN_SECONDS_PER_DAY
+	var result: Dictionary = core.set_construction_time_scale(next_mode, seconds)
+	if not bool(result.get("ok", false)):
+		var code := str(result.get("error_code", result.get("error", "clock_failed")))
+		if code != construction_clock_last_error:
+			construction_clock_last_error = code
+			push_warning("Construction clock change failed: " + code)
+		return false
+	construction_clock_last_error = ""
+	construction_clock_mode = str(result.get("mode", "developer_seconds"))
+	construction_clock_seconds_per_day = float(result.get("seconds_per_game_day", 0.0))
+	construction_clock_checksum = str(result.get("checksum", ""))
+	if construction_clock_mode == "campaign_days":
+		campaign_clock_days = 0.0
+	_update_hud()
+	return true
 
 func _toggle_crew() -> void:
 	var summary: Dictionary = core.construction_summary()
@@ -3601,6 +3664,7 @@ func _run_scene_smoke() -> void:
 	var hud_status_i18n_ok := false
 	var dashboard_body_i18n_ok := false
 	var lifecycle_scene_ok := false
+	var campaign_hud_ok := false
 	var save_ok := false
 	var clear_ok := false
 	var load_ok := false
@@ -4675,10 +4739,41 @@ func _run_scene_smoke() -> void:
 		if not lifecycle_scene_ok:
 			status = "lifecycle_failed"
 
+	if status == "ok":
+		var developer_state: Dictionary = core.construction_time_scale_state()
+		var developer_checksum := str(developer_state.get("checksum", ""))
+		campaign_hud_ok = bool(developer_state.get("ok", false))
+		campaign_hud_ok = campaign_hud_ok and str(developer_state.get("mode", "")) == "developer_seconds"
+		campaign_hud_ok = campaign_hud_ok and developer_checksum.length() == 16
+		campaign_hud_ok = campaign_hud_ok and status_label.text.contains("Clock: Developer")
+		if campaign_hud_ok:
+			var toggled_campaign := _toggle_construction_clock()
+			var campaign_state: Dictionary = core.construction_time_scale_state()
+			campaign_hud_ok = toggled_campaign and bool(campaign_state.get("ok", false))
+			campaign_hud_ok = campaign_hud_ok and str(campaign_state.get("mode", "")) == "campaign_days"
+			campaign_hud_ok = campaign_hud_ok and absf(float(campaign_state.get("seconds_per_game_day", 0.0)) - 60.0) < 0.001
+			campaign_hud_ok = campaign_hud_ok and str(campaign_state.get("checksum", "")) == construction_clock_checksum
+			campaign_hud_ok = campaign_hud_ok and str(campaign_state.get("checksum", "")) != developer_checksum
+			campaign_hud_ok = campaign_hud_ok and status_label.text.contains("Clock: Campaign · 60 s/day · Day 0")
+			i18n.set_locale("de")
+			_update_hud()
+			campaign_hud_ok = campaign_hud_ok and status_label.text.contains("Uhr: Kampagne · 60 s/Tag · Tag 0")
+			campaign_hud_ok = campaign_hud_ok and not status_label.text.contains("!base.ui.")
+			i18n.set_locale("en")
+			_update_hud()
+			var toggled_developer := _toggle_construction_clock()
+			var restored_state: Dictionary = core.construction_time_scale_state()
+			campaign_hud_ok = campaign_hud_ok and toggled_developer and bool(restored_state.get("ok", false))
+			campaign_hud_ok = campaign_hud_ok and str(restored_state.get("mode", "")) == "developer_seconds"
+			campaign_hud_ok = campaign_hud_ok and str(restored_state.get("checksum", "")) == developer_checksum
+			campaign_hud_ok = campaign_hud_ok and status_label.text.contains("Clock: Developer")
+		if not campaign_hud_ok:
+			status = "campaign_hud_failed"
+
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s heatmap_ui=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s heatmap_ui=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -4734,6 +4829,7 @@ func _run_scene_smoke() -> void:
 		"ok" if load_ok else "failed",
 		"ok" if status == "ok" else "failed",
 		"ok" if lifecycle_scene_ok else "failed",
+		"ok" if campaign_hud_ok else "failed",
 		status,
 	])
 	get_tree().quit(0 if status == "ok" else 1)

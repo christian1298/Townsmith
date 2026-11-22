@@ -23,7 +23,7 @@ tags:
 | Surface | Runtime source | EN keys | DE keys | Parity | Gate |
 |---|---|---:|---:|---|---|
 | First-person volume editor | `godot/editor_i18n.gd` | 111 | 111 | complete | `check_locale.sh` + `smoke_locale.sh` |
-| World-placement HUD, status, help | `godot/world_placement.gd` | 223 world keys | 0 | `world_i18n.gd` | dashboard shell/body, HUD shell/status, all role-player modals, and advisor titles/details keyed; content names/numbers raw |
+| World-placement HUD, status, help | `godot/world_placement.gd` | 226 world keys | 0 | `world_i18n.gd` | dashboard shell/body, HUD shell/status, all role-player modals, and advisor titles/details keyed; content names/numbers raw |
 | Dashboard shell and body | `world_placement.gd` + Rust `core_city` payload | 0 | 0 | n/a | none |
 | Advisor titles | Rust `core_city::advisor` | 22 code titles | 0 | `world_i18n.gd` | titles and parameterized details keyed by code |
 | Tutorial titles and hints | Rust payload read by `world_placement.gd` | 0 | 0 | n/a | none |
@@ -225,7 +225,7 @@ The current German editor uses a neutral infinitive/imperative style (“Klicken
 
 | Phase | Scope | Approx. keys | Exit criterion |
 |---|---|---:|---|
-| 1. HUD + dashboard shell/body | `_update_hud`, `_setup_ui`, dashboard title/hint/body | **partial** — 223 world keys | HUD shell/status, dashboard shell/body, all role-player modals, and advisor titles/details keyed; content names/numbers remain |
+| 1. HUD + dashboard shell/body | `_update_hud`, `_setup_ui`, dashboard title/hint/body | **partial** — 226 world keys | HUD shell/status, dashboard shell/body, all role-player modals, and advisor titles/details keyed; content names/numbers remain |
 | 2. Tutorial + content names | Tutorial titles/hints, starter/industry/service/tax names, `capitalize()` removal, structure names | 60–90 | No `capitalize()` or raw content ID reaches a player label |
 | 3. Advisor + errors | Rust advisor title/detail keys, dashboard body labels, modal prefixes, error mapping | **partial** — 22 code titles | Advisor titles/details localized with params; errors and number formatting remain |
 
@@ -285,13 +285,13 @@ Acceptance checks:
 
 ### Static gate
 
-`scripts/check_locale.sh` parses the `TABLES` const in `godot/editor_i18n.gd` and `godot/world_i18n.gd`, plus the `DISPLAY` const in `godot/content_i18n.gd`, and checks key parity, per-file key floors, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. The floors ratchet independently: editor `111`, world `223` (currently 223 keys), content `34`. Default mode prints one line per table plus a summary:
+`scripts/check_locale.sh` parses the `TABLES` const in `godot/editor_i18n.gd` and `godot/world_i18n.gd`, plus the `DISPLAY` const in `godot/content_i18n.gd`, and checks key parity, per-file key floors, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. The floors ratchet independently: editor `111`, world `226` (currently 226 keys), content `34`. Default mode prints one line per table plus a summary:
 
 ```text
 LOCALE_CHECK file=godot/editor_i18n.gd keys=111 min=111 status=ok
-LOCALE_CHECK file=godot/world_i18n.gd keys=223 min=223 status=ok
+LOCALE_CHECK file=godot/world_i18n.gd keys=226 min=226 status=ok
 LOCALE_CHECK file=godot/content_i18n.gd keys=34 min=34 status=ok
-LOCALE_CHECK editor=111 world=223 content=34 status=ok
+LOCALE_CHECK editor=111 world=226 content=34 status=ok
 ```
 
 Single-file mode (`scripts/check_locale.sh [FILE]`) keeps the original `LOCALE_CHECK keys=N status=ok` marker and derives the floor from the file name (`world_i18n.gd` gets 143, `content_i18n.gd` gets 34, anything else 96). `--self-test` covers twelve cases: the six editor cases (valid, missing DE key, extra DE key, empty value, placeholder mismatch, too few keys), a world-style fixture pass, a too-few world table, a world EN/DE placeholder mismatch, and the same three checks for the `DISPLAY` content table. The gate runs in `scripts/check.sh` and the Rust CI job before the Godot locale smoke.
@@ -300,7 +300,7 @@ A pseudo-localization gate follows the table check in default mode:
 
 ```bash
 ./scripts/check_pseudo_locale.py
-PSEUDO_LOCALE editor=111 world=223 content=34 long=11 status=ok
+PSEUDO_LOCALE editor=111 world=226 content=34 long=11 status=ok
 ```
 
 It accents vowels, keeps `{name}`/`{0}` placeholders byte-for-byte, and expands text to 130% of the EN length with a `«…»` marker. It checks EN/DE parity both ways, duplicate/empty keys, placeholder parity, and a 120-character length limit with an explicit 11-key allowlist for long explanatory strings. This catches structural/layout risk before German QA; it is not a translation. `--self-test` covers 17 generator/check cases without writing repository files.

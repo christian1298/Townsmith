@@ -62,7 +62,9 @@ const TABLES := {
 		"base.ui.hud.city": "City: population {population} / housing {housing} ({vacant} vacant) · jobs {jobs} ({employed} employed) · happiness {happiness}",
 		"base.ui.hud.needs": "Needs: {needs}",
 		"base.ui.hud.treasury": "Treasury: {treasury}",
-		"base.ui.hud.construction": "Construction: {active} active / {stalled} stalled   Crew: {crew}/{capacity}   Trades: {trades}   Materials: {materials} L   Save: {save}",
+		"base.ui.hud.construction": "Construction: {active} active / {stalled} stalled   Crew: {crew}/{capacity}   Trades: {trades}   Materials: {materials} L   Save: {save}   {clock}",
+		"base.ui.hud.clock_developer": "Clock: Developer",
+		"base.ui.hud.clock_campaign": "Clock: Campaign · {seconds} s/day · Day {day}",
 
 		# HUD status block.
 		"base.ui.hud.age": "Age: {value}",
@@ -166,7 +168,8 @@ const TABLES := {
 
 		"base.ui.help.move": "WASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement",
 		"base.ui.help.edit": "LMB place · RMB select · Enter: enter selected building",
-		"base.ui.help.tools": "C crew · I industry · U utility · K services · B starter · T tax · L loan · Y research · F1 dashboard · F2 citizens · {follow} · F4 materialization · F7 heatmap · V +10k · F5 save · F9 load",
+		"base.ui.help.tools": "C crew · I industry · U utility · K services · B starter · T tax · L loan · Y research · F1 dashboard · F2 citizens · {follow} · F4 materialization · F7 heatmap · {clock} · V +10k · F5 save · F9 load",
+		"base.ui.help.clock": "F8 clock",
 		"base.ui.help.architect": "First-person view at the selected door · M / Esc returns to Mayor",
 
 		# Dashboard shell.
@@ -310,7 +313,9 @@ const TABLES := {
 		"base.ui.hud.city": "Stadt: Bevölkerung {population} / Wohnraum {housing} ({vacant} frei) · Arbeitsplätze {jobs} ({employed} beschäftigt) · Zufriedenheit {happiness}",
 		"base.ui.hud.needs": "Bedarf: {needs}",
 		"base.ui.hud.treasury": "Staatskasse: {treasury}",
-		"base.ui.hud.construction": "Bau: {active} aktiv / {stalled} stockend   Crew: {crew}/{capacity}   Gewerke: {trades}   Material: {materials} L   Speichern: {save}",
+		"base.ui.hud.construction": "Bau: {active} aktiv / {stalled} stockend   Crew: {crew}/{capacity}   Gewerke: {trades}   Material: {materials} L   Speichern: {save}   {clock}",
+		"base.ui.hud.clock_developer": "Uhr: Entwickler",
+		"base.ui.hud.clock_campaign": "Uhr: Kampagne · {seconds} s/Tag · Tag {day}",
 
 		# HUD-Statusblock.
 		"base.ui.hud.age": "Zeitalter: {value}",
@@ -414,7 +419,8 @@ const TABLES := {
 
 		"base.ui.help.move": "WASD: schwenken · Q/E: drehen · Mausrad: zoomen · R: drehen · X: anheben · Z: absenken · N: Siedlung gründen",
 		"base.ui.help.edit": "LMB: platzieren · RMB: auswählen · Enter: ausgewähltes Gebäude betreten",
-		"base.ui.help.tools": "C: Crew · I: Industrie · U: Versorgung · K: Dienste · B: Startpaket · T: Steuern · L: Kredit · Y: Forschung · F1: Dashboard · F2: Bürger · {follow} · F4: Materialisierung · F7: Heatmap · V: +10k · F5: speichern · F9: laden",
+		"base.ui.help.tools": "C: Crew · I: Industrie · U: Versorgung · K: Dienste · B: Startpaket · T: Steuern · L: Kredit · Y: Forschung · F1: Dashboard · F2: Bürger · {follow} · F4: Materialisierung · F7: Heatmap · {clock} · V: +10k · F5: speichern · F9: laden",
+		"base.ui.help.clock": "F8: Uhr",
 		"base.ui.help.architect": "Ego-Ansicht an der ausgewählten Tür · M / Esc kehrt zum Bürgermeistermodus zurück",
 
 		# Dashboard-Hülle.

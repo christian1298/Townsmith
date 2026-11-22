@@ -37,7 +37,8 @@ if [[ "$LINE" != *"rooms=4"* || "$LINE" != *"preview=ok"* || "$LINE" != *"water=
 		|| "$LINE" != *"advisor_i18n=ok"*
 		|| "$LINE" != *"advisor_detail_i18n=ok"* || "$LINE" != *"modal_i18n=ok"*
 		|| "$LINE" != *"number_i18n=ok"* || "$LINE" != *"traffic=ok"* || "$LINE" != *"select=ok"* || "$LINE" != *"enter=ok"* || "$LINE" != *"return=ok"* || "$LINE" != *"save=ok"* || "$LINE" != *"load=ok"* || "$LINE" != *"guard=ok"*
-		|| "$LINE" != *"lifecycle_scene=ok"* || "$LINE" != *"status=ok"* ]]; then
+		|| "$LINE" != *"campaign_hud=ok"*
+	|| "$LINE" != *"lifecycle_scene=ok"* || "$LINE" != *"status=ok"* ]]; then
 	echo "World scene smoke contract mismatch: $LINE" >&2
 	exit 1
 fi
