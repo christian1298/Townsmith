@@ -2,20 +2,24 @@
 //!
 //! A district policy is a named circle on the world XZ plane with a tax
 //! multiplier, a service-funding multiplier, a construction switch, and a
-//! blueprint allowlist. This module is the **data layer only**:
+//! blueprint allowlist. This module is the **data layer** plus one pure
+//! placement rule:
 //!
-//! - no simulation, household, traffic, or economy code reads a policy yet;
-//! - no UI or bridge consumer displays or edits one yet;
+//! - [`policy_allows_placement`] and [`policy_placement_denial`] decide whether
+//!   a blueprint id may be placed under one policy. The bridge applies the
+//!   result to `world_place_blueprint`; no simulation or economy code reads a
+//!   policy yet;
+//! - no UI displays or edits a policy except the standalone developer scene;
 //! - [`DistrictPolicyStore`] can be composed into the world-save envelope as an
 //!   optional `policies` object; saving and loading persist the records, but
-//!   saving does not apply any tax, funding, construction, or allowlist effect.
+//!   saving does not apply any tax or funding effect.
 //!
 //! The registry is additive and owns its own JSON representation. Composing it
 //! into the world save must not change the policy record fields, the existing
 //! world-save checksum, or a save written without a registry. The deterministic
 //! lookup rule in this slice is the smallest policy id whose inclusive circle
-//! contains a point; overlap resolution, priority, and the actual
-//! tax/funding/allowlist effects remain open design work.
+//! contains a point; overlap resolution, priority, and the actual tax/funding
+//! effects remain open design work.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -60,10 +64,10 @@ pub const MAX_DISTRICT_POLICY_ALLOWLIST: usize = 256;
 
 /// One saved district policy.
 ///
-/// The values are stored for later simulation and UI slices. Nothing in this
-/// build applies them: taxes, service funding, construction gating, and the
-/// blueprint allowlist are inert data until a later ADR and implementation
-/// connect them.
+/// Taxes and service funding remain inert data for later simulation and UI
+/// slices. [`construction_allowed`](Self::construction_allowed) and
+/// [`blueprint_allowlist`](Self::blueprint_allowlist) are applied to blueprint
+/// placement by the bridge through [`policy_placement_denial`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DistrictPolicy {
     /// Stable id within the world. Assigned by the store and immutable on
@@ -79,11 +83,12 @@ pub struct DistrictPolicy {
     pub tax_multiplier: f32,
     /// Service-funding multiplier, `0.0..=2.0`. Not applied yet.
     pub service_funding: f32,
-    /// Whether construction is nominally allowed inside the circle. Not
-    /// enforced yet.
+    /// Whether construction is allowed inside the circle. Enforced for
+    /// blueprint placement by the bridge; taxes and funding stay data-only.
     pub construction_allowed: bool,
-    /// Namespaced blueprint ids allowed in the district. An empty set means no
-    /// allowlist entries; enforcement does not exist yet.
+    /// Namespaced blueprint ids allowed in the district. An empty set is
+    /// unrestricted; a non-empty set denies every other id at blueprint
+    /// placement. See [`policy_allows_placement`].
     pub blueprint_allowlist: BTreeSet<String>,
 }
 
@@ -115,6 +120,86 @@ impl DistrictPolicy {
         let dz = f64::from(self.center[1]) - f64::from(other.center[1]);
         let radii = f64::from(self.radius_m) + f64::from(other.radius_m);
         dx * dx + dz * dz <= radii * radii
+    }
+
+    /// Whether this record is complete enough to enforce a placement rule.
+    ///
+    /// A stored policy is always complete: [`DistrictPolicyStore`] validates
+    /// every record on create and load. This guard makes a hand-built record
+    /// neutral instead of allowing its missing or non-finite geometry to
+    /// produce a denial. The rule only uses the fields that decide
+    /// containment and identity, so a malformed name or allowlist entry does
+    /// not disable an otherwise usable circle.
+    #[must_use]
+    pub fn is_enforceable(&self) -> bool {
+        self.id != 0
+            && self.center.iter().all(|value| value.is_finite())
+            && self.radius_m.is_finite()
+            && self.radius_m > 0.0
+    }
+}
+
+/// Why a district policy denies a blueprint placement.
+///
+/// Both kinds are stable data: the bridge returns [`Self::code`] through its
+/// usual `{ ok: false, error_code, error }` result and a smoke can pin it
+/// without parsing prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyPlacementDenial {
+    /// The policy's `construction_allowed` flag is `false`.
+    ConstructionDisabled,
+    /// The policy's non-empty allowlist does not contain the blueprint id.
+    BlueprintNotAllowed,
+}
+
+impl PolicyPlacementDenial {
+    /// Stable machine-readable code for the bridge error shape.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ConstructionDisabled => "policy_construction_disabled",
+            Self::BlueprintNotAllowed => "policy_blueprint_not_allowed",
+        }
+    }
+}
+
+/// Whether `policy` permits placing `blueprint_id`.
+///
+/// This is the pure placement rule shared by the bridge and tests:
+///
+/// - a policy that is not [`DistrictPolicy::is_enforceable`] is neutral and
+///   permits every blueprint;
+/// - `construction_allowed == false` denies every blueprint;
+/// - an empty `blueprint_allowlist` permits every blueprint;
+/// - a non-empty allowlist permits only its exact, case-sensitive ids.
+///
+/// Circle containment is not part of this helper; callers resolve the policy
+/// with [`DistrictPolicyStore::policy_at`] (smallest containing id) first.
+#[must_use]
+pub fn policy_allows_placement(policy: &DistrictPolicy, blueprint_id: &str) -> bool {
+    policy_placement_denial(policy, blueprint_id).is_none()
+}
+
+/// The reason `policy` denies `blueprint_id`, or `None` when it permits it.
+///
+/// `ConstructionDisabled` takes priority over the allowlist, so a policy with
+/// both fields denying a placement reports the construction switch. See
+/// [`policy_allows_placement`] for the full rule.
+#[must_use]
+pub fn policy_placement_denial(
+    policy: &DistrictPolicy,
+    blueprint_id: &str,
+) -> Option<PolicyPlacementDenial> {
+    if !policy.is_enforceable() {
+        return None;
+    }
+    if !policy.construction_allowed {
+        return Some(PolicyPlacementDenial::ConstructionDisabled);
+    }
+    if policy.blueprint_allowlist.is_empty() || policy.blueprint_allowlist.contains(blueprint_id) {
+        None
+    } else {
+        Some(PolicyPlacementDenial::BlueprintNotAllowed)
     }
 }
 
@@ -1248,5 +1333,135 @@ mod tests {
             Err(DistrictPolicyError::InvalidRadius { radius_m: 1.0 })
         );
         assert_eq!(store.get(original.id), Some(&original));
+    }
+
+    fn placement_policy(id: u64, construction_allowed: bool, allowlist: &[&str]) -> DistrictPolicy {
+        DistrictPolicy {
+            id,
+            name: format!("District {id}"),
+            center: [0.0, 0.0],
+            radius_m: 64.0,
+            tax_multiplier: 1.0,
+            service_funding: 1.0,
+            construction_allowed,
+            blueprint_allowlist: allowlist.iter().map(|id| (*id).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn placement_denial_codes_are_pinned() {
+        assert_eq!(
+            PolicyPlacementDenial::ConstructionDisabled.code(),
+            "policy_construction_disabled"
+        );
+        assert_eq!(
+            PolicyPlacementDenial::BlueprintNotAllowed.code(),
+            "policy_blueprint_not_allowed"
+        );
+    }
+
+    #[test]
+    fn construction_disabled_denies_every_blueprint() {
+        let empty = placement_policy(1, false, &[]);
+        assert_eq!(
+            policy_placement_denial(&empty, "townsmith:hut"),
+            Some(PolicyPlacementDenial::ConstructionDisabled)
+        );
+        assert!(!policy_allows_placement(&empty, "townsmith:hut"));
+
+        // The construction switch wins over the allowlist, including for a
+        // blueprint the policy explicitly lists.
+        let allowlisted = placement_policy(2, false, &["townsmith:hut"]);
+        assert_eq!(
+            policy_placement_denial(&allowlisted, "townsmith:hut"),
+            Some(PolicyPlacementDenial::ConstructionDisabled)
+        );
+        assert!(!policy_allows_placement(&allowlisted, "townsmith:hut"));
+    }
+
+    #[test]
+    fn non_empty_allowlist_permits_only_listed_ids() {
+        let policy = placement_policy(1, true, &["townsmith:hut", "townsmith:shop"]);
+        assert!(policy_allows_placement(&policy, "townsmith:hut"));
+        assert!(policy_allows_placement(&policy, "townsmith:shop"));
+
+        // Exact and case-sensitive: no prefix, case, or namespace slack.
+        for denied in [
+            "townsmith:house",
+            "townsmith:hut.2",
+            "Townsmith:Hut",
+            "townsmith:h",
+            "",
+        ] {
+            assert_eq!(
+                policy_placement_denial(&policy, denied),
+                Some(PolicyPlacementDenial::BlueprintNotAllowed),
+                "{denied:?} must be denied"
+            );
+            assert!(!policy_allows_placement(&policy, denied));
+        }
+    }
+
+    #[test]
+    fn empty_allowlist_permits_every_blueprint() {
+        let policy = placement_policy(1, true, &[]);
+        for allowed in [
+            "townsmith:hut",
+            "townsmith:shop",
+            "core:anvil",
+            "not-a-namespaced-id",
+        ] {
+            assert_eq!(policy_placement_denial(&policy, allowed), None);
+            assert!(policy_allows_placement(&policy, allowed));
+        }
+    }
+
+    #[test]
+    fn outside_the_circle_is_neutral_through_policy_at() {
+        let mut store = DistrictPolicyStore::new(2026);
+        let mut deny = request("Riverside", 100.0, 100.0, 64.0);
+        deny.construction_allowed = false;
+        store.create(&deny).expect("create");
+
+        let inside = store.policy_at([100.0, 100.0]).expect("contained");
+        assert_eq!(
+            policy_placement_denial(inside, "townsmith:hut"),
+            Some(PolicyPlacementDenial::ConstructionDisabled)
+        );
+
+        // No containing policy means no rule to apply; the caller permits.
+        assert!(store.policy_at([500.0, 500.0]).is_none());
+        assert!(store.policy_at([100.0 + 64.0 + 0.5, 100.0]).is_none());
+    }
+
+    #[test]
+    fn non_enforceable_policy_is_neutral() {
+        let mut zero_id = placement_policy(0, false, &["townsmith:hut"]);
+        assert!(!zero_id.is_enforceable());
+
+        let mut nan_center = placement_policy(1, false, &[]);
+        nan_center.center = [f32::NAN, 0.0];
+
+        let mut infinite_radius = placement_policy(2, false, &[]);
+        infinite_radius.radius_m = f32::INFINITY;
+
+        let mut zero_radius = placement_policy(3, false, &[]);
+        zero_radius.radius_m = 0.0;
+
+        let mut negative_radius = placement_policy(4, false, &[]);
+        negative_radius.radius_m = -64.0;
+
+        for policy in [
+            &mut zero_id,
+            &mut nan_center,
+            &mut infinite_radius,
+            &mut zero_radius,
+            &mut negative_radius,
+        ] {
+            assert!(!policy.is_enforceable(), "{policy:?}");
+            assert_eq!(policy_placement_denial(policy, "townsmith:hut"), None);
+            assert_eq!(policy_placement_denial(policy, "townsmith:other"), None);
+            assert!(policy_allows_placement(policy, "townsmith:other"));
+        }
     }
 }

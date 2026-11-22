@@ -127,7 +127,8 @@ pub use placement::{
     WATER_LEVEL_M, WORLD_SAVE_FORMAT_VERSION,
 };
 pub use policy::{
-    DistrictPolicy, DistrictPolicyError, DistrictPolicyRequest, DistrictPolicyStore,
+    policy_allows_placement, policy_placement_denial, DistrictPolicy, DistrictPolicyError,
+    DistrictPolicyRequest, DistrictPolicyStore, PolicyPlacementDenial,
     DISTRICT_POLICY_FORMAT_VERSION, MAX_DISTRICT_POLICIES, MAX_DISTRICT_POLICY_ALLOWLIST,
     MAX_DISTRICT_POLICY_ID, MAX_DISTRICT_POLICY_NAME_CHARS, MAX_DISTRICT_POLICY_RADIUS_M,
     MAX_DISTRICT_SERVICE_FUNDING, MAX_DISTRICT_TAX_MULTIPLIER, MIN_DISTRICT_POLICY_RADIUS_M,

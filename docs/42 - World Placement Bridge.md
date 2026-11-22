@@ -25,7 +25,7 @@ tags:
 | `world_validate_placement(seed, path, x, z, rotation)` | `Dictionary` | Load and validate a `.tsbp` site without mutating; `ok`, `center`, `foundation_m`, `footprint`, `rotation_deg`, `bounds`, `blueprint_hash`, `structure` |
 | `progression_state(seed)` | `Dictionary` | Derived population age: `age`, `next_age`, `next_threshold`, `progress`, `materials` |
 | `world_blueprint_info(path)` | `Dictionary` | Metadata for the ghost/HUD: id, name, hash, bounds, rooms, capacity, jobs, cost |
-| `world_place_blueprint(seed, path, x, z, rotation)` | `Dictionary` | Validate and append; `ok`, `seed`, `count`, `checksum`, `placement` |
+| `world_place_blueprint(seed, path, x, z, rotation)` | `Dictionary` | Validate, apply the district construction/allowlist gate, and append; `ok`, `seed`, `count`, `checksum`, `placement` |
 | `world_placements()` | `Dictionary` | `open`, `seed`, `next_id`, `count`, `checksum`, `placements[]` |
 | `world_placement_count()` | `int` | Placement count |
 | `world_placement_checksum()` | `String` | Stable 64-bit checksum, hex |
@@ -73,6 +73,19 @@ Lot methods (`lot_validate`, `lot_add`, `lots`, `lot_count`, `lot_checksum`, `lo
 | Cost | finite and non-negative |
 
 The sampler uses `WorldGenerator::height_at` on the 1 m grid, not the currently loaded chunks, so placement does not depend on streaming state.
+
+### District policy gate
+
+`world_place_blueprint` applies the district construction switch and blueprint allowlist immediately after `world_placement_request` has loaded and validated the package, and before the seed/age gates, world or economy locks, any mutation, or charging. It reads the optional registry briefly and resolves the containing policy with `policy_at([center_x, center_z])`, the **smallest id** whose inclusive circle contains the placement centre. A larger-id permissive policy does not override a smaller-id denial, and a larger-id denial does not override a smaller-id permit.
+
+| Condition | Result |
+|---|---|
+| No registry, registry seed ≠ requested seed, or centre outside every circle | Neutral; placement continues |
+| Containing policy has `construction_allowed = false` | `policy_construction_disabled` |
+| Containing policy has a non-empty allowlist without this exact blueprint id | `policy_blueprint_not_allowed` |
+| Containing policy is not enforceable (hand-built record) | Neutral; placement continues |
+
+Both errors use the usual `{ ok: false, error_code, error }` shape and the message `district policy <id> blocks placing blueprint <id> here`. The rule is additive: a world without a registry places exactly as before, and the gate neither reads nor mutates the placement, construction, or economy checksums. It covers blueprint placement only — `world_validate_placement`, utility and service placement, and roads are not gated, so an ungated ghost preview can succeed where `world_place_blueprint` later denies. Tax and service-funding multipliers remain inert. See [[57 - Dashboard and Advisor]] §4.1 for the registry and save contract.
 
 ## 3. Save format
 

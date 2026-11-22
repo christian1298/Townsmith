@@ -28,21 +28,22 @@ use core_blueprint::{
 };
 use core_city::named::{age_years_from_days, slot_is_employed, MAX_AGE_DAYS};
 use core_city::{
-    advise, diff_selection, evaluate_tutorial, heatmap_grid, normalize_rotation, starter,
-    summarize, summarize_district, summarize_heatmap, AdvisorInput, AdvisorReport, Age, AgeState,
-    CitizenDeath, CitizenMotion, CitizenPosition, CityLayout, CityRuntime, CitySummary, CityTier,
-    ConstructionPhase, ConstructionSite, ConstructionStore, ConstructionTimeScale, DistrictHeatmap,
-    DistrictPolicy, DistrictPolicyError, DistrictPolicyRequest, DistrictPolicyStore,
-    DistrictSummary, Economy, Home, Household, IndustryKind, IndustryStore, InfrastructureCosts,
-    LifecycleTick, Lot, LotError, LotRequest, LotStore, MaterializationBudget,
-    MaterializationSelection, MaterializedCitizen, MotionLeg, NamedCitizens, NamedSave, Placement,
-    PlacementError, PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph,
-    RoadRequest, RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind, ServiceReport,
-    ServiceStore, ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore,
-    TechTree, Trade, TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport,
-    UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS,
-    DEFAULT_ROUTE_CACHE_CAPACITY, MAX_HEATMAP_CELLS, MAX_HEATMAP_CELL_M, MAX_LOANS, MAX_TOTAL_DEBT,
-    MAX_WORLD_COORD_M, MIN_HEATMAP_CELL_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    advise, diff_selection, evaluate_tutorial, heatmap_grid, normalize_rotation,
+    policy_placement_denial, starter, summarize, summarize_district, summarize_heatmap,
+    AdvisorInput, AdvisorReport, Age, AgeState, CitizenDeath, CitizenMotion, CitizenPosition,
+    CityLayout, CityRuntime, CitySummary, CityTier, ConstructionPhase, ConstructionSite,
+    ConstructionStore, ConstructionTimeScale, DistrictHeatmap, DistrictPolicy, DistrictPolicyError,
+    DistrictPolicyRequest, DistrictPolicyStore, DistrictSummary, Economy, Home, Household,
+    IndustryKind, IndustryStore, InfrastructureCosts, LifecycleTick, Lot, LotError, LotRequest,
+    LotStore, MaterializationBudget, MaterializationSelection, MaterializedCitizen, MotionLeg,
+    NamedCitizens, NamedSave, Placement, PlacementError, PlacementRequest, PlacementStore,
+    PolicyPlacementDenial, ResearchStore, RoadError, RoadGraph, RoadRequest, RoadSegment,
+    RoadStore, RouteCache, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore, ServiceTier,
+    Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree, Trade, TradePool,
+    TutorialInput, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
+    DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY,
+    MAX_HEATMAP_CELLS, MAX_HEATMAP_CELL_M, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M,
+    MIN_HEATMAP_CELL_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -1053,6 +1054,26 @@ impl TownsmithCore {
             Ok(value) => value,
             Err(error) => return error,
         };
+        {
+            let policies = self
+                .policies
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(denial) = placement_policy_denial(
+                policies.as_ref(),
+                seed,
+                [request.center_x, request.center_z],
+                &request.blueprint_id,
+            ) {
+                return placement_simple_error(
+                    denial.kind.code(),
+                    format!(
+                        "district policy {} blocks placing blueprint {} here",
+                        denial.policy_id, request.blueprint_id
+                    ),
+                );
+            }
+        }
         if let Some(error) = self.world_seed_error(seed) {
             return error;
         }
@@ -9688,6 +9709,40 @@ fn policy_summary(policies: Option<&DistrictPolicyStore>) -> (usize, u64) {
     policies.map_or((0, 0), |store| (store.count(), store.checksum()))
 }
 
+/// One placement denial resolved from the live district-policy registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlacementPolicyDenialPayload {
+    /// Id of the smallest containing policy that produced the denial.
+    policy_id: u64,
+    /// Which rule denied the blueprint.
+    kind: PolicyPlacementDenial,
+}
+
+/// Resolve the placement rule for one point and blueprint.
+///
+/// Returns `None` when no registry is open, the registry belongs to another
+/// seed, or no enforceable policy contains the point. Overlaps resolve through
+/// [`DistrictPolicyStore::policy_at`], so the smallest containing id decides
+/// even when a larger id would permit the blueprint. A non-enforceable record
+/// is left alone and permits the placement.
+fn placement_policy_denial(
+    policies: Option<&DistrictPolicyStore>,
+    seed: u64,
+    center: [f32; 2],
+    blueprint_id: &str,
+) -> Option<PlacementPolicyDenialPayload> {
+    let store = policies?;
+    if store.seed != seed {
+        return None;
+    }
+    let policy = store.policy_at(center)?;
+    let kind = policy_placement_denial(policy, blueprint_id)?;
+    Some(PlacementPolicyDenialPayload {
+        policy_id: policy.id,
+        kind,
+    })
+}
+
 fn attach_economy(json: &str, economy: &Economy) -> Result<String, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(json).map_err(|error| error.to_string())?;
@@ -10443,6 +10498,141 @@ mod tests {
             construction_allowed: true,
             blueprint_allowlist: std::collections::BTreeSet::new(),
         }
+    }
+
+    #[test]
+    fn placement_policy_denial_is_neutral_without_a_store_or_policy() {
+        assert_eq!(
+            placement_policy_denial(None, 2026, [100.0, 100.0], "townsmith:hut"),
+            None
+        );
+        let empty = DistrictPolicyStore::new(2026);
+        assert_eq!(
+            placement_policy_denial(Some(&empty), 2026, [100.0, 100.0], "townsmith:hut"),
+            None
+        );
+        let mut store = DistrictPolicyStore::new(2026);
+        store
+            .create(&district_policy_request("Riverside"))
+            .expect("create");
+        assert_eq!(
+            placement_policy_denial(Some(&store), 2026, [100.0, 100.0], "townsmith:hut"),
+            None
+        );
+        assert_eq!(
+            placement_policy_denial(Some(&store), 2026, [500.0, 500.0], "townsmith:hut"),
+            None
+        );
+    }
+
+    #[test]
+    fn placement_policy_denial_reports_construction_disabled() {
+        let mut store = DistrictPolicyStore::new(2026);
+        let mut request = district_policy_request("Riverside");
+        request.construction_allowed = false;
+        let policy = store.create(&request).expect("create");
+        assert_eq!(
+            placement_policy_denial(Some(&store), 2026, [100.0, 100.0], "townsmith:hut"),
+            Some(PlacementPolicyDenialPayload {
+                policy_id: policy.id,
+                kind: PolicyPlacementDenial::ConstructionDisabled,
+            })
+        );
+        assert_eq!(
+            PolicyPlacementDenial::ConstructionDisabled.code(),
+            "policy_construction_disabled"
+        );
+    }
+
+    #[test]
+    fn placement_policy_denial_reports_an_allowlist_miss() {
+        let mut store = DistrictPolicyStore::new(2026);
+        let mut request = district_policy_request("Old Town");
+        request.blueprint_allowlist =
+            std::collections::BTreeSet::from(["townsmith:shop".to_string()]);
+        let policy = store.create(&request).expect("create");
+        assert_eq!(
+            placement_policy_denial(Some(&store), 2026, [100.0, 100.0], "townsmith:hut"),
+            Some(PlacementPolicyDenialPayload {
+                policy_id: policy.id,
+                kind: PolicyPlacementDenial::BlueprintNotAllowed,
+            })
+        );
+        assert_eq!(
+            placement_policy_denial(Some(&store), 2026, [100.0, 100.0], "townsmith:shop"),
+            None
+        );
+        assert_eq!(
+            PolicyPlacementDenial::BlueprintNotAllowed.code(),
+            "policy_blueprint_not_allowed"
+        );
+    }
+
+    #[test]
+    fn placement_policy_denial_prefers_the_smallest_overlapping_id() {
+        let mut store = DistrictPolicyStore::new(2026);
+        let mut denying = district_policy_request("Riverside");
+        denying.construction_allowed = false;
+        let first = store.create(&denying).expect("first");
+        let second = store
+            .create(&district_policy_request("Old Town"))
+            .expect("second");
+        assert!(first.id < second.id);
+
+        assert_eq!(
+            placement_policy_denial(Some(&store), 2026, [100.0, 100.0], "townsmith:hut"),
+            Some(PlacementPolicyDenialPayload {
+                policy_id: first.id,
+                kind: PolicyPlacementDenial::ConstructionDisabled,
+            }),
+            "the larger permissive policy must not override the smaller id"
+        );
+
+        let mut allowing_first = DistrictPolicyStore::new(2026);
+        let mut restrict_second = district_policy_request("Old Town");
+        restrict_second.construction_allowed = false;
+        let first = allowing_first
+            .create(&district_policy_request("Riverside"))
+            .expect("first");
+        let second = allowing_first.create(&restrict_second).expect("second");
+        assert!(first.id < second.id);
+        assert_eq!(
+            placement_policy_denial(Some(&allowing_first), 2026, [100.0, 100.0], "townsmith:hut"),
+            None,
+            "the smaller permissive policy decides the overlap"
+        );
+    }
+
+    #[test]
+    fn placement_policy_denial_ignores_a_foreign_seed() {
+        let mut store = DistrictPolicyStore::new(2026);
+        let mut request = district_policy_request("Riverside");
+        request.construction_allowed = false;
+        store.create(&request).expect("create");
+        assert_eq!(
+            placement_policy_denial(Some(&store), 2027, [100.0, 100.0], "townsmith:hut"),
+            None
+        );
+    }
+
+    #[test]
+    fn placement_policy_denial_leaves_placements_and_economy_untouched() {
+        let mut store = DistrictPolicyStore::new(2026);
+        let mut request = district_policy_request("Riverside");
+        request.construction_allowed = false;
+        store.create(&request).expect("create");
+
+        let placements = PlacementStore::new(2026);
+        let placement_checksum = placements.checksum();
+        let economy = Economy::new(2026);
+        let balance = economy.balance;
+
+        let denial = placement_policy_denial(Some(&store), 2026, [100.0, 100.0], "townsmith:hut")
+            .expect("construction is disabled");
+        assert_eq!(denial.kind, PolicyPlacementDenial::ConstructionDisabled);
+        assert_eq!(placements.checksum(), placement_checksum);
+        assert_eq!(placements.placements.len(), 0);
+        assert_eq!(economy.balance, balance);
     }
 
     #[test]
