@@ -43,6 +43,7 @@ if [[ "$LINE" != BENCH_SCREEN\ status=ok\ scenes=3\ rating=* ]]; then
 	exit 1
 fi
 RATING="${LINE##*rating=}"
+RATING="${RATING%% *}"
 case "$RATING" in
 	excellent|good|playable|low) ;;
 	*)

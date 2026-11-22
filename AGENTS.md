@@ -315,6 +315,7 @@ GODOT=/path/to/godot ./scripts/smoke_city.sh
 # Player-facing benchmark report over existing Early/Mid/Late summaries.
 # Report only: it does not run scenes and is not the 1M gate.
 GODOT=/path/to/godot ./scripts/smoke_bench_screen.sh
+GODOT=/path/to/godot ./scripts/smoke_bench_live.sh
 "${GODOT:-godot}" --path godot res://bench_screen.tscn -- --output benchmarks/results/bench_screen_report.json
 # Headless MultiMesh setup harness for 10k/50k/250k boxes (not FPS evidence)
 GODOT=/path/to/godot ./scripts/smoke_metropolis_render.sh
