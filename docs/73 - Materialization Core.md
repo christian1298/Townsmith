@@ -28,7 +28,7 @@ In:
 
 Out:
 
-- materialized agents, movement visuals, or route visuals;
+- route polylines or pooled production agents; the F4 overlay draws small citizen markers at sampled positions;
 - applying the change diff incrementally, dwell time, anti-starvation, or a saved materialized set; the bridge computes the bounded diff, but the scene rebuilds markers from the selection;
 - route caching, pathfinding, traffic, schedules, or needs simulation;
 - final art or per-citizen crowd animation;
@@ -100,7 +100,7 @@ The call is read-only: it does not mutate the live named pool, population, save 
 
 `route_preview`/`route_cache_state` expose the road polyline and bounded LRU described in [[56 - Traffic]]. `core_city::movement` attaches one cached route per household to the selection and returns deterministic per-citizen positions.
 
-`citizen_movement(seed, center_x, center_z, active_radius_m, detailed_radius_m, time_s)` builds the same selection, one `CitizenMotion`, and returns `{ok, seed, center:[x,z], time_s, routes, citizens, positions:[{id, placement_id, slot, position:[x,z], leg, route_progress}], checksum}`. `time_s` is finite and bounded to `0..=1,000,000` s. Unrouted or disconnected households are omitted, not an error; a missing road store returns `no_roads`. The call is read-only and does not alter jobs, needs, save state, or named checksums. It caches the built `CitizenMotion` by `(seed, world/construction/population/named/road checksums, center, radii)`, so repeated animation samples only re-run `positions_at`; `movement_cache_state()` reports it and `movement_cache_clear()` drops it. `traffic_state`, `route_preview`, and `citizen_movement` share a bridge-owned `Arc<RoadGraph>` validated by `(seed, road-store checksum)`; `road_graph_cache_state()` reports it and `road_graph_cache_clear()` drops it. The scene agent drive is still open.
+`citizen_movement(seed, center_x, center_z, active_radius_m, detailed_radius_m, time_s)` builds the same selection, one `CitizenMotion`, and returns `{ok, seed, center:[x,z], time_s, routes, citizens, positions:[{id, placement_id, slot, position:[x,z], leg, route_progress}], checksum}`. `time_s` is finite and bounded to `0..=1,000,000` s. Unrouted or disconnected households are omitted, not an error; a missing road store returns `no_roads`. The call is read-only and does not alter jobs, needs, save state, or named checksums. It caches the built `CitizenMotion` by `(seed, world/construction/population/named/road checksums, center, radii)`, so repeated animation samples only re-run `positions_at`; `movement_cache_state()` reports it and `movement_cache_clear()` drops it. `traffic_state`, `route_preview`, and `citizen_movement` share a bridge-owned `Arc<RoadGraph>` validated by `(seed, road-store checksum)`; `road_graph_cache_state()` reports it and `road_graph_cache_clear()` drops it. The world scene now calls it at 10 Hz while the F4 overlay is visible, pools one small marker per routed citizen, and reports `movement_scene=ok`; in this scene fixture the only completed workplace is coincident with the home, so the smoke asserts routes/positions/cache wiring rather than displacement.
 
 ### Stateful bridge scheduler
 
@@ -166,7 +166,7 @@ pub struct MaterializationDiff {
 - The scene rebuilds markers from `active`/`detailed`; it does not yet apply `changed` incrementally.
 - One pinned id is supported; the full selection/story priority list and dwell time are later.
 - `core_city::movement` uses the bounded route cache: one route per household, shared by its residents, with deterministic phase offsets. Workplace choice is nearest reachable by road distance; households with no reachable workplace get no route.
-- The world scene has fading debug markers only; it does not call the movement layer or draw routes yet.
+- The world scene draws fading home markers plus small moving citizen markers for the active set; it does not draw route polylines yet.
 - Fade materials are per-node duplicates; a 2k-active route needs shared materials or a pooling strategy.
 - Removed markers free after a bounded fade deadline; the node map is keyed by citizen id.
 - No save field: the selected set is derived on demand.
@@ -178,7 +178,7 @@ pub struct MaterializationDiff {
 
 The HUD and dashboard `Citizens near` lines read the step counts (`active`/`detailed`). The `--scene-smoke` route calls the step, moves the centre by 1 m, calls it again, and checks that `diff`, `checksum`, and bounded `changed`/`truncated` fields are present.
 
-Limits: the overlay applies added/updated/removed entries from the 64-change diff, fades markers, and reconciles deferred entries under the same budget. It keeps only debug markers; it does not use the core movement layer yet.
+Limits: the overlay applies added/updated/removed entries from the 64-change diff, fades markers, and reconciles deferred entries under the same budget. It keeps home markers and a separate `CitizenMovement` root; the movement markers follow `citizen_movement` positions while the overlay is visible.
 
 ## 10. Benchmark
 
@@ -227,7 +227,7 @@ not a CI gate.
 
 ## 11. Next
 
-1. ~~Add a bounded home-work route cache and per-citizen movement.~~ Core landed in `core_city::movement`; bridge payload landed (`citizen_movement`); the scene agent drive is next.
+1. ~~Add a bounded home-work route cache and per-citizen movement.~~ Core, bridge payload (`citizen_movement`), movement cache, and scene marker drive landed; route polylines and pooled production agents remain.
 2. Replace debug markers with pooled materialized agents and add the 2k-active/200-detailed render route.
 3. Add crowd LOD and fade pooling to avoid per-node material duplicates.
 3. Add per-client interest filtering.
