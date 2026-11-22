@@ -150,6 +150,9 @@ tags:
 
 The staged cut is in [[49 - Phase 3 Slice Plan]]: city ledger, households/needs, jobs/wages, primary industries, utilities, economy, traffic, dashboard, and a headless 30-day runner.
 
+> [!info] Implemented slices
+> District summary and the F7 heatmap exist, including #263 metric modes: **F7** toggles the overlay, **Shift+F7** cycles Population → Jobs → Happiness, and world localization keys grew from 226 to 234. #260 adds the bridge-backed `DistrictPolicyStore` (CRUD, validation, v1 JSON, FNV checksum), #265 adds pure `DistrictPolicyEffect` resolution, and #268 adds the standalone developer `policy_editor.tscn` plus `smoke_policy_editor.sh`. The policy layer remains **data-only**: no save composition, dashboard panel, simulation/economy consumer, or selectable settlement panel yet. Those remain Phase 3/5 work.
+
 **Goals**
 - The city feels alive and the player can affect it.
 - A complete loop: housing → jobs → needs → taxes → services.
@@ -211,6 +214,9 @@ The staged cut is in [[49 - Phase 3 Slice Plan]]: city ledger, households/needs,
 > [!info] Gate plan
 > The measurable gate — reference hardware, required scenes, thresholds, 3-run protocol, pass/fail rules, and fallbacks — is in [[68 - Metropolis Gate]]. **The 1M / RTX 3060 gate is not yet passed.** The 21-house 6,195 FPS result is an RTX 4080 data point for the slice, not the gate. Recorded results can be evaluated with `./scripts/check_metropolis_gate.py --result PATH` (PASS/FAIL/insufficient, plus `--require-hardware`); the evaluator cannot stand in for missing reference-hardware runs. The standalone Q-101 capture form in [[66 - Playtest Kit]] §9 records the human playtest that remains open.
 
+> [!info] Supporting slices (not gate evidence)
+> Several post-audit product slices landed but do not pass the gate. #258 adds the 1M gate-result evaluator; #261 adds frame-time graphs to the benchmark screen; #262/#266 add the bounded `InterestView` road list (≤64 roads whose midpoints fall inside the viewport) and its Godot preview; #263 adds the F7 heatmap metric modes; #260/#265/#268 add the data-only district policy registry, effect helpers, and standalone editor; and #259/#267 add the Q-101 capture form and summarizer. None of these records a 1M or RTX 3060 run. The **1M cohort gate** and **benchmark reference gate card** remain open, and the human playtest still requires a session.
+
 **Goals**
 - Prove 1M+ population on 8-core/16-thread + RTX 3060-class hardware.
 - Make the city readable and manageable at district scale.
@@ -244,6 +250,9 @@ The staged cut is in [[49 - Phase 3 Slice Plan]]: city ledger, households/needs,
 **Goals**
 - Co-op that feels native, not bolted on.
 - A dedicated server that runs unattended.
+
+> [!info] Reconnect v0
+> #269 adds the Godot client `--reconnect` path and the server `--listen PORT --sessions N` cap. A reconnecting client sends `resume {session_id, last_tick}` and receives `welcome {resumed:true}` plus a snapshot inside the process-local 300-tick window. This is loopback-only, not authentication, does not survive a server restart, and has no world render integration; concurrent sessions, claims/journal recovery, and remote transport remain Phase 6 work.
 
 **Features**
 - Authoritative server; local server for single-player.

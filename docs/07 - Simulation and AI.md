@@ -114,8 +114,8 @@ A city of 1M people does not need to know that citizen #481,222 is 3% hungrier t
 > `core_city::policy` adds a persisted **data layer** for future district policies: named XZ circles with a stable id, a tax multiplier, a service-funding multiplier, a construction switch, and a blueprint allowlist. The registry is deliberately inert in this slice:
 >
 > - no simulation, cohort, household, traffic, construction, treasury, or economy code reads a policy;
-> - no UI or bridge consumer displays or edits one (the bridge has CRUD calls, but nothing in the shell calls them yet);
-> - `DistrictPolicyStore` is **not** composed into the world-save envelope, so existing world saves and their checksums are unchanged.
+> - the only GDScript consumer is the standalone developer scene in [[57 - Dashboard and Advisor]] §4.2; the dashboard does not display or edit a policy;
+> - `DistrictPolicyStore` is persisted as an optional `policies` object in the world save, written only when a registry is open. A world without one omits the object, so its JSON, byte counts, and checksums stay identical to a pre-policy save; `world_load` restores a saved registry, closes it for a policy-less save, and rejects a malformed or non-object document with `invalid_json`, an invalid registry with `invalid_policies`, and a foreign seed with `seed_mismatch`.
 >
 > | Bound | Value |
 > |---|---|
@@ -128,7 +128,7 @@ A city of 1M people does not need to know that citizen #481,222 is 3% hungrier t
 > | Name | 1–64 trimmed characters, no control characters; trimmed on create/update |
 > | Blueprint allowlist | at most 256 entries matching `^[a-z0-9_]+:[a-z0-9_./-]+$` |
 >
-> Circles include their radius. Overlaps are allowed and reported by a query helper rather than rejected; `policy_at(point)` deterministically returns the smallest containing id. Format v1 JSON validates the version, seed, `next_id`, record ids, and every field, and carries an FNV-1a checksum for bridge payloads and regression tests. Composition into the save, overlap priority beyond smallest-id, and wiring the derived effects into simulation or economy need a later ADR.
+> Circles include their radius. Overlaps are allowed and reported by a query helper rather than rejected; `policy_at(point)` deterministically returns the smallest containing id. Format v1 JSON validates the version, seed, `next_id`, record ids, and every field, and carries an FNV-1a checksum for bridge payloads and regression tests. The bridge world save persists the registry as an optional `policies` object (see [[42 - World Placement Bridge]]); overlap priority beyond smallest-id and wiring the derived effects into simulation or economy need a later ADR.
 
 > [!info] District policy effects (derived, data only)
 > `core_city::policy_effect` adds a **derived** layer over the registry. `DistrictPolicyStore::effective_policy(point)` names the policy that applies at an XZ point; `effect_at(point, base_resident, base_business)` resolves it into a `DistrictPolicyEffect`. The effect carries the policy id and name, `tax_multiplier`, `service_funding`, `construction_allowed`, a copy of the blueprint allowlist, the clamped base rates, and the two scaled per-day rates.
@@ -144,7 +144,7 @@ A city of 1M people does not need to know that citizen #481,222 is 3% hungrier t
 > - **Base rates:** clamped into `0..=100` per game day, matching `Economy::set_taxes`; a non-finite base becomes `0`, a negative base becomes `0`. `apply_multiplier` and `clamp_base_rate` are public pure helpers.
 > - **Guarantees:** results are finite and non-negative. No rounding, floor, ceil, or quantization is applied; the caller chooses the rounding point (per household, per tick, or per day).
 > - **Allowlist:** an empty set is unrestricted; otherwise only exact, case-sensitive ids match. `construction_allowed` is passed through as data.
-> - **Limits:** this is a pure query layer. No simulation, cohort, household, traffic, construction, treasury, or economy code reads an effect; no UI or bridge call exposes one; effects are not serialized, add no policy or save field, and leave the world-save checksum unchanged. Applying the values to taxes, upkeep, construction gating, or placement still needs a later ADR.
+> - **Limits:** this is a pure query layer. No simulation, cohort, household, traffic, construction, treasury, or economy code reads an effect; no UI or bridge call exposes one; effects themselves are not serialized and add no save field. The optional registry is persisted separately (above): it adds `district_policies` and `district_policy_checksum` to the save result without changing the placement, terrain, construction, road, lot, settlement, population, industry, utility, service, or research checksums, and a world without a registry stays byte-identical. Applying the values to taxes, upkeep, construction gating, or placement still needs a later ADR.
 
 Think of it like traffic: you do not simulate every car's engine to know that a highway is congested. You track how many cars are in each speed band and move them between bands. Cohorts do the same for people and needs.
 

@@ -21,9 +21,20 @@ extends Control
 ## curve derived from p50/p95/p99/max and label it `aggregated` — never raw
 ## samples. Fixtures are labelled `fixture`; raw arrays are labelled `summary`.
 ##
+## A separate read-only **Reference gate** card looks for the recorded gate JSON
+## under `benchmarks/results/gate/` (`--gate-dir PATH` overrides the directory).
+## When a file exists, the screen runs
+## `scripts/check_metropolis_gate.py --result <abs path>` and shows the final
+## `METROPOLIS_GATE status=...` line. Thresholds live only in the evaluator; this
+## screen never duplicates or relaxes them. Missing files show `missing`; a
+## missing Python/script or an evaluator exit 2 shows `insufficient` with the
+## reason. The card reports a recorded result and cannot substitute for a
+## reference-hardware run or the signed gate report (docs/68 §8.4, §9).
+##
 ## Run:
 ##   godot --path godot res://bench_screen.tscn
 ##   godot --path godot res://bench_screen.tscn -- --output /tmp/report.json
+##   godot --path godot res://bench_screen.tscn -- --gate-dir /tmp/gate
 ##   godot --path godot res://bench_screen.tscn -- --run --duration 30 --warmup 3
 ##
 ## Headless structural smoke (no display, no scene runs):
@@ -32,6 +43,17 @@ extends Control
 ## See docs/15 - Benchmarks.md and docs/68 - Metropolis Gate.md §5.3.
 
 const RESULT_DIR := "benchmarks/results"
+const GATE_DIR := "benchmarks/results/gate"
+const GATE_CHECK_SCRIPT := "scripts/check_metropolis_gate.py"
+const GATE_MARKER := "METROPOLIS_GATE status="
+const GATE_PYTHON := ["python3", "python"]
+# OS.execute returns -1 when the child cannot start and 127 when execvp cannot
+# find the interpreter; both mean "try the next candidate".
+const GATE_LAUNCH_FAILURES := [-1, 127]
+const REFERENCE_GATE_NOTE := (
+	"Recorded result only. Host hardware may not match the reference rig; "
+	+ "this card is not a gate run."
+)
 const DEFAULT_OUTPUT := "user://benchmark_report.json"
 const REPORT_SUITE := "bench_screen_report"
 const REPORT_FORMAT_VERSION := 1
@@ -57,6 +79,21 @@ const SCENE_SPECS := [
 		"label": "Late Metropolis",
 		"file": "godot_phase0_city_late_summary.json",
 		"route": "benchmarks/routes/phase0_city_late.json",
+	},
+]
+
+const GATE_SPECS := [
+	{
+		"id": "render",
+		"label": "Late Metropolis · render",
+		"scene": "late_metropolis_v1",
+		"file": "late_metropolis_v1.json",
+	},
+	{
+		"id": "cohort",
+		"label": "Headless 1M cohort",
+		"scene": "cohort_1m_v1",
+		"file": "cohort_1m_v1.json",
 	},
 ]
 
@@ -218,6 +255,7 @@ const FIXTURES := {
 var smoke_mode := false
 var run_mode := false
 var output_path := DEFAULT_OUTPUT
+var gate_dir := ""
 var live_duration_s := LIVE_DURATION_S
 var live_warmup_s := LIVE_WARMUP_S
 var _export_status: Label
@@ -225,6 +263,8 @@ var _run_status: Label
 var _run_button: Button
 var _card_count := 0
 var _graph_count := 0
+var _gate_card_count := 0
+var _gate_eval_cache: Dictionary = {}
 var _report: Dictionary = {}
 var _running := false
 var _completed_tiers: Array[String] = []
@@ -234,6 +274,7 @@ func _ready() -> void:
 	smoke_mode = args.has("--smoke")
 	run_mode = args.has("--run") and not smoke_mode
 	output_path = _arg(args, "--output", DEFAULT_OUTPUT)
+	gate_dir = _arg(args, "--gate-dir", "")
 	live_duration_s = _positive_float(_arg(args, "--duration", str(LIVE_DURATION_S)), LIVE_DURATION_S)
 	live_warmup_s = _positive_float(_arg(args, "--warmup", str(LIVE_WARMUP_S)), LIVE_WARMUP_S)
 
@@ -471,6 +512,7 @@ func _refresh_ui(report: Dictionary, run_status: String) -> void:
 		child.queue_free()
 	_card_count = 0
 	_graph_count = 0
+	_gate_card_count = 0
 	_export_status = null
 	_run_status = null
 	_run_button = null
@@ -853,6 +895,7 @@ func _build_report(use_fixtures: bool, live_hint: bool = false) -> Dictionary:
 		"overall": overall,
 		"recommended_settings": _settings_for(str(overall.get("rating", "low"))),
 		"scenes": scenes,
+		"reference_gate": _reference_gate(),
 	}
 	if live:
 		report["live_runs"] = _completed_tiers.duplicate()
@@ -870,6 +913,222 @@ func _export_report(report: Dictionary) -> bool:
 		push_error("Benchmark report was not written: " + output_path)
 		return false
 	return true
+
+## Absolute directory that holds the recorded gate JSON. `--gate-dir` may be
+## absolute or project-relative.
+func _gate_root() -> String:
+	if gate_dir.is_empty():
+		return _project_root().path_join(GATE_DIR)
+	if gate_dir.is_absolute_path():
+		return gate_dir
+	return _project_root().path_join(gate_dir)
+
+func _missing_gate_record(spec: Dictionary) -> Dictionary:
+	var gate_id := str(spec.get("id", ""))
+	return {
+		"id": gate_id,
+		"label": str(spec.get("label", "")),
+		"scene": str(spec.get("scene", "")),
+		"file": GATE_DIR.path_join(str(spec.get("file", ""))),
+		"state": "missing",
+		"recorded": false,
+		"hardware": "",
+		"runs": 0,
+		"duration_s": 0.0,
+		"warmup_s": 0.0,
+		"key_metric": {},
+		"evaluation": _gate_evaluation("insufficient", "", "no_recorded_file", -1),
+		"note": REFERENCE_GATE_NOTE,
+	}
+
+func _reference_gate() -> Dictionary:
+	var gate := {}
+	for spec_value in GATE_SPECS:
+		var spec: Dictionary = spec_value
+		gate[str(spec.get("id", ""))] = _reference_gate_record(spec)
+	return gate
+
+## Read-only summary of one recorded gate file. Never judges thresholds here:
+## the evaluator owns them and its verdict is copied verbatim.
+func _reference_gate_record(spec: Dictionary) -> Dictionary:
+	var record := _missing_gate_record(spec)
+	var path := _gate_root().path_join(str(spec.get("file", "")))
+	if not FileAccess.file_exists(path):
+		return record
+	var text := FileAccess.get_file_as_string(path)
+	var parsed: Variant = JSON.parse_string(text) if not text.is_empty() else null
+	if typeof(parsed) != TYPE_DICTIONARY:
+		record["state"] = "unreadable"
+		record["evaluation"] = _gate_evaluation("insufficient", "", "invalid_json", -1)
+		return record
+	var data: Dictionary = parsed
+	record["state"] = "present"
+	record["recorded"] = true
+	var scene := _text_field(data, "scene")
+	record["scene"] = scene if scene != "" else str(spec.get("scene", ""))
+	record["runs"] = int(_number(data.get("runs"), 0.0))
+	record["duration_s"] = _number(data.get("duration_s"))
+	record["warmup_s"] = _number(data.get("warmup_s"))
+	var hardware_value: Variant = data.get("hardware", {})
+	if typeof(hardware_value) == TYPE_DICTIONARY:
+		record["hardware"] = _hardware_text(hardware_value)
+	record["key_metric"] = _gate_key_metric(str(spec.get("id", "")), data)
+	record["evaluation"] = _evaluate_gate_result(path)
+	return record
+
+func _text_field(source: Dictionary, key: String) -> String:
+	var value: Variant = source.get(key)
+	if value == null or typeof(value) == TYPE_DICTIONARY or typeof(value) == TYPE_ARRAY:
+		return ""
+	return str(value)
+
+func _first_number(source: Dictionary, keys: Array) -> float:
+	for key_value in keys:
+		var value: Variant = source.get(str(key_value))
+		if _is_finite_number(value):
+			return float(value)
+	return 0.0
+
+func _hardware_text(hardware: Dictionary) -> String:
+	var parts := PackedStringArray()
+	var cpu := _text_field(hardware, "cpu")
+	if cpu.is_empty():
+		cpu = _text_field(hardware, "processor")
+	if not cpu.is_empty():
+		parts.append(cpu)
+	var gpu := _text_field(hardware, "gpu")
+	if not gpu.is_empty():
+		parts.append(gpu)
+	var ram := _first_number(hardware, ["ram_gb"])
+	if ram > 0.0:
+		parts.append("%.0f GB RAM" % ram)
+	var display := _text_field(hardware, "display")
+	if not display.is_empty():
+		parts.append(display)
+	var os := _text_field(hardware, "os")
+	if not os.is_empty():
+		parts.append(os)
+	if parts.is_empty():
+		return "hardware not recorded"
+	return " · ".join(parts)
+
+## One key metric per gate scene: render average FPS or cohort tick p99.
+func _gate_key_metric(gate_id: String, data: Dictionary) -> Dictionary:
+	var results_value: Variant = data.get("results", {})
+	if typeof(results_value) != TYPE_DICTIONARY:
+		return {}
+	var results: Dictionary = results_value
+	if gate_id == "render":
+		var fps := _first_number(results, ["fps_avg", "fps_median", "median_fps"])
+		if fps > 0.0:
+			return {
+				"name": "fps_avg",
+				"value": fps,
+				"unit": "FPS",
+				"text": "%.1f FPS avg" % fps,
+			}
+		return {}
+	var tick := _first_number(results, ["cohort_tick_ms_p99"])
+	if tick > 0.0:
+		return {
+			"name": "cohort_tick_ms_p99",
+			"value": tick,
+			"unit": "ms",
+			"text": "%.1f ms cohort tick p99" % tick,
+		}
+	return {}
+
+func _gate_evaluation(status: String, line: String, reason: String, exit_code: int) -> Dictionary:
+	var hardware_match := "unknown"
+	if not line.is_empty():
+		var match_value := _line_field(line, "hardware_match")
+		if not match_value.is_empty():
+			hardware_match = match_value
+	return {
+		"status": status,
+		"line": line,
+		"reason": reason,
+		"exit_code": exit_code,
+		"hardware_match": hardware_match,
+	}
+
+func _gate_file_stamp(path: String) -> String:
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return "0"
+	var stamp := "%d:%d" % [FileAccess.get_modified_time(path), file.get_length()]
+	file.close()
+	return stamp
+
+## Runs the evaluator on one recorded file. The verdict is the evaluator's own
+## final line; this screen does not re-derive or relax any threshold. A missing
+## interpreter/script or an exit-2 evaluation is reported as `insufficient`.
+func _evaluate_gate_result(path: String) -> Dictionary:
+	var script_path := _project_root().path_join(GATE_CHECK_SCRIPT)
+	if not FileAccess.file_exists(script_path):
+		return _gate_evaluation("insufficient", "", "evaluator_missing", -1)
+	var cache_key := "%s|%s" % [path, _gate_file_stamp(path)]
+	var cached: Variant = _gate_eval_cache.get(cache_key)
+	if typeof(cached) == TYPE_DICTIONARY:
+		return (cached as Dictionary).duplicate(true)
+	var launched := false
+	var exit_code := -1
+	var output: Array = []
+	for candidate in GATE_PYTHON:
+		output.clear()
+		var candidate_code := OS.execute(
+			str(candidate),
+			PackedStringArray([script_path, "--result", path]),
+			output,
+			true
+		)
+		# execvp reports a missing interpreter as 127, not only -1. Keep the
+		# next candidate on any launch failure and break only after a real run.
+		if GATE_LAUNCH_FAILURES.has(candidate_code):
+			continue
+		exit_code = candidate_code
+		launched = true
+		break
+	if not launched:
+		var missing := _gate_evaluation("insufficient", "", "python_missing", -1)
+		_gate_eval_cache[cache_key] = missing.duplicate(true)
+		return missing
+	var evaluation := _gate_evaluation_from_output(exit_code, output)
+	_gate_eval_cache[cache_key] = evaluation.duplicate(true)
+	return evaluation
+
+func _gate_evaluation_from_output(exit_code: int, output: Array) -> Dictionary:
+	var verdict := ""
+	var error_line := ""
+	for value in output:
+		# OS.execute merges stdout/stderr into one string per stream; split it
+		# so the final marker line is still matched.
+		for raw_line in str(value).split("\n"):
+			var text := raw_line.strip_edges()
+			if text.begins_with("METROPOLIS_GATE_ERROR"):
+				error_line = text
+			elif text.begins_with(GATE_MARKER):
+				verdict = text
+	if verdict.is_empty():
+		var reason := "evaluator_exit_%d" % exit_code
+		if not error_line.is_empty():
+			reason = error_line
+		return _gate_evaluation("insufficient", "", reason, exit_code)
+	var status := _line_field(verdict, "status")
+	if status.is_empty():
+		return _gate_evaluation("insufficient", verdict, "no_status", exit_code)
+	var reason := ""
+	if status == "insufficient" and not error_line.is_empty():
+		reason = error_line
+	return _gate_evaluation(status, verdict, reason, exit_code)
+
+func _line_field(line: String, key: String) -> String:
+	var prefix := key + "="
+	for token_value in line.split(" ", false):
+		var token := str(token_value)
+		if token.begins_with(prefix):
+			return token.substr(prefix.length())
+	return ""
 
 func _build_ui(report: Dictionary) -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -919,6 +1178,8 @@ func _build_ui(report: Dictionary) -> void:
 			var scene: Dictionary = scene_value
 			cards.add_child(_build_scene_card(scene))
 			_card_count += 1
+
+	root.add_child(_build_reference_gate_panel(report))
 
 	var footer := HBoxContainer.new()
 	footer.add_theme_constant_override("separation", 12)
@@ -1087,6 +1348,193 @@ func _build_scene_card(scene: Dictionary) -> PanelContainer:
 	source.add_theme_color_override("font_color", Color(0.55, 0.60, 0.68))
 	source.add_theme_font_size_override("font_size", 12)
 	box.add_child(source)
+	return card
+
+func _gate_display_status(record: Dictionary) -> String:
+	var state := str(record.get("state", "missing"))
+	if state != "present":
+		return state
+	var evaluation_value: Variant = record.get("evaluation", {})
+	var evaluation: Dictionary = evaluation_value if typeof(evaluation_value) == TYPE_DICTIONARY else {}
+	var status := str(evaluation.get("status", "insufficient"))
+	return status if not status.is_empty() else "insufficient"
+
+func _gate_status_color(status: String) -> Color:
+	match status:
+		"pass":
+			return RATING_COLORS["excellent"]
+		"fail":
+			return RATING_COLORS["low"]
+		"insufficient", "unreadable", "missing":
+			return RATING_COLORS["playable"]
+		_:
+			return Color(0.55, 0.60, 0.68)
+
+func _build_reference_gate_panel(report: Dictionary) -> PanelContainer:
+	var panel := PanelContainer.new()
+	panel.name = "ReferenceGateCard"
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.075, 0.085, 0.10)
+	style.border_color = Color(0.28, 0.32, 0.38)
+	style.border_width_left = 1
+	style.border_width_top = 1
+	style.border_width_right = 1
+	style.border_width_bottom = 1
+	style.corner_radius_top_left = 8
+	style.corner_radius_top_right = 8
+	style.corner_radius_bottom_left = 8
+	style.corner_radius_bottom_right = 8
+	style.content_margin_left = 16.0
+	style.content_margin_top = 12.0
+	style.content_margin_right = 16.0
+	style.content_margin_bottom = 12.0
+	panel.add_theme_stylebox_override("panel", style)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 6)
+	panel.add_child(box)
+
+	var header := HBoxContainer.new()
+	header.add_theme_constant_override("separation", 12)
+	box.add_child(header)
+
+	var title := Label.new()
+	title.text = "Reference gate"
+	title.add_theme_font_size_override("font_size", 20)
+	header.add_child(title)
+
+	var subtitle := Label.new()
+	subtitle.text = "Read-only report over recorded gate JSON (late_metropolis_v1 / cohort_1m_v1). Not a run."
+	subtitle.add_theme_color_override("font_color", Color(0.66, 0.71, 0.78))
+	subtitle.add_theme_font_size_override("font_size", 13)
+	subtitle.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	subtitle.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(subtitle)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 14)
+	box.add_child(row)
+
+	var gate_value: Variant = report.get("reference_gate", {})
+	var gate: Dictionary = gate_value if typeof(gate_value) == TYPE_DICTIONARY else {}
+	for spec_value in GATE_SPECS:
+		var spec: Dictionary = spec_value
+		var record_value: Variant = gate.get(str(spec.get("id", "")), {})
+		var record: Dictionary = (
+			record_value if typeof(record_value) == TYPE_DICTIONARY
+			else _missing_gate_record(spec)
+		)
+		row.add_child(_build_reference_gate_card(record))
+		_gate_card_count += 1
+	return panel
+
+func _build_reference_gate_card(record: Dictionary) -> PanelContainer:
+	var status := _gate_display_status(record)
+	var color := _gate_status_color(status)
+
+	var card := PanelContainer.new()
+	card.name = "ReferenceGate_%s" % str(record.get("id", ""))
+	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.09, 0.10, 0.12)
+	style.border_color = color
+	style.border_width_left = 2
+	style.border_width_top = 2
+	style.border_width_right = 2
+	style.border_width_bottom = 2
+	style.corner_radius_top_left = 6
+	style.corner_radius_top_right = 6
+	style.corner_radius_bottom_left = 6
+	style.corner_radius_bottom_right = 6
+	style.content_margin_left = 12.0
+	style.content_margin_top = 10.0
+	style.content_margin_right = 12.0
+	style.content_margin_bottom = 10.0
+	card.add_theme_stylebox_override("panel", style)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 3)
+	card.add_child(box)
+
+	var header := HBoxContainer.new()
+	header.add_theme_constant_override("separation", 10)
+	box.add_child(header)
+
+	var title := Label.new()
+	title.text = str(record.get("label", ""))
+	title.add_theme_font_size_override("font_size", 16)
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(title)
+
+	var status_label := Label.new()
+	status_label.text = status.to_upper()
+	status_label.add_theme_font_size_override("font_size", 14)
+	status_label.add_theme_color_override("font_color", color)
+	header.add_child(status_label)
+
+	var source := Label.new()
+	source.text = "%s · %s" % [str(record.get("scene", "")), str(record.get("file", ""))]
+	source.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	source.add_theme_color_override("font_color", Color(0.55, 0.60, 0.68))
+	source.add_theme_font_size_override("font_size", 11)
+	box.add_child(source)
+
+	var metric_value: Variant = record.get("key_metric", {})
+	var metric: Dictionary = metric_value if typeof(metric_value) == TYPE_DICTIONARY else {}
+	var metric_label := Label.new()
+	if metric.is_empty():
+		metric_label.text = "No recorded metric" if status == "missing" else "Key metric not recorded"
+	else:
+		metric_label.text = str(metric.get("text", ""))
+	metric_label.add_theme_font_size_override("font_size", 22)
+	metric_label.add_theme_color_override("font_color", Color(0.88, 0.91, 0.95))
+	box.add_child(metric_label)
+
+	var hardware := str(record.get("hardware", ""))
+	var hardware_label := Label.new()
+	hardware_label.text = "Hardware: " + (hardware if not hardware.is_empty() else "not recorded")
+	hardware_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hardware_label.add_theme_color_override("font_color", Color(0.66, 0.71, 0.78))
+	hardware_label.add_theme_font_size_override("font_size", 12)
+	box.add_child(hardware_label)
+
+	var runs := int(_number(record.get("runs"), 0.0))
+	var duration := _number(record.get("duration_s"))
+	var run_parts := PackedStringArray()
+	if runs > 0:
+		run_parts.append("%d runs" % runs)
+	if duration > 0.0:
+		run_parts.append("%.0f s" % duration)
+	if not run_parts.is_empty():
+		var run_label := Label.new()
+		run_label.text = " · ".join(run_parts)
+		run_label.add_theme_color_override("font_color", Color(0.66, 0.71, 0.78))
+		run_label.add_theme_font_size_override("font_size", 12)
+		box.add_child(run_label)
+
+	var evaluation_value: Variant = record.get("evaluation", {})
+	var evaluation: Dictionary = evaluation_value if typeof(evaluation_value) == TYPE_DICTIONARY else {}
+	var line := str(evaluation.get("line", ""))
+	var reason := str(evaluation.get("reason", ""))
+	var evaluator_label := Label.new()
+	if not line.is_empty():
+		evaluator_label.text = line
+	elif not reason.is_empty():
+		evaluator_label.text = "Evaluator: " + reason
+	else:
+		evaluator_label.text = "Evaluator: not run"
+	evaluator_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	evaluator_label.add_theme_color_override("font_color", Color(0.55, 0.60, 0.68))
+	evaluator_label.add_theme_font_size_override("font_size", 10)
+	box.add_child(evaluator_label)
+
+	var note := Label.new()
+	note.text = str(record.get("note", REFERENCE_GATE_NOTE))
+	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	note.add_theme_color_override("font_color", Color(0.72, 0.58, 0.38))
+	note.add_theme_font_size_override("font_size", 10)
+	box.add_child(note)
 	return card
 
 func _build_frame_graph(graph: Dictionary, tint: Color) -> VBoxContainer:
@@ -1276,6 +1724,64 @@ func _export_graph_problem(original: Dictionary, exported: Dictionary, index: in
 			return "export_graph_%s_%d" % [str(key), index]
 	return ""
 
+func _gate_record(report: Dictionary, gate_id: String) -> Dictionary:
+	var gate_value: Variant = report.get("reference_gate", {})
+	var gate: Dictionary = gate_value if typeof(gate_value) == TYPE_DICTIONARY else {}
+	var record_value: Variant = gate.get(gate_id, {})
+	return record_value if typeof(record_value) == TYPE_DICTIONARY else {}
+
+func _gate_marker_state(report: Dictionary, gate_id: String) -> String:
+	return str(_gate_record(report, gate_id).get("state", "missing"))
+
+func _gate_marker_eval(report: Dictionary, gate_id: String) -> String:
+	var record := _gate_record(report, gate_id)
+	var evaluation_value: Variant = record.get("evaluation", {})
+	var evaluation: Dictionary = evaluation_value if typeof(evaluation_value) == TYPE_DICTIONARY else {}
+	return str(evaluation.get("status", "insufficient"))
+
+func _reference_gate_problem(report: Dictionary) -> String:
+	var gate_value: Variant = report.get("reference_gate", {})
+	if typeof(gate_value) != TYPE_DICTIONARY:
+		return "gate_type"
+	var gate: Dictionary = gate_value
+	for spec_value in GATE_SPECS:
+		var spec: Dictionary = spec_value
+		var gate_id := str(spec.get("id", ""))
+		var record_value: Variant = gate.get(gate_id, {})
+		if typeof(record_value) != TYPE_DICTIONARY:
+			return "gate_%s_type" % gate_id
+		var record: Dictionary = record_value
+		if str(record.get("id", "")) != gate_id:
+			return "gate_%s_id" % gate_id
+		if str(record.get("file", "")) != GATE_DIR.path_join(str(spec.get("file", ""))):
+			return "gate_%s_file" % gate_id
+		if str(record.get("note", "")).is_empty():
+			return "gate_%s_note" % gate_id
+		var state := str(record.get("state", ""))
+		if state != "missing" and state != "present" and state != "unreadable":
+			return "gate_%s_state" % gate_id
+		var evaluation_value: Variant = record.get("evaluation", {})
+		if typeof(evaluation_value) != TYPE_DICTIONARY:
+			return "gate_%s_eval" % gate_id
+		var evaluation: Dictionary = evaluation_value
+		var eval_status := str(evaluation.get("status", ""))
+		if eval_status != "pass" and eval_status != "fail" and eval_status != "insufficient":
+			return "gate_%s_status" % gate_id
+		if state == "missing":
+			if bool(record.get("recorded", true)):
+				return "gate_%s_recorded" % gate_id
+			if str(evaluation.get("reason", "")).is_empty():
+				return "gate_%s_reason" % gate_id
+		elif state == "present":
+			if not bool(record.get("recorded", false)):
+				return "gate_%s_recorded" % gate_id
+			var line := str(evaluation.get("line", ""))
+			if not line.is_empty() and not line.begins_with(GATE_MARKER):
+				return "gate_%s_line" % gate_id
+			if line.is_empty() and str(evaluation.get("reason", "")).is_empty():
+				return "gate_%s_reason" % gate_id
+	return ""
+
 func _run_smoke(report: Dictionary, exported: bool) -> void:
 	var status := "ok"
 	var scenes_value: Variant = report.get("scenes", [])
@@ -1349,6 +1855,15 @@ func _run_smoke(report: Dictionary, exported: bool) -> void:
 		var resolver_problem := _smoke_graph_sources()
 		if resolver_problem != "":
 			status = resolver_problem
+
+	if status == "ok" and _gate_card_count != 2:
+		status = "gate_cards=%d" % _gate_card_count
+	if status == "ok" and find_child("ReferenceGateCard", true, false) == null:
+		status = "gate_panel_missing"
+	if status == "ok":
+		var gate_problem := _reference_gate_problem(report)
+		if gate_problem != "":
+			status = gate_problem
 
 	if status == "ok" and not exported:
 		status = "export_failed"
@@ -1437,6 +1952,14 @@ func _run_smoke(report: Dictionary, exported: bool) -> void:
 			_number((scenes[2] as Dictionary).get("median_fps")),
 			str((scenes[2] as Dictionary).get("rating", "")),
 		])
+	print("BENCH_SCREEN_GATE render=%s cohort=%s" % [
+		_gate_marker_state(report, "render"),
+		_gate_marker_state(report, "cohort"),
+	])
+	print("BENCH_SCREEN_GATE_EVAL render=%s cohort=%s" % [
+		_gate_marker_eval(report, "render"),
+		_gate_marker_eval(report, "cohort"),
+	])
 	print("BENCH_SCREEN status=%s scenes=%d rating=%s mode=smoke" % [
 		status,
 		scenes.size(),

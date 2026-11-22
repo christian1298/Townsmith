@@ -17,10 +17,12 @@ fi
 SMOKE_DIR="$(mktemp -d)"
 trap 'rm -rf "$SMOKE_DIR"' EXIT
 REPORT="$SMOKE_DIR/benchmark_report.json"
+GATE_MISSING="$SMOKE_DIR/gate-missing"
+mkdir -p "$GATE_MISSING"
 
 set +e
 OUTPUT="$(timeout 120s "$GODOT_BIN" --headless --path "$ROOT/godot" res://bench_screen.tscn -- \
-	--smoke --output "$REPORT" 2>&1)"
+	--smoke --gate-dir "$GATE_MISSING" --output "$REPORT" 2>&1)"
 GODOT_STATUS=$?
 set -e
 printf '%s\n' "$OUTPUT"

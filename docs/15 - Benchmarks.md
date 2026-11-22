@@ -45,7 +45,7 @@ A benchmark run is not a synthetic fly-through of an empty map. It is a represen
 >
 > **Report and live-run screen.** By default it reads the existing Early/Mid/Late summaries and falls back to embedded deterministic fixtures with an "Embedded fixture" label. `--run` (or the **Run Early / Mid / Late** button) executes the existing `benchmark.tscn` scenes sequentially with the matching route, 30 s duration and 3 s warm-up (`--duration`/`--warmup` override), then refreshes each card and the export. Live runs require a display; the headless smoke only checks command assembly, result loading, rating, and export. It is not the 1M/3060 gate. Run `./scripts/smoke_bench_screen.sh` and `./scripts/smoke_bench_live.sh`.
 >
-> Headless structural check (no display needed): `GODOT=/path/to/godot ./scripts/smoke_bench_screen.sh`. It prints `BENCH_SCREEN status=ok scenes=3 rating=...`.
+> Headless structural check (no display needed): `GODOT=/path/to/godot ./scripts/smoke_bench_screen.sh`. It prints `BENCH_SCREEN status=ok scenes=3 rating=...`, `BENCH_SCREEN_GATE render=... cohort=...`, and `BENCH_SCREEN_GATE_EVAL render=... cohort=...`; the smoke covers missing, present/pass, present/fail, python-only fallback, and no-interpreter gate fixtures.
 
 > [!info] Phase 3 traffic microbenchmark
 > `cargo run --release -p townsmith-bench --bin traffic` builds a deterministic 64 × 64 road grid (128 roads, 4,096 nodes, 8,064 edges, 129,024 m). On the current developer machine: graph build ~1.9 ms, 1,000 pair queries ~449 ms, 1,000 flow queries ~4.8 ms, and 64 goal fields ~60 ms. This is a microbenchmark, not the 1M/60 FPS gate.
@@ -54,7 +54,7 @@ A benchmark run is not a synthetic fly-through of an empty map. It is a represen
 > `cargo run --release -p townsmith-bench --bin streaming_scale` models 100 km² of terrain through a bounded near/mid/far resident set and LOD meshing. Current run: 525 chunks visited, 775 generated, 225 peak resident, ~281 MB peak mesh bytes, 280.3 ms mean generate, 17.4 ms mean mesh, 12.35 s total, checksum `4dfb48204244e377`. It reports `status=capped` when the per-step generation budget skips chunks. Data harness only; not the render gate.
 
 > [!info] Metropolis gate evaluator
-> `./scripts/check_metropolis_gate.py --result PATH` evaluates a recorded `late_metropolis_v1` or `cohort_1m_v1` JSON against the docs/68 thresholds and prints `METROPOLIS_GATE status=pass|fail|insufficient`. `./scripts/check_metropolis_gate.sh` finds the newest file under `benchmarks/results/gate/`. It never renders or measures; a result missing provenance is `insufficient`, and `--require-hardware` fails a non-8c/16t/RTX 3060-12GB run. `--self-test` covers 14 cases. See [[68 - Metropolis Gate]] §8.4.
+> `./scripts/check_metropolis_gate.py --result PATH` evaluates a recorded `late_metropolis_v1` or `cohort_1m_v1` JSON against the docs/68 thresholds and prints `METROPOLIS_GATE status=pass|fail|insufficient`. `./scripts/check_metropolis_gate.sh` finds the newest file under `benchmarks/results/gate/`. It never renders or measures; a result missing provenance is `insufficient`, and `--require-hardware` fails a non-8c/16t/RTX 3060-12GB run. `--self-test` covers 14 cases. See [[68 - Metropolis Gate]] §8.4. The benchmark screen's read-only reference gate card shows the same verdict (§7).
 
 > [!info] Industrial balance probe
 > `cargo run --release -p townsmith-bench --bin industrial` builds a 20,000-resident Industrial city and runs 30 days at two tax policies. Current result: default 8/4 bankrupt in ~2.3 days at −175,385/day; 20/4 ends +2,288,306 at +64,615/day. Notional construction cost is 195M against 600k of available financing. See [[72 - Industrial Balance]].
@@ -302,6 +302,17 @@ This is the player-facing version of the benchmark: a clear expectation for the 
 
 > [!info] Report-only scaffold now draws frame-time graphs (2026-11-23)
 > `godot/bench_screen.tscn` implements the **report/rating/export** part against existing Early/Mid/Late summaries: three scene cards, median FPS, 1% low, hitches, sample count, a frame-time graph per card, an overall worst-scene rating, recommended resolution scale plus shadow/LOD presets, and `--output` JSON export. Each graph draws a ms axis with 16.7/33.3 ms reference lines and p95/p99 markers. Raw per-run frame arrays are used and labelled `summary` when a summary carries them (`frametimes_ms`, `frame_times_ms`, `frames_ms`, or `samples_ms`); the committed summaries keep only medians, so their cards draw a deterministic curve from p50/p95/p99/max labelled `aggregated`, and missing summaries use the embedded fixtures labelled `fixture`. `--run` refreshes the graphs after each live scene, and the export adds `frame_graph: {source, samples, p50_ms, p95_ms, p99_ms, max_ms, axis, reference_ms}` per scene. Still open: player-chosen scene/route/preset, 1% low and 0.1% low graphs, and writing raw per-frame arrays in the normal summary. The scaffold is not the gate and does not replace a target-machine run.
+
+> [!info] Read-only reference gate card (2026-11-23)
+> The same screen carries a **Reference gate** card for the two recorded 1M gate scenes: `late_metropolis_v1` (render) and `cohort_1m_v1` (headless). It looks for `benchmarks/results/gate/<scene>.json` and, when a file exists, runs `scripts/check_metropolis_gate.py --result <abs path>` and displays the evaluator's own final line. Thresholds live only in the evaluator; the card never duplicates, re-derives, or relaxes them, and it cannot turn a result into a gate pass.
+>
+> - `missing` — no recorded file. The evaluation is `insufficient` with reason `no_recorded_file`.
+> - `insufficient` — a file exists but the evaluator cannot judge it: incomplete provenance, unreadable JSON, or no Python/evaluator available. The reason is shown.
+> - `fail` / `pass` — the evaluator's verdict for a complete recorded file, copied verbatim.
+>
+> The card is **report-only**: it does not run C1/C2, verify the rig, or replace a reference-hardware run and the signed gate report ([[68 - Metropolis Gate]] §8.4, §10.2). `--gate-dir PATH` points it at another directory, which is how `./scripts/smoke_bench_screen.sh` exercises missing, present/pass, present/fail, python-only fallback, and no-interpreter fixtures and asserts `BENCH_SCREEN_GATE_EVAL render=… cohort=…`. The exported `reference_gate` block carries `state`, `recorded`, `key_metric`, `evaluation`, and a warning note; the committed result directory stays gitignored except for its README.
+>
+> Recorded gate results are **optional and not committed** — the screen and evaluator must work with none present. The evaluator and the card are **strictly read-only**: they never write a result, edit a report, or relax a threshold. A card `pass` describes only the recorded file; it cannot convert an F1–F4 fallback ([[68 - Metropolis Gate]] §9) into a gate pass.
 
 ## 8. Developer and CI mode
 

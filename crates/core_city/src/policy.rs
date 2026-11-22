@@ -6,16 +6,16 @@
 //!
 //! - no simulation, household, traffic, or economy code reads a policy yet;
 //! - no UI or bridge consumer displays or edits one yet;
-//! - [`DistrictPolicyStore`] is **not** composed into the world-save envelope,
-//!   so loading a world does not load policies and saving a world does not
-//!   write them.
+//! - [`DistrictPolicyStore`] can be composed into the world-save envelope as an
+//!   optional `policies` object; saving and loading persist the records, but
+//!   saving does not apply any tax, funding, construction, or allowlist effect.
 //!
 //! The registry is additive and owns its own JSON representation. Composing it
-//! into the world save later must not change the policy record fields or the
-//! existing world-save checksum. The deterministic lookup rule in this slice is
-//! the smallest policy id whose inclusive circle contains a point; overlap
-//! resolution, priority, and the actual tax/funding/allowlist effects remain
-//! open design work.
+//! into the world save must not change the policy record fields, the existing
+//! world-save checksum, or a save written without a registry. The deterministic
+//! lookup rule in this slice is the smallest policy id whose inclusive circle
+//! contains a point; overlap resolution, priority, and the actual
+//! tax/funding/allowlist effects remain open design work.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -329,9 +329,10 @@ impl Error for DistrictPolicyError {}
 
 /// Persistent district-policy registry.
 ///
-/// The store is additive: it is not part of the world-save envelope yet, and
-/// saving or loading a world leaves it untouched. It owns a `seed` so a later
-/// envelope slice can reject a registry that belongs to another world.
+/// The store is additive: when no registry exists the world save omits the
+/// optional `policies` object, so old saves and their checksums do not move.
+/// It owns a `seed` so the save/load path can reject a registry that belongs
+/// to another world.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DistrictPolicyStore {
     /// Save format version.
