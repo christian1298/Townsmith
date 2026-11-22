@@ -47,36 +47,36 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with real 10 cm building detail is tractable. The box-city MultiMesh path is measured well above target on an RTX 4080; the target 3060-class run and voxel building LOD remain. See [[03 - Voxel and Scale]], [[23 - City Rendering Benchmark]], and [[09 - Open Questions]]. |
-| Next action | Run the Q-101 playtest ([[66 - Playtest Kit]]). Then: utility/service per-phase payment, reconnect and interest filtering, district policies, and the 1M render gate ([[08 - Roadmap]], [[09 - Open Questions]]). |
+| Next action | Run the Q-101 playtest ([[66 - Playtest Kit]]). Then: district policies and selectable settlement panels, the 1M render gate ([[08 - Roadmap]], [[09 - Open Questions]]), and client render integration for the multiplayer path. |
 
 ## Current capabilities
 
 - **World and save:** full-world 1M core save/load envelope (182.8 MB JSON, **232.5 ms save / 694.7 ms load**) and atomic `.tmp`/`.bak` bridge writes; 100 km² streaming data harness (525 chunks, ~281 MB peak mesh bytes). See [[68 - Metropolis Gate]] and [[75 - Save Load Stress]].
 - **City and economy:** live phase-driven financing and campaign construction clock (D-028/D-029 still proposed), utility/service build lead time, infrastructure costs, district summary and heatmap. See [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]], and [[77 - Infrastructure Costs]].
-- **Multiplayer/server:** protocol v0, authoritative executor, atomic world save/load, dev roles/rate limits/audit, and the Godot MP client loopback smoke. See [[05 - Multiplayer]].
+- **Multiplayer/server:** protocol v0, authoritative executor, atomic world save/load, dev roles/rate limits/audit, reconnect, viewport interest filtering, and the Godot MP client loopback smoke. See [[05 - Multiplayer]].
 - **Scale and rendering evidence:** 250k voxel-proxy setup, crowd LOD, 2k movement-marker stress. See [[68 - Metropolis Gate]] and [[73 - Materialization Core]].
 - **Content:** in-memory mod content pack v0; 4 content schema files with 32 entries. See [[06 - Modding and Resource Packs]].
 
 ## Code inventory
 
-`cargo test --workspace`: **909 tests**, all passing (**905 unit/integration + 4 doctests**); fmt and clippy clean.
+`cargo test --workspace`: **1019 tests**, all passing (**1014 unit/integration + 5 doctests**); fmt and clippy clean.
 
 | Area | Tests |
 |---|---:|
-| `core_city` | 460 |
-| `godot_ext` (bridge) | 87 |
-| `core_world` | 62 |
-| `townsmith-server` | 83 |
-| `core_voxel` | 52 |
-| `core_sim` | 40 |
-| `core_structure` | 19 |
-| `core_blueprint` | 15 |
-| `core_rooms` | 12 |
-| `townsmith-bench` (16 bins) | 79 |
-| doctests (`core_city` 2, `core_rooms` 1, `core_structure` 1) | 4 |
-| **Total** | **858** |
+| `core_city` | 482 |
+| `godot_ext` (bridge) | 102 |
+| `core_world` | 78 |
+| `townsmith-server` | 97 |
+| `core_voxel` | 55 |
+| `core_sim` | 53 |
+| `core_structure` | 22 |
+| `core_blueprint` | 19 |
+| `core_rooms` | 13 |
+| `townsmith-bench` (18 bins) | 93 |
+| doctests (`core_city` 3, `core_rooms` 1, `core_structure` 1) | 5 |
+| **Total** | **1019** |
 
-Bench bins: `city_loop` 8, `cohort_validate` 9, `dormant` 5, `financing` 8, `industrial` 4, `infra_cost` 1, `materialization` 2, `metropolis` 4, `metropolis_balance` 4, `modern` 5, `movement` 4, `placements` 2, `save_1m` 6, `save_stress` 6, `streaming_scale` 7, `traffic` 4.
+Bench bins: `city_loop` 9, `cohort_validate` 9, `dormant` 5, `financing` 8, `industrial` 4, `infra_cost` 2, `materialization` 2, `metropolis` 4, `metropolis_balance` 4, `modern` 5, `movement` 6, `placements` 2, `save_1m` 6, `save_stress` 11, `streaming_scale` 7, `traffic` 4, `worldgen` 3, bench lib 2.
 
 > [!warning] This is a plan, not a commitment
 > Numbers in these docs are **planning targets**, not measured results. Anything marked *Assumption* or *Proposed* must be validated before it becomes an accepted decision.

@@ -229,7 +229,7 @@ The world scene draws routed citizens through two pooled `MultiMeshInstance3D` n
 - `core_city::population`: road commute and disconnected fallback.
 - `townsmith-bench`: 8 city-loop tests (small city and a multi-row commute) and 4 traffic-grid tests.
 - World scene smoke: `traffic=ok`, graph stats, one car, movement, save/load rebuild.
-- Workspace on this branch: **909 tests** (905 unit/integration + 4 doctests, all passing); core_city **460**, bridge **87**.
+- Workspace on this branch: **1019 tests** (1014 unit/integration + 5 doctests, all passing); core_city **482**, bridge **87**.
 
 ## 8. Limits
 
