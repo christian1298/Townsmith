@@ -12,14 +12,25 @@ OUTPUT="$TMP/voxel_gate.json" "$ROOT/scripts/bench_metropolis_voxel_gate.sh" \
 	--setup-only --godot "$GODOT_BIN" --output "$TMP/b.json" >/dev/null
 OUTPUT="$TMP/voxel_gate.json" "$ROOT/scripts/bench_metropolis_voxel_gate.sh" \
 	--setup-only --lod --godot "$GODOT_BIN" --output "$TMP/c.json" >/dev/null
+OUTPUT="$TMP/voxel_gate.json" "$ROOT/scripts/bench_metropolis_voxel_gate.sh" \
+	--setup-only --switch --godot "$GODOT_BIN" --output "$TMP/d.json" >"$TMP/d.log"
+OUTPUT="$TMP/voxel_gate.json" "$ROOT/scripts/bench_metropolis_voxel_gate.sh" \
+	--setup-only --switch --godot "$GODOT_BIN" --output "$TMP/e.json" >/dev/null
 
-python3 - "$TMP/a.json" "$TMP/b.json" "$TMP/c.json" <<'PY'
+if grep -qE 'Leaked instance|ObjectDB instances leaked' "$TMP/d.log"; then
+	echo "switch setup leaked objects" >&2
+	exit 1
+fi
+
+python3 - "$TMP/a.json" "$TMP/b.json" "$TMP/c.json" "$TMP/d.json" "$TMP/e.json" <<'PY'
 import json
 import pathlib
 import sys
 a = json.loads(pathlib.Path(sys.argv[1]).read_text())
 b = json.loads(pathlib.Path(sys.argv[2]).read_text())
 c = json.loads(pathlib.Path(sys.argv[3]).read_text())
+d = json.loads(pathlib.Path(sys.argv[4]).read_text())
+e = json.loads(pathlib.Path(sys.argv[5]).read_text())
 expected = {
     "scene": "metropolis_voxel_gate_lod_26k",
     "instances": 26000,
@@ -55,8 +66,34 @@ for key, value in lod_expected.items():
         raise SystemExit(f"lod {key}: expected {value!r}, got {c.get(key)!r}")
 if c.get("lod_instances") != {"near": 698, "mid": 4318, "far": 20984}:
     raise SystemExit(f"lod_instances mismatch: {c.get('lod_instances')!r}")
+switch_expected = {
+    "scene": "metropolis_voxel_gate_switch_26k",
+    "instances": 26000,
+    "quads": 74995,
+    "triangles": 149990,
+    "buffer_bytes": 1248000,
+    "checksum": "730ad355",
+    "gate_result": "not_measured",
+    "gate_scope": "voxel_proxy_setup",
+    "run_kind": "setup_only_switch",
+}
+for key, value in switch_expected.items():
+    if d.get(key) != value:
+        raise SystemExit(f"switch {key}: expected {value!r}, got {d.get(key)!r}")
+if d.get("lod_instances") != {"near": 704, "mid": 2055, "far": 23241}:
+    raise SystemExit(f"switch lod_instances mismatch: {d.get('lod_instances')!r}")
+switch = d.get("switch") or {}
+if switch.get("nodes") != 3 or switch.get("samples") != 12:
+    raise SystemExit(f"switch shape mismatch: {switch!r}")
+if switch.get("updates") != 60 or switch.get("rebuilds") != 12 or switch.get("skips") != 48:
+    raise SystemExit(f"switch counters mismatch: {switch!r}")
+for key in ("checksum", "instances", "quads", "triangles", "buffer_bytes", "lod_instances"):
+    if d.get(key) != e.get(key):
+        raise SystemExit(f"switch determinism mismatch on {key}")
+if (d.get("switch") or {}).get("checksum") != (e.get("switch") or {}).get("checksum"):
+    raise SystemExit("switch checksum mismatch")
 print(
-    "METROPOLIS_VOXEL_GATE_SMOKE status=ok instances=%d near=%d mid=%d far=%d quads=%d triangles=%d checksum=%s lod_checksum=%s"
+    "METROPOLIS_VOXEL_GATE_SMOKE status=ok instances=%d near=%d mid=%d far=%d quads=%d triangles=%d checksum=%s lod_checksum=%s switch_checksum=%s"
     % (
         a["instances"],
         a["lod_instances"]["near"],
@@ -66,6 +103,7 @@ print(
         a["triangles"],
         a["checksum"],
         c["checksum"],
+        d["checksum"],
     )
 )
 PY

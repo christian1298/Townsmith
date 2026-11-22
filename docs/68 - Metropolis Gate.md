@@ -2,7 +2,7 @@
 title: Metropolis Gate
 project: Townsmith
 status: proposed
-updated: 2026-11-21
+updated: 2026-11-22
 tags:
   - townsmith
   - phase-5
@@ -460,7 +460,7 @@ The route is `benchmarks/routes/metropolis_gate_v1.json`; setup is deterministic
 
 ### 7.7 Voxel-proxy setup and frame-budget harness
 
-`godot/metropolis_voxel_gate.gd` builds three deterministic `MultiMesh` tiers from the Phase 0 demo voxel hut: 1k, 5k, and 20k instances (26k total). Each tier is split into static distance bands: **LOD 0 near** (`<=150 m`, greedy hut), **LOD 1 mid** (`<=400 m`, box proxy), and **LOD 2 far** (impostor quad). There is no runtime LOD switching. It reports per-tier/per-LOD instances, quads, triangles, setup ms, instance-buffer bytes, static-memory delta, and an FNV checksum. `scripts/bench_metropolis_voxel_gate.sh --setup-only` runs headless twice and fails if the layout drifts; the short/full modes capture display-backed frame times with hardware provenance.
+`godot/metropolis_voxel_gate.gd` builds three deterministic `MultiMesh` tiers from the Phase 0 demo voxel hut: 1k, 5k, and 20k instances (26k total). Each tier is split into static distance bands: **LOD 0 near** (`<=150 m`, greedy hut), **LOD 1 mid** (`<=400 m`, box proxy), and **LOD 2 far** (impostor quad). The default and `--lod` modes are static. `--switch` adds a runtime mode: one 26k layout, three reused `MultiMeshInstance3D` nodes, and deterministic distance reassignment as a 12-sample serpentine camera route crosses 50 m cells. It reports per-tier/per-LOD instances, quads, triangles, setup ms, instance-buffer bytes, static-memory delta, and an FNV checksum. `scripts/bench_metropolis_voxel_gate.sh --setup-only` runs headless twice and fails if the layout drifts; the short/full modes capture display-backed frame times with hardware provenance.
 
 Current headless setup (Ryzen 9 7950X, Godot 4.7.2):
 
@@ -475,15 +475,18 @@ LOD split: near **2,123** instances / 118,888 quads / 237,776 triangles; mid **8
 
 `--lod` mode uses one 26,000-building layout instead of three spatial tiers: near 698 / mid 4,318 / far 20,984; **85,980 quads / 171,960 triangles**; checksum **`73ac0757`**.
 
+`--switch` uses the same single layout with runtime bands. Final sample: near 704 / mid 2,055 / far 23,241; **74,995 quads / 149,990 triangles**; 12 samples, 60 updates, 12 rebuilds, 48 skips, three reused nodes, checksum **`730ad355`**. Setup ~153 ms, rebuild average ~11.5 ms, instance buffer 1,248,000 B. Default and `--lod` checksums are unchanged.
+
 ```bash
 GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only
 GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --lod
+GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --switch
 GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --short
 GODOT=/path/to/godot ./scripts/smoke_metropolis_voxel_gate.sh
 ```
 
 > [!warning] Evidence limit
-> This is **26k reused low-poly proxies** with static distance bands, not 250k distinct voxel buildings. It has no runtime LOD switching, streaming, shadows/GI/SSAO, simulation, save/load, or RTX 3060 reference run. It proves the voxel-proxy instance/LOD memory shape, and it can capture a frame budget; it does not close the M5 gate.
+> This is **26k reused low-poly proxies** with static bands by default and optional runtime switching, not 250k distinct voxel buildings. It has no streaming, shadows/GI/SSAO, simulation, save/load, or RTX 3060 reference run. It proves the voxel-proxy instance/LOD memory/hysteresis-free switch shape, and it can capture a frame budget; it does not close the M5 gate.
 
 ## 8. Pass/fail decision rules
 

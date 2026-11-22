@@ -17,23 +17,35 @@ extends Node3D
 ## checksum. `--lod` builds a single 26k-building layout instead of the three
 ## spatial tiers, so the LOD mix can be validated on its own.
 ##
+## `--switch` builds the same single 26k-building layout but reuses exactly
+## three `MultiMeshInstance3D` nodes (hut / box / impostor quad) and fills
+## their buffers from the current camera XZ: `<=150 m` hut, `<=400 m` box,
+## `>400 m` impostor. A deterministic 12-sample serpentine route (4 columns x
+## 3 rows) exercises the assignment; five update calls per sample prove that a
+## rebuild only happens when the camera enters a new 50 m XZ cell. It reports
+## per-sample band counts, rebuilds/skips, quads/triangles, buffer bytes,
+## setup ms, and a checksum over the assignment. `--switch` and `--lod` cannot
+## be combined.
+##
 ## With a display it also flies a fixed 60 s camera route after a warm-up and
 ## records real frame times. Headless (`--setup-only`) validates the layout and
 ## upload path only; it never claims FPS.
 ##
 ## This is **voxel-proxy setup/memory evidence**, not the RTX 3060 metropolis
-## gate: one reused low-poly hut, static LOD bands with no switching, no
-## streaming, shadows (unless `--shadows`), GI/SSAO, simulation, or 250k
-## buildings, and the route is a single run on whatever GPU is attached.
+## gate: one reused low-poly hut, static LOD bands (or a synthetic switch
+## route), no streaming, shadows (unless `--shadows`), GI/SSAO, simulation, or
+## 250k buildings, and the route is a single run on whatever GPU is attached.
 ##
 ## Usage:
 ##   godot --headless --path godot res://metropolis_voxel_gate.tscn -- --setup-only
 ##   godot --headless --path godot res://metropolis_voxel_gate.tscn -- --setup-only --lod
+##   godot --headless --path godot res://metropolis_voxel_gate.tscn -- --setup-only --switch
 ##   godot --path godot res://metropolis_voxel_gate.tscn -- --short
 ##
 ## Options after `--`:
 ##   --setup-only        Build, validate, print setup JSON, exit 0
 ##   --lod               Build the single 26k-building LOD-band layout
+##   --switch            Rebuild three reused MultiMeshes on a 50 m camera cell
 ##   --short             Use a 10 s measured route with a 3 s warm-up
 ##   --duration S        Measured seconds (default route value, 60)
 ##   --warmup S          Discarded warm-up seconds (default route value, 8)
@@ -51,6 +63,20 @@ const TIER_CENTER_X := [-1700.0, -700.0, 900.0]
 const LOD_ONLY_COUNT := 26_000
 const LOD_ONLY_CENTER_X := 0.0
 const LOD_ONLY_NAME := "lod_single"
+# `--switch` mode: one 26k-building layout with three reused MultiMesh nodes.
+const SWITCH_COUNT := 26_000
+const SWITCH_CENTER_X := 0.0
+const SWITCH_NAME := "switch_single"
+const SWITCH_LAYOUT_ID := "switch_single_v1"
+# Rebuild only when the camera XZ enters a new cell of this size.
+const SWITCH_CELL_M := 50.0
+const SWITCH_SAMPLE_COLUMNS := 4
+const SWITCH_SAMPLE_ROWS := 3
+const SWITCH_SAMPLE_HEIGHT_M := 90.0
+# Five update calls per sample: the first rebuilds, the other four must skip.
+const SWITCH_FRAMES_PER_SAMPLE := 5
+const SWITCH_SAMPLE_COLUMN_FRACS := [0.1, 0.3666667, 0.6333333, 0.9]
+const SWITCH_SAMPLE_ROW_FRACS := [0.1, 0.5, 0.9]
 # Static distance bands from each layout centre. Not a runtime LOD selector.
 const LOD_NEAR_RADIUS_M := 150.0
 const LOD_MID_RADIUS_M := 400.0
@@ -82,6 +108,7 @@ var setup_only := false
 var short_route := false
 var shadows_enabled := false
 var lod_mode := false
+var switch_mode := false
 
 var camera: Camera3D
 var light: DirectionalLight3D
@@ -90,6 +117,45 @@ var _scene_stats: Dictionary = {}
 var _settings: Dictionary = {}
 var _hardware: Dictionary = {}
 var _route_hash := 0
+
+# `--switch` state. Buffers are reused across rebuilds; nodes are never rebuilt.
+var _switch_positions := PackedVector2Array()
+var _switch_yaws := PackedInt32Array()
+var _switch_buffers: Array = [PackedFloat32Array(), PackedFloat32Array(), PackedFloat32Array()]
+var _switch_multimeshes: Array[MultiMesh] = []
+var _switch_nodes: Array[MultiMeshInstance3D] = []
+var _switch_mesh_stats: Array = []
+var _switch_near_stats: Dictionary = {}
+var _switch_mesh_usec := 0
+var _switch_mesh_quads: Array = [0, 0, 0]
+var _switch_mesh_triangles: Array = [0, 0, 0]
+var _switch_base_y: Array = [0.0, 0.0, 0.0]
+var _switch_rotated: Array = []
+var _switch_cos: Array = [1.0, 0.0, -1.0, 0.0]
+var _switch_sin: Array = [0.0, 1.0, 0.0, -1.0]
+var _switch_bounds: Array = [0.0, 0.0, 0.0, 0.0]
+var _switch_columns := 0
+var _switch_rows := 0
+var _switch_x0 := 0.0
+var _switch_z0 := 0.0
+var _switch_cell := Vector2i(-1_000_000, -1_000_000)
+var _switch_counts: Array = [0, 0, 0]
+var _switch_quads := 0
+var _switch_triangles := 0
+var _switch_assignment_hash := 0
+var _switch_checksum := 0
+var _switch_sample_detail: Array = []
+var _switch_sample_hashes: Array = []
+var _switch_samples := 0
+var _switch_updates := 0
+var _switch_rebuilds := 0
+var _switch_skips := 0
+var _switch_assign_usec := 0
+var _switch_build_started_usec := 0
+var _switch_mem_before_kb := 0
+var _switch_route_updates := 0
+var _switch_route_rebuilds := 0
+var _switch_route_skips := 0
 
 var elapsed := 0.0
 var measured_s := 0.0
@@ -105,6 +171,10 @@ func _ready() -> void:
 	short_route = args.has("--short")
 	shadows_enabled = args.has("--shadows")
 	lod_mode = args.has("--lod")
+	switch_mode = args.has("--switch")
+	if switch_mode and lod_mode:
+		_fail("--switch cannot be combined with --lod")
+		return
 	git_commit = _arg(args, "--git-commit", "")
 	git_dirty = _arg(args, "--git-dirty", "")
 	route_path = _arg(args, "--route", _project_root().path_join(DEFAULT_ROUTE))
@@ -127,6 +197,11 @@ func _ready() -> void:
 		_fail(str(_scene_stats["error"]))
 		return
 	_add_environment()
+	if switch_mode:
+		_run_switch_samples()
+		if _scene_stats.has("error"):
+			_fail(str(_scene_stats["error"]))
+			return
 	_apply_route(0.0)
 	_hardware = _hardware_info()
 	_settings = _settings_info()
@@ -143,6 +218,8 @@ func _process(delta: float) -> void:
 	elapsed += delta
 	var progress := clampf((elapsed - warmup_s) / maxf(duration_s, 0.001), 0.0, 1.0)
 	_apply_route(progress)
+	if switch_mode:
+		_switch_update_live(camera.position)
 
 	var now := Time.get_ticks_usec()
 	if not measuring and elapsed >= warmup_s:
@@ -162,15 +239,20 @@ func _process(delta: float) -> void:
 		_finish()
 
 func _build_scene() -> void:
+	if switch_mode:
+		_build_switch_scene()
+		return
 	var scene_started_usec := Time.get_ticks_usec()
 	var core := TownsmithCore.new()
 	var mesh_started_usec := Time.get_ticks_usec()
 	var near_mesh: ArrayMesh = core.build_demo_mesh()
 	var mesh_usec := Time.get_ticks_usec() - mesh_started_usec
+	_switch_mesh_usec = mesh_usec
 	if near_mesh == null or near_mesh.get_surface_count() < 1:
 		_scene_stats = {"error": "demo_mesh_empty"}
 		return
 	var near_stats := _mesh_stats(near_mesh)
+	_switch_near_stats = near_stats
 	var hut_aabb := near_mesh.get_aabb()
 	var material := _hut_material()
 	var meshes: Array[Mesh] = [
@@ -486,7 +568,417 @@ func _build_lod_group(
 	stats["buffer_mb"] = _round2(float(data.size() * FLOAT_BYTES) / (1024.0 * 1024.0))
 	return stats
 
+func _build_switch_scene() -> void:
+	_switch_build_started_usec = Time.get_ticks_usec()
+	_switch_mem_before_kb = OS.get_static_memory_usage() / 1024
+	var core := TownsmithCore.new()
+	var mesh_started_usec := Time.get_ticks_usec()
+	var near_mesh: ArrayMesh = core.build_demo_mesh()
+	var mesh_usec := Time.get_ticks_usec() - mesh_started_usec
+	if near_mesh == null or near_mesh.get_surface_count() < 1:
+		_scene_stats = {"error": "demo_mesh_empty"}
+		return
+	var near_stats := _mesh_stats(near_mesh)
+	var hut_aabb := near_mesh.get_aabb()
+	var material := _hut_material()
+	var meshes: Array[Mesh] = [
+		near_mesh,
+		_mid_lod_mesh(hut_aabb),
+		_far_lod_mesh(hut_aabb),
+	]
+	var half_span := 0.0
+	var max_height := 0.0
+	for lod in meshes.size():
+		var stats := _mesh_stats_any(meshes[lod])
+		stats["lod"] = lod
+		stats["name"] = LOD_NAMES[lod]
+		stats["mesh"] = LOD_MESH_IDS[lod]
+		_switch_mesh_stats.append(stats)
+		_switch_mesh_quads[lod] = int(stats["quads"])
+		_switch_mesh_triangles[lod] = int(stats["triangles"])
+		var aabb: Array = stats["aabb"]
+		var base_y := -float(aabb[1])
+		_switch_base_y[lod] = base_y
+		max_height = maxf(max_height, float(aabb[1]) + float(aabb[4]) + base_y)
+		half_span = maxf(half_span, maxf(float(aabb[3]), float(aabb[5])) * 0.5)
+
+	_switch_columns = maxi(1, int(ceil(sqrt(float(SWITCH_COUNT)))))
+	_switch_rows = maxi(1, int(ceil(float(SWITCH_COUNT) / float(_switch_columns))))
+	var extent_x := float(_switch_columns - 1) * GRID_SPACING_M
+	var extent_z := float(_switch_rows - 1) * GRID_SPACING_M
+	_switch_x0 = SWITCH_CENTER_X - extent_x * 0.5
+	_switch_z0 = -extent_z * 0.5
+	var min_x := _switch_x0 - half_span
+	var max_x := _switch_x0 + extent_x + half_span
+	var min_z := _switch_z0 - half_span
+	var max_z := _switch_z0 + extent_z + half_span
+	_switch_bounds = [min_x, min_z, max_x, max_z]
+	var city_aabb := AABB(
+		Vector3(min_x, 0.0, min_z),
+		Vector3(max_x - min_x, maxf(max_height, 1.0), max_z - min_z))
+
+	# Positions and yaws are computed once, exactly like `--lod` tier 0.
+	_switch_positions.resize(SWITCH_COUNT)
+	_switch_yaws.resize(SWITCH_COUNT)
+	for index in SWITCH_COUNT:
+		var column := index % _switch_columns
+		var row := index / _switch_columns
+		_switch_positions[index] = Vector2(
+			_switch_x0 + float(column) * GRID_SPACING_M,
+			_switch_z0 + float(row) * GRID_SPACING_M)
+		_switch_yaws[index] = int(posmod(SEED + index * 7, 4))
+
+	# Per-mesh centre rotation for the four quarter-turn yaws.
+	_switch_rotated = []
+	for lod in meshes.size():
+		var aabb: Array = (_switch_mesh_stats[lod] as Dictionary)["aabb"]
+		var center := Vector3(
+			float(aabb[0]) + float(aabb[3]) * 0.5,
+			float(aabb[1]) + float(aabb[4]) * 0.5,
+			float(aabb[2]) + float(aabb[5]) * 0.5)
+		var per_yaw: Array = []
+		for yaw in 4:
+			per_yaw.append(_rotated_center(float(yaw) * PI * 0.5, center))
+		_switch_rotated.append(per_yaw)
+
+	_container = Node3D.new()
+	_container.name = "MetropolisVoxelGateSwitch"
+	add_child(_container)
+	_switch_multimeshes.clear()
+	_switch_nodes.clear()
+	for lod in meshes.size():
+		var multimesh := MultiMesh.new()
+		multimesh.mesh = meshes[lod]
+		# transform_format and use_colors must be set before instance_count.
+		multimesh.transform_format = MultiMesh.TRANSFORM_3D
+		multimesh.use_colors = false
+		multimesh.instance_count = 0
+		multimesh.custom_aabb = city_aabb
+		var node := MultiMeshInstance3D.new()
+		node.name = "VoxelSwitchLod%d" % lod
+		node.multimesh = multimesh
+		node.material_override = material
+		node.cast_shadow = (
+			GeometryInstance3D.SHADOW_CASTING_SETTING_ON if shadows_enabled
+			else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF)
+		_container.add_child(node)
+		_switch_multimeshes.append(multimesh)
+		_switch_nodes.append(node)
+
+	# Provisional stats so `_add_environment` can size the ground and camera.
+	_scene_stats = {
+		"mesh": MESH_ID,
+		"seed": SEED,
+		"spacing_m": GRID_SPACING_M,
+		"layout": SWITCH_LAYOUT_ID,
+		"mesh_stats": near_stats,
+		"mesh_build_ms": _ms(mesh_usec),
+		"tiers": [{"bounds": _switch_bounds}],
+	}
+
+func _run_switch_samples() -> void:
+	var sample_started_usec := Time.get_ticks_usec()
+	var positions := _switch_sample_positions()
+	_switch_sample_detail.clear()
+	_switch_sample_hashes.clear()
+	_switch_samples = positions.size()
+	_switch_updates = 0
+	_switch_rebuilds = 0
+	_switch_skips = 0
+	_switch_assign_usec = 0
+	_switch_cell = Vector2i(-1_000_000, -1_000_000)
+	_switch_checksum = FNV_OFFSET_BASIS
+	_switch_checksum = _mix_string(_switch_checksum, SWITCH_LAYOUT_ID)
+	_switch_checksum = _mix_string(_switch_checksum, "switch_assignment_v1")
+	_switch_checksum = _mix(_switch_checksum, SWITCH_COUNT)
+	_switch_checksum = _mix(_switch_checksum, _switch_columns)
+	_switch_checksum = _mix(_switch_checksum, _switch_rows)
+	_switch_checksum = _mix(_switch_checksum, SWITCH_SAMPLE_COLUMNS)
+	_switch_checksum = _mix(_switch_checksum, SWITCH_SAMPLE_ROWS)
+	_switch_checksum = _mix(_switch_checksum, int(round(SWITCH_CELL_M * 1000.0)))
+	_switch_checksum = _mix(_switch_checksum, int(round(LOD_NEAR_RADIUS_M * 1000.0)))
+	_switch_checksum = _mix(_switch_checksum, int(round(LOD_MID_RADIUS_M * 1000.0)))
+
+	for sample_index in positions.size():
+		var position: Vector3 = positions[sample_index]
+		var rebuilt := false
+		for frame in SWITCH_FRAMES_PER_SAMPLE:
+			_switch_updates += 1
+			if _switch_assign(position):
+				_switch_rebuilds += 1
+				rebuilt = true
+			else:
+				_switch_skips += 1
+		if camera != null:
+			camera.position = position
+			camera.look_at(Vector3(0.0, 30.0, 0.0))
+		var sample_hash := FNV_OFFSET_BASIS
+		sample_hash = _mix(sample_hash, sample_index)
+		sample_hash = _mix(sample_hash, int(round(position.x * 1000.0)))
+		sample_hash = _mix(sample_hash, int(round(position.z * 1000.0)))
+		sample_hash = _mix(sample_hash, _switch_cell.x)
+		sample_hash = _mix(sample_hash, _switch_cell.y)
+		sample_hash = _mix(sample_hash, int(_switch_counts[0]))
+		sample_hash = _mix(sample_hash, int(_switch_counts[1]))
+		sample_hash = _mix(sample_hash, int(_switch_counts[2]))
+		sample_hash = _mix(sample_hash, _switch_assignment_hash)
+		_switch_sample_hashes.append(_checksum_hex(sample_hash))
+		_switch_checksum = _mix(_switch_checksum, sample_hash)
+		_switch_sample_detail.append({
+			"sample": sample_index,
+			"row": sample_index / SWITCH_SAMPLE_COLUMNS,
+			"column": sample_index % SWITCH_SAMPLE_COLUMNS,
+			"cell": [_switch_cell.x, _switch_cell.y],
+			"position": [
+				_round2(position.x), _round2(position.y), _round2(position.z)],
+			"rebuild": rebuilt,
+			"near": int(_switch_counts[0]),
+			"mid": int(_switch_counts[1]),
+			"far": int(_switch_counts[2]),
+			"quads": _switch_quads,
+			"triangles": _switch_triangles,
+			"buffer_bytes": SWITCH_COUNT * FLOATS_PER_INSTANCE * FLOAT_BYTES,
+		})
+
+	var assign_usec := Time.get_ticks_usec() - sample_started_usec
+	var setup_usec := Time.get_ticks_usec() - _switch_build_started_usec
+	var build_usec := sample_started_usec - _switch_build_started_usec
+	var total_buffer_bytes := SWITCH_COUNT * FLOATS_PER_INSTANCE * FLOAT_BYTES
+	var band_stats: Array = []
+	var lod_totals: Array = []
+	for lod in LOD_NAMES.size():
+		var count := int(_switch_counts[lod])
+		var quads := int(_switch_mesh_quads[lod]) * count
+		var triangles := int(_switch_mesh_triangles[lod]) * count
+		var band_bytes := count * FLOATS_PER_INSTANCE * FLOAT_BYTES
+		var entry := {
+			"name": LOD_NAMES[lod],
+			"lod": lod,
+			"mesh": LOD_MESH_IDS[lod],
+			"mesh_quads": int(_switch_mesh_quads[lod]),
+			"mesh_triangles": int(_switch_mesh_triangles[lod]),
+			"instances": count,
+			"quads": quads,
+			"triangles": triangles,
+			"buffer_bytes": band_bytes,
+			"buffer_mb": _round2(float(band_bytes) / (1024.0 * 1024.0)),
+			"setup_ms": 0.0,
+		}
+		band_stats.append(entry)
+		lod_totals.append(entry.duplicate())
+	var lod_instances := {
+		"near": int(_switch_counts[0]),
+		"mid": int(_switch_counts[1]),
+		"far": int(_switch_counts[2]),
+	}
+	var tier_lod: Array = []
+	for lod in LOD_NAMES.size():
+		var entry: Dictionary = band_stats[lod].duplicate()
+		tier_lod.append(entry)
+	var mem_kb := OS.get_static_memory_usage() / 1024 - _switch_mem_before_kb
+	_scene_stats = {
+		"mesh": MESH_ID,
+		"seed": SEED,
+		"spacing_m": GRID_SPACING_M,
+		"layout": SWITCH_LAYOUT_ID,
+		"lod_model": {
+			"mode": "runtime_distance_switch",
+			"cell_m": SWITCH_CELL_M,
+			"near_radius_m": LOD_NEAR_RADIUS_M,
+			"mid_radius_m": LOD_MID_RADIUS_M,
+			"samples": _switch_samples,
+			"sample_columns": SWITCH_SAMPLE_COLUMNS,
+			"sample_rows": SWITCH_SAMPLE_ROWS,
+			"frames_per_sample": SWITCH_FRAMES_PER_SAMPLE,
+			"nodes": _switch_nodes.size(),
+			"levels": _switch_mesh_stats,
+		},
+		"instances": SWITCH_COUNT,
+		"quads": _switch_quads,
+		"triangles": _switch_triangles,
+		"tiers": [{
+			"name": SWITCH_NAME,
+			"tier": 0,
+			"instances": SWITCH_COUNT,
+			"grid": [_switch_columns, _switch_rows],
+			"center_x": SWITCH_CENTER_X,
+			"bounds": _switch_bounds,
+			"lod": tier_lod,
+			"quads": _switch_quads,
+			"triangles": _switch_triangles,
+			"buffer_bytes": total_buffer_bytes,
+			"buffer_mb": _round2(float(total_buffer_bytes) / (1024.0 * 1024.0)),
+			"cpu_mem_kb_delta": mem_kb,
+			"setup_ms": _ms(assign_usec),
+		}],
+		"lod_tiers": lod_totals,
+		"lod_instances": lod_instances,
+		"mesh_stats": _switch_near_stats,
+		"mesh_build_ms": _ms(_switch_mesh_usec),
+		"tier_setup_ms": _ms(assign_usec),
+		"setup_ms": _ms(setup_usec),
+		"scene_build_ms": _ms(setup_usec),
+		"buffer_bytes": total_buffer_bytes,
+		"buffer_mb": _round2(float(total_buffer_bytes) / (1024.0 * 1024.0)),
+		"cpu_mem_kb_delta": mem_kb,
+		"checksum": _checksum_hex(_switch_checksum),
+	}
+	_scene_stats["switch"] = {
+		"mode": "switch",
+		"samples": _switch_samples,
+		"updates": _switch_updates,
+		"rebuilds": _switch_rebuilds,
+		"skips": _switch_skips,
+		"cell_m": SWITCH_CELL_M,
+		"columns": SWITCH_SAMPLE_COLUMNS,
+		"rows": SWITCH_SAMPLE_ROWS,
+		"frames_per_sample": SWITCH_FRAMES_PER_SAMPLE,
+		"nodes": _switch_nodes.size(),
+		"bands": band_stats,
+		"near": int(_switch_counts[0]),
+		"mid": int(_switch_counts[1]),
+		"far": int(_switch_counts[2]),
+		"quads": _switch_quads,
+		"triangles": _switch_triangles,
+		"buffer_bytes": total_buffer_bytes,
+		"buffer_mb": _round2(float(total_buffer_bytes) / (1024.0 * 1024.0)),
+		"assign_ms": _ms(assign_usec),
+		"build_ms": _ms(build_usec),
+		"setup_ms": _ms(setup_usec),
+		"rebuild_ms_avg": _round2(
+			float(_switch_assign_usec) / 1000.0 / maxf(float(_switch_rebuilds), 1.0)),
+		"checksum": _checksum_hex(_switch_checksum),
+		"sample_checksums": _switch_sample_hashes.duplicate(),
+		"samples_detail": _switch_sample_detail.duplicate(true),
+		"route_updates": 0,
+		"route_rebuilds": 0,
+		"route_skips": 0,
+	}
+
+func _switch_sample_positions() -> Array:
+	var positions: Array = []
+	var min_x := _switch_x0
+	var max_x := _switch_x0 + float(_switch_columns - 1) * GRID_SPACING_M
+	var min_z := _switch_z0
+	var max_z := _switch_z0 + float(_switch_rows - 1) * GRID_SPACING_M
+	for row in SWITCH_SAMPLE_ROWS:
+		var order: Array = range(SWITCH_SAMPLE_COLUMNS)
+		if row % 2 == 1:
+			order = range(SWITCH_SAMPLE_COLUMNS - 1, -1, -1)
+		for column in order:
+			positions.append(Vector3(
+				lerpf(min_x, max_x, float(SWITCH_SAMPLE_COLUMN_FRACS[column])),
+				SWITCH_SAMPLE_HEIGHT_M,
+				lerpf(min_z, max_z, float(SWITCH_SAMPLE_ROW_FRACS[row]))))
+	return positions
+
+func _switch_assign(position: Vector3) -> bool:
+	var cell := Vector2i(
+		int(floor(position.x / SWITCH_CELL_M)),
+		int(floor(position.z / SWITCH_CELL_M)))
+	if cell == _switch_cell:
+		return false
+	_switch_cell = cell
+	_switch_fill(position)
+	return true
+
+func _switch_fill(position: Vector3) -> void:
+	var fill_started_usec := Time.get_ticks_usec()
+	var near_limit := LOD_NEAR_RADIUS_M * LOD_NEAR_RADIUS_M
+	var mid_limit := LOD_MID_RADIUS_M * LOD_MID_RADIUS_M
+	var bands := PackedByteArray()
+	bands.resize(SWITCH_COUNT)
+	var counts := [0, 0, 0]
+	for index in SWITCH_COUNT:
+		var point := _switch_positions[index]
+		var dx := point.x - position.x
+		var dz := point.y - position.z
+		var distance_squared := dx * dx + dz * dz
+		var band := 0
+		if distance_squared > mid_limit:
+			band = 2
+		elif distance_squared > near_limit:
+			band = 1
+		bands[index] = band
+		counts[band] += 1
+
+	for lod in LOD_NAMES.size():
+		var data: PackedFloat32Array = _switch_buffers[lod]
+		data.resize(int(counts[lod]) * FLOATS_PER_INSTANCE)
+		var rotated_yaw: Array = _switch_rotated[lod]
+		var base_y := float(_switch_base_y[lod])
+		var slot := 0
+		for index in SWITCH_COUNT:
+			if int(bands[index]) != lod:
+				continue
+			var point := _switch_positions[index]
+			var yaw := int(_switch_yaws[index])
+			var c := float(_switch_cos[yaw])
+			var s := float(_switch_sin[yaw])
+			var rotated: Vector2 = rotated_yaw[yaw]
+			var offset := slot * FLOATS_PER_INSTANCE
+			data[offset + 0] = c
+			data[offset + 1] = 0.0
+			data[offset + 2] = -s
+			data[offset + 3] = point.x - rotated.x
+			data[offset + 4] = 0.0
+			data[offset + 5] = 1.0
+			data[offset + 6] = 0.0
+			data[offset + 7] = base_y
+			data[offset + 8] = s
+			data[offset + 9] = 0.0
+			data[offset + 10] = c
+			data[offset + 11] = point.y - rotated.y
+			slot += 1
+		_switch_buffers[lod] = data
+		var multimesh := _switch_multimeshes[lod]
+		multimesh.instance_count = int(counts[lod])
+		multimesh.buffer = data
+
+	# Pack the per-instance assignment into 2-bit fields for a stable hash.
+	var assignment_hash := FNV_OFFSET_BASIS
+	assignment_hash = _mix(assignment_hash, int(counts[0]))
+	assignment_hash = _mix(assignment_hash, int(counts[1]))
+	assignment_hash = _mix(assignment_hash, int(counts[2]))
+	var word := 0
+	var shift := 0
+	for index in SWITCH_COUNT:
+		word |= int(bands[index]) << shift
+		shift += 2
+		if shift == 32:
+			assignment_hash = _mix(assignment_hash, word)
+			word = 0
+			shift = 0
+	if shift > 0:
+		assignment_hash = _mix(assignment_hash, word)
+	_switch_assignment_hash = assignment_hash
+	_switch_counts = counts
+	_switch_quads = (
+		int(_switch_mesh_quads[0]) * int(counts[0])
+		+ int(_switch_mesh_quads[1]) * int(counts[1])
+		+ int(_switch_mesh_quads[2]) * int(counts[2]))
+	_switch_triangles = (
+		int(_switch_mesh_triangles[0]) * int(counts[0])
+		+ int(_switch_mesh_triangles[1]) * int(counts[1])
+		+ int(_switch_mesh_triangles[2]) * int(counts[2]))
+	_switch_assign_usec += Time.get_ticks_usec() - fill_started_usec
+
+func _switch_update_live(position: Vector3) -> void:
+	_switch_route_updates += 1
+	if _switch_assign(position):
+		_switch_route_rebuilds += 1
+	else:
+		_switch_route_skips += 1
+
+func _switch_result_payload() -> Dictionary:
+	var payload: Dictionary = (_scene_stats.get("switch", {}) as Dictionary).duplicate(true)
+	payload["route_updates"] = _switch_route_updates
+	payload["route_rebuilds"] = _switch_route_rebuilds
+	payload["route_skips"] = _switch_route_skips
+	return payload
+
 func _tier_checksum(tier: int, count: int, stats: Dictionary, layout_id: String) -> int:
+
 	var hash := FNV_OFFSET_BASIS
 	hash = _mix_string(hash, layout_id)
 	for mesh_id in LOD_MESH_IDS:
@@ -733,23 +1225,50 @@ func _finish() -> void:
 	}
 	result["gate_result"] = "not_measured"
 	result["gate_scope"] = "voxel_proxy_frame_budget"
-	result["gate_reason"] = (
-		"voxel-proxy frame budget observed with static LOD bands "
-		+ "(hut/box/quad impostor): no runtime LOD selection or switching, "
-		+ "streaming, GI/SSAO, simulation, or reference 3060 rig; not gate M5")
+	if switch_mode:
+		result["gate_reason"] = (
+			"voxel-proxy frame budget observed with runtime distance switching "
+			+ "across three reused MultiMesh nodes (hut/box/quad impostor) on a "
+			+ "synthetic 12-sample serpentine route: no streaming, GI/SSAO, "
+			+ "simulation, or reference 3060 rig; not gate M5")
+		_apply_switch_fields(result)
+	else:
+		result["gate_reason"] = (
+			"voxel-proxy frame budget observed with static LOD bands "
+			+ "(hut/box/quad impostor): no runtime LOD selection or switching, "
+			+ "streaming, GI/SSAO, simulation, or reference 3060 rig; not gate M5")
 	_write_result(result, "METROPOLIS_VOXEL_GATE_RESULT")
 
 func _write_setup() -> void:
-	var result := _base_result("setup_lod" if lod_mode else "setup")
+	var run_kind := "setup"
+	if lod_mode:
+		run_kind = "setup_lod"
+	elif switch_mode:
+		run_kind = "setup_switch"
+	var result := _base_result(run_kind)
 	result["setup_status"] = "ok"
 	result["gate_result"] = "not_measured"
 	result["gate_scope"] = "voxel_proxy_setup"
-	result["gate_reason"] = (
-		"voxel-proxy setup-only run with static LOD bands (hut/box/quad "
-		+ "impostor): instance and per-LOD layout, quads/triangles, setup time, "
-		+ "and instance-buffer memory only; no runtime LOD switching, no frames, "
-		+ "no FPS claim, not gate M5")
+	if switch_mode:
+		result["gate_reason"] = (
+			"voxel-proxy setup-only run with runtime distance switching across "
+			+ "three reused MultiMesh nodes (hut/box/quad impostor): layout, "
+			+ "per-sample band assignment, rebuild/skip counts, quads/triangles, "
+			+ "setup time, and instance-buffer memory only; no frames, no FPS "
+			+ "claim, not gate M5")
+		_apply_switch_fields(result)
+	else:
+		result["gate_reason"] = (
+			"voxel-proxy setup-only run with static LOD bands (hut/box/quad "
+			+ "impostor): instance and per-LOD layout, quads/triangles, setup time, "
+			+ "and instance-buffer memory only; no runtime LOD switching, no frames, "
+			+ "no FPS claim, not gate M5")
 	_write_result(result, "METROPOLIS_VOXEL_GATE_SETUP")
+
+func _apply_switch_fields(result: Dictionary) -> void:
+	result["mode"] = "switch"
+	result["switch"] = _switch_result_payload()
+
 
 func _base_result(run_kind: String) -> Dictionary:
 	return {
@@ -796,6 +1315,9 @@ func _base_result(run_kind: String) -> Dictionary:
 	}
 
 func _scene_name() -> String:
+	if switch_mode:
+		return "metropolis_voxel_gate_switch_%dk" % [
+			int(int(_scene_stats.get("instances", 0)) / 1000)]
 	var layout_tag := "lod_single" if lod_mode else "lod"
 	return "metropolis_voxel_gate_%s_%dk" % [
 		layout_tag, int(int(_scene_stats.get("instances", 0)) / 1000)]
