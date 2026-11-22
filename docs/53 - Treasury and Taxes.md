@@ -200,7 +200,7 @@ The world-scene smoke checks:
 
 
 > [!note] Phase billing (D-028, Proposed)
-> `ConstructionStore` carries a per-site `cost_total`/`cost_paid` schedule and a payment stall. Placement charges the 3% Survey installment, `construction_tick` charges each later phase boundary, and an unaffordable installment sets `stall_reason = "payment"` until the treasury can pay it. Legacy zero-cost sites remain prepaid. The `financing` projection still assumes fixed 50-building batches and is not yet replaced by the live schedule.
+> `ConstructionStore` carries a per-site `cost_total`/`cost_paid` schedule and a payment stall. Placement charges the 3% Survey installment, `construction_tick` charges each later phase boundary, and an unaffordable installment sets `stall_reason = "payment"` until the treasury can pay it. Legacy zero-cost sites remain prepaid. The `financing` projection still assumes fixed 50-building batches and is not yet replaced by the live schedule, because construction currently finishes in seconds while the economy advances in days (Q-102).
 
 ## 12. Limits
 
