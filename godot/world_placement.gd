@@ -50,6 +50,14 @@ const MATERIALIZATION_CHANGE_BUDGET := 64
 # target move between follow steps means the player panned and takes over.
 const FOLLOW_SHARPNESS := 6.0
 const FOLLOW_ARRIVE_EPS_M := 0.05
+# Named-citizen lifecycle clock: one game day per 60 real seconds. Whole days
+# accumulate in `_process` and are applied through `named_lifecycle_tick` only
+# while a household population store is open. Headless runs (including the
+# scene smoke) keep the clock paused so save/load checksums and benchmark
+# baselines stay fixed; a script may drive `_tick_named_lifecycle(days)`.
+const LIFECYCLE_SECONDS_PER_DAY := 60.0
+# `named_lifecycle_tick` accepts at most 36,500 days (100 years) per call.
+const LIFECYCLE_MAX_DAYS_PER_TICK := 36500
 const TAX_POLICIES := [
 	{"name": "low", "resident": 4.0, "business": 2.0},
 	{"name": "standard", "resident": 8.0, "business": 4.0},
@@ -135,6 +143,14 @@ var citizen_panel: PanelContainer
 var citizen_text: RichTextLabel
 var citizen_visible := false
 var citizen_refresh_accum := 0.0
+# Lifecycle clock state. The last result is kept so the status block can show
+# the most recent tick without re-running it; the totals are presentation only.
+var lifecycle_clock_enabled := true
+var lifecycle_accum_days := 0.0
+var lifecycle_days_total := 0
+var lifecycle_deaths_total := 0
+var lifecycle_last_error := ""
+var lifecycle_last_result: Dictionary = {}
 
 var blueprint_path := ""
 var save_path := ""
@@ -158,6 +174,7 @@ var preview_valid := false
 var preview_error := ""
 
 func _ready() -> void:
+	lifecycle_clock_enabled = not OS.get_cmdline_user_args().has("--scene-smoke") and DisplayServer.get_name() != "headless"
 	i18n = WorldI18n.new()
 	core = TownsmithCore.new()
 	_resolve_paths()
@@ -210,6 +227,8 @@ func _process(delta: float) -> void:
 			_update_citizen_panel()
 	else:
 		citizen_refresh_accum = 0.0
+	if lifecycle_clock_enabled:
+		_advance_lifecycle_clock(delta)
 	construction_tick_accum += delta
 	var steps := 0
 	while construction_tick_accum >= 0.25 and steps < 8:
@@ -2054,6 +2073,12 @@ func _update_hud() -> void:
 			"save": save_path,
 		}),
 	]
+	if not lifecycle_last_result.is_empty():
+		status_lines.append(i18n.t("base.ui.hud.lifecycle", {
+			"day": i18n.format_int(lifecycle_days_total),
+			"aged": i18n.format_int(int(lifecycle_last_result.get("aged", 0))),
+			"died": i18n.format_int(lifecycle_deaths_total),
+		}))
 	status_label.text = "\n".join(status_lines)
 	if materialization_visible:
 		status_label.text += "\n" + i18n.t("base.ui.hud.citizens_near", {
@@ -2899,6 +2924,52 @@ func _research_next() -> void:
 		}), true)
 	_update_hud()
 
+func _advance_lifecycle_clock(delta: float) -> void:
+	if not lifecycle_clock_enabled or not is_finite(delta) or delta <= 0.0:
+		return
+	lifecycle_accum_days += delta / LIFECYCLE_SECONDS_PER_DAY
+	var days := floori(lifecycle_accum_days)
+	if days < 1:
+		return
+	var population: Dictionary = core.population_state()
+	if not bool(population.get("open", false)):
+		# Keep at most one day banked so a later population store catches up
+		# without replaying the whole paused clock.
+		lifecycle_accum_days = minf(lifecycle_accum_days, 1.0)
+		return
+	var days_to_tick := float(mini(days, LIFECYCLE_MAX_DAYS_PER_TICK))
+	var result := _tick_named_lifecycle(days_to_tick)
+	if bool(result.get("ok", false)):
+		lifecycle_accum_days = maxf(0.0, lifecycle_accum_days - days_to_tick)
+	else:
+		lifecycle_accum_days = 0.0
+
+
+func _tick_named_lifecycle(days: float) -> Dictionary:
+	if core == null or not is_finite(days) or days < 0.0:
+		return {"ok": false, "error_code": "invalid_days"}
+	var population: Dictionary = core.population_state()
+	if not bool(population.get("open", false)):
+		return {"ok": false, "error_code": "no_population"}
+	var result: Dictionary = core.named_lifecycle_tick(SEED, days)
+	if not bool(result.get("ok", false)):
+		var code := str(result.get("error_code", result.get("error", "lifecycle_failed")))
+		if code != lifecycle_last_error:
+			lifecycle_last_error = code
+			push_warning("Named lifecycle tick failed: " + code)
+		return result
+	lifecycle_last_error = ""
+	lifecycle_last_result = result
+	lifecycle_days_total += int(floor(days))
+	lifecycle_deaths_total += int(result.get("died", 0))
+	_update_hud()
+	if citizen_visible:
+		_update_citizen_panel()
+	if materialization_visible:
+		_step_materialization()
+	return result
+
+
 func _advance_construction(seconds: float) -> Dictionary:
 	if seconds <= 0.0:
 		return {}
@@ -3071,6 +3142,7 @@ func _run_scene_smoke() -> void:
 	var hud_body_i18n_ok := false
 	var hud_status_i18n_ok := false
 	var dashboard_body_i18n_ok := false
+	var lifecycle_scene_ok := false
 	var save_ok := false
 	var clear_ok := false
 	var load_ok := false
@@ -3924,10 +3996,30 @@ func _run_scene_smoke() -> void:
 			if DirAccess.rename_absolute(blueprint_backup, blueprint_path) != OK:
 				status = "load_guard_restore_failed"
 
+	if status == "ok":
+		var before_named: Dictionary = core.named_citizens_state(SEED)
+		var before_population := int(core.population_state().get("population", -1))
+		var zero_tick: Dictionary = _tick_named_lifecycle(0.0)
+		lifecycle_scene_ok = bool(zero_tick.get("ok", false))
+		lifecycle_scene_ok = lifecycle_scene_ok and int(zero_tick.get("count", -1)) == int(before_named.get("count", -2))
+		lifecycle_scene_ok = lifecycle_scene_ok and int(zero_tick.get("aged", -1)) == 0
+		lifecycle_scene_ok = lifecycle_scene_ok and int(zero_tick.get("died", -1)) == 0
+		lifecycle_scene_ok = lifecycle_scene_ok and int(zero_tick.get("applied_deaths", -1)) == 0
+		var one_tick: Dictionary = _tick_named_lifecycle(1.0)
+		lifecycle_scene_ok = lifecycle_scene_ok and bool(one_tick.get("ok", false))
+		lifecycle_scene_ok = lifecycle_scene_ok and int(one_tick.get("count", -1)) > 0
+		lifecycle_scene_ok = lifecycle_scene_ok and int(one_tick.get("aged", -1)) == int(one_tick.get("count", -2))
+		lifecycle_scene_ok = lifecycle_scene_ok and int(one_tick.get("died", -1)) == 0
+		lifecycle_scene_ok = lifecycle_scene_ok and int(one_tick.get("applied_deaths", -1)) == 0
+		lifecycle_scene_ok = lifecycle_scene_ok and int(one_tick.get("population", -1)) == before_population
+		lifecycle_scene_ok = lifecycle_scene_ok and int(one_tick.get("average_age_days", -1)) > 0
+		if not lifecycle_scene_ok:
+			status = "lifecycle_failed"
+
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -3976,6 +4068,7 @@ func _run_scene_smoke() -> void:
 		"ok" if save_ok else "failed",
 		"ok" if load_ok else "failed",
 		"ok" if status == "ok" else "failed",
+		"ok" if lifecycle_scene_ok else "failed",
 		status,
 	])
 	get_tree().quit(0 if status == "ok" else 1)
