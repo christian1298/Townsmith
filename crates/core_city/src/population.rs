@@ -274,6 +274,52 @@ impl CityRuntime {
         }
     }
 
+    /// Apply named-citizen deaths to the aggregate households.
+    ///
+    /// `deaths` is `(placement_id, slot)` for each dead named citizen. The slice
+    /// may be unsorted and may contain duplicates; each pair is applied at most
+    /// once per call. A death is ignored when the home is unknown or the slot is
+    /// outside the household's pre-death `0..residents` range.
+    ///
+    /// Each applied death removes one resident, and `workers` is clamped to the
+    /// new resident count. Capacity, needs, income, staffing, and the named pool
+    /// are untouched: retiring identities and emitting events belong to the
+    /// caller. Returns the number of residents removed.
+    pub fn apply_deaths(&mut self, deaths: &[(u64, u32)]) -> u32 {
+        if deaths.is_empty() {
+            return 0;
+        }
+        let mut slots: Vec<(u64, u32)> = deaths.to_vec();
+        slots.sort_unstable();
+        slots.dedup();
+
+        let mut applied = 0_u32;
+        let mut start = 0;
+        while start < slots.len() {
+            let placement_id = slots[start].0;
+            let end = slots[start..]
+                .iter()
+                .position(|&(id, _)| id != placement_id)
+                .map_or(slots.len(), |offset| start + offset);
+            if let Some(household) = self.households.get_mut(&placement_id) {
+                // Validate every slot against the pre-death resident count so a
+                // household that loses several residents applies all of them.
+                let valid = slots[start..end]
+                    .iter()
+                    .filter(|(_, slot)| *slot < household.residents)
+                    .count();
+                let removed = u32::try_from(valid)
+                    .unwrap_or(u32::MAX)
+                    .min(household.residents);
+                household.residents -= removed;
+                household.workers = household.workers.min(household.residents);
+                applied = applied.saturating_add(removed);
+            }
+            start = end;
+        }
+        applied
+    }
+
     /// Advance move-in, jobs, and needs by `dt_s` seconds.
     ///
     /// Compatibility wrapper for callers without workplace positions; all
@@ -2122,5 +2168,88 @@ mod tests {
             assert_eq!(household.workers, 1);
             assert!(household.commute_m >= 0.0);
         }
+    }
+
+    // --- Named-citizen deaths --------------------------------------------
+
+    /// Five residents in home 1 (three employed), two in home 2.
+    fn death_fixture() -> CityRuntime {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.sync(&[(1, 5), (2, 2)]);
+        {
+            let household = runtime.households.get_mut(&1).expect("home 1");
+            household.residents = 5;
+            household.workers = 3;
+        }
+        {
+            let household = runtime.households.get_mut(&2).expect("home 2");
+            household.residents = 2;
+            household.workers = 2;
+        }
+        runtime
+    }
+
+    #[test]
+    fn deaths_reduce_population_and_workers() {
+        let mut runtime = death_fixture();
+        assert_eq!(runtime.apply_deaths(&[(1, 0), (1, 3)]), 2);
+        let household = &runtime.households[&1];
+        assert_eq!(household.residents, 3);
+        assert_eq!(household.workers, 3);
+        assert_eq!(household.capacity, 5);
+        assert_eq!(runtime.population(), 5);
+        assert_eq!(runtime.workers(), 5);
+        assert!(runtime.validate().is_ok());
+    }
+
+    #[test]
+    fn deaths_clamp_workers_to_remaining_residents() {
+        let mut runtime = death_fixture();
+        assert_eq!(runtime.apply_deaths(&[(1, 1), (1, 2), (1, 4)]), 3);
+        let household = &runtime.households[&1];
+        assert_eq!(household.residents, 2);
+        assert_eq!(household.workers, 2);
+        assert!(runtime.validate().is_ok());
+    }
+
+    #[test]
+    fn every_resident_can_die_in_one_call() {
+        let mut runtime = death_fixture();
+        assert_eq!(runtime.apply_deaths(&[(2, 0), (2, 1)]), 2);
+        let household = &runtime.households[&2];
+        assert_eq!(household.residents, 0);
+        assert_eq!(household.workers, 0);
+        assert_eq!(household.capacity, 2);
+        assert!(runtime.households.contains_key(&2));
+        assert_eq!(runtime.population(), 5);
+    }
+
+    #[test]
+    fn duplicate_deaths_apply_once() {
+        let mut runtime = death_fixture();
+        assert_eq!(runtime.apply_deaths(&[(1, 2), (1, 2), (1, 2), (1, 2)]), 1);
+        assert_eq!(runtime.households[&1].residents, 4);
+        assert_eq!(runtime.households[&1].workers, 3);
+        assert_eq!(runtime.population(), 6);
+    }
+
+    #[test]
+    fn unknown_home_and_out_of_range_slots_are_ignored() {
+        let mut runtime = death_fixture();
+        let before = runtime.clone();
+        assert_eq!(
+            runtime.apply_deaths(&[(99, 0), (1, 5), (1, u32::MAX), (2, 7)]),
+            0
+        );
+        assert_eq!(runtime, before);
+        assert!(!runtime.households.contains_key(&99));
+    }
+
+    #[test]
+    fn empty_deaths_are_a_no_op() {
+        let mut runtime = death_fixture();
+        let before = runtime.clone();
+        assert_eq!(runtime.apply_deaths(&[]), 0);
+        assert_eq!(runtime, before);
     }
 }
