@@ -44,7 +44,12 @@ fn timed_mesh(chunk: &VoxelChunk, iterations: usize) -> (Vec<f64>, usize, usize,
     (samples, vertices, indices, quads)
 }
 
+const DEFAULT_ITERATIONS: usize = 50;
+
 fn median(values: &mut [f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
     values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mid = values.len() / 2;
     if values.len().is_multiple_of(2) {
@@ -54,11 +59,32 @@ fn median(values: &mut [f64]) -> f64 {
     }
 }
 
+/// Parse the optional iteration count. Zero would time nothing and previously
+/// panicked in `median`, so it is a usage error (exit code 2).
+fn parse_iterations(raw: Option<&str>) -> Result<usize, String> {
+    match raw {
+        None => Ok(DEFAULT_ITERATIONS),
+        Some(value) => {
+            let iterations = value
+                .parse::<usize>()
+                .map_err(|_| format!("iterations must be a positive integer, got `{value}`"))?;
+            if iterations == 0 {
+                return Err("iterations must be at least 1".to_string());
+            }
+            Ok(iterations)
+        }
+    }
+}
+
 fn main() {
-    let iterations = std::env::args()
-        .nth(1)
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(50);
+    let raw = std::env::args().nth(1);
+    let iterations = match parse_iterations(raw.as_deref()) {
+        Ok(iterations) => iterations,
+        Err(error) => {
+            eprintln!("usage: townsmith-bench [iterations >= 1]\n{error}");
+            std::process::exit(2);
+        }
+    };
 
     let scenes = [
         ("checkerboard", checkerboard()),
@@ -96,4 +122,27 @@ fn main() {
     }
 
     println!("[{}]", rows.join(","));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iteration_parsing_accepts_positive_counts_and_rejects_zero() {
+        assert_eq!(parse_iterations(None), Ok(DEFAULT_ITERATIONS));
+        assert_eq!(parse_iterations(Some("1")), Ok(1));
+        assert_eq!(parse_iterations(Some("100")), Ok(100));
+        assert!(parse_iterations(Some("0")).is_err());
+        assert!(parse_iterations(Some("-1")).is_err());
+        assert!(parse_iterations(Some("ten")).is_err());
+    }
+
+    #[test]
+    fn median_handles_empty_and_partial_samples() {
+        assert_eq!(median(&mut []), 0.0);
+        assert_eq!(median(&mut [5.0]), 5.0);
+        assert_eq!(median(&mut [3.0, 1.0]), 2.0);
+        assert_eq!(median(&mut [9.0, 3.0, 1.0]), 3.0);
+    }
 }

@@ -22,11 +22,18 @@ use core_city::{
 use core_world::{DeltaStore, WorldChunkCoord, MAX_HEIGHT_M, WATER_LEVEL_M};
 
 const SEED: u64 = 2026;
+const DEFAULT_CYCLES: usize = 60;
+/// `--smoke` uses a short cycle count; the fixture checksum is cycle-invariant.
+const SMOKE_CYCLES: usize = 2;
 const DEFAULT_PLACEMENTS: usize = 120;
 const MIN_PLACEMENTS: usize = 6;
 /// The fixture stockpiles 10,000,000 litres and every site needs 10,000, so
 /// 1,000 placements is also the material ceiling for a fully completed city.
 const MAX_PLACEMENTS: usize = 1_000;
+/// Pinned combined checksum for the default 120-placement fixture. A change is
+/// either an intentional fixture change or a regression; update this pin and
+/// `docs/75` together when it is intentional.
+const DEFAULT_COMBINED_CHECKSUM: u64 = 0x0ce6_1188_7161_ff62;
 const HOUSES_PER_SIX: usize = 5;
 const RESIDENTS_PER_HOUSE: u32 = 10;
 const JOBS_PER_WORKPLACE: u32 = 10;
@@ -45,43 +52,186 @@ const TERRAIN_CELLS_PER_SIDE: usize = 256;
 const TERRAIN_CHUNKS: usize = TERRAIN_CHUNKS_PER_SIDE * TERRAIN_CHUNKS_PER_SIDE;
 
 /// Per-cycle timing samples, only populated when `--timing` is set.
+///
+/// `cycle_ms` is the save round-trip only: compose (`to_value`), serialize, and
+/// parse. In-memory validation and the post-parse verification are timed and
+/// reported separately so they cannot overstate the round-trip cost.
 #[derive(Default)]
 struct CycleTiming {
     cycle_ms: Vec<f64>,
+    compose_ms: f64,
     serialize_ms: f64,
     parse_ms: f64,
+    validate_ms: f64,
+    verify_ms: f64,
+    loop_ms_total: f64,
     combined_json_bytes: usize,
 }
 
-fn main() {
-    let cycles = arg_value("--cycles")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(60);
-    let placements = arg_value("--placements").map_or(DEFAULT_PLACEMENTS, |value| {
-        value.parse::<usize>().unwrap_or(0)
-    });
-    let timing = std::env::args().any(|arg| arg == "--timing" || arg == "--bench");
-    let terrain_enabled = std::env::args().any(|arg| arg == "--terrain");
-    let terrain_edits = arg_value("--terrain-edits").map_or(DEFAULT_TERRAIN_EDITS, |value| {
-        value.parse::<usize>().unwrap_or(0)
-    });
-    if cycles == 0
-        || cycles > MAX_CYCLES
-        || !(MIN_PLACEMENTS..=MAX_PLACEMENTS).contains(&placements)
-        || !(1..=MAX_TERRAIN_EDITS).contains(&terrain_edits)
-    {
-        eprintln!(
-            "usage: save_stress [--cycles N] [--placements {MIN_PLACEMENTS}..={MAX_PLACEMENTS}] [--terrain [--terrain-edits 1..={MAX_TERRAIN_EDITS}]] [--timing|--bench] [--smoke]"
-        );
-        std::process::exit(2);
+/// Parsed `save_stress` arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cli {
+    cycles: usize,
+    placements: usize,
+    timing: bool,
+    terrain: bool,
+    terrain_edits: usize,
+    smoke: bool,
+}
+
+impl Default for Cli {
+    fn default() -> Self {
+        Self {
+            cycles: DEFAULT_CYCLES,
+            placements: DEFAULT_PLACEMENTS,
+            timing: false,
+            terrain: false,
+            terrain_edits: DEFAULT_TERRAIN_EDITS,
+            smoke: false,
+        }
     }
-    let terrain = terrain_enabled.then_some(terrain_edits);
-    match run(cycles, placements, timing, terrain) {
+}
+
+impl Cli {
+    fn terrain_edits(self) -> Option<usize> {
+        self.terrain.then_some(self.terrain_edits)
+    }
+
+    fn validate(self) -> Result<Self, String> {
+        if self.cycles == 0 || self.cycles > MAX_CYCLES {
+            return Err(format!(
+                "cycles must be 1..={MAX_CYCLES}, got {}",
+                self.cycles
+            ));
+        }
+        if !(MIN_PLACEMENTS..=MAX_PLACEMENTS).contains(&self.placements) {
+            return Err(format!(
+                "placements must be {MIN_PLACEMENTS}..={MAX_PLACEMENTS}, got {}",
+                self.placements
+            ));
+        }
+        if !(1..=MAX_TERRAIN_EDITS).contains(&self.terrain_edits) {
+            return Err(format!(
+                "terrain edits must be 1..={MAX_TERRAIN_EDITS}, got {}",
+                self.terrain_edits
+            ));
+        }
+        Ok(self)
+    }
+
+    fn is_default_fixture(self) -> bool {
+        self.placements == DEFAULT_PLACEMENTS && !self.terrain
+    }
+}
+
+fn usage() -> String {
+    format!(
+        "usage: save_stress [--cycles 1..={MAX_CYCLES}] \
+         [--placements {MIN_PLACEMENTS}..={MAX_PLACEMENTS}] \
+         [--terrain [--terrain-edits 1..={MAX_TERRAIN_EDITS}]] \
+         [--timing|--bench] [--smoke]\n\
+         --smoke runs {SMOKE_CYCLES} cycles and gates on the pinned default checksum."
+    )
+}
+
+/// Parse the CLI, rejecting unknown flags and malformed values with exit 2.
+/// Supports both `--flag value` and `--flag=value`.
+fn parse_args(arguments: &[String]) -> Result<Cli, String> {
+    let mut cli = Cli::default();
+    let mut cycles_given = false;
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        index += 1;
+        let (flag, inline) = match argument.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => (flag, Some(value)),
+            _ => (argument.as_str(), None),
+        };
+        match flag {
+            "--cycles" => {
+                let raw = take_value(arguments, &mut index, flag, inline)?;
+                cli.cycles = parse_usize(flag, &raw)?;
+                cycles_given = true;
+            }
+            "--placements" => {
+                let raw = take_value(arguments, &mut index, flag, inline)?;
+                cli.placements = parse_usize(flag, &raw)?;
+            }
+            "--terrain" => {
+                if inline.is_some() {
+                    return Err("--terrain does not take a value".to_string());
+                }
+                cli.terrain = true;
+            }
+            "--terrain-edits" => {
+                let raw = take_value(arguments, &mut index, flag, inline)?;
+                cli.terrain_edits = parse_usize(flag, &raw)?;
+            }
+            "--timing" | "--bench" => {
+                if inline.is_some() {
+                    return Err(format!("{flag} does not take a value"));
+                }
+                cli.timing = true;
+            }
+            "--smoke" => {
+                if inline.is_some() {
+                    return Err("--smoke does not take a value".to_string());
+                }
+                cli.smoke = true;
+            }
+            other => return Err(format!("unknown argument `{other}`")),
+        }
+    }
+    if cli.smoke && !cycles_given {
+        cli.cycles = SMOKE_CYCLES;
+    }
+    cli.validate()
+}
+
+fn take_value(
+    arguments: &[String],
+    index: &mut usize,
+    flag: &str,
+    inline: Option<&str>,
+) -> Result<String, String> {
+    if let Some(value) = inline {
+        return Ok(value.to_string());
+    }
+    let value = arguments
+        .get(*index)
+        .ok_or_else(|| format!("{flag} requires a value"))?;
+    *index += 1;
+    Ok(value.clone())
+}
+
+fn parse_usize(flag: &str, raw: &str) -> Result<usize, String> {
+    raw.parse::<usize>()
+        .map_err(|_| format!("{flag} expects a non-negative integer, got `{raw}`"))
+}
+
+fn main() {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let cli = match parse_args(&arguments) {
+        Ok(cli) => cli,
+        Err(error) => {
+            eprintln!("{error}\n{}", usage());
+            std::process::exit(2);
+        }
+    };
+    match run(cli) {
         Ok(summary) => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&summary).expect("summary json")
             );
+            if cli.smoke {
+                println!(
+                    "SAVE_STRESS_SMOKE cycles={} placements={} checksum={} status=ok",
+                    cli.cycles,
+                    summary["placements"],
+                    summary["combined_checksum"].as_str().unwrap_or("")
+                );
+            }
         }
         Err(error) => {
             eprintln!("SAVE_STRESS status=failed error={error}");
@@ -90,30 +240,36 @@ fn main() {
     }
 }
 
-fn run(
-    cycles: usize,
-    placements: usize,
-    timing: bool,
-    terrain_edits: Option<usize>,
-) -> Result<serde_json::Value, String> {
+fn run(cli: Cli) -> Result<serde_json::Value, String> {
     let run_start = Instant::now();
     let build_start = Instant::now();
-    let city = City::build(placements, terrain_edits)?;
+    let city = City::build(cli.placements, cli.terrain_edits())?;
     let build_ms = elapsed_ms(build_start);
     let mut checksum: Option<u64> = None;
     let mut timings = CycleTiming::default();
-    for _ in 0..cycles {
-        let cycle_start = Instant::now();
+    for _ in 0..cli.cycles {
+        let loop_start = Instant::now();
+        let validate_start = Instant::now();
         city.validate()?;
+        let validate_ms = elapsed_ms(validate_start);
+
+        let compose_start = Instant::now();
         let value = city.to_value();
+        let compose_ms = elapsed_ms(compose_start);
+
         let serialize_start = Instant::now();
         let encoded = serde_json::to_string(&value).map_err(|error| error.to_string())?;
         let serialize_ms = elapsed_ms(serialize_start);
+
         let parse_start = Instant::now();
         let decoded: serde_json::Value =
             serde_json::from_str(&encoded).map_err(|error| error.to_string())?;
         let parse_ms = elapsed_ms(parse_start);
+
+        let verify_start = Instant::now();
         city.check_value(&decoded)?;
+        let verify_ms = elapsed_ms(verify_start);
+
         let cycle_checksum = combined_checksum(&city);
         if let Some(previous) = checksum {
             if previous != cycle_checksum {
@@ -121,21 +277,30 @@ fn run(
             }
         }
         checksum = Some(cycle_checksum);
-        if timing {
-            timings.cycle_ms.push(elapsed_ms(cycle_start));
+        if cli.timing {
+            timings.cycle_ms.push(compose_ms + serialize_ms + parse_ms);
+            timings.compose_ms += compose_ms;
             timings.serialize_ms += serialize_ms;
             timings.parse_ms += parse_ms;
+            timings.validate_ms += validate_ms;
+            timings.verify_ms += verify_ms;
+            timings.loop_ms_total += elapsed_ms(loop_start);
             timings.combined_json_bytes = encoded.len();
         }
     }
     let checksum = checksum.ok_or_else(|| "no cycles".to_string())?;
+    if cli.smoke && cli.is_default_fixture() && checksum != DEFAULT_COMBINED_CHECKSUM {
+        return Err(format!(
+            "smoke checksum {checksum:016x} moved from pinned {DEFAULT_COMBINED_CHECKSUM:016x}"
+        ));
+    }
     reject_bad_inputs(&city)?;
     let total_ms = elapsed_ms(run_start);
-    let (houses, workplaces) = placement_split(placements);
+    let (houses, workplaces) = placement_split(cli.placements);
     let mut summary = serde_json::json!({
         "scene": "save_stress",
         "seed": SEED,
-        "cycles": cycles,
+        "cycles": cli.cycles,
         "placements": city.placements.placements.len(),
         "construction_sites": city.construction.site_count(),
         "households": city.runtime.households.len(),
@@ -151,9 +316,15 @@ fn run(
         summary["terrain_bytes"] = serde_json::json!(terrain.encode().len());
         summary["terrain_checksum"] = serde_json::json!(format!("{:016x}", terrain.checksum()));
     }
-    if timing {
+    if cli.timing {
         summary["timing"] = timing_report(
-            &timings, &city, houses, workplaces, build_ms, total_ms, placements,
+            &timings,
+            &city,
+            houses,
+            workplaces,
+            build_ms,
+            total_ms,
+            cli.placements,
         );
     }
     Ok(summary)
@@ -196,8 +367,12 @@ fn timing_report(
         "cycle_ms_min": round_ms(cycle_min),
         "cycle_ms_max": round_ms(cycle_max),
         "cycle_ms": cycle_ms,
+        "compose_ms": round_ms(timings.compose_ms),
         "serialize_ms": round_ms(timings.serialize_ms),
         "parse_ms": round_ms(timings.parse_ms),
+        "validate_ms": round_ms(timings.validate_ms),
+        "verify_ms": round_ms(timings.verify_ms),
+        "loop_ms_total": round_ms(timings.loop_ms_total),
         "combined_json_bytes": timings.combined_json_bytes,
         "store_checksums": city.checksum_map(),
     })
@@ -872,26 +1047,27 @@ fn terrain_from_hex(encoded: &str, expected_checksum: u64) -> Result<DeltaStore,
     DeltaStore::decode(&bytes).map_err(|error| format!("terrain deltas: {error}"))
 }
 
-fn arg_value(name: &str) -> Option<String> {
-    let args: Vec<String> = std::env::args().collect();
-    for index in 0..args.len() {
-        if args[index] == name {
-            return args.get(index + 1).cloned();
-        }
-        if let Some(value) = args[index].strip_prefix(&format!("{name}=")) {
-            return Some(value.to_string());
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn cli(cycles: usize, placements: usize, terrain_edits: Option<usize>) -> Cli {
+        Cli {
+            cycles,
+            placements,
+            terrain: terrain_edits.is_some(),
+            terrain_edits: terrain_edits.unwrap_or(DEFAULT_TERRAIN_EDITS),
+            ..Cli::default()
+        }
+    }
+
+    fn args(values: impl IntoIterator<Item = &'static str>) -> Vec<String> {
+        values.into_iter().map(str::to_string).collect()
+    }
+
     #[test]
     fn a_small_city_round_trips() {
-        let summary = run(2, 120, false, None).expect("stress");
+        let summary = run(cli(2, 120, None)).expect("stress");
         assert_eq!(summary["status"], "ok");
         assert_eq!(summary["placements"], 120);
         assert!(summary["population"].as_u64().expect("population") > 0);
@@ -899,14 +1075,87 @@ mod tests {
 
     #[test]
     fn default_fixture_checksum_is_unchanged() {
-        let expected = "0ce611887161ff62";
-        let summary = run(1, 120, false, None).expect("stress");
+        let expected = format!("{DEFAULT_COMBINED_CHECKSUM:016x}");
+        let summary = run(cli(1, 120, None)).expect("stress");
         assert_eq!(summary["combined_checksum"], expected);
         assert!(summary.get("terrain_edits").is_none());
         let city = City::build(120, None).expect("city");
         let value = city.to_value();
         assert!(value.get("terrain_deltas").is_none());
         assert!(value.get("terrain_checksum").is_none());
+    }
+
+    #[test]
+    fn smoke_runs_a_short_gate_and_pins_the_default_checksum() {
+        let parsed = parse_args(&args(["--smoke"])).expect("parse");
+        assert!(parsed.smoke);
+        assert_eq!(parsed.cycles, SMOKE_CYCLES);
+        assert_eq!(parsed.placements, DEFAULT_PLACEMENTS);
+        let summary = run(parsed).expect("smoke");
+        assert_eq!(summary["status"], "ok");
+        assert_eq!(
+            summary["combined_checksum"],
+            format!("{DEFAULT_COMBINED_CHECKSUM:016x}")
+        );
+        assert_eq!(summary["cycles"], SMOKE_CYCLES);
+    }
+
+    #[test]
+    fn explicit_cycles_override_the_smoke_default() {
+        let parsed = parse_args(&args(["--smoke", "--cycles", "7"])).expect("parse");
+        assert_eq!(parsed.cycles, 7);
+        let parsed = parse_args(&args(["--cycles=7", "--smoke"])).expect("parse");
+        assert_eq!(parsed.cycles, 7);
+    }
+
+    #[test]
+    fn unknown_and_malformed_flags_are_rejected() {
+        assert!(parse_args(&args(["--cycle", "5"])).is_err());
+        assert!(parse_args(&args(["--terrain-edits"])).is_err());
+        assert!(parse_args(&args(["--cycles", "abc"])).is_err());
+        assert!(parse_args(&args(["--cycles=0"])).is_err());
+        assert!(parse_args(&args(["--terrain=1"])).is_err());
+        assert!(parse_args(&args(["60"])).is_err());
+        assert!(parse_args(&args(["--cycles", "1", "extra"])).is_err());
+    }
+
+    #[test]
+    fn explicit_flags_parse() {
+        let parsed = parse_args(&args([
+            "--cycles=3",
+            "--placements",
+            "56",
+            "--terrain",
+            "--terrain-edits=500",
+            "--timing",
+        ]))
+        .expect("parse");
+        assert_eq!(parsed.cycles, 3);
+        assert_eq!(parsed.placements, 56);
+        assert!(parsed.terrain);
+        assert_eq!(parsed.terrain_edits(), Some(500));
+        assert!(parsed.timing);
+        assert!(!parsed.smoke);
+    }
+
+    #[test]
+    fn timing_cycle_excludes_validation_and_verification() {
+        let summary = run(Cli {
+            cycles: 2,
+            timing: true,
+            ..cli(2, 120, None)
+        })
+        .expect("timing stress");
+        let timing = &summary["timing"];
+        let cycle_total = timing["cycle_ms_total"].as_f64().expect("cycle total");
+        let compose = timing["compose_ms"].as_f64().expect("compose");
+        let serialize = timing["serialize_ms"].as_f64().expect("serialize");
+        let parse = timing["parse_ms"].as_f64().expect("parse");
+        let loop_total = timing["loop_ms_total"].as_f64().expect("loop total");
+        assert!((cycle_total - (compose + serialize + parse)).abs() <= 0.01);
+        assert!(timing["validate_ms"].as_f64().expect("validate") > 0.0);
+        assert!(timing["verify_ms"].as_f64().expect("verify") > 0.0);
+        assert!(loop_total >= cycle_total);
     }
 
     #[test]
@@ -944,7 +1193,7 @@ mod tests {
 
     #[test]
     fn terrain_enabled_round_trips_in_the_combined_value() {
-        let summary = run(1, 120, false, Some(256)).expect("stress");
+        let summary = run(cli(1, 120, Some(256))).expect("stress");
         assert_eq!(summary["status"], "ok");
         assert_eq!(summary["terrain_edits"], 256);
         assert_eq!(summary["terrain_chunks"], TERRAIN_CHUNKS);
