@@ -377,7 +377,7 @@ The existing world JSON `population` object gets an optional sibling `named_citi
 |---|---|---|
 | **N1 — Identity layer (derived)** | Deterministic ids, names, household slot sync, read-only bridge | **Done** — PR #98; 500-resident city produces stable names; `cargo test -p core_city named`; no save or checksum change; 4k identities generate in < 100 ms under the debug test guard |
 | **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | **Done — PR #108/#126/#135; follow camera, EN/DE card, age/employment rows, and content display names** |
-| **N3 — Materialization** | Active pool, hysteresis, route cache, fade, active cap | **Partial — selection core, bridge, F4 overlay, hysteresis/pinning, change budget, and marker fades done ([[73 - Materialization Core]]); routes/agents remain** |
+| **N3 — Materialization** | Active pool, hysteresis, route cache, fade, active cap | **Partial — selection core, bridge, F4 overlay, hysteresis/pinning, change budget, marker fades, and sampled citizen movement done ([[73 - Materialization Core]]); route polylines and pooled production agents remain** |
 | **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | **Partial — PR #145/#150/#161 plus the scene hook; persistence #103, core `age_days`/`tick_lifecycle`, persisted age, `named_lifecycle_tick`, household death application, and the 60 s/day scene clock landed; lifecycle-on re-baseline and `CitizenDied` events next** |
 | **N5 — Cohort bridge (later)** | Sample from cohorts, district stories, 1M identity store | 1M cohort benchmark unchanged; materialization near camera; no per-citizen tick |
 

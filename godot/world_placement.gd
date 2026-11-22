@@ -45,6 +45,7 @@ const MATERIALIZATION_FADE_MAX_SECONDS := 1.0
 # applies at most this many node changes per refresh, including any fallback
 # reconciliation left over from a truncated diff.
 const MATERIALIZATION_CHANGE_BUDGET := 64
+const MOVEMENT_REFRESH_SECONDS := 0.1
 # Follow pulls the Mayor target toward the selected home with an exponential
 # ease. The epsilon is the arrival radius and also the pan detector: a larger
 # target move between follow steps means the player panned and takes over.
@@ -103,6 +104,13 @@ var materialization_counts := Vector2i.ZERO
 var materialization_nodes: Dictionary = {}
 # Removed markers finish their fade outside the id map, then are freed.
 var materialization_fading: Array[MeshInstance3D] = []
+var movement_root: Node3D
+var movement_mesh: BoxMesh
+var movement_material: StandardMaterial3D
+var movement_nodes: Dictionary = {}
+var movement_accum := 0.0
+var movement_time := 0.0
+var last_movement_state: Dictionary = {}
 var industry_root: Node3D
 var industry_nodes: Dictionary = {}
 var industry_kinds: Dictionary = {}
@@ -217,9 +225,15 @@ func _process(delta: float) -> void:
 		if materialization_refresh_accum >= MATERIALIZATION_REFRESH_SECONDS:
 			materialization_refresh_accum = 0.0
 			_step_materialization()
+		movement_accum += delta
+		movement_time += delta
+		if movement_accum >= MOVEMENT_REFRESH_SECONDS:
+			movement_accum = 0.0
+			_update_movement_markers()
 		_advance_materialization_fades(delta)
 	else:
 		materialization_refresh_accum = 0.0
+		movement_accum = 0.0
 	if citizen_visible:
 		citizen_refresh_accum += delta
 		if citizen_refresh_accum >= DASHBOARD_REFRESH_SECONDS:
@@ -862,6 +876,14 @@ func _setup_materialization() -> void:
 	materialization_detailed_material = StandardMaterial3D.new()
 	materialization_detailed_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	materialization_detailed_material.albedo_color = Color(1.0, 0.64, 0.18)
+	movement_root = Node3D.new()
+	movement_root.name = "CitizenMovement"
+	add_child(movement_root)
+	movement_mesh = BoxMesh.new()
+	movement_mesh.size = Vector3(0.32, 1.7, 0.32)
+	movement_material = StandardMaterial3D.new()
+	movement_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	movement_material.albedo_color = Color(0.18, 0.95, 0.72)
 
 func _materialization_center() -> Vector3:
 	if selected_id >= 0:
@@ -881,6 +903,9 @@ func _materialization_pin() -> int:
 func _toggle_materialization() -> bool:
 	materialization_visible = not materialization_visible
 	materialization_refresh_accum = 0.0
+	movement_accum = 0.0
+	if not materialization_visible:
+		_clear_movement_nodes()
 	_rebuild_materialization()
 	_update_hud()
 	return materialization_visible
@@ -1158,6 +1183,53 @@ func _rebuild_materialization() -> void:
 	materialization_counts = Vector2i(active_count, detailed_count)
 	if materialization_counts != previous_counts:
 		_update_hud()
+
+func _clear_movement_nodes() -> void:
+	for node in movement_nodes.values():
+		if is_instance_valid(node):
+			node.free()
+	movement_nodes.clear()
+	last_movement_state = {}
+
+
+func _update_movement_markers() -> void:
+	if not materialization_visible or core == null or movement_root == null:
+		return
+	var center := _materialization_center()
+	var state: Dictionary = core.citizen_movement(
+		SEED, center.x, center.z,
+		MATERIALIZATION_OUTER_RADIUS_M, MATERIALIZATION_DETAILED_RADIUS_M, movement_time
+	)
+	last_movement_state = state
+	if not bool(state.get("ok", false)):
+		return
+	var seen := {}
+	for sample in state.get("positions", []):
+		var id := int(sample.get("id", -1))
+		var point: PackedFloat32Array = sample.get("position", PackedFloat32Array())
+		if id < 0 or point.size() != 2:
+			continue
+		seen[id] = true
+		var node: MeshInstance3D = movement_nodes.get(id)
+		if not is_instance_valid(node):
+			var ground: float = core.world_height_at(SEED, point[0], point[1])
+			if ground < 0.0:
+				continue
+			node = MeshInstance3D.new()
+			node.mesh = movement_mesh
+			node.material_override = movement_material
+			node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			node.set_meta("movement_ground", ground)
+			movement_root.add_child(node)
+			movement_nodes[id] = node
+		node.position = Vector3(point[0], float(node.get_meta("movement_ground", 0.0)) + 0.85, point[1])
+	for id in movement_nodes.keys():
+		if not seen.has(id):
+			var stale: MeshInstance3D = movement_nodes[id]
+			if is_instance_valid(stale):
+				stale.free()
+			movement_nodes.erase(id)
+
 
 func _industry_color(kind: String) -> Color:
 	match kind:
@@ -3135,6 +3207,7 @@ func _run_scene_smoke() -> void:
 	var materialization_ok := false
 	var materialization_step_ok := false
 	var materialization_fade_ok := false
+	var movement_scene_ok := false
 	var follow_ok := false
 	var render_ok := false
 	var structure_ok := false
@@ -3591,6 +3664,20 @@ func _run_scene_smoke() -> void:
 							added_fading_ok = true
 				materialization_fade_ok = materialization_fade_ok and added_fading_ok
 				materialization_fade_ok = materialization_fade_ok and materialization_root.get_child_count() == marker_count
+				movement_time = 0.0
+				_update_movement_markers()
+				movement_scene_ok = bool(last_movement_state.get("ok", false))
+				movement_scene_ok = movement_scene_ok and movement_nodes.size() > 0
+				var movement_positions: Array = last_movement_state.get("positions", [])
+				movement_scene_ok = movement_scene_ok and movement_positions.size() > 0
+				movement_scene_ok = movement_scene_ok and movement_nodes.size() == movement_positions.size()
+				var movement_cache: Dictionary = core.movement_cache_state()
+				movement_scene_ok = movement_scene_ok and bool(movement_cache.get("open", false))
+				movement_scene_ok = movement_scene_ok and int(movement_cache.get("citizens", 0)) == movement_positions.size()
+				movement_time = 10.0
+				_update_movement_markers()
+				movement_scene_ok = movement_scene_ok and bool(last_movement_state.get("ok", false))
+				movement_scene_ok = movement_scene_ok and movement_nodes.size() == movement_positions.size()
 				_advance_materialization_fades(MATERIALIZATION_FADE_SECONDS + 0.05)
 				var added_settled_ok := materialization_root.get_child_count() > 0
 				for child in materialization_root.get_children():
@@ -4054,7 +4141,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -4083,6 +4170,7 @@ func _run_scene_smoke() -> void:
 		"ok" if materialization_ok else "failed",
 		"ok" if materialization_step_ok else "failed",
 		"ok" if materialization_fade_ok else "failed",
+		"ok" if movement_scene_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",
