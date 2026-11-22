@@ -37,11 +37,11 @@ use core_city::{
     IndustryKind, IndustryStore, InfrastructureCosts, LifecycleTick, Lot, LotError, LotRequest,
     LotStore, MaterializationBudget, MaterializationSelection, MaterializedCitizen, MotionLeg,
     NamedCitizens, NamedSave, Placement, PlacementError, PlacementRequest, PlacementStore,
-    PolicyPlacementDenial, ResearchStore, RoadError, RoadGraph, RoadRequest, RoadSegment,
-    RoadStore, RouteCache, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore, ServiceTier,
-    Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree, Trade, TradePool,
-    TutorialInput, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
-    DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY,
+    PolicyPlacementDenial, PolicyTaxWeights, ResearchStore, RoadError, RoadGraph, RoadRequest,
+    RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore,
+    ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree, Trade,
+    TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace,
+    Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY,
     MAX_HEATMAP_CELLS, MAX_HEATMAP_CELL_M, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M,
     MIN_HEATMAP_CELL_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
@@ -3892,6 +3892,46 @@ impl TownsmithCore {
         let buildings = summary
             .get("completed_buildings")
             .map_or(0, |value| value.to::<i64>()) as u64;
+        // Resolve district tax weights before taking the economy lock. This
+        // block holds world -> construction -> policies -> population in the
+        // documented order and releases every store before the treasury lock.
+        let policy_weights = {
+            let placements = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            let construction = self
+                .construction
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let policies = self
+                .policies
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let population_guard = self
+                .population
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let (homes, workplaces) = match placements.as_ref() {
+                Some(placements) => (
+                    completed_homes(placements, &construction)
+                        .into_iter()
+                        .map(|home| (home.id, home.center))
+                        .collect(),
+                    completed_workplaces(placements, &construction),
+                ),
+                None => (BTreeMap::new(), Vec::new()),
+            };
+            match population_guard.as_ref() {
+                Some(runtime) => policy_tax_weights(
+                    policies.as_ref(),
+                    seed,
+                    placements.as_ref().map(|placements| placements.seed),
+                    Some(runtime),
+                    &homes,
+                    &workplaces,
+                    &runtime.staffing,
+                ),
+                None => PolicyTaxWeights::ONE,
+            }
+        };
         // Read the site counts and upkeep totals before taking the economy lock:
         // the lock order is world -> ... -> economy -> utilities/services.
         let (utility_sites, utility_upkeep) = self.utility_infrastructure_for_seed(seed);
@@ -3913,12 +3953,13 @@ impl TownsmithCore {
             );
         }
         let economy = guard.get_or_insert_with(|| Economy::new(seed));
-        let tick = economy.tick_with_infrastructure_costs(
+        let tick = economy.tick_with_policy_taxes(
             seconds,
             population,
             employed,
             buildings,
             infrastructure,
+            policy_weights,
         );
         let utility_payment_due = self.settle_utility_payments(seed, economy);
         let service_payment_due = self.settle_service_payments(seed, economy);
@@ -3931,6 +3972,8 @@ impl TownsmithCore {
         result.set("service_sites", service_sites as i64);
         result.set("utility_upkeep", infrastructure.utility_per_day());
         result.set("service_upkeep", infrastructure.service_per_day());
+        result.set("policy_tax_multiplier_resident", policy_weights.resident());
+        result.set("policy_tax_multiplier_business", policy_weights.business());
         result.set("balance", tick.balance);
         result.set("utility_payment_due", utility_payment_due);
         result.set("service_payment_due", service_payment_due);
@@ -8280,6 +8323,95 @@ fn completed_workplaces(
             center: [placement.center[0], placement.center[2]],
         })
         .collect()
+}
+
+/// Weighted resident and business tax multipliers for one treasury tick.
+///
+/// The resident side averages the district tax multiplier resolved at every
+/// completed home with residents, weighted by those residents. The business
+/// side does the same at every completed workplace with staff, weighted by
+/// staffed jobs. This is the aggregate model's majority-workplace
+/// approximation: individual workers are not materialized, so each workplace's
+/// staff count is weighted at that workplace's own centre.
+///
+/// A point outside every policy contributes the neutral multiplier `1.0`, and
+/// overlapping policies resolve through `effect_at`, so the smallest policy id
+/// wins. Missing, empty, or foreign-seed registries, foreign placement or
+/// population seeds, and a non-finite weighted total all return
+/// [`PolicyTaxWeights::ONE`]. A side with no residents or staff stays neutral
+/// while the other side keeps its weight, and the final pair is validated by
+/// [`PolicyTaxWeights::new`]; anything out of range falls back to neutral.
+fn policy_tax_weights(
+    policies: Option<&DistrictPolicyStore>,
+    seed: u64,
+    placement_seed: Option<u64>,
+    population: Option<&CityRuntime>,
+    homes: &BTreeMap<u64, [f32; 2]>,
+    workplaces: &[Workplace],
+    staffing: &BTreeMap<u64, u32>,
+) -> PolicyTaxWeights {
+    let Some(policies) = policies else {
+        return PolicyTaxWeights::ONE;
+    };
+    if policies.seed != seed || policies.is_empty() {
+        return PolicyTaxWeights::ONE;
+    }
+    if placement_seed.is_some_and(|placement| placement != seed) {
+        return PolicyTaxWeights::ONE;
+    }
+    let Some(population) = population else {
+        return PolicyTaxWeights::ONE;
+    };
+    if population.seed != seed {
+        return PolicyTaxWeights::ONE;
+    }
+    let resident = weighted_tax_multiplier(
+        policies,
+        homes.iter().filter_map(|(&id, center)| {
+            let residents = population
+                .households
+                .get(&id)
+                .map_or(0, |household| household.residents);
+            (residents > 0).then_some((*center, f64::from(residents)))
+        }),
+    )
+    .unwrap_or(1.0);
+    let business = weighted_tax_multiplier(
+        policies,
+        workplaces.iter().map(|workplace| {
+            let staffed = staffing.get(&workplace.id).copied().unwrap_or(0);
+            (workplace.center, f64::from(staffed))
+        }),
+    )
+    .unwrap_or(1.0);
+    PolicyTaxWeights::new(resident, business).unwrap_or(PolicyTaxWeights::ONE)
+}
+
+/// Weighted average of the district tax multiplier across `contributions`.
+///
+/// `None` means the contribution weights are empty or produced a non-finite
+/// average, so the caller keeps that tax side neutral.
+fn weighted_tax_multiplier(
+    policies: &DistrictPolicyStore,
+    contributions: impl Iterator<Item = ([f32; 2], f64)>,
+) -> Option<f64> {
+    let mut weighted = 0.0;
+    let mut weight = 0.0;
+    for (center, contribution) in contributions {
+        if !contribution.is_finite() || contribution <= 0.0 {
+            continue;
+        }
+        let multiplier = policies
+            .effect_at(center, 1.0, 1.0)
+            .map_or(1.0, |effect| f64::from(effect.tax_multiplier));
+        weighted += multiplier * contribution;
+        weight += contribution;
+    }
+    if !weight.is_finite() || weight <= 0.0 || !weighted.is_finite() {
+        return None;
+    }
+    let average = weighted / weight;
+    average.is_finite().then_some(average)
 }
 
 fn completed_utility_consumers(
@@ -12769,5 +12901,315 @@ mod tests {
     fn drop_joins_workers_without_hanging() {
         let bridge = TerrainBridge::new();
         drop(bridge);
+    }
+
+    fn test_policy(
+        seed: u64,
+        name: &str,
+        center: [f32; 2],
+        radius_m: f32,
+        tax_multiplier: f32,
+    ) -> DistrictPolicyStore {
+        let mut store = DistrictPolicyStore::new(seed);
+        let request = DistrictPolicyRequest {
+            name: name.to_string(),
+            center,
+            radius_m,
+            tax_multiplier,
+            service_funding: 1.0,
+            construction_allowed: true,
+            blueprint_allowlist: BTreeSet::new(),
+        };
+        store.create(&request).expect("policy");
+        store
+    }
+
+    fn test_household(residents: u32, workers: u32) -> Household {
+        Household {
+            capacity: residents.max(workers),
+            residents,
+            workers,
+            food: 1.0,
+            water: 1.0,
+            rest: 1.0,
+            commute_m: 0.0,
+            commute_time_s: 0.0,
+            income_per_day: 0.0,
+            home: [0.0, 0.0],
+            workplace_id: None,
+        }
+    }
+
+    fn test_runtime(
+        seed: u64,
+        households: &[(u64, u32, u32)],
+        staffing: &[(u64, u32)],
+    ) -> CityRuntime {
+        let mut runtime = CityRuntime::new(seed);
+        for &(id, residents, workers) in households {
+            runtime
+                .households
+                .insert(id, test_household(residents, workers));
+        }
+        for &(id, workers) in staffing {
+            runtime.staffing.insert(id, workers);
+        }
+        runtime
+    }
+
+    fn home_centers(entries: &[(u64, [f32; 2])]) -> BTreeMap<u64, [f32; 2]> {
+        entries.iter().copied().collect()
+    }
+
+    #[test]
+    fn missing_or_empty_policy_store_keeps_taxes_neutral() {
+        let runtime = test_runtime(7, &[(1, 4, 2)], &[(10, 2)]);
+        let homes = home_centers(&[(1, [0.0, 0.0])]);
+        let workplaces = [Workplace {
+            id: 10,
+            slots: 2,
+            center: [5.0, 0.0],
+        }];
+        let neutral = policy_tax_weights(
+            None,
+            7,
+            Some(7),
+            Some(&runtime),
+            &homes,
+            &workplaces,
+            &runtime.staffing,
+        );
+        assert_eq!(neutral, PolicyTaxWeights::ONE);
+        assert!(neutral.is_neutral());
+
+        let empty = DistrictPolicyStore::new(7);
+        assert_eq!(
+            policy_tax_weights(
+                Some(&empty),
+                7,
+                Some(7),
+                Some(&runtime),
+                &homes,
+                &workplaces,
+                &runtime.staffing,
+            ),
+            PolicyTaxWeights::ONE
+        );
+
+        // A city with no residents or staff also has no denominators.
+        let vacant = test_runtime(7, &[], &[]);
+        let store = test_policy(7, "Tax", [0.0, 0.0], 100.0, 2.0);
+        assert_eq!(
+            policy_tax_weights(
+                Some(&store),
+                7,
+                Some(7),
+                Some(&vacant),
+                &BTreeMap::new(),
+                &[],
+                &BTreeMap::new(),
+            ),
+            PolicyTaxWeights::ONE
+        );
+    }
+
+    #[test]
+    fn a_doubled_district_policy_doubles_both_tax_sides() {
+        let store = test_policy(7, "Doubled", [0.0, 0.0], 100.0, 2.0);
+        let runtime = test_runtime(7, &[(1, 4, 3)], &[(10, 3)]);
+        let homes = home_centers(&[(1, [10.0, 0.0])]);
+        let workplaces = [Workplace {
+            id: 10,
+            slots: 4,
+            center: [-10.0, 0.0],
+        }];
+        let weights = policy_tax_weights(
+            Some(&store),
+            7,
+            Some(7),
+            Some(&runtime),
+            &homes,
+            &workplaces,
+            &runtime.staffing,
+        );
+        assert_eq!(weights, PolicyTaxWeights::new(2.0, 2.0).expect("weights"));
+        assert_eq!(weights.resident(), 2.0);
+        assert_eq!(weights.business(), 2.0);
+
+        let mut neutral = Economy::new(7);
+        let base = neutral.tick(core_city::DAY_SECONDS, 4, 3, 1);
+        let mut weighted = Economy::new(7);
+        let ticked = weighted.tick_with_policy_taxes(
+            core_city::DAY_SECONDS,
+            4,
+            3,
+            1,
+            InfrastructureCosts::ZERO,
+            weights,
+        );
+        assert!((ticked.income - base.income * 2.0).abs() < 1e-9);
+        assert!((ticked.expenses - base.expenses).abs() < 1e-9);
+    }
+
+    #[test]
+    fn homes_and_workplaces_outside_every_policy_stay_neutral() {
+        let store = test_policy(7, "Elsewhere", [1_000.0, 0.0], 16.0, 4.0);
+        let runtime = test_runtime(7, &[(1, 4, 3)], &[(10, 3)]);
+        let homes = home_centers(&[(1, [0.0, 0.0])]);
+        let workplaces = [Workplace {
+            id: 10,
+            slots: 4,
+            center: [50.0, 0.0],
+        }];
+        let weights = policy_tax_weights(
+            Some(&store),
+            7,
+            Some(7),
+            Some(&runtime),
+            &homes,
+            &workplaces,
+            &runtime.staffing,
+        );
+        assert_eq!(weights, PolicyTaxWeights::ONE);
+    }
+
+    #[test]
+    fn overlapping_districts_resolve_to_the_smallest_policy_id() {
+        let mut store = test_policy(7, "Outer", [0.0, 0.0], 100.0, 1.0);
+        let inner = DistrictPolicyRequest {
+            name: "Inner".to_string(),
+            center: [100.0, 0.0],
+            radius_m: 50.0,
+            tax_multiplier: 4.0,
+            service_funding: 1.0,
+            construction_allowed: true,
+            blueprint_allowlist: BTreeSet::new(),
+        };
+        store.create(&inner).expect("inner");
+        assert_eq!(store.count(), 2);
+        let runtime = test_runtime(7, &[(1, 10, 2)], &[(10, 2)]);
+        // The home sits inside both circles, so the older id-1 policy (1.0)
+        // wins. The workplace is only inside the newer id-2 circle (4.0).
+        let homes = home_centers(&[(1, [0.0, 0.0])]);
+        let workplaces = [Workplace {
+            id: 10,
+            slots: 2,
+            center: [140.0, 0.0],
+        }];
+        let weights = policy_tax_weights(
+            Some(&store),
+            7,
+            Some(7),
+            Some(&runtime),
+            &homes,
+            &workplaces,
+            &runtime.staffing,
+        );
+        assert_eq!(weights.resident(), 1.0);
+        assert_eq!(weights.business(), 4.0);
+    }
+
+    #[test]
+    fn split_household_weights_each_workplace_staffing() {
+        // The household remembers workplace 10 as its majority destination,
+        // but its three workers are staffed at two sites. The business side
+        // weights each workplace's staff at that workplace's own centre.
+        let store = test_policy(7, "Doubled", [0.0, 0.0], 20.0, 2.0);
+        let mut runtime = test_runtime(7, &[(1, 4, 3)], &[(10, 2), (11, 1)]);
+        runtime
+            .households
+            .get_mut(&1)
+            .expect("household")
+            .workplace_id = Some(10);
+        let homes = home_centers(&[(1, [0.0, 0.0])]);
+        let workplaces = [
+            Workplace {
+                id: 10,
+                slots: 2,
+                center: [5.0, 0.0],
+            },
+            Workplace {
+                id: 11,
+                slots: 1,
+                center: [200.0, 0.0],
+            },
+        ];
+        let weights = policy_tax_weights(
+            Some(&store),
+            7,
+            Some(7),
+            Some(&runtime),
+            &homes,
+            &workplaces,
+            &runtime.staffing,
+        );
+        assert_eq!(weights.resident(), 2.0);
+        // (2 staff * 2.0 + 1 staff * 1.0) / 3 staff.
+        assert!((weights.business() - 5.0 / 3.0).abs() < 1e-9);
+        assert_ne!(weights.business(), 2.0);
+    }
+
+    #[test]
+    fn foreign_registry_placement_or_population_seed_keeps_taxes_neutral() {
+        let store = test_policy(8, "Foreign", [0.0, 0.0], 100.0, 2.0);
+        let runtime = test_runtime(7, &[(1, 4, 3)], &[(10, 3)]);
+        let homes = home_centers(&[(1, [0.0, 0.0])]);
+        let workplaces = [Workplace {
+            id: 10,
+            slots: 3,
+            center: [5.0, 0.0],
+        }];
+        assert_eq!(
+            policy_tax_weights(
+                Some(&store),
+                7,
+                Some(7),
+                Some(&runtime),
+                &homes,
+                &workplaces,
+                &runtime.staffing,
+            ),
+            PolicyTaxWeights::ONE
+        );
+
+        let store = test_policy(7, "Local", [0.0, 0.0], 100.0, 2.0);
+        assert_eq!(
+            policy_tax_weights(
+                Some(&store),
+                7,
+                Some(8),
+                Some(&runtime),
+                &homes,
+                &workplaces,
+                &runtime.staffing,
+            ),
+            PolicyTaxWeights::ONE
+        );
+
+        let foreign_population = test_runtime(8, &[(1, 4, 3)], &[(10, 3)]);
+        assert_eq!(
+            policy_tax_weights(
+                Some(&store),
+                7,
+                Some(7),
+                Some(&foreign_population),
+                &homes,
+                &workplaces,
+                &foreign_population.staffing,
+            ),
+            PolicyTaxWeights::ONE
+        );
+        assert_eq!(
+            policy_tax_weights(
+                Some(&store),
+                7,
+                Some(7),
+                None,
+                &homes,
+                &workplaces,
+                &BTreeMap::new(),
+            ),
+            PolicyTaxWeights::ONE
+        );
     }
 }
