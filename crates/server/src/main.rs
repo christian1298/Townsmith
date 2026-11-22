@@ -13,7 +13,9 @@ use core_sim::{Cohort, CohortSimulation};
 use townsmith_server::listen::{run_listen, run_save_load_smoke, ListenConfig};
 use townsmith_server::protocol::{run_loopback_smoke, LOOPBACK_SEED};
 use townsmith_server::save::LoadedWorld;
-use townsmith_server::world::{run_authority_loopback, ServerWorld};
+use townsmith_server::world::{
+    run_authority_loopback, run_roles_loopback, ClientRole, ServerWorld,
+};
 
 fn arg_value(name: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
@@ -66,6 +68,22 @@ fn main() {
             }
             Err(error) => {
                 eprintln!("SERVER_AUTHORITY status=error error={error}");
+                std::process::exit(1);
+            }
+        }
+        match run_roles_loopback() {
+            Ok(report) => {
+                println!(
+                    "SERVER_ROLES status=ok sessions={} role_checks={} rate_limited={} audit={} checksum={}",
+                    report.sessions,
+                    report.role_checks,
+                    report.rate_limited,
+                    report.audit,
+                    report.checksum
+                );
+            }
+            Err(error) => {
+                eprintln!("SERVER_ROLES status=error error={error}");
                 std::process::exit(1);
             }
         }
@@ -129,6 +147,11 @@ fn run_listen_mode(port: &str) {
     let seed = arg_value("--seed")
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(LOOPBACK_SEED);
+    let role_name = arg_value("--role").unwrap_or_else(|| "mayor".to_string());
+    let Some(role) = ClientRole::parse(&role_name) else {
+        eprintln!("SERVER_LISTEN status=error error=invalid role `{role_name}`");
+        std::process::exit(1);
+    };
     let autosave_ticks = arg_value("--autosave-ticks")
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0);
@@ -168,6 +191,9 @@ fn run_listen_mode(port: &str) {
         },
     };
 
+    let mut world = world;
+    world.set_role(role);
+
     let listener = match TcpListener::bind(address) {
         Ok(listener) => listener,
         Err(error) => {
@@ -184,10 +210,11 @@ fn run_listen_mode(port: &str) {
     };
 
     println!(
-        "SERVER_LISTEN status=ok address={address} seed={} tick={} checksum={} save={} autosave_ticks={}",
+        "SERVER_LISTEN status=ok address={address} seed={} tick={} checksum={} role={} save={} autosave_ticks={}",
         world.seed,
         world.tick,
         world.checksum(),
+        world.role().as_str(),
         save_path
             .as_ref()
             .map_or_else(|| "none".to_string(), |path| path.display().to_string()),
