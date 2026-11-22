@@ -2,7 +2,7 @@
 title: Runner Matrix
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-3
@@ -121,9 +121,9 @@ The comparison checks the checksum and structural counters exactly, and the econ
 
 ## 6. Tests
 
-- `city_loop` bin: 5 tests — five-house completion, 15-house road commute, scenario preset sizes, a full early-scenario run with utilities and industry, and a deterministic balance-report shape.
-- Workspace: **651 tests + 2 doctests (653 passed)**.
-- `core_city` 279; `core_structure` 19; bridge 59; traffic-grid 3; city-loop 7; industrial 4.
+- `city_loop` bin: 8 tests — five-house completion, 15-house road commute, campaign-day timeline, degraded variants/matrix, scenario preset sizes, a full early-scenario run with utilities and industry, and a deterministic balance-report shape.
+- Workspace: **909 tests** (905 unit/integration + 4 doctests, all passing).
+- `core_city` 460; `core_structure` 19; bridge 87; traffic-grid 4; city-loop 8; industrial 4.
 
 ## 7. Limits
 

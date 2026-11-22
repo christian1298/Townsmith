@@ -30,8 +30,8 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 
 | Item | State |
 |---|---|
-| Phase | **Phase 1** technical acceptance passed; the human 30-minute playtest is still pending (Q-101, [[66 - Playtest Kit]]). **Phase 2** first slice planned in [[41 - Phase 2 Slice Plan]] |
-| Code | **Vertical slice:** `core_voxel` (32³ chunk, palette/RLE, greedy mesher, chunked editable volume + cross-chunk meshing, 52 tests), `core_world` (1 m terrain, 256 m chunks, edit deltas, streaming, seam-aware terrain mesh + LOD + skirts, 62 tests), `core_sim` (1M cohort tick + 2,000 active agents, 26 tests), `core_city` (synthetic Early/Mid/Late layouts + world-placement validation, JSON save, construction sites, road segments, zoned lots, settlement ownership, the city ledger, household runtime, jobs/commute, treasury, construction draw-down/loans, primary industries, water/power utilities, a derived traffic graph, the city advisor, population-driven ages, structural limits, research, age gates, civic services, the starter catalog, construction trades, the tutorial checklist, and a derived named-citizen identity layer, 340 tests), `core_blueprint` (`.tsbp` v1 packages + material cost + optional structure, 15 tests), `core_rooms` (room detection + shared acceptance house, 12 tests + 1 doctest), `core_structure` (system tiers, story/height/span/foundation rules, age requirements, 19 tests + 1 doctest), `townsmith-server`, `townsmith-bench`, a 3-run benchmark harness, a Godot 4.7 GDExtension bridge with terrain workers, city layout, editable volume, blueprint, copy-mesh, acceptance, world-placement, construction, road, lot, settlement, household, treasury, industry, utility, traffic, advisor, research, age-gate, civic-service, starter-library, trade, and tutorial, materialization, and save-compatibility APIs (72 bridge tests), a streamed-world placement scene with a green/red ghost, Mayor camera/selection/door view, phased construction sites, road/zone overlays, settlement rings, a MultiMesh city renderer, a 200-instance voxel-hut route, a first-person editor with `VOLUME_SMOKE`, `EDITOR_SMOKE`, `ROOM_OVERLAY_SMOKE`, `UNDO_SMOKE`, `BLUEPRINT_SMOKE`, `LOCALE_SMOKE`, `LAYOUT_SMOKE`, `SLICE_ACCEPTANCE`, `WORLD_PLACEMENT`, and `WORLD_SCENE` paths. Headless smoke passes. |
+| Phase | **Phase 3 and Phase 4 slices implemented.** The Phase 5 1M/3060 render gate is open; the Q-101 human playtest is still pending. |
+| Code | Rust workspace plus a Godot 4 shell. City, world, server, and benchmark paths are implemented; see [Code inventory](#code-inventory). |
 | Engine | **Accepted:** Godot 4 shell + Rust core via GDExtension. The Phase 0 spike passed; the 3060-class 1M 30 FPS gate remains open for Phase 5. See [[04 - Engine and Stack]] and [[10 - Decisions]]. |
 | Team | **Accepted:** 2–3 full-time generalists; Rust/Godot experience or willingness to learn. |
 | Language | **Accepted:** Rust is the primary implementation language from Phase 0; GDScript is shell/UI only; C++ is the fallback. See D-011. |
@@ -47,7 +47,36 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with real 10 cm building detail is tractable. The box-city MultiMesh path is measured well above target on an RTX 4080; the target 3060-class run and voxel building LOD remain. See [[03 - Voxel and Scale]], [[23 - City Rendering Benchmark]], and [[09 - Open Questions]]. |
-| Next action | Record the 30-minute slice playtest (Q-101). Phase 2 planning has started with [[41 - Phase 2 Slice Plan]]: placement validation, world save/load, the streamed-world preview (2A), terrain edit deltas (2B), the first Mayor camera/selection/door slice (2C), and construction v0 (2D) are implemented; the road network (2E.1–2E.2), lots/zoning (2E.3), and settlement boundaries (2E.4) are implemented. Phase 3 starts with [[49 - Phase 3 Slice Plan]]: the city ledger (3.1), household move-in/needs (3.2), and jobs/wages/commute (3.3), primary industries (3.4), utilities (3.5), a treasury/tax ledger with construction draw-down, loans, and bankruptcy (3.6), traffic (3.7), the dashboard/advisor (3.8), and the early/mid/late runner matrix (3.9) are implemented, and Phase 4 has started with population-driven ages ([[59 - Progression and Ages]]); Phase 4.2 structural limits are implemented ([[60 - Structural Limits]]) and Phase 4.3 research/age gates are implemented ([[61 - Research]]); Phase 4.4 civic services ([[62 - Civic Services]]) and a starter building library ([[63 - Starter Library]]) are implemented, with age-specific construction trades ([[64 - Construction Trades]]) and a derived tutorial checklist ([[65 - Tutorial]]) implemented; the first early/mid/late balance report ([[58 - Runner Matrix]]), the degraded outage matrix ([[71 - Degraded City Matrix]]), and the 20,000-resident Industrial probe ([[72 - Industrial Balance]]) are implemented; the citizen panel, named persistence ([[70 - Named Persistence]]), the EN/DE follow/citizen UI, the N3 selection core ([[73 - Materialization Core]]), the 1M data harness ([[68 - Metropolis Gate]]), and the Modern balance probe ([[74 - Modern Balance]]) are in; the N3 read-only bridge, fixed-speed travel time, infrastructure site upkeep, the save/load stress harness, and a first dashboard-localization slice are in; the N3 F4 materialization overlay and selection benchmark, the world-locale parity gate, bridge infrastructure upkeep, and a phased-financing projection are in; the stateful N3 scheduler, dashboard body localization, infrastructure cost model, voxel-proxy gate harness, and bounded save-envelope fuzz are in; the N3 scene scheduler, HUD status/common-modal localization, infrastructure site charging, named age lifecycle, and voxel-LOD gate tiers are in; Phased construction billing (D-028), N3 citizen movement markers, bridge graph/movement caches, content-name localization, locale-aware HUD/dashboard numbers, district summary aggregation, pooled MultiMesh movement markers, incremental road-graph appends, indexed 250k placement records, a report-only benchmark screen, a pseudo-locale gate, and cohort validation are in; [[10 - Decisions]] D-029 (campaign construction clock) is proposed, and the live financing projection needs its sign-off. Route polylines/crowd LOD, district UI/cohorts, utility/service phased payment, 1M save/streaming, and the Q-101 playtest ([[66 - Playtest Kit]]) are next. Planning notes: [[67 - Named Citizens]], [[68 - Metropolis Gate]], [[69 - Localization Audit]]. Technical acceptance and the 21-house result are in [[40 - Slice Acceptance Results]]. Keep the 3060-class 1M gate for Phase 5. |
+| Next action | Run the Q-101 playtest ([[66 - Playtest Kit]]). Then: utility/service per-phase payment, reconnect and interest filtering, district policies, and the 1M render gate ([[08 - Roadmap]], [[09 - Open Questions]]). |
+
+## Current capabilities
+
+- **World and save:** full-world 1M core save/load envelope (182.8 MB JSON, **232.5 ms save / 694.7 ms load**) and atomic `.tmp`/`.bak` bridge writes; 100 km² streaming data harness (525 chunks, ~281 MB peak mesh bytes). See [[68 - Metropolis Gate]] and [[75 - Save Load Stress]].
+- **City and economy:** live phase-driven financing and campaign construction clock (D-028/D-029 still proposed), utility/service build lead time, infrastructure costs, district summary and heatmap. See [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]], and [[77 - Infrastructure Costs]].
+- **Multiplayer/server:** protocol v0, authoritative executor, atomic world save/load, dev roles/rate limits/audit, and the Godot MP client loopback smoke. See [[05 - Multiplayer]].
+- **Scale and rendering evidence:** 250k voxel-proxy setup, crowd LOD, 2k movement-marker stress. See [[68 - Metropolis Gate]] and [[73 - Materialization Core]].
+- **Content:** in-memory mod content pack v0; 4 content schema files with 32 entries. See [[06 - Modding and Resource Packs]].
+
+## Code inventory
+
+`cargo test --workspace`: **909 tests**, all passing (**905 unit/integration + 4 doctests**); fmt and clippy clean.
+
+| Area | Tests |
+|---|---:|
+| `core_city` | 460 |
+| `godot_ext` (bridge) | 87 |
+| `core_world` | 62 |
+| `townsmith-server` | 83 |
+| `core_voxel` | 52 |
+| `core_sim` | 40 |
+| `core_structure` | 19 |
+| `core_blueprint` | 15 |
+| `core_rooms` | 12 |
+| `townsmith-bench` (16 bins) | 79 |
+| doctests (`core_city` 2, `core_rooms` 1, `core_structure` 1) | 4 |
+| **Total** | **858** |
+
+Bench bins: `city_loop` 8, `cohort_validate` 9, `dormant` 5, `financing` 8, `industrial` 4, `infra_cost` 1, `materialization` 2, `metropolis` 4, `metropolis_balance` 4, `modern` 5, `movement` 4, `placements` 2, `save_1m` 6, `save_stress` 6, `streaming_scale` 7, `traffic` 4.
 
 > [!warning] This is a plan, not a commitment
 > Numbers in these docs are **planning targets**, not measured results. Anything marked *Assumption* or *Proposed* must be validated before it becomes an accepted decision.
@@ -154,11 +183,11 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 ## Next actions
 
-1. Run and record the 30-minute slice playtest in [[66 - Playtest Kit]] (Q-101); technical acceptance is complete, but the slice is not fully accepted until the human playtest is recorded.
-2. Implement the first Phase 2 slice from [[41 - Phase 2 Slice Plan]]: placement validation, world save/load, then terrain deltas and Mayor Mode.
-3. Finish deferred editor work: paint/pick, brushes, selection/copy/rotate/mirror, structural v0, thumbnails, AO/texture arrays.
-4. Keep the 3060-class 1M performance gate open for Phase 5; D-003 is accepted for the architecture.
-5. ~~Write the first content schemas (materials, rooms, props).~~ Material/room/prop schema v1, base data, and the `content_schema` gate are in; runtime registry, mod manifest loading, and save references remain.
+1. Record the 30-minute slice playtest in [[66 - Playtest Kit]] (Q-101).
+2. Utility and service per-phase payment, then reconnect and interest filtering for multiplayer.
+3. District policies and selectable settlement panels.
+4. Close the 1M render gate: real voxel/LOD city, 3060 baseline, fixed fixture, and Phase 5 evidence ([[68 - Metropolis Gate]]).
+5. Keep the runtime content registry and save references as the remaining modding step.
 
 ## Document map
 

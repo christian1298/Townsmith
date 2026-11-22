@@ -36,7 +36,7 @@ Out:
 - clickable advice that selects or centres a building;
 - acknowledged, dismissed, or persisted notifications;
 - charts, history, trend lines, or time-series;
-- localization beyond advisor titles/details and the dashboard shell (remaining modals/content/number formatting);
+- new UI strings added after the current 226-key world table and 34-key content table; developer-only debug text stays English;
 - automated pause, advisor actions, or policy changes;
 - per-citizen or per-household advice.
 
@@ -200,20 +200,20 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 ## 7. Tests
 
 - `core_city::advisor`: 9 tests — healthy, service shortages, missing stores, budget/debt, bankruptcy ordering, vacancies/unemployment, disconnected roads/long commutes, empty city, cap/determinism.
-- `core_city` total: **340 tests**.
-- Bridge: **49 tests** (advisor is covered by the scene smoke; a bridge unit test would need a live Godot engine for `VarDictionary`).
-- Workspace: **651 tests + 2 doctests**.
+- `core_city` total: **460 tests**.
+- Bridge: **87 tests** (advisor is covered by the scene smoke; a bridge unit test would need a live Godot engine for `VarDictionary`).
+- Workspace: **909 tests** (905 unit/integration + 4 doctests).
 - `cargo run --release -p townsmith-bench --bin city_loop -- --scenario mid` — checksum `623f39c61b71b68a`; the 3.9 matrix is in [[58 - Runner Matrix]].
 
 ## 8. Limits
 
 - Advisor advice is city-wide; the dashboard District section is read-only and camera-centred (256 m), not a selectable settlement/district panel. No building drill-down from advice.
-- The heatmap is also camera/selection-centred (`_materialization_center`, 512 m), read-only, and does not aggregate cohorts, settlements, or off-screen districts. It draws one density metric (population) and only nonzero cells; needs, jobs, and happiness are in the bridge payload but not rendered yet.
+- The heatmap is camera/selection-centred (`_materialization_center`, 512 m), read-only, and does not aggregate cohorts, settlements, or off-screen districts. It draws one density metric (population) and only nonzero cells; needs, jobs, and happiness are in the bridge payload but not rendered yet. The F7 overlay, status line, legend, and unavailable/empty text are localized and pooled through one `MultiMesh`.
 - Thresholds are fixed; no difficulty, policy, or player preference.
 - Advice is not persisted, acknowledged, or suppressed.
 - No click-to-select, camera focus, or one-click policy action.
 - The dashboard rebuilds the full snapshot plus advisor while visible, throttled to 2 Hz rather than on every HUD update; no incremental caching yet.
-- English-only developer UI.
+- EN/DE covers the HUD, dashboard body, role-player modals, advisor, content names, and numbers; developer-only debug and console text stays English.
 - `city.food_shortage`, `city.water_shortage`, `city.power_shortage`, and `city.unhappy` use one code for both critical and warning levels; the severity field distinguishes them.
 - The advisor reports debt as information even when the daily net is positive.
 - Advisor titles and details are localized by code (`base.advisor.<code>.title`/`.detail`); details use named params and fall back to the bridge English text for unknown codes.

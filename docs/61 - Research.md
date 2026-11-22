@@ -2,7 +2,7 @@
 title: Research
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-4
@@ -167,8 +167,8 @@ The scene smoke:
 - `core_city::research`: 14 tests — default tree and ages, starting pool, generation, unlock/spend, duplicate/unknown, age/prerequisite gates, insufficient points, availability flags, JSON/checksum, invalid state, prerequisite closure and spend consistency, invalid/cyclic trees, invalid costs.
 - `core_city::progression`: 6 tests including age id aliases.
 - `core_structure`: 19 tests + 1 doctest, including minimum-age mapping.
-- `godot_ext`: 49 tests, including research JSON roundtrip/old save, unknown completed nodes, and structure age helpers.
-- Workspace: **651 tests + 2 doctests (653 passed)**.
+- `godot_ext`: 87 tests, including research JSON roundtrip/old save, unknown completed nodes, and structure age helpers.
+- Workspace: **909 tests** (905 unit/integration + 4 doctests, all passing).
 
 ## 9. Limits
 

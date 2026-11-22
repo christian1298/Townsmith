@@ -297,7 +297,17 @@ Population, employment, and building counts are static for v0. `employed` is 60%
 
 `SERVER_ROLES status=ok sessions=3 role_checks=4 rate_limited=1 audit=65 checksum=b6ab299531341226` is the loopback golden (viewer forbidden, mayor accepted, admin step, rate-limited ping).
 
-**Limits.** In-memory only, one session, no persistence, authentication, roles/permissions, content-manifest enforcement, rate limiting, interest management, delta snapshots, rollback, terrain sampling, or cost/material checks. Direct mutation of public fields does not refresh `session_checksum`; call `checksum()` for live state.
+**Current server status (2026-11-23).**
+
+| Capability | State | Evidence |
+|---|---|---|
+| Framing/validation | Protocol v0, 4-byte length + JSON, 1 MiB cap, stable codes | `SERVER_PROTOCOL status=ok frames=8 checksum=e2f15a193149bb86` |
+| Authority | Stateful executor; hello, ping, time, tax, road, disconnect | `SERVER_AUTHORITY status=ok commands=6 checksum=70e25aff45867b94` |
+| Save/load | `ServerSave` v1, atomic tmp/fsync/rename, one-step `.bak` recovery | `SERVER_SAVE status=ok bytes=744 tick=2 checksum=70e25aff45867b94`; `--listen PORT --save PATH --load PATH` |
+| Roles | Dev-only viewer/mayor/admin, token bucket, 256-entry audit ring | `SERVER_ROLES ... checksum=b6ab299531341226` |
+| Godot client | Loopback `hello`/`ping`/tax/road/disconnect | `MP_CLIENT ... frames=12` |
+
+**Limits.** In-memory world with one session, no authentication, content-manifest enforcement, interest management, delta snapshots, reconnect, rollback, terrain sampling, or cost/material checks. Persistence is one file per world; no journal, compression, or remote storage. Roles are assigned by the server process, not authenticated. Direct mutation of public fields does not refresh `session_checksum`; call `checksum()` for live state.
 
 **Loopback smoke**
 
@@ -305,6 +315,9 @@ Population, employment, and building counts are static for v0. `employed` is 60%
 cargo run --release -p townsmith-server -- --loopback-smoke
 # SERVER_PROTOCOL status=ok frames=8 checksum=e2f15a193149bb86
 # SERVER_AUTHORITY status=ok commands=6 checksum=70e25aff45867b94
+# SERVER_ROLES status=ok sessions=3 role_checks=4 rate_limited=1 audit=65 checksum=b6ab299531341226
+cargo run --release -p townsmith-server -- --save-load-smoke
+# SERVER_SAVE status=ok action=loopback bytes=744 tick=2 checksum=70e25aff45867b94
 ```
 
 The authority path binds `127.0.0.1:0` and runs `hello → welcome`, `set_tax → snapshot`, `place_road → snapshot`, `ping → pong`, `resume → snapshot`, `disconnect → goodbye`. The client replays the same commands on a local reference world and requires byte-for-byte identical responses; it also asserts the exact tick (1, 2), balance (100,000), and seed-derived population. Socket timeouts replace sleeps.

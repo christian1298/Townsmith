@@ -15,6 +15,9 @@ tags:
 > [!info] What this note is
 > A coverage audit of user-facing strings at the Phase 3 slice, plus a concrete expansion plan. It records the current state, separates player-facing text from developer-only text, proposes key conventions and interpolation rules, and defines the migration phases and the smoke/CI gate. No code or locale files were changed by this audit.
 
+> [!note] Current status (2026-11-23)
+> The runtime tables now hold **111 editor keys, 226 world keys, and 34 content keys**, each with full EN/DE parity. The world table covers the HUD, status, dashboard body, role-player modals, advisor titles/details, and heatmap text; `content_i18n.gd` is wired into the HUD, panels, modals, and 3D labels; `WorldI18n.format_int`/`format_float` handle EN/DE numbers. `scripts/check_locale.sh` prints `LOCALE_CHECK editor=111 world=226 content=34 status=ok`, and the pseudo-locale gate prints `PSEUDO_LOCALE editor=111 world=226 content=34 long=11 status=ok`. Sections 2.1–2.6 below are the original audit snapshot; their "not wired" notes are historical. The current coverage table in §1 and the `*_i18n=ok` world-scene markers are authoritative.
+
 > [!warning] Runtime layout differs from the original brief
 > There is **no `godot/locale/` directory** and no `en.json` / `de.json` at this commit. The only runtime table is inline in `godot/editor_i18n.gd` (`TABLES`), with **111 EN and 111 DE keys**. [[38 - Editor Localization]] documents this as a deliberate slice stand-in for the compiled pipeline in [[16 - Localization]]. The audit below targets the actual files, not the assumed layout.
 
@@ -23,29 +26,30 @@ tags:
 | Surface | Runtime source | EN keys | DE keys | Parity | Gate |
 |---|---|---:|---:|---|---|
 | First-person volume editor | `godot/editor_i18n.gd` | 111 | 111 | complete | `check_locale.sh` + `smoke_locale.sh` |
-| World-placement HUD, status, help | `godot/world_placement.gd` | 226 world keys | 0 | `world_i18n.gd` | dashboard shell/body, HUD shell/status, all role-player modals, and advisor titles/details keyed; content names/numbers raw |
-| Dashboard shell and body | `world_placement.gd` + Rust `core_city` payload | 0 | 0 | n/a | none |
-| Advisor titles | Rust `core_city::advisor` | 22 code titles | 0 | `world_i18n.gd` | titles and parameterized details keyed by code |
-| Tutorial titles and hints | Rust payload read by `world_placement.gd` | 0 | 0 | n/a | none |
-| Starter, industry, service, tax names | Rust payload + `kind.capitalize()` | 0 | 0 | n/a | none |
-| Content display names | `godot/content_i18n.gd` | 34 | 34 | complete | static gate; HUD/panel/modal/3D labels wired; `content_ui=ok` |
-| Player-visible error modals | GDScript literals + `error_code` | 0 | 0 | n/a | none |
+| World HUD, dashboard, modals, advisor | `godot/world_i18n.gd` | 226 | 226 | complete | static gate + `WORLD_SCENE` |
+| Dashboard body | `world_i18n.gd` + Rust payload | 90 dashboard keys | 90 | complete | `dashboard_body_i18n=ok` |
+| Advisor titles/details | `world_i18n.gd` + Rust codes | 22 codes | 22 | complete | `advisor_i18n=ok`, `advisor_detail_i18n=ok` |
+| Content display names | `godot/content_i18n.gd` | 34 | 34 | complete | static gate + `content_ui=ok` |
+| Player-visible modals/errors | `world_i18n.gd` | 114 modal keys | 114 | complete | `modal_i18n=ok`; raw codes developer-only |
+| Tutorial titles | `content_i18n.gd` + Rust step IDs | 5 steps | 5 | complete | `content_ui=ok` |
+
+Dashboard, advisor, and modal counts are subsets of the 226-key world table, not additional tables. The content table is a separate `DISPLAY` table parsed by the same gate.
 
 Facts about the current table:
 
 - `TABLES` contains the same 111 keys under `en` and `de`; the locale smoke asserts parity and required key groups.
 - Lookup returns `!key!` for a missing key, so gaps are visible instead of silently falling back.
-- Placeholders are `{0}`, `{1}`, … for arrays and `{name}` for dictionaries. There is no plural helper and no locale-aware number formatter.
+- Placeholders are `{0}`, `{1}`, … for arrays and `{name}` for dictionaries. There is no plural helper yet; `WorldI18n.format_int` / `format_float` provide locale-aware EN/DE numbers.
 - The editor table is owned by the editor slice. It is not yet the shared content registry or the moddable language-pack pipeline from [[16 - Localization]].
 
 > [!note] Count method
-> Key counts are a static count of the two `TABLES` dictionaries. The Godot smoke was not run in this audit; `scripts/smoke_locale.sh` is the authority for parity and rendering.
+> Key counts are a static count of the `TABLES` / `DISPLAY` dictionaries. `scripts/check_locale.sh` is the static gate; `scripts/smoke_locale.sh` and the world scene are the runtime authority for parity and rendering.
 
 ## 2. Hard-coded player-facing strings
 
 Number formatting now has `WorldI18n.format_int` / `format_float`: EN `1,234.5`, DE `1.234,5`. HUD and dashboard quantities use them; ids, coordinates, seeds, advisor detail parameters, citizen-panel values, and loan-modal amounts stay raw. Smoke checks `number_i18n=ok` plus a DE/EN dashboard grouping assertion.
 
-The largest gap is `godot/world_placement.gd`. Almost every string in the Mayor/Architect HUD, dashboard shell, modal line, and content label is a literal. The Rust dashboard and advisor are a second, separate gap: they cannot be fixed in GDScript alone.
+At audit time, almost every string in `godot/world_placement.gd` was a literal, and the Rust dashboard/advisor payload was English data. The HUD, status, dashboard body, modals, advisor titles/details, content names, and numbers are now keyed; the inventory below is retained as the migration record.
 
 ### 2.1 HUD, status, and help
 
@@ -79,7 +83,7 @@ The help lines are one long sentence each. They must be split into keyed rows or
 | `Population 2 residents / 2 housing (0 vacant)` and similar value lines | Rust payload | Player-facing; needs plural rules |
 | `▲ The city is running a deficit — Raise taxes, borrow deliberately, or wait...` | Rust advisor | Player-facing |
 
-The dashboard body is produced by `core_city` and passed through the bridge. Its labels, units, and advisor text are English data, not UI code.
+The dashboard body is produced by `core_city`, passed through the bridge, and rendered with `world_i18n.gd` keys. Section labels, values, units, advisor titles/details, and modal text are keyed; raw IDs and error codes stay developer-only.
 
 ### 2.3 Advisor messages
 
@@ -133,16 +137,16 @@ The protocol should send the code plus parameters; each client resolves the titl
 | Industry names and descriptions | Rust industry payload | English data |
 | Tax policy names (`low`, `standard`, `high`) | `TAX_POLICIES` in `world_placement.gd` | English literals |
 
-These are content names, so the durable fix is a content registry with `name_key` / `description_key`, not a larger GDScript table.
+These content names now resolve through `content_i18n.gd` in the HUD, panels, modals, and 3D labels. The durable fix remains a Rust-side content registry with `name_key` / `description_key`.
 
-### 2.7 Content display-name table (not wired)
+### 2.7 Content display-name table (wired)
 
 `godot/content_i18n.gd` adds a data-only EN/DE lookup for the Phase 2 content names: 20 starter buildings, 2 utility kinds, 3 industry kinds, 4 civic service kinds, and 5 tutorial step IDs, for **34 keys per locale** with full parity. It exposes `display(key, locale)`, plus `starters(locale)`, `industries(locale)`, `services(locale)`, and `tutorials(locale)` flatteners keyed by stable content ID/kind.
 
 - Key layout is `base.content.starter.<slug>` (the `base:` prefix is stripped), `base.content.industry.<kind>`, `base.content.service.<kind>`, and `base.content.tutorial.<step>`.
 - Missing keys fall back to English, then to the raw key; unsupported locales resolve to English. Values are display names only, with no placeholders or sentences.
-- **This is not wired into `world_placement.gd`.** The HUD, dashboard, labels, and tutorial still read the Rust payload or call `kind.capitalize()`, so players keep seeing raw/English labels until the UI slice consumes this table.
-- `scripts/check_locale.sh` does not parse this file yet; the counts above are a static audit, not a CI gate.
+- **This is wired into `world_placement.gd`.** The HUD, dashboard, labels, modals, and tutorial titles resolve through `ContentI18n.display`; the world smoke checks `content_ui=ok`.
+- `scripts/check_locale.sh` parses this file with a 34-key floor, parity, and placeholder checks.
 - The durable fix remains a Rust-side `name_key` content registry; this table is the slice bridge until that protocol lands.
 
 ## 3. Player-facing versus developer-only
@@ -225,9 +229,9 @@ The current German editor uses a neutral infinitive/imperative style (“Klicken
 
 | Phase | Scope | Approx. keys | Exit criterion |
 |---|---|---:|---|
-| 1. HUD + dashboard shell/body | `_update_hud`, `_setup_ui`, dashboard title/hint/body | **partial** — 226 world keys | HUD shell/status, dashboard shell/body, all role-player modals, and advisor titles/details keyed; content names/numbers remain |
-| 2. Tutorial + content names | Tutorial titles/hints, starter/industry/service/tax names, `capitalize()` removal, structure names | 60–90 | No `capitalize()` or raw content ID reaches a player label |
-| 3. Advisor + errors | Rust advisor title/detail keys, dashboard body labels, modal prefixes, error mapping | **partial** — 22 code titles | Advisor titles/details localized with params; errors and number formatting remain |
+| 1. HUD + dashboard shell/body | `_update_hud`, `_setup_ui`, dashboard title/hint/body | **done** — 226 world keys | HUD shell/status, dashboard shell/body, all role-player modals, and advisor titles/details keyed; EN/DE numbers wired |
+| 2. Tutorial + content names | Tutorial titles/hints, starter/industry/service/tax names, `capitalize()` removal, structure names | **done** — 34 content keys | No `capitalize()` or raw content ID reaches a player label; `content_ui=ok` |
+| 3. Advisor + errors | Rust advisor title/detail keys, dashboard body labels, modal prefixes, error mapping | **done** — 22 codes, 114 modal keys | Advisor titles/details localized with params; modal text keyed with raw codes developer-only; `modal_i18n=ok` |
 
 ### Phase 1 — HUD and dashboard shell (recommended first slice)
 

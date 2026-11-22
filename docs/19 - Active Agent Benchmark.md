@@ -2,7 +2,7 @@
 title: Active Agent Benchmark
 project: Townsmith
 status: active
-updated: 2026-11-19
+updated: 2026-11-23
 tags:
   - townsmith
   - simulation
@@ -114,7 +114,7 @@ These numbers are not comparable to the cohort tick in [[18 - Phase 0 Implementa
 
 ## 5. Tests
 
-`core_sim` has 26 tests; 15 are for active agents:
+`core_sim` has 40 tests; 15 are for active agents:
 
 | Test | Asserts |
 |---|---|

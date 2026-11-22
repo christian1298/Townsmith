@@ -2,7 +2,7 @@
 title: Structural Limits
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-4
@@ -179,12 +179,12 @@ The palette shows `structure: timber frame (3/3 stories)`. Loading a package res
 ## 8. Tests and smoke
 
 - `core_structure`: **19 tests + 1 doctest** for each limit, composite bonus/weak ground, span, foundation, aliases, and derivation.
-- `core_city::placement`: 6 tests — a four-story timber request fails with `structure_stories`; a four-story brick request and a stone-ground/timber request pass; legacy requests without metadata pass; loaded placements revalidate. Core city total **170**.
+- `core_city::placement`: 6 tests — a four-story timber request fails with `structure_stories`; a four-story brick request and a stone-ground/timber request pass; legacy requests without metadata pass; loaded placements revalidate. Core city total **460**.
 - `core_blueprint`: **15 tests** — default metadata omits the field; a valid structure roundtrips; an over-limit structure saves as a draft; a height mismatch is rejected on save.
-- `godot_ext`: **49 tests**; blueprint info and placement payloads include the structure summary, with a bridge roundtrip test plus the world-scene and editor smoke coverage.
+- `godot_ext`: **87 tests**; blueprint info and placement payloads include the structure summary, with a bridge roundtrip test plus the world-scene and editor smoke coverage.
 - `smoke_world_scene.sh`: the acceptance house derives timber frame, two stories, and a three-story limit; the marker includes `structure=ok`.
 - The editor blueprint smoke checks the saved/loaded timber structure block.
-- Workspace: **651 tests + 2 doctests (653 passed)**.
+- Workspace: **909 tests** (905 unit/integration + 4 doctests, all passing).
 
 ## 9. Limits
 
