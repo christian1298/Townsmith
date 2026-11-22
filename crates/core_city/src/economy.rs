@@ -526,6 +526,9 @@ impl Economy {
         if self.format_version != ECONOMY_FORMAT_VERSION {
             return Err(EconomyError::UnsupportedVersion(self.format_version));
         }
+        if self.seed > i64::MAX as u64 {
+            return Err(EconomyError::Invalid("seed is above i64::MAX"));
+        }
         if !self.balance.is_finite() {
             return Err(EconomyError::Invalid("balance is not finite"));
         }
@@ -975,5 +978,16 @@ mod tests {
         let mut economy = Economy::new(2026);
         economy.balance = f64::NAN;
         assert!(economy.validate().is_err());
+    }
+
+    #[test]
+    fn a_seed_above_the_json_safe_range_is_rejected() {
+        let mut economy = Economy::new(i64::MAX as u64);
+        assert!(economy.validate().is_ok());
+        economy.seed = i64::MAX as u64 + 1;
+        assert!(matches!(
+            economy.validate(),
+            Err(EconomyError::Invalid("seed is above i64::MAX"))
+        ));
     }
 }

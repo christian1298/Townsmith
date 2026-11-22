@@ -55,6 +55,8 @@ pub struct NamedCitizen {
 
 Records are sorted by `(id, placement_id, slot)` for deterministic JSON. Runtime state remains a `BTreeMap<(placement_id, slot), NamedCitizen>`.
 
+A persisted `age_days` of zero is the old-save default: `sync` seeds it from the per-slot deterministic identity age (`named::age_years(id)`), the same value used for a newly materialized identity. There is no household-level offset, so household members can share an age.
+
 ## 3. Save/load
 
 `world_save`:

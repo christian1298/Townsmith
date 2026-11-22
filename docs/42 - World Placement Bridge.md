@@ -40,6 +40,8 @@ Terrain-edit methods (`terrain_edit_height`, `terrain_delta_count`, `terrain_del
 
 Construction methods (`construction_tick`, `construction_sites`, `construction_summary`, `construction_set_crew`, `construction_add_materials`, `construction_checksum`, `construction_clear`) are documented in [[45 - Construction Sites]]. A successful placement creates a site in the same transaction.
 
+Treasury policy: `world_place_blueprint`, `utility_add_site`, and `service_add_site` share one rule for an absent treasury. The bridge opens `Economy::new(seed)` at the 100,000 starting balance, charges the initial installment, and reports `charged=true`; `cost_paid` and `payment_due` describe the result. A failed add or charge rolls back only a treasury that the same call opened, restoring the closed state, so a rejected call leaves no state and cannot pin the world to that seed. A pre-existing treasury is reused and never removed.
+
 Road methods (`road_validate`, `road_add`, `roads`, `road_count`, `road_checksum`, `road_clear`, `road_remove`) validate width through the shared core 2–24 m range and are documented in [[46 - Road Network]]; `traffic_state(seed)` exposes the derived graph in [[56 - Traffic]]. The world save carries an optional `roads` object; old saves load with the road store closed.
 
 Lot methods (`lot_validate`, `lot_add`, `lots`, `lot_count`, `lot_checksum`, `lot_clear`, `lot_remove`) are documented in [[47 - Lots and Zoning]]. The world save carries an optional `lots` object; old saves load with the lot store closed.

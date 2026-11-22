@@ -4204,28 +4204,28 @@ impl TownsmithCore {
         };
         let lead_days = construction_lead_days(time_scale, kind.campaign_build_days());
         let cost = kind.construction_cost();
-        let initial_due = if lead_days > 0.0 { cost * 0.5 } else { cost };
+        let initial_due = infrastructure_initial_due(cost, lead_days);
         let mut economy = self
             .economy
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(economy) = economy.as_ref() {
-            if economy.seed != seed {
-                return placement_simple_error(
-                    "seed_mismatch",
-                    "the treasury belongs to a different seed",
-                );
+        let created = match economy_for_seed(&mut economy, seed) {
+            Ok((treasury, created)) => {
+                if !treasury.can_afford(initial_due) {
+                    let balance = treasury.balance;
+                    rollback_created_treasury(&mut economy, created);
+                    return placement_simple_error(
+                        "insufficient_funds",
+                        format!(
+                            "utility site needs {initial_due} now and the treasury has {balance}"
+                        ),
+                    );
+                }
+                created
             }
-            if !economy.can_afford(initial_due) {
-                return placement_simple_error(
-                    "insufficient_funds",
-                    format!(
-                        "utility site needs {initial_due} now and the treasury cannot cover it"
-                    ),
-                );
-            }
-        }
-        let charged = {
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        let cost_paid = {
             let mut guard = self
                 .utilities
                 .lock()
@@ -4234,6 +4234,7 @@ impl TownsmithCore {
                 .as_ref()
                 .is_some_and(|utilities| utilities.seed != seed)
             {
+                rollback_created_treasury(&mut economy, created);
                 return placement_simple_error(
                     "seed_mismatch",
                     "the utilities store belongs to a different seed",
@@ -4247,37 +4248,33 @@ impl TownsmithCore {
                 lead_days,
                 cost,
             ) {
+                rollback_created_treasury(&mut economy, created);
                 return placement_simple_error("utility_failed", error.to_string());
             }
             let due = utilities.payment_due(placement_id, kind);
-            if let Some(economy) = economy.as_mut() {
-                if !economy.try_charge_construction(due) {
-                    utilities.remove_placement(placement_id);
-                    return placement_simple_error(
-                        "insufficient_funds",
-                        format!("utility site needs {due} now and the treasury cannot cover it"),
-                    );
-                }
-                if let Some(site) = utilities.site_mut(placement_id, kind) {
-                    let _ = site.mark_paid(due);
-                }
-                true
-            } else {
-                false
+            if let Err((code, message)) =
+                charge_seed_treasury(&mut economy, created, due, "utility site")
+            {
+                utilities.remove_placement(placement_id);
+                return placement_simple_error(code, message);
             }
+            if let Some(site) = utilities.site_mut(placement_id, kind) {
+                let _ = site.mark_paid(due);
+            }
+            utilities
+                .site(placement_id, kind)
+                .map_or(0.0, |site| site.cost_paid)
         };
         drop(economy);
+        let payment = infrastructure_payment(cost, cost_paid);
         let mut result = self.utilities_refresh(seed as i64);
         result.set("placement_id", placement_id as i64);
         result.set("kind", &GString::from(kind.as_str()));
         result.set("construction_cost", cost);
-        result.set("cost_total", cost);
-        result.set("cost_paid", if charged { initial_due } else { 0.0 });
-        result.set(
-            "payment_due",
-            (cost - if charged { initial_due } else { 0.0 }).max(0.0),
-        );
-        result.set("charged", charged);
+        result.set("cost_total", payment.cost_total);
+        result.set("cost_paid", payment.cost_paid);
+        result.set("payment_due", payment.payment_due);
+        result.set("charged", payment.charged);
         result
     }
 
@@ -4454,33 +4451,34 @@ impl TownsmithCore {
         };
         let lead_days = construction_lead_days(time_scale, kind.campaign_build_days(tier));
         let cost = kind.construction_cost(tier);
-        let initial_due = if lead_days > 0.0 { cost * 0.5 } else { cost };
+        let initial_due = infrastructure_initial_due(cost, lead_days);
         let mut economy = self
             .economy
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(economy) = economy.as_ref() {
-            if economy.seed != seed {
-                return placement_simple_error(
-                    "seed_mismatch",
-                    "the treasury belongs to a different seed",
-                );
+        let created = match economy_for_seed(&mut economy, seed) {
+            Ok((treasury, created)) => {
+                if !treasury.can_afford(initial_due) {
+                    let balance = treasury.balance;
+                    rollback_created_treasury(&mut economy, created);
+                    return placement_simple_error(
+                        "insufficient_funds",
+                        format!(
+                            "service site needs {initial_due} now and the treasury has {balance}"
+                        ),
+                    );
+                }
+                created
             }
-            if !economy.can_afford(initial_due) {
-                return placement_simple_error(
-                    "insufficient_funds",
-                    format!(
-                        "service site needs {initial_due} now and the treasury cannot cover it"
-                    ),
-                );
-            }
-        }
-        let charged = {
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        let cost_paid = {
             let mut guard = self
                 .services
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             if guard.as_ref().is_some_and(|services| services.seed != seed) {
+                rollback_created_treasury(&mut economy, created);
                 return placement_simple_error(
                     "seed_mismatch",
                     "the services store belongs to a different seed",
@@ -4495,38 +4493,34 @@ impl TownsmithCore {
                 lead_days,
                 cost,
             ) {
+                rollback_created_treasury(&mut economy, created);
                 return placement_simple_error("service_failed", error.to_string());
             }
             let due = services.payment_due(placement_id);
-            if let Some(economy) = economy.as_mut() {
-                if !economy.try_charge_construction(due) {
-                    services.remove_placement(placement_id);
-                    return placement_simple_error(
-                        "insufficient_funds",
-                        format!("service site needs {due} now and the treasury cannot cover it"),
-                    );
-                }
-                if let Some(site) = services.site_mut(placement_id) {
-                    let _ = site.mark_paid(due);
-                }
-                true
-            } else {
-                false
+            if let Err((code, message)) =
+                charge_seed_treasury(&mut economy, created, due, "service site")
+            {
+                services.remove_placement(placement_id);
+                return placement_simple_error(code, message);
             }
+            if let Some(site) = services.site_mut(placement_id) {
+                let _ = site.mark_paid(due);
+            }
+            services
+                .site(placement_id)
+                .map_or(0.0, |site| site.cost_paid)
         };
         drop(economy);
+        let payment = infrastructure_payment(cost, cost_paid);
         let mut result = self.services_refresh(seed as i64);
         result.set("placement_id", placement_id as i64);
         result.set("kind", &GString::from(kind.as_str()));
         result.set("tier", &GString::from(tier.as_str()));
         result.set("construction_cost", cost);
-        result.set("cost_total", cost);
-        result.set("cost_paid", if charged { initial_due } else { 0.0 });
-        result.set(
-            "payment_due",
-            (cost - if charged { initial_due } else { 0.0 }).max(0.0),
-        );
-        result.set("charged", charged);
+        result.set("cost_total", payment.cost_total);
+        result.set("cost_paid", payment.cost_paid);
+        result.set("payment_due", payment.payment_due);
+        result.set("charged", payment.charged);
         result
     }
 
@@ -7498,6 +7492,99 @@ fn construction_lead_days(scale: ConstructionTimeScale, days: f32) -> f32 {
     } else {
         days
     }
+}
+
+/// First utility/service installment: half under a campaign lead time, the
+/// full catalog cost on the developer clock.
+fn infrastructure_initial_due(cost: f64, lead_days: f32) -> f64 {
+    if lead_days > 0.0 {
+        cost * 0.5
+    } else {
+        cost
+    }
+}
+
+/// Construction payment figures reported after a successful infrastructure
+/// add.
+///
+/// `cost_paid` is read from the site after the installment is recorded, so a
+/// replacement reports the preserved progress rather than assuming a fresh
+/// site. The bridge only builds this after the charge succeeded, so `charged`
+/// is always true; the struct keeps the payload contract testable without a
+/// `TownsmithCore`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct InfrastructurePayment {
+    cost_total: f64,
+    cost_paid: f64,
+    payment_due: f64,
+    charged: bool,
+}
+
+fn infrastructure_payment(cost_total: f64, cost_paid: f64) -> InfrastructurePayment {
+    InfrastructurePayment {
+        cost_total,
+        cost_paid,
+        payment_due: (cost_total - cost_paid).max(0.0),
+        charged: true,
+    }
+}
+
+/// Borrow the seed treasury, opening one with the starting balance when none
+/// exists.
+///
+/// Returns the treasury and whether this call created it. A treasury for a
+/// different seed is rejected like every other seed-taking bridge call.
+/// Callers that fail after this point must call [`rollback_created_treasury`],
+/// so a rejected infrastructure add leaves no treasury behind and cannot pin
+/// the world to that seed (F-016).
+fn economy_for_seed(
+    economy: &mut Option<Economy>,
+    seed: u64,
+) -> Result<(&mut Economy, bool), (&'static str, String)> {
+    if economy
+        .as_ref()
+        .is_some_and(|treasury| treasury.seed != seed)
+    {
+        return Err((
+            "seed_mismatch",
+            "the treasury belongs to a different seed".to_string(),
+        ));
+    }
+    let created = economy.is_none();
+    let treasury = economy.get_or_insert_with(|| Economy::new(seed));
+    Ok((treasury, created))
+}
+
+/// Remove a treasury opened by the failed call; a pre-existing treasury and
+/// its balance are left untouched.
+fn rollback_created_treasury(economy: &mut Option<Economy>, created: bool) {
+    if created {
+        *economy = None;
+    }
+}
+
+/// Charge an infrastructure installment, closing a treasury this call opened
+/// when the treasury rejects it.
+fn charge_seed_treasury(
+    economy: &mut Option<Economy>,
+    created: bool,
+    due: f64,
+    label: &str,
+) -> Result<(), (&'static str, String)> {
+    let Some(treasury) = economy.as_mut() else {
+        return Err((
+            "no_treasury",
+            "no treasury is open for this seed".to_string(),
+        ));
+    };
+    if !treasury.try_charge_construction(due) {
+        rollback_created_treasury(economy, created);
+        return Err((
+            "insufficient_funds",
+            format!("{label} needs {due} now and the treasury cannot cover it"),
+        ));
+    }
+    Ok(())
 }
 
 /// Parse the bridge construction-clock mode.
@@ -11519,6 +11606,132 @@ mod tests {
         let campaign = ConstructionTimeScale::campaign_default();
         assert_eq!(construction_lead_days(campaign, 1.5), 1.5);
         assert_eq!(construction_lead_days(campaign, 0.0), 0.0);
+    }
+
+    #[test]
+    fn infrastructure_initial_due_is_full_on_developer_and_half_on_campaign() {
+        let cost = UtilityKind::Water.construction_cost();
+        assert!(cost > 0.0);
+        let developer = construction_lead_days(ConstructionTimeScale::DeveloperSeconds, 5.0);
+        assert!((infrastructure_initial_due(cost, developer) - cost).abs() < 1e-9);
+        let campaign = construction_lead_days(ConstructionTimeScale::campaign_default(), 5.0);
+        assert_eq!(campaign, 5.0);
+        assert!((infrastructure_initial_due(cost, campaign) - cost * 0.5).abs() < 1e-9);
+        assert!((infrastructure_initial_due(cost, 0.0) - cost).abs() < 1e-9);
+    }
+
+    #[test]
+    fn infrastructure_payment_reports_the_charged_installment() {
+        let cost = UtilityKind::Water.construction_cost();
+        let developer = infrastructure_payment(cost, cost);
+        assert!(developer.charged);
+        assert!((developer.cost_total - cost).abs() < 1e-9);
+        assert!((developer.cost_paid - cost).abs() < 1e-9);
+        assert!(developer.payment_due.abs() < 1e-9);
+
+        let campaign = infrastructure_payment(cost, cost * 0.5);
+        assert!(campaign.charged);
+        assert!((campaign.cost_paid - cost * 0.5).abs() < 1e-9);
+        assert!((campaign.payment_due - cost * 0.5).abs() < 1e-9);
+
+        // A replacement keeps prior progress, so only the remainder is due.
+        let replacement = infrastructure_payment(cost, cost + 10.0);
+        assert!(replacement.charged);
+        assert!(replacement.payment_due.abs() < 1e-9);
+    }
+
+    #[test]
+    fn economy_for_seed_opens_a_missing_treasury() {
+        let mut economy = None;
+        let (treasury, created) = economy_for_seed(&mut economy, 2026).expect("treasury");
+        assert!(created);
+        assert_eq!(treasury.seed, 2026);
+        assert!((treasury.balance - STARTING_BALANCE).abs() < 1e-9);
+        assert_eq!(economy.as_ref().expect("open").seed, 2026);
+    }
+
+    #[test]
+    fn economy_for_seed_reuses_an_existing_treasury() {
+        let mut economy = Some(Economy::new(2026));
+        economy.as_mut().expect("treasury").charge_construction(7.0);
+        let (treasury, created) = economy_for_seed(&mut economy, 2026).expect("treasury");
+        assert!(!created);
+        assert!((treasury.balance - (STARTING_BALANCE - 7.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn economy_for_seed_rejects_a_foreign_seed() {
+        let mut economy = Some(Economy::new(1));
+        let (code, _) = economy_for_seed(&mut economy, 2).expect_err("foreign seed");
+        assert_eq!(code, "seed_mismatch");
+        let kept = economy.as_ref().expect("treasury stays open");
+        assert_eq!(kept.seed, 1);
+        assert!((kept.balance - STARTING_BALANCE).abs() < 1e-9);
+    }
+
+    #[test]
+    fn charge_seed_treasury_charges_a_fresh_treasury() {
+        let mut economy = None;
+        let created = {
+            let (_, created) = economy_for_seed(&mut economy, 2026).expect("treasury");
+            created
+        };
+        assert!(created);
+        charge_seed_treasury(&mut economy, created, 30.0, "utility site").expect("charge");
+        let treasury = economy.as_ref().expect("treasury");
+        assert_eq!(treasury.seed, 2026);
+        assert!((treasury.balance - (STARTING_BALANCE - 30.0)).abs() < 1e-9);
+        assert!((treasury.construction_spent - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn charge_seed_treasury_rolls_back_a_created_treasury() {
+        let mut economy = None;
+        let created = {
+            let (_, created) = economy_for_seed(&mut economy, 2026).expect("treasury");
+            created
+        };
+        assert!(created);
+        let (code, _) = charge_seed_treasury(
+            &mut economy,
+            created,
+            STARTING_BALANCE + 1.0,
+            "utility site",
+        )
+        .expect_err("unaffordable");
+        assert_eq!(code, "insufficient_funds");
+        assert!(economy.is_none());
+    }
+
+    #[test]
+    fn failed_charge_keeps_a_preexisting_treasury() {
+        let mut economy = Some(Economy::new(2026));
+        economy.as_mut().expect("treasury").balance = 10.0;
+        let created = {
+            let (_, created) = economy_for_seed(&mut economy, 2026).expect("treasury");
+            created
+        };
+        assert!(!created);
+        let (code, _) = charge_seed_treasury(&mut economy, created, 50.0, "service site")
+            .expect_err("unaffordable");
+        assert_eq!(code, "insufficient_funds");
+        let treasury = economy.as_ref().expect("pre-existing treasury stays open");
+        assert_eq!(treasury.seed, 2026);
+        assert!((treasury.balance - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn failed_infrastructure_add_restores_a_missing_treasury() {
+        let mut economy = None;
+        let created = {
+            let (_, created) = economy_for_seed(&mut economy, 2026).expect("treasury");
+            created
+        };
+        assert!(created);
+        // The caller reaches this rollback when the site add fails before the
+        // charge, so the failed call leaves no treasury (and no seed pin).
+        rollback_created_treasury(&mut economy, created);
+        assert!(economy.is_none());
     }
 
     #[test]

@@ -67,10 +67,10 @@ Output is deterministic; smoke checksum `a920cf0c4eb9a4f1`.
 
 ## 5. Limits
 
-- Site construction is charged on add; re-adding/replacing a site charges again. Removing a site does not refund.
+- Site construction is charged on add; re-adding/replacing a site charges the amount still due. Removing a site does not refund.
 - The bridge now charges per-kind/per-tier totals, but the core count-based `tick_with_infrastructure` wrapper remains for pinned balance probes and legacy callers.
-- No phased payment for utility/service sites; the full site cost is charged immediately. Buildings use the D-028 phase schedule through the bridge.
-- If no treasury is open, the site is added with `charged=false` (legacy/dev path).
+- No phased payment for utility/service sites; half the site cost is charged on add under a campaign lead time and the remainder when it becomes operational. Buildings use the D-028 phase schedule through the bridge.
+- An add with no open treasury opens the seed treasury at the 100,000 starting balance and charges the installment (`charged=true`). A failed add or charge restores the closed state when this call created the treasury; a pre-existing treasury is kept.
 - Site counts are fixed probe fixtures; real cities may have different coverage/site mixes.
 - No land, road, maintenance, staffing, or replacement cost.
 - Values are draft balance numbers, not tuned campaign costs.
