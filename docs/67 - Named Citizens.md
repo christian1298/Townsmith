@@ -92,7 +92,7 @@ citizen_id   = first 63 bits of citizen_seed, with collision probe
 
 ### Age
 
-- `age_days` starts from a deterministic band at move-in: adults 18–64, with a household-level offset so a household is not all the same age.
+- `age_days` starts from a deterministic band at move-in: adults 18–64, derived from the per-slot identity hash (`age_years(id)`), not from the household. Ages are stable per slot, but there is no household-level offset, so two slots in one household can draw the same age.
 - Age advances only while the citizen is named and the world advances time. No aging while paused.
 - Bands: child (<18), adult (18–64), elder (65+). v1 has no children (no births); named citizens are adults or elders.
 - `age_days` is persisted; the display is derived.

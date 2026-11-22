@@ -72,7 +72,7 @@ Validation runs bounds/sides/area → cap → overlap → road frontage → terr
 | Overlap | no positive-area overlap; shared edges are allowed |
 | Road frontage | the lot AABB must be within 2 m of a road corridor |
 | Cap | 100,000 lots per save |
-| IDs | positive, unique, below `next_id`, `next_id ≤ i64::MAX` |
+| IDs | positive, unique, below `next_id`; assignable range `1..i64::MAX` (`i64::MAX` itself is never assigned); `next_id ≤ i64::MAX` |
 
 Road frontage uses `RoadStore::has_frontage(bounds, gap)`: each segment expands **perpendicular to its axis** by ceil(width/2) plus the gap, with no slack past its endpoints, then tests the lot AABB. This is a parcel corridor check, not a driveway or access simulation.
 

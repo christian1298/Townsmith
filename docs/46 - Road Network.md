@@ -83,6 +83,7 @@ Coordinates are centreline cells in metres on the 1 m grid. `start` and `end` mu
 | Water | Every sampled centre and width-edge cell must be above `WATER_LEVEL_M = 24` |
 | Rise/fall | `max_height - min_height ≤ 8 m` across the sampled segment (centreline plus width edges) |
 | Capacity | ≤ 200,000 segments per save |
+| IDs | positive, unique, below `next_id`; assignable range `1..i64::MAX` (`i64::MAX` itself is never assigned); `next_id ≤ i64::MAX` |
 | Load | Known format version, unique ids, monotonic `next_id`, valid geometry |
 
 Terrain sampling walks each centreline cell and checks the centre plus both width edges. It uses the delta-aware sampler, so an edited terrain cell affects road validation.
