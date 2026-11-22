@@ -245,6 +245,25 @@ impl Economy {
         }
     }
 
+    /// Reverse part or all of a construction charge.
+    ///
+    /// The bridge uses this only to unwind a placement whose first
+    /// installment was charged but whose construction site then rejected the
+    /// payment, so the treasury is restored exactly instead of keeping money
+    /// with no site behind it.
+    ///
+    /// The amount must be finite and positive; anything else is ignored, so a
+    /// corrupt caller cannot mint money. `construction_spent` is clamped at
+    /// zero and the bankruptcy flag is recomputed from the restored balance.
+    pub fn refund_construction(&mut self, amount: f64) {
+        if !amount.is_finite() || amount <= 0.0 {
+            return;
+        }
+        self.construction_spent = (self.construction_spent - amount).max(0.0);
+        self.balance += amount;
+        self.bankrupt = self.balance <= BANKRUPTCY_THRESHOLD;
+    }
+
     /// Charge construction only when the city can currently afford it.
     ///
     /// A bankrupt city cannot start anything new. This keeps placement from
@@ -849,6 +868,36 @@ mod tests {
         assert!(!economy.try_charge_construction(80_000.0));
         assert!((economy.balance - 70_000.0).abs() < 0.001);
         assert!((economy.construction_spent - 30_000.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn refund_construction_restores_the_charge_and_clamps_spending() {
+        let mut economy = Economy::new(2026);
+        assert!(economy.try_charge_construction(30_000.0));
+        economy.refund_construction(30_000.0);
+        assert_eq!(economy.balance, STARTING_BALANCE);
+        assert_eq!(economy.construction_spent, 0.0);
+        assert!(!economy.bankrupt);
+
+        // Invalid amounts are ignored rather than minting or removing money.
+        for amount in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            economy.refund_construction(amount);
+            assert_eq!(economy.balance, STARTING_BALANCE);
+            assert_eq!(economy.construction_spent, 0.0);
+        }
+
+        // Spending is clamped at zero while the cash still comes back.
+        economy.refund_construction(5_000.0);
+        assert_eq!(economy.balance, STARTING_BALANCE + 5_000.0);
+        assert_eq!(economy.construction_spent, 0.0);
+
+        // The bankruptcy flag is recomputed from the restored balance.
+        economy.charge_construction(200_000.0);
+        assert!(economy.bankrupt);
+        economy.refund_construction(100_000.0);
+        assert_eq!(economy.balance, 5_000.0);
+        assert!(!economy.bankrupt);
+        economy.validate().expect("refunded economy stays valid");
     }
 
     #[test]

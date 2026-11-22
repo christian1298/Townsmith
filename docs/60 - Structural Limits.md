@@ -86,7 +86,7 @@ pub struct StructureSummary {
 
 `StructureSpec::derive_from_bounds(system, bounds_m)` is the conservative fallback:
 
-- stories = `ceil(height / 3.2)`, minimum 1;
+- stories = `min(ceil(height / 3.2), system's max stories)`, minimum 1 — the clamp keeps a building at the material's height limit valid instead of deriving one story too many;
 - height = the blueprint height;
 - span is **not** inferred from the footprint, because the overall width is not a beam span;
 - foundation = the recommended depth for that story count.
@@ -97,7 +97,7 @@ This lets old packages and editor saves participate without a migration.
 
 Validation returns the first failure:
 
-1. stories >= 1, height finite > 0, span finite >= 0, foundation finite >= 0, and declared height matches the blueprint bounds height.
+1. stories >= 1, height finite > 0, span finite >= 0, foundation finite in `0..=32 m`, and declared height matches the blueprint bounds height.
 2. Resolve effective limits:
    - no ground system: the selected system's limits;
    - same ground and upper system: the selected system's limits;
@@ -109,6 +109,8 @@ Validation returns the first failure:
 4. `height_m <= effective_max_height_m`.
 5. a declared `max_span_m` <= `effective_max_span_m`.
 6. `foundation_depth_m >= recommended_foundation_m(stories)`.
+
+The 32 m cap comes from D-025 and is checked with the other declared fields (rule 1) using the 1 mm float tolerance. It applies to drafts too: a deeper basement needs a new decision, not a silent draft.
 
 Recommended foundation depth:
 
@@ -132,6 +134,7 @@ Composite v1 is intentionally narrow: a stone/brick ground floor carrying timber
 | `structure_height` | Height exceeds the effective limit |
 | `structure_span` | Declared span exceeds the effective limit |
 | `structure_foundation` | Foundation is shallower than recommended |
+| `structure_foundation_depth` | Foundation depth exceeds the 32 m D-025 cap |
 | `structure_ground` | Ground system is too weak for the upper system |
 | `invalid_structure` | Invalid values or bounds |
 
@@ -178,7 +181,7 @@ The palette shows `structure: timber frame (3/3 stories)`. Loading a package res
 
 ## 8. Tests and smoke
 
-- `core_structure`: **19 tests + 1 doctest** for each limit, composite bonus/weak ground, span, foundation, aliases, and derivation.
+- `core_structure`: **22 tests + 1 doctest** for each limit, composite bonus/weak ground, span, foundation depth cap, aliases, derivation, and derivation clamping at every system height limit.
 - `core_city::placement`: 6 tests — a four-story timber request fails with `structure_stories`; a four-story brick request and a stone-ground/timber request pass; legacy requests without metadata pass; loaded placements revalidate. Core city total **460**.
 - `core_blueprint`: **15 tests** — default metadata omits the field; a valid structure roundtrips; an over-limit structure saves as a draft; a height mismatch is rejected on save.
 - `godot_ext`: **87 tests**; blueprint info and placement payloads include the structure summary, with a bridge roundtrip test plus the world-scene and editor smoke coverage.
@@ -189,7 +192,7 @@ The palette shows `structure: timber frame (3/3 stories)`. Loading a package res
 ## 9. Limits
 
 - No voxel load-path or span analysis: declared values are trusted after range checks.
-- Foundation depth is a declared number, not excavated geometry.
+- Foundation depth is a declared number, not excavated geometry; it is capped at 32 m (D-025) and checked for the recommended minimum.
 - Bracing, openings, cantilevers, wall thickness, and soil/water tables are not modeled.
 - Only masonry-ground + timber-upper composite receives a bonus.
 - Placement is age-gated ([[61 - Research]]): a Wood-age city can author a concrete draft but cannot place it. The editor still allows selection for authoring.

@@ -107,7 +107,7 @@ The world is not a fixed city tile. It is a **large, procedurally generated regi
 | **Settlement** | Soft, player-defined | Named cluster of buildings and roads |
 | **World** | Effectively infinite | No hard map edge; procedural generation + edit deltas |
 
-- **Streaming:** world chunks load within a radius of each player/camera; building voxel data loads only for nearby or edited buildings.
+- **Streaming:** world chunks load within a radius of each player/camera; building voxel data loads only for nearby or edited buildings. `StreamingConfig` clamps `view_radius` to `0..=8` and `unload_margin` to `0..=8` at construction, so a bad config cannot load nothing or synchronously generate an unbounded set (worst case 625 resident chunks, ~117 MiB of dense cells).
 - **Dormant regions:** outside the active set, no per-tick simulation runs. When the player returns, the region is advanced statistically.
 - **Build anywhere:** terrain is 1 m; building detail is 10 cm. The player can place a building anywhere the terrain/access rules allow. There is no lot requirement in the wilderness.
 - **Sparse edits:** the procedural base is deterministic from a seed. The save stores only player edits: terrain height deltas, roads, buildings, harvested resources, and wildlife changes.
@@ -145,7 +145,7 @@ The world is not a fixed city tile. It is a **large, procedurally generated regi
 - Placement validation checks slope, water, foundation depth, road access, and utility connection.
 - Off-grid buildings are allowed but need self-contained utilities; connected settlements are more efficient.
 - The world is **effectively infinite**: there is no authored map edge. Practical limits are streaming radius, save size, and server resources; only visited/edited chunks are stored.
-- **Coordinates:** use 64-bit integer chunk/world coordinates. Rendering uses a **floating origin** that rebases near the player, because 32-bit floats lose precision far from spawn.
+- **Coordinates:** use 64-bit integer chunk/world coordinates. Rendering uses a **floating origin** that rebases near the player, because 32-bit floats lose precision far from spawn. `WorldChunkCoord::origin_m` saturates at the `i64` limits instead of overflowing; `local_from_world` uses floor division/remainder, so cells at `i64::MIN`/`i64::MAX` map exactly; chunks whose origin does not fit are rejected by `checked_origin_m` and skipped by streaming.
 - **f32 sampling bound:** terrain heights are sampled through `f32`, so 1 m cells stay exact only for `|x|, |z| <= 2^24 m = 16,777,216 m`. Beyond that the binary32 spacing is at least 2 m, adjacent cells can quantize to the same sample, and terrain appears flat-stepped. This is the supported world-coordinate bound, not a silent failure; chunk/world storage and rendering remain `i64` + floating origin. Sampling in `f64` would change every deterministic height and needs a `WORLDGEN_VERSION` bump plus a deliberate golden update.
 - **Terrain mesh winding:** quads are emitted clockwise from the outside, matching Godot's front-face convention and the voxel mesher. Culling stays disabled in the preview until a display-backed seam smoke proves it safe (see [[21 - LOD Seams]]).
 

@@ -27,17 +27,18 @@ tags:
 | Room sampling/volume | F-021, F-054 | Fixed | PR #238 (sim M1) |
 | Bench gates | F-031..F-034, F-063, F-066, F-067 | Fixed | PR #239; movement `b50a763030007ef1`, infra `a920cf0c4eb9a4f1`, save-stress `0ce611887161ff62` |
 | Bridge parity, seeds, acceptance volume, docs | F-029, F-030, F-056..F-062 | Fixed | PR #240; 928 workspace tests |
+| Godot shell: HUD cadence + backlog clamp, streamer-derived chunk cells, bench route helper, headless/editor guards, industry animation cache, deterministic smoke budgets | F-035..F-038, F-068..F-071 | Fixed | PR #243; `WORLD_SCENE … chunk_cells=ok status=ok`, `BENCH_SCREEN status=ok scenes=3 rating=playable`, `STREAM_ORDER_SMOKE status=ok checksum=ea5bc6f9 commits=59 loaded=30 stages=4`, `MOVEMENT_STRESS_SMOKE status=ok pass1_checksum=f29c282d`, `MP_CLIENT status=ok checksum=f17ed4f094dad32f`; default flyover route runs 263 frames with no `look_at` diagnostic |
+| Mod validation guards | F-027, F-028 | Fixed | PR #247; duplicate tech ids reject with `invalid_tech_tree`, manifest sets cap at 10,000 and chains at 512; 946 workspace tests |
+| Cohort integration (NaN services/state, multi-day `dt`, fractional employment carry) | F-010, F-011, F-023 | Fixed | PR #250; `cohort_validate` `a00cc463d7cb9e72` (was `f265539bcb8804fc`), `dt_max_delta` `0.000006`, 450 vs 450 employed; `dormant` `df136e2d51c0d0f8`/`cee14784f2a131c1` with 0.0 measured deltas |
 
 ### Deferred
 
 | Findings | Reason |
 |---|---|
 | F-003 | `v0` world assumes one hello per process; the multi-connection vote loopback needs a multi-session model, not a test-only patch. The pure vote state machine has 18 tests. |
-| F-010, F-011, F-023 | Cohort integration semantics (NaN, multi-day dt, fractional employment carry) change pinned cohort/dormant checksums and documented behavior; needs a balance pass. |
 | F-015, F-016 | Refund-on-failed-mark-paid and the no-treasury utility/service fallback change charges/checksums. Needs an economy decision, not a mechanical fix. |
 | F-017..F-020, F-022, F-043..F-051, F-053, F-055 | World/mesh/blueprint/structure cluster; design changes (delta reload semantics, winding, palette/blueprint caps, basement depth) need focused PRs and golden updates. |
-| F-024..F-028 | Scale work (flow-field cache, service spatial index, graph build, mod duplicate/recursion guards) needs benchmarks and mod-format decisions. |
-| F-035..F-038, F-068..F-071 | Godot shell cluster; needs a display-backed behavior/smoke pass, not a blind edit. |
+| F-024..F-026 | Scale work (flow-field cache, service spatial index, graph build) needs benchmarks. |
 | F-072, F-082, F-084 | Operational: the generated script UID sidecars are tracked; the extension was rebuilt and the world/bench/stream/movement/MP smokes were run in this session. |
 
 ## How to use this document
@@ -55,7 +56,7 @@ tags:
 | `cargo test --workspace` | **909 passed, 0 failed** |
 | `content/` schema (`check_content_schema.py`) | ok (4 files, 32 entries) |
 | `scripts/*.sh` `bash -n`, `scripts/*.py` compile | clean |
-| Godot headless smokes | **not run — no Godot binary on this machine.** Must re-run after fixes. |
+| Godot headless smokes | run 2026-11-23 on Godot 4.7.2: world scene, bench screen/live, stream order, movement stress, and MP client all `status=ok` (markers in the status table above). |
 | Docs frontmatter / wikilinks / D-Q-A IDs | zero broken wikilinks; D-001..D-029, Q-001..Q-102, A-001..A-016 gap/duplicate-free |
 
 Nine parallel deep reviews covered: `godot_ext`, `core_voxel`+`core_world`, `core_city` (two halves), `core_sim`+`core_blueprint`+`core_rooms`+`core_structure`, `server`, `bench` (all 25 bins), `godot/` scripts+scenes, `scripts/`+CI+docs. Full read of ~68k lines Rust and ~15k lines GDScript/scenes.
@@ -83,8 +84,8 @@ Fix: treat write errors like read errors (`session_ended` → end session, keep 
 ### Cluster B — NaN / dt hardening (three crates, one pattern)
 
 - **F-009** `crates/core_city/src/construction.rs:759-760` — `tick()` does not guard non-finite `delta_seconds`: `f64::clamp` propagates NaN, `dt <= 0.0` is false for NaN, so `elapsed_s` becomes NaN and `to_json_pretty()` then fails (serde rejects NaN) while `validate()` passes and `checksum()` (`construction.rs:990`) silently hashes **zero bytes** via `unwrap_or_default()`. All sibling tick entry points guard this (`population.rs:451`, `services.rs:670`, `named.rs:646`). Fix: reject/zero non-finite `dt`; validate `elapsed_s` finiteness in `validate()`.
-- **F-010** `crates/core_sim/src/district.rs:54-69` — `sanitized()` clamps but does not reject NaN (`f32::clamp` returns NaN for NaN), so a NaN `food`/`jobs`/`wages` permanently poisons `needs`, `happiness`, `income` and propagates into summaries/checksums; `Cohort` fields are `pub` with no constructor validation, so NaN survives save/load. Fix: `if !v.is_finite() { 0.0 } else { v.clamp(...) }`; validate on construction/deserialization.
-- **F-011** `crates/core_sim/src/cohort.rs:101` — `dt_days.clamp(0.0, 1.0)` silently truncates multi-day `dt`: `tick(7.0)` advances one day's worth with no error. Fix: reject `dt_days > 1.0` (debug_assert or `SimError`) or internally split into whole-day steps.
+- **F-010** `crates/core_sim/src/district.rs:54-69` — `sanitized()` clamps but does not reject NaN (`f32::clamp` returns NaN for NaN), so a NaN `food`/`jobs`/`wages` permanently poisons `needs`, `happiness`, `income` and propagates into summaries/checksums; `Cohort` fields are `pub` with no constructor validation, so NaN survives save/load. Fix: `if !v.is_finite() { 0.0 } else { v.clamp(...) }`; validate on construction/deserialization. **Fixed:** `DistrictServices::sanitized()` maps non-finite to `0.0` before clamping; `Cohort::new`/`Cohort::sanitized`/`tick` repair state; regression tests cover NaN/±inf for services and cohort state.
+- **F-011** `crates/core_sim/src/cohort.rs:101` — `dt_days.clamp(0.0, 1.0)` silently truncates multi-day `dt`: `tick(7.0)` advances one day's worth with no error. Fix: reject `dt_days > 1.0` (debug_assert or `SimError`) or internally split into whole-day steps. **Fixed:** `tick` splits into whole 1-day steps plus one bounded remainder (no iterative float subtraction), `MAX_TICK_DAYS` caps a corrupt caller, non-finite `dt` is a no-op; `tick(7.0)` is bit-identical to 7×`tick(1.0)`.
 - **F-012** `crates/core_city/src/construction.rs:990`, `placement.rs:911`, `settlement.rs:316` — `checksum()` swallows serialization failures via `serde_json::to_vec(self).unwrap_or_default()`, hashing empty bytes (silent wrong baseline checksums; interacts with F-009). Fix: `Result` or `.expect(...)` consistent with other stores.
 
 ### Cluster C — campaign/economy edge cases
@@ -105,7 +106,7 @@ Fix: treat write errors like read errors (`session_ended` → end session, keep 
 - **F-020** `crates/core_blueprint/src/package.rs:150-157` (with `format.rs:124-168`) — decode-then-cap memory amplification: `MAX_SOLID_VOXELS`/bounds checks run only after full decode; a ~80 KB `voxels.bin` forces a ~256 MB `VoxelVolume` allocation before rejection (~3000× amplification from an untrusted shared blueprint). Fix: enforce the solid cap incrementally during decode, or pre-reject volume configs exceeding a memory budget.
 - **F-021** `crates/core_rooms/src/lib.rs:247` — partial top-band sampling lands on the top voxel of a short band, inside the ceiling slab per the standard fixtures, so rooms in the partial top band are silently missed (no room, no capacity, props ignored). Fix: sample mid-band (`band_start + (band_end - band_start) / 2`).
 - **F-022** `crates/core_structure/src/lib.rs:329` — `derive_from_bounds` story/height limits are mutually inconsistent with `STORY_HEIGHT_M = 3.2`: for every system there is a band (timber 9.6-11 m, brick 19.2-20 m, RC 96-100 m, steel 256-260 m, composite 384-400 m) where derived `ceil(h/3.2)` exceeds the story limit, so the derived spec always fails validation — and per docs/60 §6 a legacy package whose derivation fails **silently skips structural validation**. Fix: clamp derived stories to the system max.
-- **F-023** `crates/core_sim/src/cohort.rs:133-137` — employment update has no fractional carry: `|desired-employed| * 0.10 * dt < 0.5` rounds back every tick, permanently freezing employment (count ≤ 5 at `dt=1.0`); asymmetric (+0.5 rounds up, −0.5 rounds back). Legal small cohorts (10-100) today. Fix: f32 accumulator with integer mirror, or residual carry.
+- **F-023** `crates/core_sim/src/cohort.rs:133-137` — employment update has no fractional carry: `|desired-employed| * 0.10 * dt < 0.5` rounds back every tick, permanently freezing employment (count ≤ 5 at `dt=1.0`); asymmetric (+0.5 rounds up, −0.5 rounds back). Legal small cohorts (10-100) today. Fix: f32 accumulator with integer mirror, or residual carry. **Fixed:** private `employment_carry` (`-0.5..=0.5`, transient, outside pinned checksums) holds the sub-citizen remainder; 10 citizens at `jobs=0.9` converge to 9, coarse/fine employment now agree (450 vs 450), and the carry never puts `employed` above `count`.
 
 ### Cluster F — scale walls (correct but O(n·m); bite at 1M target)
 
@@ -115,8 +116,8 @@ Fix: treat write errors like read errors (`session_ended` → end session, keep 
 
 ### Cluster G — mod/content validation gaps (D-006)
 
-- **F-027** `crates/core_city/src/research.rs:81-88,323-327` — duplicate tech-node IDs in mod trees are silently collapsed (`BTreeMap` deserialize keeps the last; `validate()` runs after the collapse, so it can never detect). Contradicts the D-006 duplicate-rejection pattern used in `registry.rs`/`manifest.rs`. Fix: deserialize into `Vec<TechNode>` and reject repeated ids before building the map.
-- **F-028** `crates/core_city/src/manifest.rs:460-502` — `detect_cycles` recursion depth unbounded in manifest count; a very deep dependency chain can stack-overflow `visit`. Fix: node-count cap on the set.
+- **F-027 (fixed)** `crates/core_city/src/research.rs:81-88,323-327` — duplicate tech-node IDs in mod trees are silently collapsed (`BTreeMap` deserialize keeps the last; `validate()` runs after the collapse, so it can never detect). Contradicts the D-006 duplicate-rejection pattern used in `registry.rs`/`manifest.rs`. Fix: deserialize into a list before building the map and reject repeated ids with `invalid_tech_tree`; tests cover raw duplicate map keys and array form. Valid trees keep canonical map serialization.
+- **F-028 (fixed)** `crates/core_city/src/manifest.rs:460-502` — `detect_cycles` recursion depth unbounded in manifest count; a very deep dependency chain can stack-overflow `visit`. Fix: `MAX_MANIFESTS = 10_000` and `MAX_DEPENDENCY_DEPTH = 512`; cycle detection threads depth and returns stable `TooManyManifests`/`DependencyDepthExceeded` errors. Tests cover a 20,000-manifest chain, a valid 512 chain, and a rejected 513 chain.
 
 ### Cluster H — bridge state consistency (godot_ext)
 
@@ -131,6 +132,8 @@ Fix: treat write errors like read errors (`session_ended` → end session, keep 
 - **F-034** `crates/bench/src/bin/movement.rs:116-129` — smoke pins no checksum (only in-process reproducibility); deterministically-wrong results pass. Fix: pin like `materialization.rs:47`.
 
 ### Cluster J — Godot shell
+
+> [!success] Fixed 2026-11-23 — see the status table and the smoke markers above.
 
 - **F-035** `godot/world_placement.gd:333-340` — HUD issues ~15 bridge queries per `_advance_construction`, driven at ≥4 Hz plus every count change (the dashboard got a 0.5 s cadence for exactly this reason, comment at 23-27); a >2 s frame stall silently drops accumulated time via `fmod` truncation. Fix: throttle `_update_hud` like `_update_dashboard`; clamp explicitly rather than `fmod`.
 - **F-036** `godot/world_placement.gd:3243-3253` — `_touched_chunks` hardcodes `255` (implicit copy of the streamer's `CHUNK_CELLS - 1`); if chunk resolution changes, terrain edits stop invalidating neighbor chunks and stale borders remesh. Fix: derive the cell count from the streamer or return it from `terrain_edit_height`.
@@ -240,7 +243,7 @@ Fix: treat write errors like read errors (`session_ended` → end session, keep 
 8. **PR8 (mod validation):** F-027, F-028 + duplicate-id tech-tree test.
 9. **PR9 (bridge consistency):** F-029, F-030 + F-056..F-062.
 10. **PR10 (bench gates):** F-031..F-034, F-063, F-066, F-067.
-11. **PR11 (Godot shell):** F-035..F-038 + F-068..F-072; requires `GODOT` binary for smoke verification.
+11. **PR11 (Godot shell):** ~~F-035..F-038 + F-068..F-072~~ Done — F-072 landed earlier; the rest are fixed in PR #243 with the headless smoke matrix run.
 12. **PR12 (docs/scripts hygiene):** F-073..F-081 + F-083.
 
 > [!note] This doc is intentionally not indexed in `00 - Start Here`; it is a transient work item. Delete or archive it once all findings are resolved.

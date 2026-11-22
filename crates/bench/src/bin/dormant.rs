@@ -3,8 +3,10 @@
 //! One small multi-district city is left dormant for a year, then advanced
 //! with [`CohortSimulation::catch_up`]. A second copy is advanced by continuous
 //! `tick(1.0)` calls. Catch-up must reproduce the continuous state exactly:
-//! whole-day steps are the same arithmetic, so employment cannot freeze the way
-//! the fractional-day steps do in `cohort_validate`.
+//! whole-day catch-up steps are the same arithmetic as continuous daily
+//! ticking, so the state is bit-identical. (Fractional-day steps now converge
+//! too, thanks to the employment carry, but whole days remain the catch-up rule
+//! so the result is exactly the continuous one.)
 //!
 //! The scene reports:
 //!
@@ -316,7 +318,7 @@ fn report(outcome: &Outcome) -> serde_json::Value {
         "report_checksum": format!("{:016x}", outcome.report_checksum),
         "city_checksum": format!("{:016x}", outcome.city_checksum),
         "checksum_scope": "report: district + days + target cohorts; city: every cohort of the full city",
-        "step_rule": "whole 1.0-day steps; fractional-day employment updates freeze on rounding",
+        "step_rule": "whole 1.0-day steps; arithmetic-identical to continuous daily ticking (fractional steps also converge now that employment carries a fractional remainder)",
         "status": if outcome.ok { "ok" } else { "failed" },
     })
 }

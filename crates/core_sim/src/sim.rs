@@ -190,9 +190,10 @@ impl CohortSimulation {
     ///
     /// Only cohorts assigned to `district` move. Other districts and the
     /// district service inputs are left untouched. Steps are always exactly
-    /// `1.0` days, because fractional-day employment updates round back to the
-    /// current count (`cohort_validate`); `days` whole steps are therefore
-    /// equivalent to repeated [`Self::tick`]`(1.0)` calls for the same cohorts.
+    /// `1.0` days, which is arithmetic-identical to repeated [`Self::tick`]`(1.0)`
+    /// calls for the same cohorts; because the employment carry round-trips
+    /// exactly across whole days, `days` steps reproduce the continuously
+    /// ticked state bit-for-bit.
     ///
     /// # Errors
     ///
@@ -404,6 +405,19 @@ mod tests {
         let before = sim.clone();
         sim.tick(0.0);
         assert_eq!(sim, before);
+    }
+
+    #[test]
+    fn multi_day_city_tick_equals_repeated_day_ticks() {
+        let mut split = single_district_city();
+        let mut repeated = split.clone();
+
+        split.tick(7.0);
+        for _ in 0..7 {
+            repeated.tick(1.0);
+        }
+
+        assert_eq!(split, repeated);
     }
 
     fn district_cohorts(sim: &CohortSimulation, district: u32) -> Vec<Cohort> {

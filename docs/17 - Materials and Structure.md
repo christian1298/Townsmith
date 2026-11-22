@@ -2,7 +2,7 @@
 title: Materials and Structure
 project: Townsmith
 status: proposed
-updated: 2026-11-21
+updated: 2026-11-23
 tags:
   - townsmith
   - building
@@ -163,7 +163,7 @@ Sub-ground floors are supported from the start of the building editor, with vehi
 **Rules**
 
 - Basements are **levels below grade**, not stories above ground. They do not count toward the material's max stories, but they add load, foundation depth, and excavation cost.
-- Initial blueprint depth cap: **32 m**; practical early-game basements are 1–2 levels (3–6 m). Deeper levels need engineering, waterproofing, and stronger retaining walls.
+- Initial blueprint depth cap: **32 m**; practical early-game basements are 1–2 levels (3–6 m). Deeper levels need engineering, waterproofing, and stronger retaining walls. The cap is enforced by `core_structure::MAX_FOUNDATION_DEPTH_M` with the stable `structure_foundation_depth` error, so a declared depth above 32 m is rejected (see [[60 - Structural Limits]]).
 - Basements can use different materials from the superstructure (e.g., concrete retaining walls under a timber house).
 - **Water table and soil** affect cost, flooding risk, and maximum depth. High groundwater needs dewatering and tanking.
 - **Excavation** is a construction phase: excavate, shore, foundation, waterproof, backfill. It creates jobs for excavator operators, foundation crews, and waterproofers.

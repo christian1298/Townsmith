@@ -23,6 +23,8 @@ The world is still `seed + procedural base + sparse deltas`.
 - A delta is one cell: `(chunk_x, chunk_z, local_x, local_z, height_m)`.
 - `local_x`/`local_z` are `u8` inside a 256 × 256 m chunk; `height_m` is `0..=255`.
 - Repeating a cell replaces its value; there is no edit history.
+- Decoding rejects a repeated chunk coordinate (`DuplicateDeltaChunk`) and a repeated `(local_x, local_z)` cell within a chunk (`DuplicateDeltaEdit`). The encoder never produces either, so valid blobs re-encode byte-identically.
+- Edits for a chunk keep their first-recorded order for encoding and maintain a `(local_x, local_z)` `BTreeMap` index, so replacing or sampling a cell is O(log n) instead of a linear scan.
 - Deltas apply to generated chunks before meshing, so all LODs and skirts see the same surface.
 - The terrain sampler used for placement validation is delta-aware. Placement on an edited site uses the edited heights, not the procedural base.
 - Biome, material, water, and resource edits are out of scope for 2B.
@@ -69,11 +71,11 @@ The first edit opens a `PlacementStore` for that seed if none exists, so `world_
 - `terrain_deltas` is the lowercase hex encoding of the `TSDL` v1 blob from `DeltaStore::encode`.
 - `terrain_checksum` is the FNV-1a checksum of the same blob. It is required whenever `terrain_deltas` is present.
 - Both fields are omitted when there are no edits, so 2A saves keep working.
-- `world_load` verifies the checksum over the raw bytes **before** decoding, bounds the decoder counts, validates every height, verifies the placement packages, and only then replaces both the placement store and the delta store.
+- `world_load` verifies the checksum over the raw bytes **before** decoding, bounds the decoder counts, validates every height, rejects duplicate chunk coordinates and duplicate cells, verifies the placement packages, and only then replaces both the placement store and the delta store.
 - Old saves without terrain fields load with empty deltas.
 - The 64 MiB save cap applies before reading; a malformed hex string or `TSDL` blob is rejected with `invalid_terrain_deltas`.
 
-The binary blob is a 10-byte header, 20 bytes per edited chunk, and 4 bytes per edit. 10,000 edits in one chunk are about 40 KB binary and about 78 KiB of hex before JSON overhead.
+The binary blob is a 10-byte header, 20 bytes per edited chunk, and 4 bytes per edit. 10,000 edits in one chunk are about 40 KB binary and about 78 KiB of hex before JSON overhead. `DeltaStore::encoded_len()` reports the exact size and `encode()` reserves exactly that, so it no longer over-allocates by ~5×.
 
 ## 4. Streaming and dirty chunks
 
@@ -129,17 +131,17 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 - One 1 m cell per edit; brushes and smoothing are later.
 - No undo/redo for terrain yet.
 - `terrain_clear_deltas()` is a store operation; the shell must call `invalidate_all()` afterward.
-- No delta compaction or spatial index; the blob is O(edits) and saved as hex.
+- No delta compaction; each chunk keeps a local `(x, z)` cell index, and the blob is O(edits) and saved as hex.
 - Deltas are local to the client save; server-authoritative replication is a later phase.
-- Edits are not applied to already-loaded chunks on load until `invalidate_all()` runs; the scene does that.
+- `StreamingWorld::load_deltas` decodes first, then regenerates every loaded chunk from the generator and applies the new store before committing both atomically. Edits that existed only in the previous store disappear; a failed decode leaves the world untouched. The Godot shell still calls `invalidate_all()` to remesh loaded chunks.
 - Terrain workers hold the delta read lock while meshing a chunk; an edit can wait for up to the in-flight mesh time.
 - Old saves cannot represent terrain edits, so loading one clears the current delta store.
 
 ## 8. Tests
 
-- `core_world`: 66 tests, including delta-aware sampling, checksum stability, malformed-stream bounds, unload/reload persistence, streaming roundtrip, Godot-CW winding, and no-sampler seam suppression.
+- `core_world`: 74 tests, including delta-aware sampling, checksum stability, duplicate chunk/cell rejection, byte-identical re-encoding, full-chunk terraform, malformed-stream bounds, unload/reload persistence, config sanitization, coordinate-limit behavior, streaming roundtrip, Godot-CW winding, and no-sampler seam suppression.
 - `godot_ext`: 87 tests, including worker meshing with deltas, hex roundtrip, and world-JSON delta roundtrip/checksum rejection.
-- `cargo test --workspace`: **916 tests** (912 unit/integration + 4 doctests).
+- `cargo test --workspace`: **953 tests** (948 unit/integration + 5 doctests).
 - `smoke_world_scene.sh`: `WORLD_SCENE ... edits=ok ... status=ok`.
 - `smoke_world_placement.sh` still passes on saves without terrain fields.
 

@@ -36,7 +36,58 @@ impl TerrainEdit {
 /// Sparse edit deltas, grouped by chunk.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DeltaStore {
-    chunks: BTreeMap<WorldChunkCoord, Vec<TerrainEdit>>,
+    chunks: BTreeMap<WorldChunkCoord, ChunkEdits>,
+}
+
+/// Edits for one chunk: insertion order plus a cell index.
+///
+/// Encoding keeps the order edits were first recorded in, so valid blobs stay
+/// byte-identical across the index change. Lookups and replacements go through
+/// the `(x, z)` index instead of scanning the vector, which keeps full-chunk
+/// terraform O(n log n) rather than O(n²).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ChunkEdits {
+    order: Vec<TerrainEdit>,
+    index: BTreeMap<(u8, u8), usize>,
+}
+
+impl ChunkEdits {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            order: Vec::with_capacity(capacity),
+            index: BTreeMap::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    /// Insert or replace one cell. Returns `false` when the cell already existed.
+    fn set(&mut self, x: u8, z: u8, height: u16) -> bool {
+        if let Some(&position) = self.index.get(&(x, z)) {
+            self.order[position].height = height;
+            false
+        } else {
+            self.index.insert((x, z), self.order.len());
+            self.order.push(TerrainEdit::new(x, z, height));
+            true
+        }
+    }
+
+    fn height(&self, x: u8, z: u8) -> Option<u16> {
+        self.index
+            .get(&(x, z))
+            .map(|&position| self.order[position].height)
+    }
+
+    fn contains(&self, x: u8, z: u8) -> bool {
+        self.index.contains_key(&(x, z))
+    }
+
+    fn iter(&self) -> std::slice::Iter<'_, TerrainEdit> {
+        self.order.iter()
+    }
 }
 
 impl DeltaStore {
@@ -57,12 +108,7 @@ impl DeltaStore {
         if height > MAX_HEIGHT_M {
             return Err(WorldError::InvalidHeight { height });
         }
-        let edits = self.chunks.entry(coord).or_default();
-        if let Some(existing) = edits.iter_mut().find(|edit| edit.x == x && edit.z == z) {
-            existing.height = height;
-        } else {
-            edits.push(TerrainEdit::new(x, z, height));
-        }
+        self.chunks.entry(coord).or_default().set(x, z, height);
         Ok(())
     }
 
@@ -74,13 +120,12 @@ impl DeltaStore {
     pub fn height_at(&self, generator: &WorldGenerator, pos: TerrainPos) -> u16 {
         let coord = WorldChunkCoord::from_terrain_pos(pos);
         if let Some((x, z)) = coord.local_from_world(pos) {
-            if let Some(edits) = self.chunks.get(&coord) {
-                if let Some(edit) = edits
-                    .iter()
-                    .find(|edit| usize::from(edit.x) == x && usize::from(edit.z) == z)
-                {
-                    return edit.height;
-                }
+            if let Some(height) = self
+                .chunks
+                .get(&coord)
+                .and_then(|edits| edits.height(x as u8, z as u8))
+            {
+                return height;
             }
         }
         generator.height_at(pos)
@@ -89,17 +134,19 @@ impl DeltaStore {
     /// Apply the deltas for a chunk, if any.
     pub fn apply_to(&self, chunk: &mut WorldChunk) {
         if let Some(edits) = self.chunks.get(&chunk.coord()) {
-            for edit in edits {
+            for edit in edits.iter() {
                 // Local coordinates are u8, so they are always in range.
                 let _ = chunk.set_height(edit.x as usize, edit.z as usize, edit.height);
             }
         }
     }
 
-    /// Edits for one chunk.
+    /// Edits for one chunk, in insertion order.
     #[must_use]
     pub fn edits_for(&self, coord: WorldChunkCoord) -> &[TerrainEdit] {
-        self.chunks.get(&coord).map_or(&[], Vec::as_slice)
+        self.chunks
+            .get(&coord)
+            .map_or(&[], |edits| edits.order.as_slice())
     }
 
     /// Number of chunks with edits.
@@ -111,7 +158,7 @@ impl DeltaStore {
     /// Total number of edits.
     #[must_use]
     pub fn edit_count(&self) -> usize {
-        self.chunks.values().map(Vec::len).sum()
+        self.chunks.values().map(ChunkEdits::len).sum()
     }
 
     /// Whether the store is empty.
@@ -137,10 +184,18 @@ impl DeltaStore {
         Self::checksum_bytes(&self.encode())
     }
 
+    /// Size in bytes of this store's encoded blob.
+    ///
+    /// Layout: a 10-byte header, 20 bytes per edited chunk, 4 bytes per edit.
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        10 + self.chunks.len() * 20 + self.edit_count() * 4
+    }
+
     /// Encode to the phase 0 binary delta format.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(10 + self.edit_count() * 20);
+        let mut out = Vec::with_capacity(self.encoded_len());
         out.extend_from_slice(&DELTA_MAGIC);
         out.extend_from_slice(&DELTA_VERSION.to_le_bytes());
         out.extend_from_slice(&(self.chunks.len() as u32).to_le_bytes());
@@ -149,7 +204,7 @@ impl DeltaStore {
             out.extend_from_slice(&coord.x.to_le_bytes());
             out.extend_from_slice(&coord.z.to_le_bytes());
             out.extend_from_slice(&(edits.len() as u32).to_le_bytes());
-            for edit in edits {
+            for edit in edits.iter() {
                 out.push(edit.x);
                 out.push(edit.z);
                 out.extend_from_slice(&edit.height.to_le_bytes());
@@ -159,6 +214,10 @@ impl DeltaStore {
     }
 
     /// Decode the phase 0 binary delta format.
+    ///
+    /// Duplicate chunk coordinates and duplicate `(x, z)` cells within a chunk
+    /// are rejected. The encoder never produces them, so a valid blob
+    /// re-encodes byte-identically.
     pub fn decode(bytes: &[u8]) -> Result<Self, WorldError> {
         let mut cursor = Cursor::new(bytes);
         if cursor.take::<4>()? != DELTA_MAGIC {
@@ -180,11 +239,15 @@ impl DeltaStore {
         for _ in 0..chunk_count {
             let x = i64::from_le_bytes(cursor.take()?);
             let z = i64::from_le_bytes(cursor.take()?);
+            let coord = WorldChunkCoord::new(x, z);
+            if chunks.contains_key(&coord) {
+                return Err(WorldError::DuplicateDeltaChunk { x, z });
+            }
             let edit_count = u32::from_le_bytes(cursor.take()?) as usize;
             if edit_count > cursor.remaining() / 4 {
                 return Err(WorldError::TruncatedDelta);
             }
-            let mut edits = Vec::with_capacity(edit_count);
+            let mut edits = ChunkEdits::with_capacity(edit_count);
             for _ in 0..edit_count {
                 let edit_x = cursor.take::<1>()?[0];
                 let edit_z = cursor.take::<1>()?[0];
@@ -192,9 +255,17 @@ impl DeltaStore {
                 if height > MAX_HEIGHT_M {
                     return Err(WorldError::InvalidHeight { height });
                 }
-                edits.push(TerrainEdit::new(edit_x, edit_z, height));
+                if edits.contains(edit_x, edit_z) {
+                    return Err(WorldError::DuplicateDeltaEdit {
+                        chunk_x: x,
+                        chunk_z: z,
+                        x: edit_x,
+                        z: edit_z,
+                    });
+                }
+                edits.set(edit_x, edit_z, height);
             }
-            chunks.insert(WorldChunkCoord::new(x, z), edits);
+            chunks.insert(coord, edits);
         }
 
         if cursor.remaining() != 0 {
@@ -389,5 +460,107 @@ mod tests {
             DeltaStore::decode(&encoded),
             Err(WorldError::TrailingDeltaBytes { remaining: 1 })
         );
+    }
+
+    #[test]
+    fn decode_rejects_duplicate_chunk_coordinates() {
+        let mut bytes = Vec::from(*b"TSDL");
+        bytes.extend_from_slice(&DELTA_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        for _ in 0..2 {
+            bytes.extend_from_slice(&5i64.to_le_bytes());
+            bytes.extend_from_slice(&(-6i64).to_le_bytes());
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+        }
+        let error = DeltaStore::decode(&bytes).expect_err("duplicate chunk");
+        assert_eq!(error, WorldError::DuplicateDeltaChunk { x: 5, z: -6 });
+        assert_eq!(error.to_string(), "delta stream repeats chunk (5, -6)");
+    }
+
+    #[test]
+    fn decode_rejects_duplicate_cells_in_a_chunk() {
+        let mut bytes = Vec::from(*b"TSDL");
+        bytes.extend_from_slice(&DELTA_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&2i64.to_le_bytes());
+        bytes.extend_from_slice(&3i64.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        for _ in 0..2 {
+            bytes.push(9);
+            bytes.push(4);
+            bytes.extend_from_slice(&40u16.to_le_bytes());
+        }
+        let error = DeltaStore::decode(&bytes).expect_err("duplicate cell");
+        assert_eq!(
+            error,
+            WorldError::DuplicateDeltaEdit {
+                chunk_x: 2,
+                chunk_z: 3,
+                x: 9,
+                z: 4,
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "delta stream repeats cell (9, 4) in chunk (2, 3)"
+        );
+    }
+
+    #[test]
+    fn valid_blobs_re_encode_byte_identically() {
+        let mut store = DeltaStore::new();
+        let first = WorldChunkCoord::new(4, -3);
+        let second = WorldChunkCoord::new(-1, 2);
+        // Deliberately non-sorted insertion order: encoding preserves it.
+        store.set_height(first, 200, 1, 50).expect("edit");
+        store.set_height(first, 1, 200, 60).expect("edit");
+        store.set_height(second, 3, 3, 70).expect("edit");
+        store.set_height(first, 200, 1, 80).expect("edit");
+        let encoded = store.encode();
+        let decoded = DeltaStore::decode(&encoded).expect("decode");
+        assert_eq!(decoded, store);
+        assert_eq!(decoded.encode(), encoded);
+        assert_eq!(decoded.checksum(), DeltaStore::checksum_bytes(&encoded));
+    }
+
+    #[test]
+    fn full_chunk_terraform_reads_every_cell() {
+        let coord = WorldChunkCoord::new(-1, 2);
+        let generator = WorldGenerator::new(3);
+        let mut store = DeltaStore::new();
+        for z in 0..=u8::MAX {
+            for x in 0..=u8::MAX {
+                let height = (u16::from(x).wrapping_mul(7) + u16::from(z) * 13) % 256;
+                store.set_height(coord, x, z, height).expect("edit");
+            }
+        }
+        assert_eq!(store.edit_count(), WORLD_CHUNK_CELLS);
+        assert_eq!(store.chunk_count(), 1);
+
+        let origin = coord.origin_m();
+        for z in 0..=u8::MAX {
+            for x in 0..=u8::MAX {
+                let expected = (u16::from(x).wrapping_mul(7) + u16::from(z) * 13) % 256;
+                let pos = TerrainPos::new(origin.x + i64::from(x), origin.z + i64::from(z));
+                assert_eq!(store.height_at(&generator, pos), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn encoding_capacity_matches_the_layout_not_the_old_hint() {
+        let mut store = DeltaStore::new();
+        let coord = WorldChunkCoord::new(0, 0);
+        for index in 0..10_000u32 {
+            let x = (index % 256) as u8;
+            let z = (index / 256) as u8;
+            store.set_height(coord, x, z, 40).expect("edit");
+        }
+        let encoded = store.encode();
+        assert_eq!(store.encoded_len(), 10 + 20 + 4 * 10_000);
+        assert_eq!(store.encoded_len(), encoded.len());
+        assert!(encoded.capacity() >= encoded.len());
+        // The old hint was `10 + edit_count * 20`; the layout is 4 bytes/edit.
+        assert!(encoded.capacity() < 10 + 10_000 * 20);
     }
 }

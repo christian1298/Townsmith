@@ -174,6 +174,8 @@ The world-scene overlay splits routed citizens into near and far pools. Near kee
 
 Limits: no GPU instancing beyond MultiMesh, no per-agent visibility query, no route-line LOD, and no FPS claim. It is not the 2,000-active-agent render gate.
 
+The overlay shares the world scene's 0.5 s presentation cadence. The construction tick (4 Hz) does not rebuild the HUD per step: it marks the panel dirty and the HUD rebuilds at most every **0.5 s** (`HUD_REFRESH_SECONDS`), and industry sites animate from a rebuilt `{pivot, base_y, spinner, worker}` cache instead of per-frame `get_meta`/`get_child(0)` lookups (audit F-035/F-070). The 10 Hz movement-marker update and the F4 overlay step are unchanged.
+
 ## 7.2 Standalone 2,000-marker stress
 
 `godot/movement_stress.gd` is a synthetic MultiMesh marker harness: 2,000 deterministic agents from 400 homes x 5 residents and 200 workplaces, updated at 10 Hz for 120 simulated seconds (1,200 updates) in one pooled `MultiMeshInstance3D`. Headless three-run medians on the developer machine: median **0.38-0.40 ms**, p95 **0.44-0.53 ms**, max **0.66-1.19 ms**, checksum `d387ba8c`.

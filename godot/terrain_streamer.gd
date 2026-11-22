@@ -89,6 +89,12 @@ func bind_camera(camera_node: Camera3D) -> void:
 func chunk_count() -> int:
 	return chunks.size()
 
+## Cells along one chunk edge. A terrain edit on a border cell only remeshes
+## the neighbour when the caller knows the last local index, so callers derive
+## their edge test from this instead of copying `CHUNK_CELLS - 1`.
+func chunk_cell_count() -> int:
+	return CHUNK_CELLS
+
 ## Mark a loaded or queued chunk for remeshing after a terrain edit.
 func invalidate_chunk(coord: Vector2i) -> void:
 	ready_chunks.erase(coord)

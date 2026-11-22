@@ -16,7 +16,7 @@ pub use active::{
     DEFAULT_AGENT_COUNT, DEFAULT_WORLD_SIZE, MAX_NEIGHBORS, MIN_WORLD_SIZE, SEPARATION_RADIUS,
     TICK_DT,
 };
-pub use cohort::{Cohort, Need, NEED_COUNT};
+pub use cohort::{Cohort, Need, MAX_TICK_DAYS, NEED_COUNT};
 pub use district::DistrictServices;
 pub use sim::{CatchUpReport, CatchUpState, CohortSimulation, SimError, MAX_CATCH_UP_DAYS};
 pub use summary::{

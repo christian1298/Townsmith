@@ -930,27 +930,40 @@ impl RoadGraph {
             return Err(TrafficError::TooManyRoads(roads.len()));
         }
 
+        // Sorted row/column indexes over segment endpoints and occupied
+        // perpendicular lines. These mirror the graph's `row_nodes` /
+        // `column_nodes` tables: a segment scans only its own line's nodes and
+        // the occupied perpendicular lines in range, never every integer metre.
         let mut vertical_by_x: BTreeMap<i32, Vec<&RoadSegment>> = BTreeMap::new();
         let mut horizontal_by_z: BTreeMap<i32, Vec<&RoadSegment>> = BTreeMap::new();
-        let mut endpoints_by_z: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
-        let mut endpoints_by_x: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
+        let mut row_endpoints: BTreeMap<i32, BTreeSet<i32>> = BTreeMap::new();
+        let mut column_endpoints: BTreeMap<i32, BTreeSet<i32>> = BTreeMap::new();
+        let mut vertical_columns: BTreeSet<i32> = BTreeSet::new();
+        let mut horizontal_rows: BTreeSet<i32> = BTreeSet::new();
 
         for road in roads {
             let start = road.start;
             let end = road.end;
             let horizontal = start[1] == end[1];
             let vertical = start[0] == end[0];
+            // Lenient build: zero-length and non-axis-aligned records are
+            // skipped rather than rejected.
             if horizontal == vertical {
                 continue;
             }
-            endpoints_by_z.entry(start[1]).or_default().push(start[0]);
-            endpoints_by_z.entry(end[1]).or_default().push(end[0]);
-            endpoints_by_x.entry(start[0]).or_default().push(start[1]);
-            endpoints_by_x.entry(end[0]).or_default().push(end[1]);
+            row_endpoints.entry(start[1]).or_default().insert(start[0]);
+            row_endpoints.entry(end[1]).or_default().insert(end[0]);
+            column_endpoints
+                .entry(start[0])
+                .or_default()
+                .insert(start[1]);
+            column_endpoints.entry(end[0]).or_default().insert(end[1]);
             if horizontal {
                 horizontal_by_z.entry(start[1]).or_default().push(road);
+                horizontal_rows.insert(start[1]);
             } else {
                 vertical_by_x.entry(start[0]).or_default().push(road);
+                vertical_columns.insert(start[0]);
             }
         }
 
@@ -965,51 +978,52 @@ impl RoadGraph {
                 continue;
             }
             graph.road_count += 1;
+            // Duplicate ids keep the last geometry, matching the former
+            // two-pass build. `add_segment` rejects conflicts instead.
             graph.roads.insert(road.id, road.clone());
 
             let mut points = vec![start, end];
             if horizontal {
                 let z = start[1];
-                if let Some(xs) = endpoints_by_z.get(&z) {
-                    for &x in xs {
-                        if x >= start[0].min(end[0]) && x <= start[0].max(end[0]) {
-                            points.push([x, z]);
-                        }
-                    }
+                let min_x = start[0].min(end[0]);
+                let max_x = start[0].max(end[0]);
+                if let Some(xs) = row_endpoints.get(&z) {
+                    points.extend(xs.range(min_x..=max_x).map(|&x| [x, z]));
                 }
-                for x in start[0].min(end[0])..=start[0].max(end[0]) {
-                    if let Some(verticals) = vertical_by_x.get(&x) {
-                        for candidate in verticals {
-                            let min_z = candidate.start[1].min(candidate.end[1]);
-                            let max_z = candidate.start[1].max(candidate.end[1]);
-                            if z >= min_z && z <= max_z {
-                                points.push([x, z]);
-                            }
-                        }
+                for &x in vertical_columns.range(min_x..=max_x) {
+                    let crossing = vertical_by_x.get(&x).is_some_and(|verticals| {
+                        verticals.iter().any(|candidate| {
+                            z >= candidate.start[1].min(candidate.end[1])
+                                && z <= candidate.start[1].max(candidate.end[1])
+                        })
+                    });
+                    if crossing {
+                        points.push([x, z]);
                     }
                 }
             } else {
                 let x = start[0];
-                if let Some(zs) = endpoints_by_x.get(&x) {
-                    for &z in zs {
-                        if z >= start[1].min(end[1]) && z <= start[1].max(end[1]) {
-                            points.push([x, z]);
-                        }
-                    }
+                let min_z = start[1].min(end[1]);
+                let max_z = start[1].max(end[1]);
+                if let Some(zs) = column_endpoints.get(&x) {
+                    points.extend(zs.range(min_z..=max_z).map(|&z| [x, z]));
                 }
-                for z in start[1].min(end[1])..=start[1].max(end[1]) {
-                    if let Some(horizontals) = horizontal_by_z.get(&z) {
-                        for candidate in horizontals {
-                            let min_x = candidate.start[0].min(candidate.end[0]);
-                            let max_x = candidate.start[0].max(candidate.end[0]);
-                            if x >= min_x && x <= max_x {
-                                points.push([x, z]);
-                            }
-                        }
+                for &z in horizontal_rows.range(min_z..=max_z) {
+                    let crossing = horizontal_by_z.get(&z).is_some_and(|horizontals| {
+                        horizontals.iter().any(|candidate| {
+                            x >= candidate.start[0].min(candidate.end[0])
+                                && x <= candidate.start[0].max(candidate.end[0])
+                        })
+                    });
+                    if crossing {
+                        points.push([x, z]);
                     }
                 }
             }
 
+            // Every collinear endpoint and perpendicular crossing is already
+            // in the point set, so connecting consecutive points never creates
+            // an edge that spans a node and needs splitting.
             points.sort_unstable_by(|left, right| {
                 left[0].cmp(&right[0]).then(left[1].cmp(&right[1]))
             });
@@ -1144,21 +1158,25 @@ impl RoadGraph {
     /// every perpendicular edge crossing it. That matches `build`, where the
     /// global endpoint and crossing tables already contain those points.
     fn append_split_points(&self, road: &RoadSegment) -> Vec<RoadNode> {
-        let mut points = BTreeSet::new();
-        points.insert(road.start);
-        points.insert(road.end);
+        let mut points = Vec::new();
+        points.push(road.start);
+        points.push(road.end);
         if road.start[1] == road.end[1] {
             let z = road.start[1];
             let min_x = road.start[0].min(road.end[0]);
             let max_x = road.start[0].max(road.end[0]);
             if let Some(xs) = self.row_nodes.get(&z) {
-                for &x in xs.range(min_x..=max_x) {
-                    points.insert([x, z]);
-                }
+                points.extend(xs.range(min_x..=max_x).map(|&x| [x, z]));
             }
-            for (&x, _) in self.column_nodes.range(min_x..=max_x) {
-                if self.column_crossing(x, z) {
-                    points.insert([x, z]);
+            for (&x, zs) in self.column_nodes.range(min_x..=max_x) {
+                let Some(&lower) = zs.range(..z).next_back() else {
+                    continue;
+                };
+                let Some(&upper) = zs.range((Excluded(z), Unbounded)).next() else {
+                    continue;
+                };
+                if self.has_edge([x, lower], [x, upper]) {
+                    points.push([x, z]);
                 }
             }
         } else {
@@ -1166,45 +1184,23 @@ impl RoadGraph {
             let min_z = road.start[1].min(road.end[1]);
             let max_z = road.start[1].max(road.end[1]);
             if let Some(zs) = self.column_nodes.get(&x) {
-                for &z in zs.range(min_z..=max_z) {
-                    points.insert([x, z]);
-                }
+                points.extend(zs.range(min_z..=max_z).map(|&z| [x, z]));
             }
-            for (&z, _) in self.row_nodes.range(min_z..=max_z) {
-                if self.row_crossing(x, z) {
-                    points.insert([x, z]);
+            for (&z, xs) in self.row_nodes.range(min_z..=max_z) {
+                let Some(&lower) = xs.range(..x).next_back() else {
+                    continue;
+                };
+                let Some(&upper) = xs.range((Excluded(x), Unbounded)).next() else {
+                    continue;
+                };
+                if self.has_edge([lower, z], [upper, z]) {
+                    points.push([x, z]);
                 }
             }
         }
-        points.into_iter().collect()
-    }
-
-    /// Whether a vertical edge at `x` strictly spans `z`.
-    fn column_crossing(&self, x: i32, z: i32) -> bool {
-        let Some(zs) = self.column_nodes.get(&x) else {
-            return false;
-        };
-        let Some(&lower) = zs.range(..z).next_back() else {
-            return false;
-        };
-        let Some(&upper) = zs.range((Excluded(z), Unbounded)).next() else {
-            return false;
-        };
-        self.has_edge([x, lower], [x, upper])
-    }
-
-    /// Whether a horizontal edge at `z` strictly spans `x`.
-    fn row_crossing(&self, x: i32, z: i32) -> bool {
-        let Some(xs) = self.row_nodes.get(&z) else {
-            return false;
-        };
-        let Some(&lower) = xs.range(..x).next_back() else {
-            return false;
-        };
-        let Some(&upper) = xs.range((Excluded(x), Unbounded)).next() else {
-            return false;
-        };
-        self.has_edge([lower, z], [upper, z])
+        points.sort_unstable_by(|left, right| left[0].cmp(&right[0]).then(left[1].cmp(&right[1])));
+        points.dedup();
+        points
     }
 
     fn has_edge(&self, a: RoadNode, b: RoadNode) -> bool {
@@ -2847,6 +2843,161 @@ mod tests {
         let fresh = RoadGraph::build(&[segment]).expect("build");
         assert_equivalent(&graph, &fresh);
         assert_eq!(graph.stats().roads, 1);
+    }
+
+    /// Former two-pass build with a per-metre crossing probe, retained as the
+    /// equivalence reference for the indexed build.
+    fn legacy_build(roads: &[RoadSegment]) -> RoadGraph {
+        let mut vertical_by_x: BTreeMap<i32, Vec<&RoadSegment>> = BTreeMap::new();
+        let mut horizontal_by_z: BTreeMap<i32, Vec<&RoadSegment>> = BTreeMap::new();
+        let mut endpoints_by_z: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
+        let mut endpoints_by_x: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
+
+        for road in roads {
+            let start = road.start;
+            let end = road.end;
+            let horizontal = start[1] == end[1];
+            let vertical = start[0] == end[0];
+            if horizontal == vertical {
+                continue;
+            }
+            endpoints_by_z.entry(start[1]).or_default().push(start[0]);
+            endpoints_by_z.entry(end[1]).or_default().push(end[0]);
+            endpoints_by_x.entry(start[0]).or_default().push(start[1]);
+            endpoints_by_x.entry(end[0]).or_default().push(end[1]);
+            if horizontal {
+                horizontal_by_z.entry(start[1]).or_default().push(road);
+            } else {
+                vertical_by_x.entry(start[0]).or_default().push(road);
+            }
+        }
+
+        let mut graph = RoadGraph::default();
+        for road in roads {
+            let start = road.start;
+            let end = road.end;
+            let horizontal = start[1] == end[1];
+            let vertical = start[0] == end[0];
+            if horizontal == vertical {
+                continue;
+            }
+            graph.road_count += 1;
+            graph.roads.insert(road.id, road.clone());
+
+            let mut points = vec![start, end];
+            if horizontal {
+                let z = start[1];
+                if let Some(xs) = endpoints_by_z.get(&z) {
+                    for &x in xs {
+                        if x >= start[0].min(end[0]) && x <= start[0].max(end[0]) {
+                            points.push([x, z]);
+                        }
+                    }
+                }
+                for x in start[0].min(end[0])..=start[0].max(end[0]) {
+                    if let Some(verticals) = vertical_by_x.get(&x) {
+                        for candidate in verticals {
+                            let min_z = candidate.start[1].min(candidate.end[1]);
+                            let max_z = candidate.start[1].max(candidate.end[1]);
+                            if z >= min_z && z <= max_z {
+                                points.push([x, z]);
+                            }
+                        }
+                    }
+                }
+            } else {
+                let x = start[0];
+                if let Some(zs) = endpoints_by_x.get(&x) {
+                    for &z in zs {
+                        if z >= start[1].min(end[1]) && z <= start[1].max(end[1]) {
+                            points.push([x, z]);
+                        }
+                    }
+                }
+                for z in start[1].min(end[1])..=start[1].max(end[1]) {
+                    if let Some(horizontals) = horizontal_by_z.get(&z) {
+                        for candidate in horizontals {
+                            let min_x = candidate.start[0].min(candidate.end[0]);
+                            let max_x = candidate.start[0].max(candidate.end[0]);
+                            if x >= min_x && x <= max_x {
+                                points.push([x, z]);
+                            }
+                        }
+                    }
+                }
+            }
+
+            points.sort_unstable_by(|left, right| {
+                left[0].cmp(&right[0]).then(left[1].cmp(&right[1]))
+            });
+            points.dedup();
+            graph.connect_points(&points);
+        }
+        graph.base_version = graph.checksum();
+        graph
+    }
+
+    #[test]
+    fn indexed_build_matches_the_legacy_per_metre_build() {
+        let collisions = vec![
+            road(1, [0, 0], [20, 0]),
+            road(2, [5, 0], [15, 0]),
+            road(3, [10, 0], [10, 10]),
+            road(4, [0, 5], [20, 5]),
+            road(5, [10, 5], [10, 15]),
+            road(6, [20, 0], [20, 20]),
+            road(7, [-10, 10], [30, 10]),
+            // Lenient skips and a duplicate id must behave the same.
+            road(8, [3, 3], [3, 3]),
+            road(9, [30, 30], [40, 44]),
+            road(3, [20, 20], [20, 30]),
+        ];
+        let mut random = Vec::new();
+        let mut seed = 0x5eed_1234_9876_abcd_u64;
+        for id in 1..=48 {
+            let x = next_test_coord(&mut seed, -64, 64) as i32;
+            let z = next_test_coord(&mut seed, -64, 64) as i32;
+            let length = 4 + (seed >> 40) as i32 % 24;
+            if seed & 1 == 0 {
+                random.push(road(id, [x, z], [x + length, z]));
+            } else {
+                random.push(road(id, [x, z], [x, z + length]));
+            }
+        }
+        let fixtures = [
+            Vec::new(),
+            grid_roads(6, 16, [-40, -40]),
+            collisions,
+            random,
+        ];
+        for (index, roads) in fixtures.iter().enumerate() {
+            let graph = RoadGraph::build(roads).expect("indexed build");
+            let legacy = legacy_build(roads);
+            assert_eq!(
+                graph.checksum(),
+                legacy.checksum(),
+                "checksum differs for fixture {index}"
+            );
+            assert_equivalent(&graph, &legacy);
+        }
+    }
+
+    #[test]
+    fn sixty_four_grid_build_is_golden() {
+        let graph = RoadGraph::build(&grid_roads(64, 16, [0, 0])).expect("build");
+        let stats = graph.stats();
+        assert_eq!(stats.roads, 128);
+        assert_eq!(stats.nodes, 4_096);
+        assert_eq!(stats.edges, 8_064);
+        assert_eq!(stats.components, 1);
+        assert_eq!(stats.total_length_m, 129_024.0);
+        // The benchmark's graph fingerprint, pinned before the build rewrite.
+        assert_eq!(graph.checksum(), 0x4ba1_7cb8_87e8_d9c5);
+        assert_eq!(graph.nearest_node([0.0, 0.0]), Some(([0, 0], 0.0)));
+        assert_eq!(
+            graph.distance_m([0.0, 0.0], [1_008.0, 1_008.0]),
+            Some(2_016.0)
+        );
     }
 
     #[test]
