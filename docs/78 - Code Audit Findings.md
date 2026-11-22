@@ -17,29 +17,35 @@ tags:
 ## Fix session status (2026-11-23)
 
 > [!summary] Outcome
-> P0 and the highest-risk P1 clusters are fixed and merged. The remaining findings are deferred with explicit reasons; none are silently dropped. Fixed work is covered by the named PRs and regression tests.
+> Every audited finding with a code or documentation defect is fixed and merged, except **F-003**, which is deferred because the v0 world intentionally permits one `hello` per process. Fixed work is covered by the named PRs and regression tests.
 
 | Area | Findings | Status | Evidence |
 |---|---|---|---|
 | Docs / scripts / hygiene | F-073..F-081, F-083 | Fixed | PR #235 |
 | Server crash, roles, vote/reconnect seams, CLI | F-001, F-002, F-004..F-008, F-039..F-042 | Fixed | PR #236; `SERVER_PROTOCOL`/`AUTHORITY`/`ROLES`/`RESUME` goldens unchanged |
 | Construction NaN/checksum, campaign phases, replacement, trades, city-loop flags | F-009, F-012..F-014, F-052, F-064, F-065 | Fixed | PR #237; 466 core_city lib tests |
-| Room sampling/volume | F-021, F-054 | Fixed | PR #238 (sim M1) |
+| Room sampling/volume | F-021, F-054 | Fixed | PR #238 |
 | Bench gates | F-031..F-034, F-063, F-066, F-067 | Fixed | PR #239; movement `b50a763030007ef1`, infra `a920cf0c4eb9a4f1`, save-stress `0ce611887161ff62` |
-| Bridge parity, seeds, acceptance volume, docs | F-029, F-030, F-056..F-062 | Fixed | PR #240; 928 workspace tests |
-| Godot shell: HUD cadence + backlog clamp, streamer-derived chunk cells, bench route helper, headless/editor guards, industry animation cache, deterministic smoke budgets | F-035..F-038, F-068..F-071 | Fixed | PR #243; `WORLD_SCENE … chunk_cells=ok status=ok`, `BENCH_SCREEN status=ok scenes=3 rating=playable`, `STREAM_ORDER_SMOKE status=ok checksum=ea5bc6f9 commits=59 loaded=30 stages=4`, `MOVEMENT_STRESS_SMOKE status=ok pass1_checksum=f29c282d`, `MP_CLIENT status=ok checksum=f17ed4f094dad32f`; default flyover route runs 263 frames with no `look_at` diagnostic |
-| Mod validation guards | F-027, F-028 | Fixed | PR #247; duplicate tech ids reject with `invalid_tech_tree`, manifest sets cap at 10,000 and chains at 512; 946 workspace tests |
-| Cohort integration (NaN services/state, multi-day `dt`, fractional employment carry) | F-010, F-011, F-023 | Fixed | PR #250; `cohort_validate` `a00cc463d7cb9e72` (was `f265539bcb8804fc`), `dt_max_delta` `0.000006`, 450 vs 450 employed; `dormant` `df136e2d51c0d0f8`/`cee14784f2a131c1` with 0.0 measured deltas |
+| Bridge parity, seeds, acceptance volume, docs | F-029, F-030, F-056..F-062 | Fixed | PR #240 |
+| Godot shell: HUD, streamer cells, bench route helper, headless/editor guards, industry cache, smoke budgets | F-035..F-038, F-068..F-071 | Fixed | PR #243; world, bench, stream, movement, and MP smokes green |
+| Generated Godot UID sidecars | F-072 | Fixed | PR #242 |
+| Structure and blueprint guards | F-020, F-022, F-055 | Fixed | PR #244; story clamp, 32 m foundation cap, pre-allocation solid budget |
+| Terrain winding and palette | F-018, F-019 | Fixed | PR #245; Godot-CW winding assertion, 32,769-entry palette cap |
+| Refund on failed installment | F-015 | Fixed | PR #246 |
+| Mod guards | F-027, F-028 | Fixed | PR #247; duplicate tech ids rejected; 10,000 manifests / 512 dependency depth |
+| Scale: road build, services, flow cache | F-024..F-026 | Fixed | PRs #248, #254, #255; checksums preserved; service refresh 20.55 s → 133 ms at cap scale |
+| World streaming, delta, coordinate bounds | F-017, F-043..F-046, F-049 | Fixed | PR #249; streaming `f30740380558f66d` and save pins unchanged |
+| Cohort NaN, multi-day dt, employment carry | F-010, F-011, F-023 | Fixed | PR #250; `cohort_validate` `a00cc463d7cb9e72`, `dt_max_delta` 6e-6 |
+| Terrain boundary walls and f32 bound | F-047, F-048 | Fixed | PR #251; terrain quads 82,970 / 24,815 / 7,675 |
+| Infrastructure seed treasury | F-016 | Fixed | PR #252; initial due charged, rollback restores only a created treasury |
+| ID range, seed bound, named-age docs | F-050, F-051, F-053 | Fixed | PR #253 |
+| Operational: extension rebuild and smoke re-run | F-082, F-084 | Verified | Extension rebuilt; world/bench/stream/movement/MP smokes run in this session |
 
 ### Deferred
 
-| Findings | Reason |
+| Finding | Reason |
 |---|---|
-| F-003 | `v0` world assumes one hello per process; the multi-connection vote loopback needs a multi-session model, not a test-only patch. The pure vote state machine has 18 tests. |
-| F-015, F-016 | Refund-on-failed-mark-paid and the no-treasury utility/service fallback change charges/checksums. Needs an economy decision, not a mechanical fix. |
-| F-017..F-020, F-022, F-043..F-051, F-053, F-055 | World/mesh/blueprint/structure cluster; design changes (delta reload semantics, winding, palette/blueprint caps, basement depth) need focused PRs and golden updates. |
-| F-024..F-026 | Scale work (flow-field cache, service spatial index, graph build) needs benchmarks. |
-| F-072, F-082, F-084 | Operational: the generated script UID sidecars are tracked; the extension was rebuilt and the world/bench/stream/movement/MP smokes were run in this session. |
+| F-003 | The v0 world assumes one `hello` per process; a multi-connection vote loopback needs a multi-session model, not a test-only patch. The pure vote state machine has 18 tests. |
 
 ## How to use this document
 
