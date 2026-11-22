@@ -231,6 +231,9 @@ cargo run --release -p townsmith-bench --bin worldgen
 # 1M cohort tick microbenchmark
 cargo run --release -p townsmith-bench --bin cohort
 
+# Cohort vs individual / time-step validation
+cargo run --release -p townsmith-bench --bin cohort_validate -- --smoke
+
 # 30-day headless city loop (construction, move-in, jobs, needs, wages)
 cargo run --release -p townsmith-bench --bin city_loop
 

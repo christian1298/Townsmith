@@ -2,7 +2,7 @@
 title: Simulation and AI
 project: Townsmith
 status: proposed
-updated: 2026-11-21
+updated: 2026-11-22
 tags:
   - townsmith
   - simulation
@@ -787,7 +787,7 @@ Each placed building instance has:
 - **Headless simulation runner:** fast-forward days/months without rendering; output CSV metrics.
 - **1M benchmark:** 1M cohorts, 250k buildings, 2k active agents; measure tick time and memory on target hardware.
 - **Scenario tests:** "500 citizens, 50 buildings, wood age; assert no starvation and budget within range."
-- **Cohort validation:** compare cohort aggregates against a fully individual reference sim on a small city; they should match within tolerance.
+- **Cohort validation:** `cohort_validate` compares 5×100 cohorts against 500 one-citizen cohorts and 1-day against 1/24-day steps. Strict aggregate/individual state matches exactly; needs match to 3.6e-6. Employment is not step-invariant at fractional job rates, so dormant catch-up must use the continuous day step. See [[68 - Metropolis Gate]] §7.8.
 - **Dormant catch-up tests:** leave a region for a year; compare catch-up against continuous simulation.
 - **Primary-industry tests:** forest regrowth, crop yields, wildlife population under hunting pressure.
 - **Golden saves:** load a known save, tick N times, compare key metrics with tolerances.
