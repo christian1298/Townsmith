@@ -12,7 +12,10 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::traffic::{travel_time_seconds, FlowField, RoadGraph, DEFAULT_TRAVEL_SPEED_MPS};
+use crate::traffic::{
+    fnv1a_feed, travel_time_seconds, FlowField, RoadGraph, DEFAULT_TRAVEL_SPEED_MPS,
+    FNV_OFFSET_BASIS,
+};
 
 /// Current household save format.
 pub const POPULATION_FORMAT_VERSION: u16 = 1;
@@ -140,6 +143,23 @@ pub struct Household {
     /// Home position in metres; refreshed from the placement on tick.
     #[serde(default)]
     pub home: [f32; 2],
+    /// Workplace this household commutes to, remembered from the last job
+    /// assignment.
+    ///
+    /// The aggregate model assigns residents to individual job slots but keeps
+    /// one record per home. When residents split across workplaces, this is the
+    /// workplace with the most assigned workers, ties broken by the lower
+    /// placement id. `None` means no remembered workplace: the household has no
+    /// workers, has not been assigned yet, or was loaded from a save that
+    /// predates this field.
+    ///
+    /// Derived state: it is recomputed on every job assignment, so an unknown
+    /// or out-of-range id is cleared by the next tick. Movement uses it as the
+    /// preferred destination and falls back to the nearest workplace when it is
+    /// `None` or no longer usable. It is omitted from JSON while `None`, so old
+    /// saves round-trip unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workplace_id: Option<u64>,
 }
 
 impl Household {
@@ -155,12 +175,16 @@ impl Household {
             commute_time_s: 0.0,
             income_per_day: 0.0,
             home: [0.0, 0.0],
+            workplace_id: None,
         }
     }
 
     fn clamp_to_capacity(&mut self) {
         self.residents = self.residents.min(self.capacity);
         self.workers = self.workers.min(self.residents);
+        if self.workers == 0 {
+            self.workplace_id = None;
+        }
     }
 
     /// Average need satisfaction.
@@ -317,6 +341,9 @@ impl CityRuntime {
                     .min(household.residents);
                 household.residents -= removed;
                 household.workers = household.workers.min(household.residents);
+                if household.workers == 0 {
+                    household.workplace_id = None;
+                }
                 applied = applied.saturating_add(removed);
             }
             start = end;
@@ -459,7 +486,7 @@ impl CityRuntime {
         self.staffing = assignment.staffing;
         let mut assigned = 0_usize;
         for (&id, household) in &mut self.households {
-            let (workers, weighted) = if household.residents > 0 {
+            let (workers, weighted, workplace) = if household.residents > 0 {
                 debug_assert_eq!(
                     assignment.home_ids.get(assigned).copied(),
                     Some(id),
@@ -468,11 +495,12 @@ impl CityRuntime {
                 let values = (
                     assignment.workers[assigned],
                     assignment.commute_weighted[assigned],
+                    assignment.workplace_by_home[assigned],
                 );
                 assigned += 1;
                 values
             } else {
-                (0, 0.0)
+                (0, 0.0, None)
             };
             household.workers = workers;
             household.commute_m = if workers > 0 {
@@ -483,6 +511,7 @@ impl CityRuntime {
             household.commute_time_s =
                 travel_time_seconds(household.commute_m, DEFAULT_TRAVEL_SPEED_MPS).unwrap_or(0.0);
             household.income_per_day = f64::from(workers) * WAGE_PER_WORKER_PER_DAY;
+            household.workplace_id = if workers > 0 { workplace } else { None };
         }
 
         for household in self.households.values_mut() {
@@ -615,10 +644,30 @@ impl CityRuntime {
     }
 
     /// Parse and validate a household save.
+    ///
+    /// Remembered workplaces that cannot refer to a placement (`> i64::MAX`) or
+    /// belong to a household with no workers are cleared before validation.
+    /// Unknown but representable ids are kept until the next job assignment
+    /// overwrites them; movement falls back to the nearest workplace meanwhile.
+    /// Clearing old saves is a no-op because they omit the field.
     pub fn from_json(json: &str) -> Result<Self, PopulationError> {
-        let runtime: Self = serde_json::from_str(json)?;
+        let mut runtime: Self = serde_json::from_str(json)?;
+        runtime.clear_invalid_workplaces();
         runtime.validate()?;
         Ok(runtime)
+    }
+
+    /// Drop remembered workplaces that are out of range or stale after load.
+    fn clear_invalid_workplaces(&mut self) {
+        for household in self.households.values_mut() {
+            if household.workers == 0
+                || household
+                    .workplace_id
+                    .is_some_and(|id| id > i64::MAX as u64)
+            {
+                household.workplace_id = None;
+            }
+        }
     }
 
     /// Validate all ranges and state invariants.
@@ -703,9 +752,13 @@ impl CityRuntime {
 
     /// FNV-1a checksum over the compact JSON.
     ///
-    /// `commute_time_s` is a derived display value; it is zeroed before
-    /// serialization so adding travel time does not change the pinned
-    /// population checksum.
+    /// `commute_time_s` and `workplace_id` are derived values recomputed on
+    /// every tick; they are zeroed before serialization so adding them does not
+    /// change the pinned population checksum or the committed benchmark
+    /// baselines. Old saves already omit both fields.
+    ///
+    /// Use [`Self::workplace_checksum`] when a consumer must react to a change
+    /// in the remembered workplace, as the movement cache does.
     #[must_use]
     pub fn checksum(&self) -> u64 {
         const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -713,12 +766,35 @@ impl CityRuntime {
         let mut snapshot = self.clone();
         for household in snapshot.households.values_mut() {
             household.commute_time_s = 0.0;
+            household.workplace_id = None;
         }
         let json = serde_json::to_vec(&snapshot).expect("CityRuntime always serializes");
         let mut hash = OFFSET;
         for byte in json {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(PRIME);
+        }
+        hash
+    }
+
+    /// FNV-1a checksum over the remembered workplace of every household.
+    ///
+    /// The save checksum deliberately excludes this derived field, so the
+    /// movement cache keys on this value instead: a reassignment that changes a
+    /// commuter's destination must invalidate the cached routes even though the
+    /// population checksum is unchanged.
+    #[must_use]
+    pub fn workplace_checksum(&self) -> u64 {
+        let mut hash = FNV_OFFSET_BASIS;
+        for (&id, household) in &self.households {
+            fnv1a_feed(&mut hash, id);
+            match household.workplace_id {
+                Some(workplace_id) => {
+                    fnv1a_feed(&mut hash, 1);
+                    fnv1a_feed(&mut hash, workplace_id);
+                }
+                None => fnv1a_feed(&mut hash, 0),
+            }
         }
         hash
     }
@@ -741,6 +817,9 @@ struct JobAssignment {
     commute_weighted: Vec<f32>,
     /// Workers per workplace id.
     staffing: BTreeMap<u64, u32>,
+    /// Workplace with the most workers for each household, tie-broken by the
+    /// lowest workplace id. `None` when the household has no workers.
+    workplace_by_home: Vec<Option<u64>>,
 }
 
 /// One candidate pair, ordered by the global allocation comparator:
@@ -758,6 +837,8 @@ struct JobPass {
     remaining: Vec<u32>,
     /// Worker-weighted commute distance per household.
     commute_weighted: Vec<f32>,
+    /// Distinct workplaces touched per household, with worker counts.
+    workplace_counts: Vec<Vec<(usize, u32)>>,
 }
 
 /// Assign residents to job slots, globally nearest pair first.
@@ -1006,6 +1087,7 @@ fn assign_with_grid(
     let mut need: Vec<u32> = homes.iter().map(|home| home.residents).collect();
     let mut remaining: Vec<u32> = workplaces.iter().map(|work| work.slots).collect();
     let mut commute_weighted = vec![0.0_f32; homes.len()];
+    let mut workplace_counts: Vec<Vec<(usize, u32)>> = vec![Vec::new(); homes.len()];
     let mut need_left: u64 = need.iter().map(|&value| u64::from(value)).sum();
     let mut slots_left: u64 = remaining.iter().map(|&value| u64::from(value)).sum();
 
@@ -1047,6 +1129,13 @@ fn assign_with_grid(
             need_left -= u64::from(take);
             slots_left -= u64::from(take);
             commute_weighted[index] += distance * take as f32;
+            match workplace_counts[index]
+                .iter_mut()
+                .find(|(work, _)| *work == work_index)
+            {
+                Some((_, count)) => *count += take,
+                None => workplace_counts[index].push((work_index, take)),
+            }
         }
         cursors[index].advance();
         if need[index] > 0 {
@@ -1068,6 +1157,7 @@ fn assign_with_grid(
             need,
             remaining,
             commute_weighted,
+            workplace_counts,
         },
     )
 }
@@ -1127,6 +1217,7 @@ fn run_pass(pairs: &[JobPair], homes: &[JobHome], workplaces: &[Workplace]) -> J
     let mut need: Vec<u32> = homes.iter().map(|home| home.residents).collect();
     let mut remaining: Vec<u32> = workplaces.iter().map(|work| work.slots).collect();
     let mut commute_weighted = vec![0.0_f32; homes.len()];
+    let mut workplace_counts: Vec<Vec<(usize, u32)>> = vec![Vec::new(); homes.len()];
     let mut need_left: u64 = need.iter().map(|&value| u64::from(value)).sum();
     let mut slots_left: u64 = remaining.iter().map(|&value| u64::from(value)).sum();
     for &(distance, home_index, work_index) in pairs {
@@ -1147,11 +1238,19 @@ fn run_pass(pairs: &[JobPair], homes: &[JobHome], workplaces: &[Workplace]) -> J
         need_left -= u64::from(take);
         slots_left -= u64::from(take);
         commute_weighted[home_index] += distance * take as f32;
+        match workplace_counts[home_index]
+            .iter_mut()
+            .find(|(work, _)| *work == work_index)
+        {
+            Some((_, count)) => *count += take,
+            None => workplace_counts[home_index].push((work_index, take)),
+        }
     }
     JobPass {
         need,
         remaining,
         commute_weighted,
+        workplace_counts,
     }
 }
 
@@ -1169,11 +1268,26 @@ fn finish_assignment(homes: &[JobHome], workplaces: &[Workplace], pass: JobPass)
             *entry = entry.saturating_add(staffed);
         }
     }
+    let workplace_by_home = pass
+        .workplace_counts
+        .iter()
+        .map(|counts| {
+            counts
+                .iter()
+                .max_by(|(left_work, left_count), (right_work, right_count)| {
+                    left_count
+                        .cmp(right_count)
+                        .then_with(|| workplaces[*right_work].id.cmp(&workplaces[*left_work].id))
+                })
+                .map(|(work_index, _)| workplaces[*work_index].id)
+        })
+        .collect();
     JobAssignment {
         home_ids: homes.iter().map(|home| home.id).collect(),
         workers,
         commute_weighted: pass.commute_weighted,
         staffing,
+        workplace_by_home,
     }
 }
 
@@ -1474,6 +1588,35 @@ mod tests {
         runtime.tick(10.0, 2, &[(1, 4)]);
         assert_eq!(runtime.population(), 4);
         assert_eq!(runtime.workers(), 2);
+    }
+
+    #[test]
+    fn household_remembers_majority_workplace_with_id_tiebreak() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.set_move_in_per_second(10.0);
+        let homes = [Home {
+            id: 1,
+            capacity: 4,
+            center: [0.0, 0.0],
+        }];
+        let workplaces = [
+            Workplace {
+                id: 20,
+                slots: 2,
+                center: [10.0, 0.0],
+            },
+            Workplace {
+                id: 10,
+                slots: 2,
+                center: [-10.0, 0.0],
+            },
+        ];
+        runtime.tick_with_workplaces(10.0, &homes, &workplaces);
+        assert_eq!(runtime.households[&1].workers, 4);
+        assert_eq!(runtime.households[&1].workplace_id, Some(10));
+        runtime.tick_with_workplaces(10.0, &homes, &[]);
+        assert_eq!(runtime.households[&1].workers, 0);
+        assert_eq!(runtime.households[&1].workplace_id, None);
     }
 
     #[test]
@@ -1909,6 +2052,7 @@ mod tests {
         runtime.households.insert(
             1,
             Household {
+                workplace_id: None,
                 capacity: 2,
                 residents: 3,
                 workers: 0,

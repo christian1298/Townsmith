@@ -488,6 +488,7 @@ mod tests {
 
     fn household(capacity: u32, residents: u32, workers: u32) -> Household {
         Household {
+            workplace_id: None,
             capacity,
             residents,
             workers,
