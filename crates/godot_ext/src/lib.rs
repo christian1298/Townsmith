@@ -2702,8 +2702,10 @@ impl TownsmithCore {
     /// Create one district policy in the in-memory registry.
     ///
     /// The registry is created lazily on the first policy for `seed`. It is
-    /// data only: no simulation, household, treasury, or economy code reads it,
-    /// and it is not part of the world-save envelope yet. The allowlist is a
+    /// data only: no simulation, household, treasury, or economy code reads it.
+    /// The registry is persisted as an optional `policies` object by
+    /// [`Self::world_save`] and restored by [`Self::world_load`], but saving
+    /// does not apply any policy effect. The allowlist is a
     /// `PackedStringArray` of namespaced blueprint ids. On failure the lazy
     /// registry is removed again, so a rejected first create leaves no store.
     #[func]
@@ -2824,8 +2826,9 @@ impl TownsmithCore {
     /// `policies` array, and a zero checksum. A registry from another seed is
     /// a `seed_mismatch`. The standalone developer script
     /// `godot/policy_editor.gd` is the only UI consumer; no simulation,
-    /// household, treasury, or economy code reads these values, and they are
-    /// not part of the world-save envelope.
+    /// household, treasury, or economy code reads these values. The registry
+    /// is persisted in the world save, but saving it applies no tax, funding,
+    /// construction, or allowlist effect.
     #[func]
     fn district_policies_state(&self, seed: i64) -> VarDictionary {
         let Ok(seed) = u64::try_from(seed) else {
@@ -5435,6 +5438,7 @@ impl TownsmithCore {
             mut services,
             industry,
             research,
+            policies,
         ) = {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             let construction = self
@@ -5472,6 +5476,10 @@ impl TownsmithCore {
                 .research
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
+            let policies = self
+                .policies
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             (
                 world.as_ref().cloned(),
                 construction.clone(),
@@ -5485,6 +5493,7 @@ impl TownsmithCore {
                 services.as_ref().cloned(),
                 industry.as_ref().cloned(),
                 research.as_ref().cloned(),
+                policies.as_ref().cloned(),
             )
         };
         let Some(store) = store else {
@@ -5733,6 +5742,10 @@ impl TownsmithCore {
             }
             None => json,
         };
+        let json = match attach_optional_policies(json, policies.as_ref(), store.seed) {
+            Ok(json) => json,
+            Err((code, error)) => return placement_simple_error(code, error),
+        };
         if json.len() > MAX_WORLD_SAVE_BYTES as usize {
             return placement_simple_error(
                 "save_too_large",
@@ -5791,6 +5804,19 @@ impl TownsmithCore {
                 *guard = Some(population.clone());
             }
         }
+        if let Some(policies) = policies.as_ref() {
+            let mut guard = self
+                .policies
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if guard
+                .as_ref()
+                .is_some_and(|live| live.seed == policies.seed)
+            {
+                *guard = Some(policies.clone());
+            }
+        }
+        let (policy_count, policy_checksum) = policy_summary(policies.as_ref());
         let mut result = VarDictionary::new();
         result.set("ok", true);
         result.set("path", &GString::from(path.to_string_lossy().as_ref()));
@@ -5911,6 +5937,11 @@ impl TownsmithCore {
                 "{:016x}",
                 research.as_ref().map_or(0, ResearchStore::checksum)
             )),
+        );
+        result.set("district_policies", policy_count as i64);
+        result.set(
+            "district_policy_checksum",
+            &GString::from(&format!("{policy_checksum:016x}")),
         );
         result.set(
             "terrain_checksum",
@@ -6090,6 +6121,10 @@ impl TownsmithCore {
                 ),
             );
         }
+        let policies = match policies_from_world_json(&json, expected_seed) {
+            Ok(policies) => policies,
+            Err((code, error)) => return placement_simple_error(code, error),
+        };
         let store = match PlacementStore::from_json(&json) {
             Ok(store) => store,
             Err(error) => return placement_error_result(&error),
@@ -6312,6 +6347,7 @@ impl TownsmithCore {
         let utility_checksum = utilities.as_ref().map_or(0, UtilityStore::checksum);
         let service_count = services.as_ref().map_or(0, ServiceStore::site_count);
         let service_checksum = services.as_ref().map_or(0, ServiceStore::checksum);
+        let (policy_count, policy_checksum) = policy_summary(policies.as_ref());
         let deltas_count = deltas.edit_count();
         let deltas_checksum = deltas.checksum();
         let mut guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
@@ -6358,6 +6394,10 @@ impl TownsmithCore {
             .research
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let mut policies_guard = self
+            .policies
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut deltas_guard = self
             .terrain_deltas
             .write()
@@ -6374,6 +6414,7 @@ impl TownsmithCore {
         *services_guard = services;
         *industry_guard = industry;
         *research_guard = Some(research);
+        *policies_guard = policies;
         *deltas_guard = deltas;
         *self
             .terrain_seed
@@ -6456,6 +6497,11 @@ impl TownsmithCore {
         result.set(
             "research_checksum",
             &GString::from(&format!("{research_checksum:016x}")),
+        );
+        result.set("district_policies", policy_count as i64);
+        result.set(
+            "district_policy_checksum",
+            &GString::from(&format!("{policy_checksum:016x}")),
         );
         result
     }
@@ -9547,6 +9593,101 @@ fn research_from_world_json(json: &str) -> Result<Option<ResearchStore>, (&'stat
     Ok(Some(store))
 }
 
+/// Add the optional `policies` object to one already-parsed world save.
+///
+/// The envelope must be a JSON object. Checking it before assignment keeps a
+/// non-object document from panicking at the indexing operation and reports
+/// `invalid_json`; a serialization failure is `save_failed`.
+fn attach_policies(
+    mut value: serde_json::Value,
+    store: &DistrictPolicyStore,
+) -> Result<serde_json::Value, (&'static str, String)> {
+    if !value.is_object() {
+        return Err((
+            "invalid_json",
+            "the world save is not a JSON object".to_string(),
+        ));
+    }
+    value["policies"] =
+        serde_json::to_value(store).map_err(|error| ("save_failed", error.to_string()))?;
+    Ok(value)
+}
+
+/// Compose the district-policy store into the world save when one is open.
+///
+/// A missing store returns the input string untouched, so a world without
+/// district policies keeps byte-identical JSON and checksums. A store for
+/// another seed is rejected before serialization, and an invalid store is
+/// rejected rather than written.
+fn attach_optional_policies(
+    json: String,
+    policies: Option<&DistrictPolicyStore>,
+    seed: u64,
+) -> Result<String, (&'static str, String)> {
+    let Some(policies) = policies else {
+        return Ok(json);
+    };
+    if policies.seed != seed {
+        return Err((
+            "seed_mismatch",
+            format!(
+                "district policies use seed {} but this world is {seed}",
+                policies.seed
+            ),
+        ));
+    }
+    policies
+        .validate()
+        .map_err(|error| ("invalid_policies", error.to_string()))?;
+    let value: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|error| ("save_failed", format!("invalid save JSON: {error}")))?;
+    let value = attach_policies(value, policies)?;
+    serde_json::to_string_pretty(&value).map_err(|error| ("save_failed", error.to_string()))
+}
+
+/// Read the optional `policies` object from a world save.
+///
+/// Old saves have no object and load with the registry closed. A malformed
+/// document, a non-object envelope, a malformed object, an invalid registry,
+/// or a registry for another world seed is rejected so a failed load never
+/// installs a partial store.
+fn policies_from_world_json(
+    json: &str,
+    expected_seed: u64,
+) -> Result<Option<DistrictPolicyStore>, (&'static str, String)> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| ("invalid_json", error.to_string()))?;
+    if !value.is_object() {
+        return Err((
+            "invalid_json",
+            "the world save is not a JSON object".to_string(),
+        ));
+    }
+    let Some(raw) = value.get("policies") else {
+        return Ok(None);
+    };
+    let store: DistrictPolicyStore = serde_json::from_value(raw.clone())
+        .map_err(|error| ("invalid_policies", error.to_string()))?;
+    store
+        .validate()
+        .map_err(|error| ("invalid_policies", error.to_string()))?;
+    if store.seed != expected_seed {
+        return Err((
+            "seed_mismatch",
+            format!(
+                "district policies use seed {} but this world is {expected_seed}",
+                store.seed
+            ),
+        ));
+    }
+    Ok(Some(store))
+}
+
+/// Count and checksum reported by save/load when no registry is open.
+fn policy_summary(policies: Option<&DistrictPolicyStore>) -> (usize, u64) {
+    policies.map_or((0, 0), |store| (store.count(), store.checksum()))
+}
+
 fn attach_economy(json: &str, economy: &Economy) -> Result<String, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(json).map_err(|error| error.to_string())?;
@@ -10470,6 +10611,171 @@ mod tests {
         assert_eq!(state.count, 1);
         assert_eq!(state.policies, vec![policy]);
         assert_eq!(state.checksum, store.checksum());
+    }
+
+    #[test]
+    fn district_policy_world_save_round_trips_the_registry() {
+        let mut store = DistrictPolicyStore::new(2026);
+        let first = store
+            .create(&district_policy_request("Riverside"))
+            .expect("first");
+        let mut changed = district_policy_request("Old Town");
+        changed.construction_allowed = false;
+        changed
+            .blueprint_allowlist
+            .insert("base:workshop".to_string());
+        let second = store.create(&changed).expect("second");
+        let base = "{\n  \"format_version\": 1,\n  \"seed\": 2026,\n  \"next_id\": 1,\n  \"placements\": []\n}\n";
+
+        let json = attach_optional_policies(base.to_string(), Some(&store), 2026).expect("attach");
+        assert_ne!(json.as_bytes(), base.as_bytes());
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("save JSON");
+        assert_eq!(parsed["seed"], 2026);
+        assert_eq!(parsed["next_id"], 1);
+        assert_eq!(parsed["policies"]["seed"], 2026);
+        assert_eq!(
+            parsed["policies"]["policies"]
+                .as_object()
+                .map(|map| map.len()),
+            Some(2)
+        );
+
+        let loaded = policies_from_world_json(&json, 2026)
+            .expect("load")
+            .expect("registry");
+        assert_eq!(loaded, store);
+        assert_eq!(loaded.get(first.id), Some(&first));
+        assert_eq!(loaded.get(second.id), Some(&second));
+        assert_eq!(loaded.checksum(), store.checksum());
+        assert_eq!(loaded.next_id, 3);
+    }
+
+    #[test]
+    fn district_policy_world_load_accepts_an_old_save_without_policies() {
+        let base = "{\n  \"format_version\": 1,\n  \"seed\": 2026,\n  \"next_id\": 1,\n  \"placements\": []\n}\n";
+        assert_eq!(policies_from_world_json(base, 2026), Ok(None));
+    }
+
+    #[test]
+    fn district_policy_world_save_keeps_json_byte_identical_without_a_registry() {
+        let base = "{\n  \"format_version\": 1,\n  \"seed\": 2026,\n  \"next_id\": 1,\n  \"placements\": []\n}\n";
+        let saved = attach_optional_policies(base.to_string(), None, 2026).expect("save");
+        assert_eq!(saved.as_bytes(), base.as_bytes());
+        assert!(!saved.contains("policies"));
+    }
+
+    #[test]
+    fn district_policy_world_save_and_load_reject_a_foreign_seed() {
+        let mut store = DistrictPolicyStore::new(2026);
+        store
+            .create(&district_policy_request("Riverside"))
+            .expect("create");
+        let base = "{\n  \"seed\": 2026,\n  \"placements\": []\n}\n";
+        let attached =
+            attach_optional_policies(base.to_string(), Some(&store), 2026).expect("attach");
+        assert_eq!(
+            policies_from_world_json(&attached, 2026),
+            Ok(Some(store.clone()))
+        );
+
+        let (code, message) = attach_optional_policies(base.to_string(), Some(&store), 2027)
+            .expect_err("foreign save");
+        assert_eq!(code, "seed_mismatch");
+        assert!(message.contains("2026"), "{message}");
+
+        let (code, message) = policies_from_world_json(&attached, 2027).expect_err("foreign load");
+        assert_eq!(code, "seed_mismatch");
+        assert!(message.contains("2027"), "{message}");
+    }
+
+    #[test]
+    fn district_policy_world_save_and_load_reject_malformed_json() {
+        let mut store = DistrictPolicyStore::new(2026);
+        store
+            .create(&district_policy_request("Riverside"))
+            .expect("create");
+
+        let (code, _) = attach_optional_policies("{\"seed\":".to_string(), Some(&store), 2026)
+            .expect_err("malformed save");
+        assert_eq!(code, "save_failed");
+        let (code, _) = attach_optional_policies("[]".to_string(), Some(&store), 2026)
+            .expect_err("non-object save");
+        assert_eq!(code, "invalid_json");
+
+        let (code, _) = policies_from_world_json("{\"seed\":", 2026).expect_err("malformed load");
+        assert_eq!(code, "invalid_json");
+        let (code, _) = policies_from_world_json("[]", 2026).expect_err("non-object load");
+        assert_eq!(code, "invalid_json");
+        let (code, _) =
+            policies_from_world_json("{\"policies\": 7}", 2026).expect_err("scalar policies");
+        assert_eq!(code, "invalid_policies");
+        let (code, _) =
+            policies_from_world_json("{\"policies\": null}", 2026).expect_err("null policies");
+        assert_eq!(code, "invalid_policies");
+    }
+
+    #[test]
+    fn district_policy_world_save_and_load_reject_an_invalid_registry() {
+        let mut store = DistrictPolicyStore::new(2026);
+        store
+            .create(&district_policy_request("Riverside"))
+            .expect("create");
+        store.format_version = 99;
+        let (code, message) =
+            attach_optional_policies("{\"seed\": 2026}".to_string(), Some(&store), 2026)
+                .expect_err("invalid save");
+        assert_eq!(code, "invalid_policies");
+        assert!(message.contains("99"), "{message}");
+        let registry = serde_json::to_value(&store).expect("invalid store JSON");
+        let envelope = serde_json::json!({ "seed": 2026, "policies": registry }).to_string();
+        let (code, message) = policies_from_world_json(&envelope, 2026).expect_err("invalid load");
+        assert_eq!(code, "invalid_policies");
+        assert!(message.contains("99"), "{message}");
+
+        let mut bad_counter = DistrictPolicyStore::new(2026);
+        bad_counter.next_id = 0;
+        let registry = serde_json::to_value(&bad_counter).expect("bad counter JSON");
+        let envelope = serde_json::json!({ "seed": 2026, "policies": registry }).to_string();
+        let (code, message) =
+            policies_from_world_json(&envelope, 2026).expect_err("bad counter load");
+        assert_eq!(code, "invalid_policies");
+        assert!(message.contains("next_id"), "{message}");
+    }
+
+    #[test]
+    fn district_policy_summary_reports_a_stable_empty_checksum() {
+        assert_eq!(policy_summary(None), (0, 0));
+        let first = DistrictPolicyStore::new(2026);
+        let second = DistrictPolicyStore::new(2026);
+        assert!(first.is_empty());
+        assert_eq!(first.checksum(), second.checksum());
+        assert_eq!(policy_summary(Some(&first)), (0, first.checksum()));
+        assert_eq!(first.checksum(), DistrictPolicyStore::new(2026).checksum());
+    }
+
+    #[test]
+    fn district_policy_world_load_replaces_or_clears_the_live_registry() {
+        let mut previous = DistrictPolicyStore::new(2026);
+        previous
+            .create(&district_policy_request("Riverside"))
+            .expect("previous");
+        let mut live = Some(previous);
+        assert_eq!(live.as_ref().map(DistrictPolicyStore::count), Some(1));
+
+        let mut saved = DistrictPolicyStore::new(2026);
+        let replacement = saved
+            .create(&district_policy_request("Old Town"))
+            .expect("replacement");
+        let json = attach_optional_policies("{\"seed\": 2026}".to_string(), Some(&saved), 2026)
+            .expect("attach");
+        live = policies_from_world_json(&json, 2026).expect("load");
+        let installed = live.as_ref().expect("installed registry");
+        assert_eq!(installed, &saved);
+        assert_eq!(installed.count(), 1);
+        assert_eq!(installed.get(replacement.id), Some(&replacement));
+
+        live = policies_from_world_json("{\"seed\": 2026}", 2026).expect("old load");
+        assert!(live.is_none(), "an old save did not clear the registry");
     }
 
     #[test]
