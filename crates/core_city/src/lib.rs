@@ -45,6 +45,7 @@ pub mod named;
 pub mod pack;
 pub mod placement;
 pub mod policy;
+pub mod policy_effect;
 pub mod population;
 pub mod progression;
 pub mod registry;
@@ -131,6 +132,9 @@ pub use policy::{
     MAX_DISTRICT_POLICY_ID, MAX_DISTRICT_POLICY_NAME_CHARS, MAX_DISTRICT_POLICY_RADIUS_M,
     MAX_DISTRICT_SERVICE_FUNDING, MAX_DISTRICT_TAX_MULTIPLIER, MIN_DISTRICT_POLICY_RADIUS_M,
     MIN_DISTRICT_TAX_MULTIPLIER,
+};
+pub use policy_effect::{
+    apply_multiplier, clamp_base_rate, DistrictPolicyEffect, MAX_POLICY_EFFECT_BASE_RATE,
 };
 pub use population::{
     CityRuntime, Home, Household, PopulationError, PopulationReport, Workplace,
