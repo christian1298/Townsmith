@@ -168,6 +168,12 @@ Measured on the development machine:
 
 The build is a one-time camera-selection cost, not a per-frame cost. It is still above the 4 ms pathfinding budget: the next step is predecessor trees or lazy per-workplace route reconstruction, so 400 polylines do not each run a fresh Dijkstra. The flow-field precompute replaced the original pairwise `distance_m` scan (35.7 s → 737 ms).
 
+## 7.1 Crowd LOD in the F4 overlay
+
+The world-scene overlay splits routed citizens into near and far pools. Near keeps every routed position within **120 m** as a full-size marker; far sorts the remainder by citizen id and takes a uniform stride capped at **500** instances. The split and far-id FNV checksum are deterministic across refreshes. This is presentation culling only: the bridge still returns every routed position, and the scene smoke asserts near + far ≤ positions with `movement_lod=ok`.
+
+Limits: no GPU instancing beyond MultiMesh, no per-agent visibility query, no route-line LOD, and no FPS claim. It is not the 2,000-active-agent render gate.
+
 ## 8. Related
 
 - [[07 - Simulation and AI]] — tiers, tick budgets, and the 2,000-agent target.
