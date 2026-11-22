@@ -15,10 +15,17 @@ extends RefCounted
 ## - a key missing from the active locale falls back to English, then `!key!`;
 ## - placeholders are named (`{name}`, `{id}`, ...) and substituted verbatim.
 ##
+## Numbers are formatted here, not with `%d` / `%.0f` in UI code, so the group
+## and decimal separators follow the locale (`1,234.5` in EN, `1.234,5` in DE).
+## See `format_int` and `format_float`.
+##
 ## See `docs/67 - Named Citizens.md` and `docs/69 - Localization Audit.md`.
 
 const DEFAULT_LOCALE := "en"
 const SUPPORTED_LOCALES := ["en", "de"]
+## Rendered for NaN/INF; a value that cannot be read as a number renders as 0.
+const NOT_AVAILABLE := "—"
+const MAX_DECIMALS := 6
 
 const TABLES := {
 	"en": {
@@ -520,6 +527,37 @@ func t(key: String, params = {}) -> String:
 	return _apply_params(value, params)
 
 
+## Locale-aware whole number for HUD/dashboard values.
+## `1234` -> `1,234` (EN) / `1.234` (DE). Floats round to the nearest whole
+## number; NaN/INF render as `—`; anything unreadable renders as `0`.
+func format_int(value = 0) -> String:
+	if value is int:
+		return _group_digits(str(value))
+	if value is float:
+		if not is_finite(value):
+			return NOT_AVAILABLE
+		return _format_decimal(value, 0)
+	if value is String and value.is_valid_float():
+		return format_int(float(value))
+	return "0"
+
+
+## Locale-aware fixed-point number. `format_float(1234.5, 1)` ->
+## `1,234.5` (EN) / `1.234,5` (DE). `decimals` is clamped to 0..6; NaN/INF
+## render as `—`; anything unreadable renders as zero with the same decimals.
+func format_float(value = 0.0, decimals: int = 0) -> String:
+	var places := clampi(decimals, 0, MAX_DECIMALS)
+	if value is int:
+		return _format_decimal(float(value), places)
+	if value is float:
+		if not is_finite(value):
+			return NOT_AVAILABLE
+		return _format_decimal(value, places)
+	if value is String and value.is_valid_float():
+		return format_float(float(value), places)
+	return _format_decimal(0.0, places)
+
+
 func raw(key: String, locale: String = "") -> String:
 	var code := locale if not locale.is_empty() else _locale
 	var table: Dictionary = TABLES.get(code, {})
@@ -579,6 +617,55 @@ static func _resolve_locale(code: String) -> String:
 	if SUPPORTED_LOCALES.has(language):
 		return language
 	return DEFAULT_LOCALE
+
+
+func _format_decimal(value: float, decimals: int) -> String:
+	var text := (("%." + str(decimals) + "f") % value)
+	# `%.0f` prints `-0` for small negative values; show zero without a sign.
+	if text.begins_with("-") and _is_zero_text(text.substr(1)):
+		text = text.substr(1)
+	var parts := text.split(".")
+	var whole := _group_digits(parts[0])
+	if decimals <= 0:
+		return whole
+	var fraction: String = parts[1] if parts.size() > 1 else ""
+	if fraction.length() < decimals:
+		fraction += "0".repeat(decimals - fraction.length())
+	return whole + _decimal_separator() + fraction
+
+
+func _group_digits(text: String) -> String:
+	if text.begins_with("-"):
+		return "-" + _group_digits(text.substr(1))
+	if text.begins_with("+"):
+		return _group_digits(text.substr(1))
+	var digits := text if not text.is_empty() else "0"
+	var grouped := digits
+	if digits.length() > 3:
+		var parts := PackedStringArray()
+		var first := digits.length() % 3
+		if first > 0:
+			parts.append(digits.substr(0, first))
+		for index in range(first, digits.length(), 3):
+			parts.append(digits.substr(index, 3))
+		grouped = _group_separator().join(parts)
+	return grouped
+
+
+func _is_zero_text(text: String) -> bool:
+	for index in text.length():
+		var character := text.substr(index, 1)
+		if character != "0" and character != ".":
+			return false
+	return true
+
+
+func _decimal_separator() -> String:
+	return "," if _locale == "de" else "."
+
+
+func _group_separator() -> String:
+	return "." if _locale == "de" else ","
 
 
 func _apply_params(text: String, params) -> String:
