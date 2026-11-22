@@ -2,7 +2,7 @@
 title: World Placement Bridge
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-2
@@ -31,7 +31,7 @@ tags:
 | `world_placement_checksum()` | `String` | Stable 64-bit checksum, hex |
 | `world_clear_placements()` | `bool` | Clear placements; keep the seed |
 | `world_remove_placement(id)` | `bool` | Remove one placement |
-| `world_save(path)` | `Dictionary` | Write world JSON atomically; returns placement/construction/road/lot/delta counts and checksums |
+| `world_save(path)` | `Dictionary` | Write world JSON atomically: sibling `.tmp` + `sync_all` + rename, rotating a valid previous save to `.bak`; returns counts, checksums, `bytes`, `backup_rotated` |
 | `world_load(path, expected_seed)` | `Dictionary` | Read JSON for one seed, verify structure, packages, construction, roads, lots, settlements, and deltas, replace the stores |
 | `world_height_at(seed, x, z)` | `float` | One terrain sample for the preview; `-1.0` on invalid input |
 | `city_summary()` | `Dictionary` | Derived population, housing, jobs, employment, happiness; see [[49 - Phase 3 Slice Plan]] |
@@ -102,7 +102,7 @@ The sampler uses `WorldGenerator::height_at` on the 1 m grid, not the currently 
 }
 ```
 
-2B adds an optional `terrain_deltas` (hex `TSDL`) + `terrain_checksum` pair when edits exist; 2D adds a `construction` object when sites exist; 2E adds optional `roads`, `lots`, and `settlements` objects. Phase 3 adds optional `population`, `economy`, `industry`, and `utilities` objects; each is validated and replaced atomically with the rest of the world. See [[43 - Terrain Edits]], [[45 - Construction Sites]], [[46 - Road Network]], [[47 - Lots and Zoning]], and [[48 - Settlement Boundaries]].
+2B adds an optional `terrain_deltas` (hex `TSDL`) + `terrain_checksum` pair when edits exist; 2D adds a `construction` object when sites exist; 2E adds optional `roads`, `lots`, and `settlements` objects. Phase 3 adds optional `population`, `economy`, `industry`, and `utilities` objects; each is validated and replaced atomically with the rest of the world. At the file layer, `world_save` writes a sibling temp file, syncs it, rotates a structurally valid previous save to `<path>.bak`, then renames the temp over the primary. `world_load` falls back to `.bak` when the primary is missing or invalid JSON, and returns `recovered_from_backup`, `backup`, and `backup_checksum`; store/schema validation failures still reject rather than silently falling back. See [[43 - Terrain Edits]], [[45 - Construction Sites]], [[46 - Road Network]], [[47 - Lots and Zoning]], and [[48 - Settlement Boundaries]].
 
 `world_load` rejects:
 

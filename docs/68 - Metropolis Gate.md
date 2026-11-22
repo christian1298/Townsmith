@@ -443,7 +443,7 @@ Measured on a 32-thread developer machine, release build, tmpfs:
 
 Both directions are far under the 30 s target. `--smoke` uses 25,000 placements / 100,000 population / 2,000 named and runs twice; smoke checksum `b9ecb8d06628eb68`, save 26.5 ms / load 69.9 ms, 18.5 MB JSON, 60 MB RSS.
 
-This is the **full core-world envelope**, but it is still not the Godot `world_save` path: `VarDictionary`/engine overhead, disk atomicity and durability, compression, VRAM, streaming, and rendering remain out. `MAX_HOUSEHOLDS` and `MAX_SITES` are raised to 1,000,000 for this shape. It substantially closes the save/load timing part of G-07 but does not close the gate by itself.
+This is the **full core-world envelope**, but it is still not the Godot `world_save` path: `VarDictionary`/engine overhead, compression, VRAM, streaming, and rendering remain out. The bridge file layer now covers atomic replacement and a one-step `.bak` recovery; store-level schema rejection is unchanged. `MAX_HOUSEHOLDS` and `MAX_SITES` are raised to 1,000,000 for this shape. It substantially closes the save/load timing part of G-07 but does not close the gate by itself.
 
 ### 7.5 CPU setup harness
 
