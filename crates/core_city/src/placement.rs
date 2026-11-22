@@ -870,7 +870,11 @@ impl PlacementStore {
     }
 
     /// Validate records loaded from disk without a terrain sampler.
-    fn validate_loaded(&self) -> Result<(), PlacementError> {
+    ///
+    /// This checks recorded ids, counters, geometry, stats, and optional
+    /// structure metadata. It does not re-sample terrain or overlap; use a
+    /// rebuild index and [`Self::validate_indexed`] for edits after a load.
+    pub fn validate_loaded(&self) -> Result<(), PlacementError> {
         if self.format_version != WORLD_SAVE_FORMAT_VERSION {
             return Err(PlacementError::UnsupportedVersion {
                 version: self.format_version,
