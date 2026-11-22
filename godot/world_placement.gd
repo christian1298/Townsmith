@@ -1942,40 +1942,40 @@ func _update_hud() -> void:
 	var research_text := "—"
 	if bool(research.get("open", false)):
 		research_text = i18n.t("base.ui.hud.research", {
-			"points": roundi(float(research.get("points", 0.0))),
-			"completed": int(research.get("completed_count", 0)),
-			"total": int(research.get("node_count", 0)),
-			"rate": "%.1f" % float(research.get("rate_per_day", 0.0)),
+			"points": i18n.format_int(roundi(float(research.get("points", 0.0)))),
+			"completed": i18n.format_int(int(research.get("completed_count", 0))),
+			"total": i18n.format_int(int(research.get("node_count", 0))),
+			"rate": i18n.format_float(float(research.get("rate_per_day", 0.0)), 1),
 		})
 	var tutorial: Dictionary = core.tutorial_state(SEED)
 	var tutorial_text := "—"
 	if bool(tutorial.get("ok", false)):
 		if bool(tutorial.get("complete", false)):
 			tutorial_text = i18n.t("base.ui.hud.tutorial_complete", {
-				"completed": int(tutorial.get("completed", 0)),
-				"total": int(tutorial.get("total", 0)),
+				"completed": i18n.format_int(int(tutorial.get("completed", 0))),
+				"total": i18n.format_int(int(tutorial.get("total", 0))),
 			})
 		else:
 			tutorial_text = i18n.t("base.ui.hud.tutorial_next", {
-				"completed": int(tutorial.get("completed", 0)),
-				"total": int(tutorial.get("total", 0)),
+				"completed": i18n.format_int(int(tutorial.get("completed", 0))),
+				"total": i18n.format_int(int(tutorial.get("total", 0))),
 				"title": str(tutorial.get("current_title", "?")),
 			})
 	var economy: Dictionary = core.economy_state()
 	var treasury_text := "—"
 	if bool(economy.get("open", false)):
 		var net := float(economy.get("daily_net", 0.0))
-		var net_text := ("+" if net >= 0.0 else "") + "%.0f" % net
+		var net_text: String = ("+" if net >= 0.0 else "") + i18n.format_float(net, 0)
 		treasury_text = i18n.t("base.ui.hud.treasury_value", {
-			"balance": "%.0f" % float(economy.get("balance", 0.0)),
+			"balance": i18n.format_float(float(economy.get("balance", 0.0)), 0),
 			"net": net_text,
-			"tax": "%.0f" % float(economy.get("tax_per_resident_per_day", 0.0)),
-			"business": "%.0f" % float(economy.get("business_tax_per_job_per_day", 0.0)),
+			"tax": i18n.format_float(float(economy.get("tax_per_resident_per_day", 0.0)), 0),
+			"business": i18n.format_float(float(economy.get("business_tax_per_job_per_day", 0.0)), 0),
 		})
 		if float(economy.get("debt", 0.0)) > 0.001:
 			treasury_text = i18n.t("base.ui.hud.treasury_debt", {
 				"value": treasury_text,
-				"debt": "%.0f" % float(economy.get("debt", 0.0)),
+				"debt": i18n.format_float(float(economy.get("debt", 0.0)), 0),
 			})
 		if bool(economy.get("bankrupt", false)):
 			treasury_text = i18n.t("base.ui.hud.treasury_bankrupt", {"value": treasury_text})
@@ -1983,29 +1983,29 @@ func _update_hud() -> void:
 	var industry_text := "—"
 	if bool(industry.get("open", false)):
 		industry_text = i18n.t("base.ui.hud.industry_value", {
-			"wood": "%.0f" % float(industry.get("wood", 0.0)),
-			"food": "%.0f" % float(industry.get("food", 0.0)),
-			"hides": "%.0f" % float(industry.get("hides", 0.0)),
-			"supply": "%.0f" % (float(industry.get("food_supply", 0.0)) * 100.0),
+			"wood": i18n.format_float(float(industry.get("wood", 0.0)), 0),
+			"food": i18n.format_float(float(industry.get("food", 0.0)), 0),
+			"hides": i18n.format_float(float(industry.get("hides", 0.0)), 0),
+			"supply": i18n.format_float(float(industry.get("food_supply", 0.0)) * 100.0, 0),
 		})
 	var utilities: Dictionary = core.utilities_state()
 	var utilities_text := "—"
 	if bool(utilities.get("open", false)):
 		utilities_text = i18n.t("base.ui.hud.utilities_value", {
-			"water": "%.0f" % (float(utilities.get("water_supply", 0.0)) * 100.0),
-			"water_sites": int(utilities.get("water_sites", 0)),
-			"power": "%.0f" % (float(utilities.get("power_supply", 0.0)) * 100.0),
-			"power_sites": int(utilities.get("power_sites", 0)),
+			"water": i18n.format_float(float(utilities.get("water_supply", 0.0)) * 100.0, 0),
+			"water_sites": i18n.format_int(int(utilities.get("water_sites", 0))),
+			"power": i18n.format_float(float(utilities.get("power_supply", 0.0)) * 100.0, 0),
+			"power_sites": i18n.format_int(int(utilities.get("power_sites", 0))),
 		})
 	var services: Dictionary = core.services_state()
 	var service_text := "—"
 	if bool(services.get("open", false)):
 		service_text = i18n.t("base.ui.hud.civic_value", {
-			"school": "%.0f" % (float(services.get("school_supply", 0.0)) * 100.0),
-			"clinic": "%.0f" % (float(services.get("clinic_supply", 0.0)) * 100.0),
-			"fire": "%.0f" % (float(services.get("fire_supply", 0.0)) * 100.0),
-			"police": "%.0f" % (float(services.get("police_supply", 0.0)) * 100.0),
-			"research": "%.1f" % float(services.get("research_per_day", 0.0)),
+			"school": i18n.format_float(float(services.get("school_supply", 0.0)) * 100.0, 0),
+			"clinic": i18n.format_float(float(services.get("clinic_supply", 0.0)) * 100.0, 0),
+			"fire": i18n.format_float(float(services.get("fire_supply", 0.0)) * 100.0, 0),
+			"police": i18n.format_float(float(services.get("police_supply", 0.0)) * 100.0, 0),
+			"research": i18n.format_float(float(services.get("research_per_day", 0.0)), 1),
 		})
 	var traffic: Dictionary = traffic_stats
 	if traffic.is_empty():
@@ -2013,19 +2013,19 @@ func _update_hud() -> void:
 	var traffic_text := "—"
 	if bool(traffic.get("open", false)):
 		traffic_text = i18n.t("base.ui.hud.traffic_value", {
-			"nodes": int(traffic.get("nodes", 0)),
-			"edges": int(traffic.get("edges", 0)),
-			"length": "%.0f" % float(traffic.get("total_length_m", 0.0)),
-			"cars": traffic_cars.size(),
+			"nodes": i18n.format_int(int(traffic.get("nodes", 0))),
+			"edges": i18n.format_int(int(traffic.get("edges", 0))),
+			"length": i18n.format_float(float(traffic.get("total_length_m", 0.0)), 0),
+			"cars": i18n.format_int(traffic_cars.size()),
 		})
 	var happiness_text := "—"
 	var needs_text := "—"
 	if int(city.get("population", 0)) > 0:
-		happiness_text = "%.0f%%" % (float(city.get("happiness", 0.0)) * 100.0)
+		happiness_text = i18n.format_float(float(city.get("happiness", 0.0)) * 100.0, 0) + "%"
 		needs_text = i18n.t("base.ui.hud.needs_value", {
-			"food": "%.0f" % (float(city.get("food", 0.0)) * 100.0),
-			"water": "%.0f" % (float(city.get("water", 0.0)) * 100.0),
-			"rest": "%.0f" % (float(city.get("rest", 0.0)) * 100.0),
+			"food": i18n.format_float(float(city.get("food", 0.0)) * 100.0, 0),
+			"water": i18n.format_float(float(city.get("water", 0.0)) * 100.0, 0),
+			"rest": i18n.format_float(float(city.get("rest", 0.0)) * 100.0, 0),
 		})
 	var status_lines: Array[String] = [
 		selected_line,
@@ -2036,26 +2036,26 @@ func _update_hud() -> void:
 			"state": state,
 		}),
 		i18n.t("base.ui.hud.placements", {
-			"placements": core.world_placement_count(),
-			"roads": core.road_count(),
-			"lots": core.lot_count(),
-			"settlements": core.settlement_count(),
-			"edits": core.terrain_delta_count(),
+			"placements": i18n.format_int(core.world_placement_count()),
+			"roads": i18n.format_int(core.road_count()),
+			"lots": i18n.format_int(core.lot_count()),
+			"settlements": i18n.format_int(core.settlement_count()),
+			"edits": i18n.format_int(core.terrain_delta_count()),
 		}),
 		i18n.t("base.ui.hud.city", {
-			"population": int(city.get("population", 0)),
-			"housing": int(city.get("housing_capacity", 0)),
-			"vacant": int(city.get("vacancies", 0)),
-			"jobs": int(city.get("jobs", 0)),
-			"employed": int(city.get("employed", 0)),
+			"population": i18n.format_int(int(city.get("population", 0))),
+			"housing": i18n.format_int(int(city.get("housing_capacity", 0))),
+			"vacant": i18n.format_int(int(city.get("vacancies", 0))),
+			"jobs": i18n.format_int(int(city.get("jobs", 0))),
+			"employed": i18n.format_int(int(city.get("employed", 0))),
 			"happiness": happiness_text,
 		}),
 		i18n.t("base.ui.hud.age", {"value": age_text}),
 		i18n.t("base.ui.hud.research_line", {"value": research_text}),
 		i18n.t("base.ui.hud.tutorial_line", {"value": tutorial_text}),
 		i18n.t("base.ui.hud.commute", {
-			"commute": "%.0f" % float(city.get("average_commute_m", 0.0)),
-			"wages": "%.0f" % float(city.get("daily_wages", 0.0)),
+			"commute": i18n.format_float(float(city.get("average_commute_m", 0.0)), 0),
+			"wages": i18n.format_float(float(city.get("daily_wages", 0.0)), 0),
 		}),
 		i18n.t("base.ui.hud.needs", {"needs": needs_text}),
 		i18n.t("base.ui.hud.treasury", {"treasury": treasury_text}),
@@ -2064,12 +2064,12 @@ func _update_hud() -> void:
 		i18n.t("base.ui.hud.civic", {"value": service_text}),
 		i18n.t("base.ui.hud.traffic", {"value": traffic_text}),
 		i18n.t("base.ui.hud.construction", {
-			"active": int(construction.get("active", 0)),
-			"stalled": int(construction.get("stalled", 0)),
-			"crew": int(construction.get("effective_crew", 0)),
-			"capacity": int(construction.get("crew_capacity", 0)),
-			"trades": int(construction.get("trades", []).size()),
-			"materials": int(construction.get("materials_stock", 0)),
+			"active": i18n.format_int(int(construction.get("active", 0))),
+			"stalled": i18n.format_int(int(construction.get("stalled", 0))),
+			"crew": i18n.format_int(int(construction.get("effective_crew", 0))),
+			"capacity": i18n.format_int(int(construction.get("crew_capacity", 0))),
+			"trades": i18n.format_int(int(construction.get("trades", []).size())),
+			"materials": i18n.format_int(int(construction.get("materials_stock", 0))),
 			"save": save_path,
 		}),
 	]
@@ -2082,8 +2082,8 @@ func _update_hud() -> void:
 	status_label.text = "\n".join(status_lines)
 	if materialization_visible:
 		status_label.text += "\n" + i18n.t("base.ui.hud.citizens_near", {
-			"active": materialization_counts.x,
-			"detailed": materialization_counts.y,
+			"active": i18n.format_int(materialization_counts.x),
+			"detailed": i18n.format_int(materialization_counts.y),
 		})
 
 func _toggle_citizen_panel() -> bool:
@@ -2258,18 +2258,19 @@ func _update_dashboard() -> void:
 	var happiness := "—"
 	var needs := "—"
 	if population > 0:
-		happiness = "%.0f%%" % (float(city.get("happiness", 0.0)) * 100.0)
+		happiness = i18n.format_float(float(city.get("happiness", 0.0)) * 100.0, 0) + "%"
 		needs = i18n.t("base.ui.dashboard.body.needs_values", {
-			"food": "%.0f" % (float(city.get("food", 0.0)) * 100.0),
-			"water": "%.0f" % (float(city.get("water", 0.0)) * 100.0),
-			"rest": "%.0f" % (float(city.get("rest", 0.0)) * 100.0),
+			"food": i18n.format_float(float(city.get("food", 0.0)) * 100.0, 0),
+			"water": i18n.format_float(float(city.get("water", 0.0)) * 100.0, 0),
+			"rest": i18n.format_float(float(city.get("rest", 0.0)) * 100.0, 0),
 		})
 	var treasury: String = i18n.t("base.ui.dashboard.body.treasury_closed")
 	if bool(economy.get("open", false)):
+		var net := float(economy.get("daily_net", 0.0))
 		treasury = i18n.t("base.ui.dashboard.body.treasury", {
-			"balance": "%.0f" % float(economy.get("balance", 0.0)),
-			"net": "%+.0f" % float(economy.get("daily_net", 0.0)),
-			"debt": "%.0f" % float(economy.get("debt", 0.0)),
+			"balance": i18n.format_float(float(economy.get("balance", 0.0)), 0),
+			"net": ("+" if net >= 0.0 else "") + i18n.format_float(net, 0),
+			"debt": i18n.format_float(float(economy.get("debt", 0.0)), 0),
 		})
 		if bool(economy.get("bankrupt", false)):
 			treasury = i18n.t("base.ui.dashboard.body.treasury_bankrupt", {
@@ -2278,40 +2279,40 @@ func _update_dashboard() -> void:
 	var utilities_line: String = i18n.t("base.ui.dashboard.body.utilities_closed")
 	if bool(industry.get("open", false)) or bool(utilities.get("open", false)):
 		utilities_line = i18n.t("base.ui.dashboard.body.utilities", {
-			"food": "%.0f" % (float(industry.get("food_supply", 0.0)) * 100.0),
-			"water": "%.0f" % (float(utilities.get("water_supply", 0.0)) * 100.0),
-			"power": "%.0f" % (float(utilities.get("power_supply", 0.0)) * 100.0),
+			"food": i18n.format_float(float(industry.get("food_supply", 0.0)) * 100.0, 0),
+			"water": i18n.format_float(float(utilities.get("water_supply", 0.0)) * 100.0, 0),
+			"power": i18n.format_float(float(utilities.get("power_supply", 0.0)) * 100.0, 0),
 		})
 	var civic_line: String = i18n.t("base.ui.dashboard.body.civic_closed")
 	if bool(services.get("open", false)):
 		civic_line = i18n.t("base.ui.dashboard.body.civic", {
-			"school": "%.0f" % (float(services.get("school_supply", 0.0)) * 100.0),
-			"clinic": "%.0f" % (float(services.get("clinic_supply", 0.0)) * 100.0),
-			"fire": "%.0f" % (float(services.get("fire_supply", 0.0)) * 100.0),
-			"police": "%.0f" % (float(services.get("police_supply", 0.0)) * 100.0),
-			"research": "%.1f" % float(services.get("research_per_day", 0.0)),
+			"school": i18n.format_float(float(services.get("school_supply", 0.0)) * 100.0, 0),
+			"clinic": i18n.format_float(float(services.get("clinic_supply", 0.0)) * 100.0, 0),
+			"fire": i18n.format_float(float(services.get("fire_supply", 0.0)) * 100.0, 0),
+			"police": i18n.format_float(float(services.get("police_supply", 0.0)) * 100.0, 0),
+			"research": i18n.format_float(float(services.get("research_per_day", 0.0)), 1),
 		})
 	var roads: String = i18n.t("base.ui.dashboard.body.roads_closed")
 	if bool(traffic.get("open", false)):
 		roads = i18n.t("base.ui.dashboard.body.roads", {
-			"nodes": int(traffic.get("nodes", 0)),
-			"edges": int(traffic.get("edges", 0)),
-			"length": "%.0f" % float(traffic.get("total_length_m", 0.0)),
-			"components": int(traffic.get("components", 0)),
+			"nodes": i18n.format_int(int(traffic.get("nodes", 0))),
+			"edges": i18n.format_int(int(traffic.get("edges", 0))),
+			"length": i18n.format_float(float(traffic.get("total_length_m", 0.0)), 0),
+			"components": i18n.format_int(int(traffic.get("components", 0))),
 		})
 	var text := "[b]%s[/b]\n%s\n" % [
 		i18n.t("base.ui.dashboard.section.population"),
 		i18n.t("base.ui.dashboard.body.population", {
-			"residents": population,
-			"occupied": population,
-			"housing": int(city.get("housing_capacity", 0)),
-			"vacant": int(city.get("vacancies", 0)),
+			"residents": i18n.format_int(population),
+			"occupied": i18n.format_int(population),
+			"housing": i18n.format_int(int(city.get("housing_capacity", 0))),
+			"vacant": i18n.format_int(int(city.get("vacancies", 0))),
 		}),
 	]
 	if materialization_visible:
 		text += i18n.t("base.ui.dashboard.body.citizens_near", {
-			"active": materialization_counts.x,
-			"detailed": materialization_counts.y,
+			"active": i18n.format_int(materialization_counts.x),
+			"detailed": i18n.format_int(materialization_counts.y),
 		}) + "\n"
 	var age_line := "—"
 	if bool(progression.get("ok", false)):
@@ -2324,17 +2325,17 @@ func _update_dashboard() -> void:
 			age_line = i18n.t("base.ui.dashboard.body.age_next", {
 				"age": str(progression.get("age", "?")),
 				"next": next_age,
-				"threshold": int(progression.get("next_threshold", 0)),
-				"progress": roundi(float(progression.get("progress", 0.0)) * 100.0),
+				"threshold": i18n.format_int(int(progression.get("next_threshold", 0))),
+				"progress": i18n.format_int(roundi(float(progression.get("progress", 0.0)) * 100.0)),
 			})
 	text += "[b]%s[/b]\n%s\n" % [i18n.t("base.ui.dashboard.section.age"), age_line]
 	var research_line := "—"
 	if bool(research.get("open", false)):
 		research_line = i18n.t("base.ui.dashboard.body.research", {
-			"points": roundi(float(research.get("points", 0.0))),
-			"rate": "%.1f" % float(research.get("rate_per_day", 0.0)),
-			"completed": int(research.get("completed_count", 0)),
-			"total": int(research.get("node_count", 0)),
+			"points": i18n.format_int(roundi(float(research.get("points", 0.0)))),
+			"rate": i18n.format_float(float(research.get("rate_per_day", 0.0)), 1),
+			"completed": i18n.format_int(int(research.get("completed_count", 0))),
+			"total": i18n.format_int(int(research.get("node_count", 0))),
 		})
 	text += "[b]%s[/b]\n%s\n" % [i18n.t("base.ui.dashboard.section.research"), research_line]
 	var tutorial: Dictionary = core.tutorial_state(SEED)
@@ -2342,23 +2343,23 @@ func _update_dashboard() -> void:
 	if bool(tutorial.get("ok", false)):
 		if bool(tutorial.get("complete", false)):
 			tutorial_line = i18n.t("base.ui.dashboard.body.tutorial_complete", {
-				"completed": int(tutorial.get("completed", 0)),
-				"total": int(tutorial.get("total", 0)),
+				"completed": i18n.format_int(int(tutorial.get("completed", 0))),
+				"total": i18n.format_int(int(tutorial.get("total", 0))),
 			})
 		else:
 			tutorial_line = i18n.t("base.ui.dashboard.body.tutorial_next", {
-				"completed": int(tutorial.get("completed", 0)),
-				"total": int(tutorial.get("total", 0)),
+				"completed": i18n.format_int(int(tutorial.get("completed", 0))),
+				"total": i18n.format_int(int(tutorial.get("total", 0))),
 				"title": str(tutorial.get("current_title", "?")),
 			})
 	text += "[b]%s[/b]\n%s\n" % [i18n.t("base.ui.dashboard.section.tutorial"), tutorial_line]
 	text += "[b]%s[/b]\n%s\n" % [
 		i18n.t("base.ui.dashboard.section.work"),
 		i18n.t("base.ui.dashboard.body.work", {
-			"filled": int(city.get("employed", 0)),
-			"jobs": int(city.get("jobs", 0)),
-			"unemployed": int(city.get("unemployed", 0)),
-			"commute": "%.0f" % float(city.get("average_commute_m", 0.0)),
+			"filled": i18n.format_int(int(city.get("employed", 0))),
+			"jobs": i18n.format_int(int(city.get("jobs", 0))),
+			"unemployed": i18n.format_int(int(city.get("unemployed", 0))),
+			"commute": i18n.format_float(float(city.get("average_commute_m", 0.0)), 0),
 		}),
 	]
 	text += "[b]%s[/b]\n%s\n%s\n" % [
@@ -2375,9 +2376,9 @@ func _update_dashboard() -> void:
 		treasury,
 		i18n.t("base.ui.dashboard.section.industry"),
 		i18n.t("base.ui.dashboard.body.industry", {
-			"wood": "%.0f" % float(industry.get("wood", 0.0)),
-			"food": "%.0f" % float(industry.get("food", 0.0)),
-			"hides": "%.0f" % float(industry.get("hides", 0.0)),
+			"wood": i18n.format_float(float(industry.get("wood", 0.0)), 0),
+			"food": i18n.format_float(float(industry.get("food", 0.0)), 0),
+			"hides": i18n.format_float(float(industry.get("hides", 0.0)), 0),
 		}),
 	]
 	text += "[b]%s[/b]\n%s\n[b]%s[/b]\n%s\n" % [
@@ -2385,9 +2386,9 @@ func _update_dashboard() -> void:
 		roads,
 		i18n.t("base.ui.dashboard.section.construction"),
 		i18n.t("base.ui.dashboard.body.construction", {
-			"active": int(construction.get("active", 0)),
-			"stalled": int(construction.get("stalled", 0)),
-			"completed": int(city.get("completed_buildings", 0)),
+			"active": i18n.format_int(int(construction.get("active", 0))),
+			"stalled": i18n.format_int(int(construction.get("stalled", 0))),
+			"completed": i18n.format_int(int(city.get("completed_buildings", 0))),
 		}),
 	]
 	text += "\n[b]%s[/b]\n" % i18n.t("base.ui.dashboard.section.advisor")
@@ -3786,8 +3787,15 @@ func _run_scene_smoke() -> void:
 				modal_i18n_ok = modal_i18n_ok and modal_label.text.contains("Select a building first")
 				i18n.set_locale("de")
 				number_i18n_ok = i18n.format_int(1000) == "1.000" and i18n.format_float(1234.5, 1) == "1.234,5"
+				var expected_de: String = i18n.format_float(float(economy_after.get("balance", 0.0)), 0)
+				_update_dashboard()
+				number_i18n_ok = number_i18n_ok and dashboard_text.text.contains(expected_de)
 				i18n.set_locale("en")
 				number_i18n_ok = number_i18n_ok and i18n.format_int(1000) == "1,000" and i18n.format_float(1234.5, 1) == "1,234.5"
+				var expected_en: String = i18n.format_float(float(economy_after.get("balance", 0.0)), 0)
+				_update_dashboard()
+				number_i18n_ok = number_i18n_ok and dashboard_text.text.contains(expected_en)
+				number_i18n_ok = number_i18n_ok and expected_de != expected_en
 				selected_id = saved_selected
 				_set_modal("", false)
 				var balance_before_loan := float(economy_after.get("balance", 0.0))
