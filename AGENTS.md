@@ -339,6 +339,9 @@ GODOT=/path/to/godot ./scripts/smoke_city.sh
 
 # Player-facing benchmark screen over existing Early/Mid/Late summaries.
 # Default is report-only; `--run` executes the three scenes sequentially.
+# Read-only reference gate card: missing -> insufficient; present -> evaluator
+# pass/fail. Results are optional and not committed; it never runs C1/C2, writes
+# a result, or converts an F1-F4 fallback into a pass. Not a gate result.
 # Neither path is the 1M gate.
 GODOT=/path/to/godot ./scripts/smoke_bench_screen.sh
 GODOT=/path/to/godot ./scripts/smoke_bench_live.sh
@@ -349,6 +352,10 @@ GODOT=/path/to/godot ./scripts/smoke_playtest_capture.sh
 ./scripts/check_playtest_report.sh                  # docs/playtest/*.json
 ./scripts/check_playtest_report.sh path/to/q101_capture.json --markdown /tmp/q101_summary.md
 "${GODOT:-godot}" --path godot res://bench_screen.tscn -- --output benchmarks/results/bench_screen_report.json
+# Gate card against another result directory (smoke uses temp fixtures)
+"${GODOT:-godot}" --path godot res://bench_screen.tscn -- --gate-dir benchmarks/results/gate
+# smoke_bench_screen.sh covers missing/present-pass/present-fail gate fixtures and
+# prints BENCH_SCREEN_GATE + BENCH_SCREEN_GATE_EVAL render=... cohort=...
 # Headless MultiMesh setup harness for 10k/50k/250k boxes (not FPS evidence)
 GODOT=/path/to/godot ./scripts/smoke_metropolis_render.sh
 GODOT=/path/to/godot ./scripts/bench_metropolis_gate.sh --setup-only
