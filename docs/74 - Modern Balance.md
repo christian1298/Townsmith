@@ -71,6 +71,18 @@ The same model as [[72 - Industrial Balance#2.1 Phased financing projection|the 
 
 The shipping cap, not tax revenue at 20/4, is the binding constraint: at no point in the model can the city fund a 50-building batch from the 600,000 available.
 
+
+#### Live phase-driven model
+
+`financing --live` replaces the fixed 50-building batch assumption with the real phase schedule: one building placed at a time, campaign clock (1 game day = 60 s), 24 hourly construction ticks per day, phase installments settled each hour (borrowing up to the debt cap), and one economy tick per day from completed capacity only. It stops at completion, bankruptcy, or the 200-year cap.
+
+| Scenario | Result | Completed | Peak debt | Max financing | Interest | Insolvent days | Bankrupt day |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Industrial | bankrupt | 8 / 2,917 | 491,781 (day 15) | 478,214 | 15,018 | 51 | 74 |
+| Modern | bankrupt | 6 / 18,750 | 494,521 (day 10) | 504,764 | 13,782 | 48 | 65 |
+
+Live checksum `acb418b780e0b076`; the default projection checksum remains `5b3a8777b0fe999e`. D-029 is still Proposed; this is evidence, not a balance pass.
+
 ## 3. Problems found
 
 1. **Default taxes cannot run a Modern city.** Wages alone are 3,000,000/day; building upkeep is 93,750/day; utility/service site upkeep is **4,965/day**; loan service is 800/day. Resident + business taxes at 8/4 produce 1,800,000/day, a **1,299,515/day** deficit. The city crosses the −50,000 bankruptcy threshold after **8 game hours**.
