@@ -60,6 +60,8 @@ pub struct FlowField {
 
 `RoadGraph::add_segment(&RoadSegment)` appends one validated segment to an existing graph: it splits existing edges at new endpoints/crossings, inserts the new nodes/edges in sorted order, and updates the nearest-node grid incrementally. `extend_segments(&[RoadSegment])` appends a batch and stops on the first error. The result is checksum-, node-, route-, and nearest-node-identical to a fresh `build` over the combined segment list. Removals and geometry changes still require a rebuild.
 
+`RoadGraph::change_version()` is a cheap deterministic token over the graph's construction lineage: a fresh build captures its content checksum, and each effective append advances the token. `FlowFieldCache` entries store `(field, graph_version)`; `get_or_build` reuses only when the version matches, otherwise it rebuilds in place. `get_for` is the version-checked read; raw `get` is the unchecked display path. `invalidate()` drops fields but keeps cumulative hit/miss counters.
+
 `RoadGraph::build(&[RoadSegment])`:
 
 1. Index horizontal segments by Z, vertical segments by X, and every endpoint by its X and Z.
@@ -203,25 +205,27 @@ Default 64 × 64 grid, 16 m spacing, 1,000 queries, 64 goal fields, four cache p
 | Average pair distance | 672.4 m |
 | Average flow distance | 1,017.3 m |
 
-The pair-query path runs Dijkstra per call and snaps endpoints through the uniform-grid nearest-node index. The index is 14× faster than the exact linear reference on this fixture (0.35 ms vs 4.90 ms per 1,000 lookups) and returns bit-identical nodes/distances; `nearest_node_linear` is kept as the test and benchmark reference. Flow fields are much faster for batched origins. The `FlowFieldCache` is a bounded, deterministic FIFO keyed by exact goal; it is benchmark-only until the road graph has a change version, because a stale cached field after a road edit would be a correctness hazard. The grid checksum is `4ba17cb887e8d9c5`; the flow checksum is `bad91013922d1e27`. The 64-road append case is only ~1.09× faster than a rebuild because each append splits dozens of crossing edges; the single-edit case is the representative bridge path and is ~40× faster. Both append results match the fresh-build checksum `38fe2aec6a85da95` on the 192-road fixture.
+The pair-query path runs Dijkstra per call and snaps endpoints through the uniform-grid nearest-node index. The index is 14× faster than the exact linear reference on this fixture (0.35 ms vs 4.90 ms per 1,000 lookups) and returns bit-identical nodes/distances; `nearest_node_linear` is kept as the test and benchmark reference. Flow fields are much faster for batched origins. The `FlowFieldCache` is a bounded, deterministic FIFO now keyed by `(graph change version, exact goal)`, so an appended road forces a rebuild instead of serving a stale field; the rebuild is in place and the second query hits. The grid checksum is `4ba17cb887e8d9c5`; the flow checksum is `bad91013922d1e27`. The 64-road append case is only ~1.09× faster than a rebuild because each append splits dozens of crossing edges; the single-edit case is the representative bridge path and is ~40× faster. Both append results match the fresh-build checksum `38fe2aec6a85da95` on the 192-road fixture.
+
+The flow-cache edit fixture reports base field `289dab005fcdfbac` (3 reachable nodes), edited/refreshed field `76d0cd9e5a5916ca` (5 nodes, equal to a fresh build), one rebuild, a second-query hit, and ~0.001 ms rebuild time. It is included in the `traffic` bench JSON as `flow_cache_graph_edits`.
 
 These are microbenchmarks on one machine, not the 1M/60 FPS gate.
 
 ## 7. Tests
 
-- `core_city::traffic`: 41 tests — graph construction, flow fields, route polylines, walking legs, invalid/disconnected pairs, deterministic turn tie-break, 9 nearest-node index-vs-linear equivalence cases, and 10 incremental append/extend cases.
+- `core_city::traffic`: 47 tests — graph construction, flow fields, route polylines, walking legs, invalid/disconnected pairs, deterministic turn tie-break, 9 nearest-node index-vs-linear equivalence cases, 10 incremental append/extend cases, and 6 graph-version/flow-cache invalidation cases.
 - `core_city::route_cache`: 5 tests — hit/reuse, LRU eviction, disconnected/invalid pairs not cached, checksums, capacity bounds.
 - `core_city::population`: road commute and disconnected fallback.
-- `townsmith-bench`: 7 city-loop tests (small city and a multi-row commute) and 3 traffic-grid tests.
+- `townsmith-bench`: 7 city-loop tests (small city and a multi-row commute) and 4 traffic-grid tests.
 - World scene smoke: `traffic=ok`, graph stats, one car, movement, save/load rebuild.
-- Workspace: **651 tests + 2 doctests (653 passed)**; core_city **340**, core_structure **19**, bridge **72**.
+- Workspace on this branch: **658 tests + 2 doctests (660 passed)**; core_city **346**, bridge **72**.
 
 ## 8. Limits
 
 - Graph build scans each segment's integer span; a 512 m segment is 512 lookups. The cap is 10,000 roads / 20,000 nodes.
 - Nearest-node lookup uses a deterministic 32 m uniform grid with an expanding-ring proof and a linear fallback for out-of-bounds or pathological queries. Appends update that grid in place; a removal or geometry change still rebuilds the whole graph and index. The bridge caches the derived graph by `(seed, road-store checksum)`, so repeated route/path calls reuse it until a road edit.
 - Width, lanes, direction, and variable speed are ignored for routing. Travel time uses one flat 8 m/s speed and is display-only.
-- The bridge caches one `Arc<RoadGraph>` by `(seed, road-store checksum)`; a road edit rebuilds it once, then `traffic_state`, `route_preview`, and `citizen_movement` reuse it. There is no worker-thread time slicing.
+- The bridge caches one `Arc<RoadGraph>` by `(seed, road-store checksum)`; a road edit still rebuilds that bridge graph from the full store. The versioned `FlowFieldCache` is core-only for now; wiring `add_segment` into the bridge cache and keeping a long-lived flow cache are next. There is no worker-thread time slicing.
 - Visual cars are decorative and not tied to actual commute flows.
 - The runner's road grid is a benchmark fixture, not a terrain-validated player layout.
 - No congestion, transit, sidewalks, signals, parking, or accidents.
