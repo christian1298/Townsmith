@@ -23,7 +23,7 @@ tags:
 | Surface | Runtime source | EN keys | DE keys | Parity | Gate |
 |---|---|---:|---:|---|---|
 | First-person volume editor | `godot/editor_i18n.gd` | 96 | 96 | complete | `check_locale.sh` + `smoke_locale.sh` |
-| World-placement HUD, status, help | `godot/world_placement.gd` | 165 world keys | 0 | `world_i18n.gd` | dashboard shell/body, HUD shell/status, common modals, and advisor titles keyed; rare modals/content/details raw |
+| World-placement HUD, status, help | `godot/world_placement.gd` | 210 world keys | 0 | `world_i18n.gd` | dashboard shell/body, HUD shell/status, all role-player modals, and advisor titles/details keyed; content names/numbers raw |
 | Dashboard shell and body | `world_placement.gd` + Rust `core_city` payload | 0 | 0 | n/a | none |
 | Advisor titles | Rust `core_city::advisor` | 22 code titles | 0 | `world_i18n.gd` | titles and parameterized details keyed by code |
 | Tutorial titles and hints | Rust payload read by `world_placement.gd` | 0 | 0 | n/a | none |
@@ -223,7 +223,7 @@ The current German editor uses a neutral infinitive/imperative style (“Klicken
 
 | Phase | Scope | Approx. keys | Exit criterion |
 |---|---|---:|---|
-| 1. HUD + dashboard shell/body | `_update_hud`, `_setup_ui`, dashboard title/hint/body | **partial** — 165 world keys | HUD shell/status, dashboard shell/body, common modals, and advisor titles keyed; rare modals/content/details remain |
+| 1. HUD + dashboard shell/body | `_update_hud`, `_setup_ui`, dashboard title/hint/body | **partial** — 210 world keys | HUD shell/status, dashboard shell/body, all role-player modals, and advisor titles/details keyed; content names/numbers remain |
 | 2. Tutorial + content names | Tutorial titles/hints, starter/industry/service/tax names, `capitalize()` removal, structure names | 60–90 | No `capitalize()` or raw content ID reaches a player label |
 | 3. Advisor + errors | Rust advisor title/detail keys, dashboard body labels, modal prefixes, error mapping | **partial** — 22 code titles | Advisor titles/details localized with params; errors and number formatting remain |
 
