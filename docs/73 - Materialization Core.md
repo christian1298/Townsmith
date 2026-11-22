@@ -100,7 +100,7 @@ The call is read-only: it does not mutate the live named pool, population, save 
 
 `route_preview`/`route_cache_state` expose the road polyline and bounded LRU described in [[56 - Traffic]]. `core_city::movement` attaches one cached route per household to the selection and returns deterministic per-citizen positions.
 
-`citizen_movement(seed, center_x, center_z, active_radius_m, detailed_radius_m, time_s)` builds the same selection, one `CitizenMotion`, and returns `{ok, seed, center:[x,z], time_s, routes, citizens, positions:[{id, placement_id, slot, position:[x,z], leg, route_progress}], checksum}`. `time_s` is finite and bounded to `0..=1,000,000` s. Unrouted or disconnected households are omitted, not an error; a missing road store returns `no_roads`. The call is read-only and does not alter jobs, needs, save state, or named checksums. It caches the built `CitizenMotion` by `(seed, world/construction/population/named/road checksums, center, radii)`, so repeated animation samples only re-run `positions_at`; `movement_cache_state()` reports it and `movement_cache_clear()` drops it. `traffic_state`, `route_preview`, and `citizen_movement` share a bridge-owned `Arc<RoadGraph>` validated by `(seed, road-store checksum)`; `road_graph_cache_state()` reports it and `road_graph_cache_clear()` drops it. The world scene now calls it at 10 Hz while the F4 overlay is visible, pools one small marker per routed citizen, and reports `movement_scene=ok`; in this scene fixture the only completed workplace is coincident with the home, so the smoke asserts routes/positions/cache wiring rather than displacement.
+`citizen_movement(seed, center_x, center_z, active_radius_m, detailed_radius_m, time_s)` builds the same selection, one `CitizenMotion`, and returns `{ok, seed, center:[x,z], time_s, routes, citizens, positions:[{id, placement_id, slot, position:[x,z], leg, route_progress}], checksum}`. `time_s` is finite and bounded to `0..=1,000,000` s. Unrouted or disconnected households are omitted, not an error; a missing road store returns `no_roads`. The call is read-only and does not alter jobs, needs, save state, or named checksums. It caches the built `CitizenMotion` by `(seed, world/construction/population/named/road checksums, center, radii)`, so repeated animation samples only re-run `positions_at`; `movement_cache_state()` reports it and `movement_cache_clear()` drops it. `traffic_state`, `route_preview`, and `citizen_movement` share a bridge-owned `Arc<RoadGraph>` validated by `(seed, road-store checksum)`; `road_graph_cache_state()` reports it and `road_graph_cache_clear()` drops it. The world scene now calls it at 10 Hz while the F4 overlay is visible, draws every routed citizen through one pooled `MultiMesh`, and reports `movement_scene=ok`; in this scene fixture the only completed workplace is coincident with the home, so the smoke asserts routes/positions/cache wiring rather than displacement.
 
 ### Stateful bridge scheduler
 
@@ -166,7 +166,7 @@ pub struct MaterializationDiff {
 - The scene rebuilds markers from `active`/`detailed`; it does not yet apply `changed` incrementally.
 - One pinned id is supported; the full selection/story priority list and dwell time are later.
 - `core_city::movement` uses the bounded route cache: one route per household, shared by its residents, with deterministic phase offsets. Workplace choice is nearest reachable by road distance; households with no reachable workplace get no route.
-- The world scene draws fading home markers plus small moving citizen markers for the active set; it does not draw route polylines yet.
+- The world scene draws fading home markers plus one pooled `MultiMesh` of small moving citizen markers for the routed active set; it does not draw route polylines yet.
 - Fade materials are per-node duplicates; a 2k-active route needs shared materials or a pooling strategy.
 - Removed markers free after a bounded fade deadline; the node map is keyed by citizen id.
 - No save field: the selected set is derived on demand.
@@ -178,7 +178,7 @@ pub struct MaterializationDiff {
 
 The HUD and dashboard `Citizens near` lines read the step counts (`active`/`detailed`). The `--scene-smoke` route calls the step, moves the centre by 1 m, calls it again, and checks that `diff`, `checksum`, and bounded `changed`/`truncated` fields are present.
 
-Limits: the overlay applies added/updated/removed entries from the 64-change diff, fades markers, and reconciles deferred entries under the same budget. It keeps home markers and a separate `CitizenMovement` root; the movement markers follow `citizen_movement` positions while the overlay is visible.
+Limits: the overlay applies added/updated/removed entries from the 64-change diff, fades markers, and reconciles deferred entries under the same budget. It keeps home markers and a separate `CitizenMovement` root. Movement markers are one pooled `MultiMeshInstance3D` (one instance per routed citizen, cached ground height keyed by citizen id, `instance_count` and transforms rewritten in place at 10 Hz); hiding the overlay frees the pool and clears both caches, leaving no children under `CitizenMovement`. The markers follow `citizen_movement` positions while the overlay is visible.
 
 ## 10. Benchmark
 
@@ -227,7 +227,7 @@ not a CI gate.
 
 ## 11. Next
 
-1. ~~Add a bounded home-work route cache and per-citizen movement.~~ Core, bridge payload (`citizen_movement`), movement cache, and scene marker drive landed; route polylines and pooled production agents remain.
-2. Replace debug markers with pooled materialized agents and add the 2k-active/200-detailed render route.
+1. ~~Add a bounded home-work route cache and per-citizen movement.~~ Core, bridge payload (`citizen_movement`), movement cache, and the live marker drive landed; route polylines remain open.
+2. ~~Replace per-citizen movement markers with one pooled `MultiMesh`.~~ One `MultiMeshInstance3D` now holds every routed citizen marker (`movement_scene=ok`, `movement_pool=ok`); the 2k-active/200-detailed render route and pooled materialized agents beyond the debug movement markers remain open.
 3. Add crowd LOD and fade pooling to avoid per-node material duplicates.
-3. Add per-client interest filtering.
+4. Add per-client interest filtering.

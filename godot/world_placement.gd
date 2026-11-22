@@ -107,7 +107,15 @@ var materialization_fading: Array[MeshInstance3D] = []
 var movement_root: Node3D
 var movement_mesh: BoxMesh
 var movement_material: StandardMaterial3D
-var movement_nodes: Dictionary = {}
+# One pooled MultiMesh holds every routed citizen marker; the transform buffer
+# is rewritten in place each refresh instead of creating a node per citizen.
+var movement_multimesh_instance: MultiMeshInstance3D
+var movement_multimesh: MultiMesh
+# Cached terrain height keyed by citizen id. Entries are dropped when the
+# citizen leaves the routed set so the cache stays bounded by the route count.
+var movement_ground: Dictionary = {}
+# Citizen ids in MultiMesh instance order for the most recent refresh.
+var movement_ids: Array[int] = []
 var movement_accum := 0.0
 var movement_time := 0.0
 var last_movement_state: Dictionary = {}
@@ -885,6 +893,27 @@ func _setup_materialization() -> void:
 	movement_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	movement_material.albedo_color = Color(0.18, 0.95, 0.72)
 
+func _setup_movement_pool() -> void:
+	# Created lazily on the first marker refresh so a hidden overlay owns no
+	# child nodes under `CitizenMovement`.
+	if movement_root == null:
+		return
+	if movement_multimesh_instance != null and is_instance_valid(movement_multimesh_instance):
+		return
+	movement_multimesh = MultiMesh.new()
+	movement_multimesh.mesh = movement_mesh
+	# transform_format and use_colors must be set before instance_count; Godot
+	# rejects both once instances exist.
+	movement_multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	movement_multimesh.use_colors = false
+	movement_multimesh.instance_count = 0
+	movement_multimesh_instance = MultiMeshInstance3D.new()
+	movement_multimesh_instance.name = "CitizenMovementPool"
+	movement_multimesh_instance.multimesh = movement_multimesh
+	movement_multimesh_instance.material_override = movement_material
+	movement_multimesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	movement_root.add_child(movement_multimesh_instance)
+
 func _materialization_center() -> Vector3:
 	if selected_id >= 0:
 		var selected := _selected_placement()
@@ -1185,10 +1214,14 @@ func _rebuild_materialization() -> void:
 		_update_hud()
 
 func _clear_movement_nodes() -> void:
-	for node in movement_nodes.values():
-		if is_instance_valid(node):
-			node.free()
-	movement_nodes.clear()
+	if movement_root != null:
+		for child in movement_root.get_children():
+			if is_instance_valid(child):
+				child.free()
+	movement_multimesh_instance = null
+	movement_multimesh = null
+	movement_ground.clear()
+	movement_ids.clear()
 	last_movement_state = {}
 
 
@@ -1203,32 +1236,56 @@ func _update_movement_markers() -> void:
 	last_movement_state = state
 	if not bool(state.get("ok", false)):
 		return
+	_setup_movement_pool()
+	if movement_multimesh == null:
+		return
+	var ids: Array[int] = []
 	var seen := {}
+	var transforms: Array[Transform3D] = []
+	var min_x := INF
+	var max_x := -INF
+	var min_z := INF
+	var max_z := -INF
+	var min_y := INF
+	var max_y := -INF
 	for sample in state.get("positions", []):
 		var id := int(sample.get("id", -1))
 		var point: PackedFloat32Array = sample.get("position", PackedFloat32Array())
 		if id < 0 or point.size() != 2:
 			continue
-		seen[id] = true
-		var node: MeshInstance3D = movement_nodes.get(id)
-		if not is_instance_valid(node):
+		if not movement_ground.has(id):
 			var ground: float = core.world_height_at(SEED, point[0], point[1])
 			if ground < 0.0:
 				continue
-			node = MeshInstance3D.new()
-			node.mesh = movement_mesh
-			node.material_override = movement_material
-			node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-			node.set_meta("movement_ground", ground)
-			movement_root.add_child(node)
-			movement_nodes[id] = node
-		node.position = Vector3(point[0], float(node.get_meta("movement_ground", 0.0)) + 0.85, point[1])
-	for id in movement_nodes.keys():
+			movement_ground[id] = ground
+		var y := float(movement_ground[id]) + 0.85
+		ids.append(id)
+		seen[id] = true
+		transforms.append(Transform3D(Basis.IDENTITY, Vector3(point[0], y, point[1])))
+		min_x = minf(min_x, point[0])
+		max_x = maxf(max_x, point[0])
+		min_z = minf(min_z, point[1])
+		max_z = maxf(max_z, point[1])
+		min_y = minf(min_y, y)
+		max_y = maxf(max_y, y)
+	# Drop cached heights for citizens that left the routed set.
+	for id in movement_ground.keys():
 		if not seen.has(id):
-			var stale: MeshInstance3D = movement_nodes[id]
-			if is_instance_valid(stale):
-				stale.free()
-			movement_nodes.erase(id)
+			movement_ground.erase(id)
+	movement_ids = ids
+	# Reuse the same MultiMesh: only the instance count and transforms change.
+	if movement_multimesh.instance_count != ids.size():
+		movement_multimesh.instance_count = ids.size()
+	for index in ids.size():
+		movement_multimesh.set_instance_transform(index, transforms[index])
+	if ids.is_empty():
+		movement_multimesh.custom_aabb = AABB()
+	else:
+		# Markers move, so keep the bounds explicit instead of relying on a
+		# stale scan. Pad by half the box footprint and the full marker height.
+		movement_multimesh.custom_aabb = AABB(
+			Vector3(min_x - 0.16, min_y - 0.85, min_z - 0.16),
+			Vector3(max_x - min_x + 0.32, max_y - min_y + 1.7, max_z - min_z + 0.32))
 
 
 func _industry_color(kind: String) -> Color:
@@ -3208,6 +3265,7 @@ func _run_scene_smoke() -> void:
 	var materialization_step_ok := false
 	var materialization_fade_ok := false
 	var movement_scene_ok := false
+	var movement_pool_ok := false
 	var follow_ok := false
 	var render_ok := false
 	var structure_ok := false
@@ -3667,17 +3725,29 @@ func _run_scene_smoke() -> void:
 				movement_time = 0.0
 				_update_movement_markers()
 				movement_scene_ok = bool(last_movement_state.get("ok", false))
-				movement_scene_ok = movement_scene_ok and movement_nodes.size() > 0
 				var movement_positions: Array = last_movement_state.get("positions", [])
 				movement_scene_ok = movement_scene_ok and movement_positions.size() > 0
-				movement_scene_ok = movement_scene_ok and movement_nodes.size() == movement_positions.size()
+				var movement_pool: MultiMeshInstance3D = movement_multimesh_instance
+				var movement_pool_live := movement_pool != null and is_instance_valid(movement_pool)
+				# One pooled MultiMesh instead of one node per citizen.
+				movement_pool_ok = movement_pool_live and movement_multimesh != null
+				movement_pool_ok = movement_pool_ok and movement_root.get_child_count() == 1
+				movement_pool_ok = movement_pool_ok and movement_multimesh.instance_count == movement_positions.size()
+				movement_pool_ok = movement_pool_ok and movement_ids.size() == movement_positions.size()
+				movement_pool_ok = movement_pool_ok and movement_ground.size() == movement_positions.size()
+				movement_scene_ok = movement_scene_ok and movement_pool_ok
 				var movement_cache: Dictionary = core.movement_cache_state()
 				movement_scene_ok = movement_scene_ok and bool(movement_cache.get("open", false))
 				movement_scene_ok = movement_scene_ok and int(movement_cache.get("citizens", 0)) == movement_positions.size()
 				movement_time = 10.0
 				_update_movement_markers()
+				var moved_positions: Array = last_movement_state.get("positions", [])
 				movement_scene_ok = movement_scene_ok and bool(last_movement_state.get("ok", false))
-				movement_scene_ok = movement_scene_ok and movement_nodes.size() == movement_positions.size()
+				# The pool is reused across ticks; only count and transforms change.
+				movement_scene_ok = movement_scene_ok and movement_pool_live and movement_multimesh_instance == movement_pool
+				movement_scene_ok = movement_scene_ok and movement_root.get_child_count() == 1
+				movement_scene_ok = movement_scene_ok and movement_multimesh.instance_count == moved_positions.size()
+				movement_pool_ok = movement_pool_ok and movement_ids.size() == moved_positions.size()
 				_advance_materialization_fades(MATERIALIZATION_FADE_SECONDS + 0.05)
 				var added_settled_ok := materialization_root.get_child_count() > 0
 				for child in materialization_root.get_children():
@@ -3712,6 +3782,13 @@ func _run_scene_smoke() -> void:
 				materialization_ok = materialization_ok and materialization_counts == Vector2i(expected_active, expected_detailed)
 				materialization_ok = materialization_ok and not _toggle_materialization()
 				materialization_ok = materialization_ok and materialization_root.get_child_count() == 0
+				# F4 off frees the pooled markers and clears the height/id caches.
+				movement_scene_ok = movement_scene_ok and movement_root.get_child_count() == 0
+				movement_scene_ok = movement_scene_ok and movement_multimesh_instance == null
+				movement_pool_ok = movement_pool_ok and movement_root.get_child_count() == 0
+				movement_pool_ok = movement_pool_ok and movement_multimesh == null
+				movement_pool_ok = movement_pool_ok and movement_ground.is_empty()
+				movement_pool_ok = movement_pool_ok and movement_ids.is_empty()
 				# A small camera move must run through the stored selection and
 				# return a bounded diff with a checksum.
 				var moved_step: Dictionary = core.materialization_step(
@@ -4141,7 +4218,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -4171,6 +4248,7 @@ func _run_scene_smoke() -> void:
 		"ok" if materialization_step_ok else "failed",
 		"ok" if materialization_fade_ok else "failed",
 		"ok" if movement_scene_ok else "failed",
+		"ok" if movement_pool_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",
