@@ -120,9 +120,9 @@ The non-zero commute and split-assignment cases are covered by the core tests, b
 ## 6. Tests
 
 - `core_city`: 7 assignment tests — global nearest-slot order, id-order independence, split assignment, shortage, commute happiness, JSON roundtrip, old-save defaults — plus 5 index exactness/fallback tests. The exactness tests assert the grid path actually ran, and the non-finite fixture asserts the fallback ran.
-- `core_city` total: **316 tests**.
+- `core_city` total: **340 tests**.
 - `godot_ext`: **72 tests** total; the scene smoke covers the bridge path.
-- Workspace: **613 tests + 2 doctests (615 passed)**.
+- Workspace: **651 tests + 2 doctests (653 passed)**.
 
 ## 7. Assignment index
 
