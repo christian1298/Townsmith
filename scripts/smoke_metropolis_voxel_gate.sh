@@ -16,13 +16,17 @@ OUTPUT="$TMP/voxel_gate.json" "$ROOT/scripts/bench_metropolis_voxel_gate.sh" \
 	--setup-only --switch --godot "$GODOT_BIN" --output "$TMP/d.json" >"$TMP/d.log"
 OUTPUT="$TMP/voxel_gate.json" "$ROOT/scripts/bench_metropolis_voxel_gate.sh" \
 	--setup-only --switch --godot "$GODOT_BIN" --output "$TMP/e.json" >/dev/null
+OUTPUT="$TMP/voxel_gate.json" "$ROOT/scripts/bench_metropolis_voxel_gate.sh" \
+	--setup-only --buildings 50000 --godot "$GODOT_BIN" --output "$TMP/f.json" >"$TMP/f.log"
+OUTPUT="$TMP/voxel_gate.json" "$ROOT/scripts/bench_metropolis_voxel_gate.sh" \
+	--setup-only --buildings 50000 --godot "$GODOT_BIN" --output "$TMP/g.json" >/dev/null
 
-if grep -qE 'Leaked instance|ObjectDB instances leaked' "$TMP/d.log"; then
-	echo "switch setup leaked objects" >&2
+if grep -qE 'Leaked instance|ObjectDB instances leaked' "$TMP/d.log" "$TMP/f.log"; then
+	echo "voxel setup leaked objects" >&2
 	exit 1
 fi
 
-python3 - "$TMP/a.json" "$TMP/b.json" "$TMP/c.json" "$TMP/d.json" "$TMP/e.json" <<'PY'
+python3 - "$TMP/a.json" "$TMP/b.json" "$TMP/c.json" "$TMP/d.json" "$TMP/e.json" "$TMP/f.json" "$TMP/g.json" <<'PY'
 import json
 import pathlib
 import sys
@@ -31,6 +35,8 @@ b = json.loads(pathlib.Path(sys.argv[2]).read_text())
 c = json.loads(pathlib.Path(sys.argv[3]).read_text())
 d = json.loads(pathlib.Path(sys.argv[4]).read_text())
 e = json.loads(pathlib.Path(sys.argv[5]).read_text())
+f = json.loads(pathlib.Path(sys.argv[6]).read_text())
+g = json.loads(pathlib.Path(sys.argv[7]).read_text())
 expected = {
     "scene": "metropolis_voxel_gate_lod_26k",
     "instances": 26000,
@@ -92,8 +98,28 @@ for key in ("checksum", "instances", "quads", "triangles", "buffer_bytes", "lod_
         raise SystemExit(f"switch determinism mismatch on {key}")
 if (d.get("switch") or {}).get("checksum") != (e.get("switch") or {}).get("checksum"):
     raise SystemExit("switch checksum mismatch")
+scale_expected = {
+    "scene": "metropolis_voxel_gate_scale_50k",
+    "layout": "scale_single_v1",
+    "instances": 50000,
+    "quads": 110920,
+    "triangles": 221840,
+    "buffer_bytes": 2400000,
+    "checksum": "a387e352",
+    "run_kind": "setup_only_scale",
+}
+for key, value in scale_expected.items():
+    if f.get(key) != value:
+        raise SystemExit(f"scale {key}: expected {value!r}, got {f.get(key)!r}")
+if f.get("lod_instances") != {"near": 716, "mid": 4308, "far": 44976}:
+    raise SystemExit(f"scale lod_instances mismatch: {f.get('lod_instances')!r}")
+for key in ("checksum", "instances", "quads", "triangles", "buffer_bytes", "lod_instances"):
+    if f.get(key) != g.get(key):
+        raise SystemExit(f"scale determinism mismatch on {key}")
+if (f.get("scale") or {}).get("grid") != [224, 224]:
+    raise SystemExit(f"scale grid mismatch: {(f.get('scale') or {}).get('grid')!r}")
 print(
-    "METROPOLIS_VOXEL_GATE_SMOKE status=ok instances=%d near=%d mid=%d far=%d quads=%d triangles=%d checksum=%s lod_checksum=%s switch_checksum=%s"
+    "METROPOLIS_VOXEL_GATE_SMOKE status=ok instances=%d near=%d mid=%d far=%d quads=%d triangles=%d checksum=%s lod_checksum=%s switch_checksum=%s scale_checksum=%s"
     % (
         a["instances"],
         a["lod_instances"]["near"],
@@ -104,6 +130,7 @@ print(
         a["checksum"],
         c["checksum"],
         d["checksum"],
+        f["checksum"],
     )
 )
 PY

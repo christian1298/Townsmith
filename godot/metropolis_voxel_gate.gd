@@ -17,6 +17,14 @@ extends Node3D
 ## checksum. `--lod` builds a single 26k-building layout instead of the three
 ## spatial tiers, so the LOD mix can be validated on its own.
 ##
+## `--buildings N` (or `--scale-250k`) builds one deterministic single-layout
+## grid with `N` buildings, 10,000-250,000, default 26,000. The same static
+## distance bands (near hut / mid box / far impostor) are assigned from the
+## layout centre; the grid is `ceil(sqrt(N))` columns x `ceil(N / columns)`
+## rows. This is setup/memory evidence at the gate's building count, not a
+## frame-budget claim: with a display the fixed route still runs, but the
+## result is reported as setup-scale evidence unless a frame run is explicit.
+##
 ## `--switch` builds the same single 26k-building layout but reuses exactly
 ## three `MultiMeshInstance3D` nodes (hut / box / impostor quad) and fills
 ## their buffers from the current camera XZ: `<=150 m` hut, `<=400 m` box,
@@ -34,17 +42,22 @@ extends Node3D
 ## This is **voxel-proxy setup/memory evidence**, not the RTX 3060 metropolis
 ## gate: one reused low-poly hut, static LOD bands (or a synthetic switch
 ## route), no streaming, shadows (unless `--shadows`), GI/SSAO, simulation, or
-## 250k buildings, and the route is a single run on whatever GPU is attached.
+## distinct 250k voxel buildings, and the route is a single run on whatever
+## GPU is attached. The 26k default remains the frame-budget harness; the
+## 250k scale layout is setup/memory evidence only.
 ##
 ## Usage:
 ##   godot --headless --path godot res://metropolis_voxel_gate.tscn -- --setup-only
 ##   godot --headless --path godot res://metropolis_voxel_gate.tscn -- --setup-only --lod
 ##   godot --headless --path godot res://metropolis_voxel_gate.tscn -- --setup-only --switch
+##   godot --headless --path godot res://metropolis_voxel_gate.tscn -- --setup-only --buildings 250000
 ##   godot --path godot res://metropolis_voxel_gate.tscn -- --short
 ##
 ## Options after `--`:
 ##   --setup-only        Build, validate, print setup JSON, exit 0
 ##   --lod               Build the single 26k-building LOD-band layout
+##   --buildings N       Build one N-building scale layout (10,000-250,000)
+##   --scale-250k        Shorthand for --buildings 250000
 ##   --switch            Rebuild three reused MultiMeshes on a 50 m camera cell
 ##   --short             Use a 10 s measured route with a 3 s warm-up
 ##   --duration S        Measured seconds (default route value, 60)
@@ -63,6 +76,14 @@ const TIER_CENTER_X := [-1700.0, -700.0, 900.0]
 const LOD_ONLY_COUNT := 26_000
 const LOD_ONLY_CENTER_X := 0.0
 const LOD_ONLY_NAME := "lod_single"
+# `--buildings N` mode: one deterministic grid of N proxies. 250,000 is the
+# Phase 5 building count; this is setup/memory evidence, not a frame claim.
+const SCALE_MIN_COUNT := 10_000
+const SCALE_MAX_COUNT := 250_000
+const SCALE_DEFAULT_COUNT := 26_000
+const SCALE_CENTER_X := 0.0
+const SCALE_LAYOUT_ID := "scale_single_v1"
+const SCALE_NAME := "scale_single"
 # `--switch` mode: one 26k-building layout with three reused MultiMesh nodes.
 const SWITCH_COUNT := 26_000
 const SWITCH_CENTER_X := 0.0
@@ -109,6 +130,8 @@ var short_route := false
 var shadows_enabled := false
 var lod_mode := false
 var switch_mode := false
+var scale_mode := false
+var scale_count := SCALE_DEFAULT_COUNT
 
 var camera: Camera3D
 var light: DirectionalLight3D
@@ -174,6 +197,24 @@ func _ready() -> void:
 	switch_mode = args.has("--switch")
 	if switch_mode and lod_mode:
 		_fail("--switch cannot be combined with --lod")
+		return
+	var buildings_value := _arg(args, "--buildings", "")
+	if args.has("--scale-250k"):
+		if buildings_value != "" and buildings_value != "250000":
+			_fail("--scale-250k conflicts with --buildings " + buildings_value)
+			return
+		buildings_value = "250000"
+	if buildings_value != "":
+		if not buildings_value.is_valid_int():
+			_fail("--buildings must be an integer")
+			return
+		scale_count = buildings_value.to_int()
+		if scale_count < SCALE_MIN_COUNT or scale_count > SCALE_MAX_COUNT:
+			_fail("--buildings must be %d-%d" % [SCALE_MIN_COUNT, SCALE_MAX_COUNT])
+			return
+		scale_mode = true
+	if scale_mode and (lod_mode or switch_mode):
+		_fail("--buildings/--scale-250k cannot be combined with --lod or --switch")
 		return
 	git_commit = _arg(args, "--git-commit", "")
 	git_dirty = _arg(args, "--git-dirty", "")
@@ -280,8 +321,17 @@ func _build_scene() -> void:
 	add_child(_container)
 
 	var layout_id := "lod_single_v1" if lod_mode else "tiers_v1"
+	if scale_mode:
+		layout_id = SCALE_LAYOUT_ID
 	var layouts: Array = []
-	if lod_mode:
+	if scale_mode:
+		layouts.append({
+			"tier": 0,
+			"name": SCALE_NAME,
+			"count": scale_count,
+			"center_x": SCALE_CENTER_X,
+		})
+	elif lod_mode:
 		layouts.append({
 			"tier": 0,
 			"name": LOD_ONLY_NAME,
@@ -398,6 +448,28 @@ func _build_scene() -> void:
 		"cpu_mem_kb_delta": total_mem_kb,
 		"checksum": _checksum_hex(combined_checksum),
 	}
+	if scale_mode:
+		var scale_tier: Dictionary = tier_stats[0]
+		_scene_stats["scale"] = {
+			"mode": "single_layout_grid",
+			"count": total_instances,
+			"grid": (scale_tier["grid"] as Array).duplicate(),
+			"spacing_m": GRID_SPACING_M,
+			"near_radius_m": LOD_NEAR_RADIUS_M,
+			"mid_radius_m": LOD_MID_RADIUS_M,
+			"bytes_per_instance": FLOATS_PER_INSTANCE * FLOAT_BYTES,
+			"instance_buffer_bytes": total_buffer_bytes,
+			"instance_buffer_mb": _round2(
+				float(total_buffer_bytes) / (1024.0 * 1024.0)),
+			"static_memory_kb_delta": total_mem_kb,
+			"static_memory_mb": _round2(float(total_mem_kb) / 1024.0),
+			"mesh_build_ms": _ms(mesh_usec),
+			"tier_setup_ms": _ms(total_setup_usec),
+			"setup_ms": _ms(mesh_usec + total_setup_usec),
+			"checksum": _checksum_hex(combined_checksum),
+			"frame_budget_claimed": false,
+			"status": "ok",
+		}
 
 func _build_layout(
 	tier: int,
@@ -1232,6 +1304,14 @@ func _finish() -> void:
 			+ "synthetic 12-sample serpentine route: no streaming, GI/SSAO, "
 			+ "simulation, or reference 3060 rig; not gate M5")
 		_apply_switch_fields(result)
+	elif scale_mode:
+		result["gate_reason"] = (
+			"voxel-proxy scale-layout observation at %d buildings with static "
+			% scale_count
+			+ "LOD bands (hut/box/quad impostor): setup/memory evidence plus a "
+			+ "single display-backed route on this GPU; not an FPS claim for the "
+			+ "26k frame-budget harness, not streaming/GI/SSAO/simulation, and not "
+			+ "the 1M/3060 gate M5")
 	else:
 		result["gate_reason"] = (
 			"voxel-proxy frame budget observed with static LOD bands "
@@ -1245,6 +1325,8 @@ func _write_setup() -> void:
 		run_kind = "setup_lod"
 	elif switch_mode:
 		run_kind = "setup_switch"
+	elif scale_mode:
+		run_kind = "setup_scale"
 	var result := _base_result(run_kind)
 	result["setup_status"] = "ok"
 	result["gate_result"] = "not_measured"
@@ -1257,6 +1339,14 @@ func _write_setup() -> void:
 			+ "setup time, and instance-buffer memory only; no frames, no FPS "
 			+ "claim, not gate M5")
 		_apply_switch_fields(result)
+	elif scale_mode:
+		result["gate_reason"] = (
+			"voxel-proxy setup-only scale run on one deterministic %d-building "
+			% scale_count
+			+ "grid with static LOD bands (near hut / mid box / far quad impostor): "
+			+ "per-band counts, quads/triangles, setup time, and instance-buffer "
+			+ "memory only; no streaming, shadows/GI/SSAO, simulation, or RTX 3060 "
+			+ "reference run, no frames, no FPS claim, not the 1M/3060 gate M5")
 	else:
 		result["gate_reason"] = (
 			"voxel-proxy setup-only run with static LOD bands (hut/box/quad "
@@ -1271,7 +1361,7 @@ func _apply_switch_fields(result: Dictionary) -> void:
 
 
 func _base_result(run_kind: String) -> Dictionary:
-	return {
+	var result := {
 		"format_version": 2,
 		"suite": "metropolis_voxel_gate",
 		"gate": "G5",
@@ -1313,10 +1403,17 @@ func _base_result(run_kind: String) -> Dictionary:
 		"evidence": "voxel_proxy_setup_and_frame_budget",
 		"gate_note": "not the 3060 metropolis gate; see docs/68 §7.7",
 	}
+	if scale_mode:
+		result["scale_mode"] = true
+		result["scale"] = _scene_stats.get("scale", {})
+	return result
 
 func _scene_name() -> String:
 	if switch_mode:
 		return "metropolis_voxel_gate_switch_%dk" % [
+			int(int(_scene_stats.get("instances", 0)) / 1000)]
+	if scale_mode:
+		return "metropolis_voxel_gate_scale_%dk" % [
 			int(int(_scene_stats.get("instances", 0)) / 1000)]
 	var layout_tag := "lod_single" if lod_mode else "lod"
 	return "metropolis_voxel_gate_%s_%dk" % [

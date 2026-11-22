@@ -14,15 +14,21 @@
 # refills their buffers when the camera enters a new 50 m XZ cell along a
 # deterministic 12-sample serpentine route.
 #
+# `--buildings N` (or `--scale-250k`) builds one deterministic N-building grid
+# with the same static bands: 10,000-250,000 buildings, default 26,000. The
+# 250k run is **setup/memory evidence at the gate's building count**, not a
+# frame-budget claim. The 26k default remains the frame-budget harness.
+#
 # This is **voxel-proxy setup/memory evidence plus an optional frame budget**,
 # not the RTX 3060 metropolis gate: static LOD bands (or a synthetic switch
-# route), one reused low-poly hut, no streaming, GI/SSAO, simulation, or 250k
-# buildings.
+# route), one reused low-poly hut, no streaming, GI/SSAO, simulation, or
+# distinct voxel buildings.
 #
 # Usage:
 #   GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only
 #   GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --lod
 #   GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --switch
+#   GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --buildings 250000
 #   GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --short
 #   GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh
 #   GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --runs 3
@@ -41,11 +47,14 @@ SETUP_ONLY=0
 SHORT=0
 LOD_MODE=0
 SWITCH_MODE=0
+BUILDINGS=""
 
 usage() {
 	cat <<'USAGE'
 --setup-only        Headless setup twice, deterministic checks, exit 0
 --lod               Single 26k-building LOD-band layout instead of 3 tiers
+--buildings N       Single N-building scale layout (10000-250000)
+--scale-250k        Shorthand for --buildings 250000
 --switch            Runtime distance switching across three reused MultiMeshes
 --short             Short 10 s display-backed route (3 s warm-up)
 --full              Full 60 s display-backed route (8 s warm-up)
@@ -62,6 +71,8 @@ while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--setup-only) SETUP_ONLY=1; shift ;;
 		--lod) LOD_MODE=1; shift ;;
+		--buildings) BUILDINGS="${2:?--buildings needs a value}"; shift 2 ;;
+		--scale-250k) BUILDINGS=250000; shift ;;
 		--switch) SWITCH_MODE=1; shift ;;
 		--short) SHORT=1; shift ;;
 		--full) SHORT=0; shift ;;
@@ -83,6 +94,20 @@ fi
 if [[ "$SWITCH_MODE" == "1" && "$LOD_MODE" == "1" ]]; then
 	echo "--switch cannot be combined with --lod" >&2
 	exit 2
+fi
+if [[ -n "$BUILDINGS" ]]; then
+	if ! [[ "$BUILDINGS" =~ ^[0-9]+$ ]]; then
+		echo "--buildings must be an integer (got '$BUILDINGS')" >&2
+		exit 2
+	fi
+	if (( BUILDINGS < 10000 || BUILDINGS > 250000 )); then
+		echo "--buildings must be 10000-250000 (got '$BUILDINGS')" >&2
+		exit 2
+	fi
+	if [[ "$SWITCH_MODE" == "1" || "$LOD_MODE" == "1" ]]; then
+		echo "--buildings/--scale-250k cannot be combined with --lod or --switch" >&2
+		exit 2
+	fi
 fi
 if [[ "$SHORT" == "1" ]]; then
 	DURATION="${DURATION:-10}"
@@ -138,6 +163,9 @@ run_setup() {
 	if [[ "$SWITCH_MODE" == "1" ]]; then
 		mode_arg+=(--switch)
 	fi
+	if [[ -n "$BUILDINGS" ]]; then
+		mode_arg+=(--buildings "$BUILDINGS")
+	fi
 	set +e
 	timeout 240 env -u DISPLAY -u WAYLAND_DISPLAY "$GODOT_BIN" \
 		--headless --path "$ROOT/godot" res://metropolis_voxel_gate.tscn -- \
@@ -159,7 +187,9 @@ run_setup() {
 	fi
 }
 
-if [[ "$SWITCH_MODE" == "1" ]]; then
+if [[ -n "$BUILDINGS" ]]; then
+	echo "METROPOLIS_VOXEL_GATE_STAGE setup layout=scale_single tiers=1 instances=$BUILDINGS route=$(basename "$ROUTE") mode=$([[ "$SHORT" == "1" ]] && echo short || echo full)"
+elif [[ "$SWITCH_MODE" == "1" ]]; then
 	echo "METROPOLIS_VOXEL_GATE_STAGE setup layout=switch_single tiers=1 instances=26000 route=$(basename "$ROUTE") mode=$([[ "$SHORT" == "1" ]] && echo short || echo full)"
 elif [[ "$LOD_MODE" == "1" ]]; then
 	echo "METROPOLIS_VOXEL_GATE_STAGE setup layout=lod_single tiers=1 instances=26000 route=$(basename "$ROUTE") mode=$([[ "$SHORT" == "1" ]] && echo short || echo full)"
@@ -169,7 +199,7 @@ fi
 run_setup "$TMP/setup_a.json" "$TMP/setup_a.log"
 run_setup "$TMP/setup_b.json" "$TMP/setup_b.log"
 
-python3 - "$TMP/setup_a.json" "$TMP/setup_b.json" "$LOD_MODE" "$SWITCH_MODE" <<'PY'
+python3 - "$TMP/setup_a.json" "$TMP/setup_b.json" "$LOD_MODE" "$SWITCH_MODE" "$BUILDINGS" <<'PY'
 import json
 import sys
 
@@ -177,6 +207,7 @@ a = json.load(open(sys.argv[1]))
 b = json.load(open(sys.argv[2]))
 lod_mode = sys.argv[3] == "1"
 switch_mode = sys.argv[4] == "1"
+scale_count = int(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] else 0
 
 def fail(message):
     raise SystemExit("voxel gate setup is not deterministic: " + message)
@@ -186,12 +217,38 @@ for key in ("instances", "quads", "triangles", "buffer_bytes", "scene", "mesh", 
         fail(f"{key}: {a.get(key)!r} != {b.get(key)!r}")
 if a.get("checksum") != b.get("checksum"):
     fail(f"checksum: {a.get('checksum')!r} != {b.get('checksum')!r}")
-if a.get("instances") != 26_000:
+if not scale_count and a.get("instances") != 26_000:
     fail(f"instances: {a.get('instances')!r} != 26000")
 if a.get("lod_mode") is not lod_mode:
     fail(f"lod_mode: {a.get('lod_mode')!r} != {lod_mode}")
 
-if switch_mode:
+if scale_count:
+    known = {
+        50_000: {"checksum": "a387e352", "quads": 110_920, "triangles": 221_840,
+                 "lod": {"near": 716, "mid": 4_308, "far": 44_976}},
+        250_000: {"checksum": "aab83a92", "quads": 310_920, "triangles": 621_840,
+                  "lod": {"near": 716, "mid": 4_308, "far": 244_976}},
+    }
+    expected = known.get(scale_count)
+    if a.get("instances") != scale_count:
+        fail(f"instances: {a.get('instances')!r} != {scale_count}")
+    if a.get("layout") != "scale_single_v1":
+        fail(f"layout: {a.get('layout')!r} != scale_single_v1")
+    expected_scene = f"metropolis_voxel_gate_scale_{scale_count // 1000}k"
+    if a.get("scene") != expected_scene:
+        fail(f"scene: {a.get('scene')!r} != {expected_scene!r}")
+    if expected:
+        for key in ("checksum", "quads", "triangles"):
+            if a.get(key) != expected[key]:
+                fail(f"{key}: {a.get(key)!r} != {expected[key]!r}")
+        if a.get("lod_instances") != expected["lod"]:
+            fail(f"lod_instances: {a.get('lod_instances')!r} != {expected['lod']!r}")
+        if sum(int(entry["instances"]) for entry in a["tiers"][0]["lod"]) != scale_count:
+            fail("scale LOD instances do not sum to total")
+        if sum(int(entry["triangles"]) for entry in a["tiers"][0]["lod"]) != a["triangles"]:
+            fail("scale LOD triangles do not sum to total")
+    expected_tiers = 1
+elif switch_mode:
     expected = {
         "scene": "metropolis_voxel_gate_switch_26k",
         "layout": "switch_single_v1",
@@ -210,15 +267,16 @@ else:
         "lod": {"near": 698, "mid": 4_318, "far": 20_984} if lod_mode else
                {"near": 2_123, "mid": 8_457, "far": 15_420},
     }
-for key in ("scene", "layout", "checksum", "quads", "triangles"):
-    if a.get(key) != expected[key]:
-        fail(f"{key}: {a.get(key)!r} != {expected[key]!r}")
-if a.get("lod_instances") != expected["lod"]:
-    fail(f"lod_instances: {a.get('lod_instances')!r} != {expected['lod']!r}")
+if not scale_count:
+    for key in ("scene", "layout", "checksum", "quads", "triangles"):
+        if a.get(key) != expected[key]:
+            fail(f"{key}: {a.get(key)!r} != {expected[key]!r}")
+    if a.get("lod_instances") != expected["lod"]:
+        fail(f"lod_instances: {a.get('lod_instances')!r} != {expected['lod']!r}")
 
 tiers_a = a.get("tiers") or []
 tiers_b = b.get("tiers") or []
-expected_tiers = 1 if (lod_mode or switch_mode) else 3
+expected_tiers = 1 if (lod_mode or switch_mode or scale_count) else 3
 if len(tiers_a) != expected_tiers or len(tiers_b) != expected_tiers:
     fail(f"tier count: {len(tiers_a)} != {expected_tiers} or {len(tiers_b)} != {expected_tiers}")
 for index, (left, right) in enumerate(zip(tiers_a, tiers_b)):
@@ -231,12 +289,13 @@ for index, (left, right) in enumerate(zip(tiers_a, tiers_b)):
         fail(f"tier {index} LOD triangles do not sum to tier triangles")
 
 lod_tiers = a.get("lod_tiers") or []
-if len(lod_tiers) != 3:
-    fail(f"lod tier count: {len(lod_tiers)} != 3")
-lod_by_name = {entry["name"]: entry for entry in lod_tiers}
-for name, count in expected["lod"].items():
-    if int(lod_by_name[name]["instances"]) != count:
-        fail(f"lod {name} instances: {lod_by_name[name]['instances']!r} != {count}")
+if not scale_count:
+    if len(lod_tiers) != 3:
+        fail(f"lod tier count: {len(lod_tiers)} != 3")
+    lod_by_name = {entry["name"]: entry for entry in lod_tiers}
+    for name, count in expected["lod"].items():
+        if int(lod_by_name[name]["instances"]) != count:
+            fail(f"lod {name} instances: {lod_by_name[name]['instances']!r} != {count}")
 if sum(int(entry["instances"]) for entry in lod_tiers) != a["instances"]:
     fail("LOD instances do not sum to total instances")
 if sum(int(entry["quads"]) for entry in lod_tiers) != a["quads"]:
@@ -296,7 +355,7 @@ out = pathlib.Path(sys.argv[2])
 lod_mode = sys.argv[4] == "1"
 switch_mode = sys.argv[5] == "1"
 result = dict(setup)
-result["run_kind"] = "setup_only_switch" if switch_mode else ("setup_only_lod" if lod_mode else "setup_only")
+result["run_kind"] = "setup_only_scale" if setup.get("scale_mode") else ("setup_only_switch" if switch_mode else ("setup_only_lod" if lod_mode else "setup_only"))
 result["runs"] = 0
 result["setup_runs"] = 2
 result["setup_deterministic"] = True
@@ -304,6 +363,11 @@ result["route_mode"] = "short" if sys.argv[3] == "1" else "full"
 result["gate_result"] = "not_measured"
 result["gate_scope"] = "voxel_proxy_setup"
 result["gate_reason"] = (
+    "setup-only scale run: deterministic single-layout grid with static LOD "
+    "bands (near hut / mid box / far quad impostor), per-band counts, "
+    "quads/triangles, setup time, and instance-buffer memory only; no frames, "
+    "no FPS claim, not the 1M/3060 gate M5"
+) if setup.get("scale_mode") else (
     "setup-only run: deterministic voxel-proxy layout with runtime distance "
     "switching across three reused MultiMesh nodes (near hut / mid box / far "
     "quad impostor), per-sample assignment, rebuild/skip counts, "
@@ -335,7 +399,7 @@ out = pathlib.Path(sys.argv[2])
 lod_mode = sys.argv[4] == "1"
 switch_mode = sys.argv[5] == "1"
 result = dict(setup)
-result["run_kind"] = "setup_only_switch" if switch_mode else ("setup_only_lod" if lod_mode else "setup_only")
+result["run_kind"] = "setup_only_scale" if setup.get("scale_mode") else ("setup_only_switch" if switch_mode else ("setup_only_lod" if lod_mode else "setup_only"))
 result["runs"] = 0
 result["setup_runs"] = 2
 result["setup_deterministic"] = True
