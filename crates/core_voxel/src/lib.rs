@@ -19,7 +19,7 @@ pub use chunk::VoxelChunk;
 pub use coords::{MaterialId, AIR, CHUNK_SIZE, CHUNK_VOLUME, VOXEL_SIZE_M};
 pub use error::VoxelError;
 pub use mesh::{greedy_mesh, greedy_mesh_with_sampler, MeshBuffers, MeshVertex};
-pub use palette::{EncodedChunk, RleRun};
+pub use palette::{EncodedChunk, RleRun, MAX_PALETTE_ENTRIES};
 pub use volume::{
     ChunkPos, VolumeConfig, VolumeConfigError, VolumePos, VoxelVolume, MAX_CHUNKS,
     MAX_CHUNKS_PER_AXIS,
