@@ -42,6 +42,10 @@ if [[ "$LINE" != BENCH_SCREEN\ status=ok\ scenes=3\ rating=* ]]; then
 	echo "Benchmark screen smoke contract mismatch: $LINE" >&2
 	exit 1
 fi
+if ! grep -q '^BENCH_SCREEN_GRAPHS OK scenes=3$' <<<"$OUTPUT"; then
+	echo "Benchmark screen smoke failed: graph marker missing" >&2
+	exit 1
+fi
 RATING="${LINE##*rating=}"
 RATING="${RATING%% *}"
 case "$RATING" in
@@ -59,6 +63,7 @@ fi
 
 python3 - "$REPORT" <<'PY'
 import json
+import math
 import sys
 
 path = sys.argv[1]
@@ -66,6 +71,7 @@ with open(path, encoding="utf-8") as handle:
     report = json.load(handle)
 
 ratings = {"excellent", "good", "playable", "low"}
+graph_sources = {"fixture", "aggregated", "summary"}
 assert report["suite"] == "bench_screen_report", report.get("suite")
 assert report["overall"]["rating"] in ratings, report["overall"]
 scenes = report["scenes"]
@@ -77,7 +83,33 @@ for scene in scenes:
     assert scene["median_fps"] > 0, scene
     assert scene["samples"] >= 1, scene
     assert scene["recommended_settings"]["resolution_scale_percent"] > 0, scene
-print("BENCH_SCREEN_EXPORT OK scenes=3 rating=%s" % report["overall"]["rating"])
+
+    graph = scene.get("frame_graph")
+    assert isinstance(graph, dict) and graph, scene.get("id")
+    assert graph["source"] in graph_sources, graph.get("source")
+    # --smoke always exercises the embedded deterministic fixtures.
+    assert graph["source"] == "fixture", (scene["id"], graph["source"])
+    samples = graph["samples"]
+    assert isinstance(samples, list) and len(samples) >= 2, (scene["id"], len(samples))
+    assert graph["sample_count"] == len(samples), scene["id"]
+    for sample in samples:
+        assert isinstance(sample, (int, float)) and math.isfinite(sample), sample
+        assert sample > 0, sample
+    p50 = graph["p50_ms"]
+    p95 = graph["p95_ms"]
+    p99 = graph["p99_ms"]
+    peak = graph["max_ms"]
+    for value in (p50, p95, p99, peak):
+        assert isinstance(value, (int, float)) and math.isfinite(value), value
+        assert value > 0, value
+    assert p50 <= p95 <= p99 <= peak, (scene["id"], p50, p95, p99, peak)
+    axis = graph["axis"]
+    assert axis["x_min"] == 0, axis
+    assert axis["x_max"] == len(samples) - 1, axis
+    assert axis["y_min_ms"] == 0, axis
+    assert axis["y_max_ms"] >= peak > axis["y_min_ms"], axis
+    assert sorted(graph["reference_ms"]) == [16.7, 33.3], graph.get("reference_ms")
+print("BENCH_SCREEN_EXPORT OK scenes=3 graphs=3 rating=%s" % report["overall"]["rating"])
 PY
 
 echo "BENCH_SCREEN_SMOKE OK rating=${RATING}"

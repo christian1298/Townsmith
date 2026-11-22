@@ -48,4 +48,9 @@ if ! grep -q '^BENCH_SCREEN_RUN tier=early ' <<<"$OUTPUT" \
 	exit 1
 fi
 
-echo "BENCH_SCREEN_LIVE_SMOKE OK scenes=3 rating=$(sed -n 's/.*rating=\([^ ]*\).*/\1/p' <<<"$LINE")"
+if ! grep -q '^BENCH_SCREEN_GRAPHS OK scenes=3$' <<<"$OUTPUT"; then
+	echo "Benchmark live smoke failed: graph marker missing" >&2
+	exit 1
+fi
+
+echo "BENCH_SCREEN_LIVE_SMOKE OK scenes=3 graphs=3 rating=$(sed -n 's/.*rating=\([^ ]*\).*/\1/p' <<<"$LINE")"
