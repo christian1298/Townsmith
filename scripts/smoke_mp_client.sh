@@ -103,7 +103,7 @@ CHECKSUM="$(sed -n 's/.* checksum=\([0-9a-f]*\).*/\1/p' <<<"$LINE")"
 FRAMES_SENT="$(sed -n 's/.* frames_sent=\([0-9][0-9]*\).*/\1/p' <<<"$LINE")"
 FRAMES_RECEIVED="$(sed -n 's/.* frames_received=\([0-9][0-9]*\).*/\1/p' <<<"$LINE")"
 
-for FIELD in "reject=ok" "road=ok"; do
+for FIELD in "reject=ok" "road=ok" "interest=ok" "roads=1" "truncated=false"; do
 	if [[ "$LINE" != *"$FIELD"* ]]; then
 		echo "Multiplayer client smoke failed: missing $FIELD ($LINE)" >&2
 		exit 1
@@ -121,14 +121,14 @@ if [[ ! "$CHECKSUM" =~ ^[0-9a-f]{16}$ ]]; then
 	echo "Multiplayer client smoke failed: bad checksum '${CHECKSUM:-none}'" >&2
 	exit 1
 fi
-if [[ "$FRAMES_SENT" != "6" || "$FRAMES_RECEIVED" != "6" ]]; then
+if [[ "$FRAMES_SENT" != "7" || "$FRAMES_RECEIVED" != "8" ]]; then
 	echo "Multiplayer client smoke failed: frames sent=${FRAMES_SENT:-none} received=${FRAMES_RECEIVED:-none}" >&2
 	exit 1
 fi
-if ! grep -Eq "status=session frames=12|SERVER_LISTEN status=ok sessions=1 " "$SERVER_LOG"; then
-	echo "Multiplayer client smoke failed: server did not report a 12-frame session" >&2
+if ! grep -Eq "SERVER_LISTEN status=ok sessions=1 commands=7 " "$SERVER_LOG"; then
+	echo "Multiplayer client smoke failed: server did not report a 7-command, 15-frame session" >&2
 	cat "$SERVER_LOG" >&2
 	exit 1
 fi
 
-echo "MP_CLIENT_SMOKE status=ok port=$PORT tick=$TICK population=$POPULATION checksum=$CHECKSUM frames=12"
+echo "MP_CLIENT_SMOKE status=ok port=$PORT tick=$TICK population=$POPULATION checksum=$CHECKSUM frames=15"

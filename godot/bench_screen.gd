@@ -4,14 +4,22 @@ extends Control
 ##
 ## Reads the existing Early/Mid/Late summary JSON written by
 ## `scripts/bench_godot.sh` and shows three scene cards, a per-scene and
-## overall rating, recommended settings, and a combined JSON export.
+## overall rating, recommended settings, a compact frame-time graph per scene,
+## and a combined JSON export.
 ##
 ## By default this is a **report over existing results**. With `--run` (or the
 ## "Run Early / Mid / Late" button) it runs `res://benchmark.tscn` once per tier,
-## sequentially, writing a fresh single-run summary and refreshing the cards
-## after each scene. It still does not produce frame-time graphs and is not the
-## 1M/3060 gate. If a summary file is missing, the screen falls back to embedded
-## deterministic fixtures so the report stays usable in a clean checkout.
+## sequentially, writing a fresh single-run summary and refreshing the cards,
+## graphs included, after each scene. It is still not the 1M/3060 gate. If a
+## summary file is missing, the screen falls back to embedded deterministic
+## fixtures so the report stays usable in a clean checkout.
+##
+## Frame-time graphs are drawn from per-run frame arrays when a summary carries
+## them (`frametimes_ms`, `frame_times_ms`, `frames_ms`, or `samples_ms`, at the
+## top level, under `results`, or under an array of per-run records). The
+## committed summaries only keep medians, so those cards draw a deterministic
+## curve derived from p50/p95/p99/max and label it `aggregated` — never raw
+## samples. Fixtures are labelled `fixture`; raw arrays are labelled `summary`.
 ##
 ## Run:
 ##   godot --path godot res://bench_screen.tscn
@@ -88,6 +96,96 @@ const SETTINGS_BY_RATING := {
 	},
 }
 
+const GRAPH_MAX_POINTS := 160
+const GRAPH_REFERENCE_MS := [16.7, 33.3]
+const GRAPH_SOURCE_FIXTURE := "fixture"
+const GRAPH_SOURCE_AGGREGATED := "aggregated"
+const GRAPH_SOURCE_SUMMARY := "summary"
+const FRAME_SAMPLE_KEYS := ["frametimes_ms", "frame_times_ms", "frames_ms", "samples_ms"]
+
+## Compact frame-time plot. One instance per scene card; redrawn on resize.
+class FrameGraph extends Control:
+	const BACKDROP := Color(0.052, 0.062, 0.078)
+	const BORDER := Color(0.17, 0.20, 0.24)
+	const REFERENCE := Color(0.32, 0.38, 0.46)
+	const P95_COLOR := Color(0.96, 0.75, 0.30, 0.9)
+	const P99_COLOR := Color(0.96, 0.42, 0.38, 0.9)
+	const AXIS_TEXT := Color(0.50, 0.56, 0.63)
+	const REFERENCE_MS := [16.7, 33.3]
+
+	var samples := PackedFloat32Array()
+	var p95_ms := 0.0
+	var p99_ms := 0.0
+	var y_max_ms := 33.3
+	var tint := Color(0.42, 0.72, 0.98)
+
+	func _init() -> void:
+		custom_minimum_size = Vector2(0.0, 116.0)
+		size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _draw() -> void:
+		draw_rect(Rect2(Vector2.ZERO, size), BACKDROP, true)
+		draw_rect(Rect2(Vector2.ZERO, size), BORDER, false, 1.0)
+		if samples.size() < 2 or size.x < 60.0 or size.y < 50.0:
+			return
+		var plot_left := 32.0
+		var plot_right := maxf(plot_left + 1.0, size.x - 34.0)
+		var plot_top := 10.0
+		var plot_bottom := maxf(plot_top + 1.0, size.y - 16.0)
+		var span := maxf(y_max_ms, 0.001)
+		var height := plot_bottom - plot_top
+		var x_step := (plot_right - plot_left) / maxf(float(samples.size() - 1), 1.0)
+
+		for reference in REFERENCE_MS:
+			if float(reference) <= span:
+				var y := plot_bottom - (float(reference) / span) * height
+				_dashed_horizontal(y, plot_left, plot_right, REFERENCE)
+				_label("%.1f" % float(reference), Vector2(2.0, y + 3.0), REFERENCE)
+		_label("%.1f ms" % span, Vector2(2.0, plot_top + 4.0), AXIS_TEXT)
+		_label("0", Vector2(2.0, plot_bottom + 3.0), AXIS_TEXT)
+		_label("frames", Vector2(plot_right - 26.0, size.y - 3.0), AXIS_TEXT)
+
+		var markers := [
+			{"value": p95_ms, "color": P95_COLOR, "label": "p95"},
+			{"value": p99_ms, "color": P99_COLOR, "label": "p99"},
+		]
+		for marker_value in markers:
+			var marker: Dictionary = marker_value
+			var value := float(marker.get("value", 0.0))
+			if value <= 0.0 or value > span:
+				continue
+			var marker_y := plot_bottom - (value / span) * height
+			var marker_color: Color = marker.get("color", REFERENCE)
+			_dashed_horizontal(marker_y, plot_left, plot_right, marker_color)
+			_label(str(marker.get("label", "")), Vector2(plot_right + 4.0, marker_y + 3.0), marker_color)
+
+		var previous := Vector2(
+			plot_left,
+			plot_bottom - clampf(samples[0] / span, 0.0, 1.0) * height
+		)
+		for index in range(1, samples.size()):
+			var point := Vector2(
+				plot_left + x_step * float(index),
+				plot_bottom - clampf(samples[index] / span, 0.0, 1.0) * height
+			)
+			draw_line(previous, point, tint, 1.4, true)
+			previous = point
+
+	func _dashed_horizontal(y: float, x0: float, x1: float, color: Color) -> void:
+		var dash := 5.0
+		var gap := 4.0
+		var x := x0
+		while x < x1:
+			draw_line(Vector2(x, y), Vector2(minf(x + dash, x1), y), color, 1.0)
+			x += dash + gap
+
+	func _label(text: String, position: Vector2, color: Color) -> void:
+		var font := ThemeDB.fallback_font
+		if font == null:
+			return
+		draw_string(font, position, text, HORIZONTAL_ALIGNMENT_LEFT, -1, 9, color)
+
 ## Deterministic fallbacks. They use the same fields as the real summaries so
 ## the smoke path exercises the real parser and median-FPS derivation.
 const FIXTURES := {
@@ -126,6 +224,7 @@ var _export_status: Label
 var _run_status: Label
 var _run_button: Button
 var _card_count := 0
+var _graph_count := 0
 var _report: Dictionary = {}
 var _running := false
 var _completed_tiers: Array[String] = []
@@ -371,6 +470,7 @@ func _refresh_ui(report: Dictionary, run_status: String) -> void:
 		remove_child(child)
 		child.queue_free()
 	_card_count = 0
+	_graph_count = 0
 	_export_status = null
 	_run_status = null
 	_run_button = null
@@ -481,9 +581,186 @@ func _scene_record(spec: Dictionary, summary: Dictionary, source_file: String, s
 		"hitches_16ms": hitches,
 		"samples": sample_count,
 		"sample_unit": sample_unit,
+		"frame_graph": _frame_graph_for(results, summary, source),
 		"rating": rating,
 		"reason": _rating_reason(rating),
 		"recommended_settings": _settings_for(rating),
+	}
+
+func _finite_sample_array(values: Array) -> Array:
+	var samples: Array = []
+	for value in values:
+		if not _is_finite_number(value):
+			continue
+		var sample := float(value)
+		if sample > 0.0:
+			samples.append(sample)
+	return samples
+
+func _samples_from_container(container: Dictionary) -> Array:
+	for key in FRAME_SAMPLE_KEYS:
+		var value: Variant = container.get(key)
+		if typeof(value) != TYPE_ARRAY:
+			continue
+		var samples := _finite_sample_array(value)
+		if samples.size() >= 2:
+			return samples
+	return []
+
+func _raw_frame_samples(summary: Dictionary, results: Dictionary) -> Array:
+	var direct := _samples_from_container(summary)
+	if not direct.is_empty():
+		return direct
+	direct = _samples_from_container(results)
+	if not direct.is_empty():
+		return direct
+	var runs_value: Variant = summary.get("runs")
+	if typeof(runs_value) != TYPE_ARRAY:
+		return []
+	var combined: Array = []
+	for run_value in (runs_value as Array):
+		if typeof(run_value) != TYPE_DICTIONARY:
+			continue
+		var run: Dictionary = run_value
+		var part := _samples_from_container(run)
+		if part.is_empty():
+			var run_results: Variant = run.get("results")
+			if typeof(run_results) == TYPE_DICTIONARY:
+				part = _samples_from_container(run_results)
+		combined.append_array(part)
+	return combined if combined.size() >= 2 else []
+
+func _percentile_value(sorted_samples: Array, fraction: float) -> float:
+	if sorted_samples.is_empty():
+		return 0.0
+	var index := clampi(
+		int(round(float(sorted_samples.size() - 1) * fraction)),
+		0,
+		sorted_samples.size() - 1
+	)
+	return float(sorted_samples[index])
+
+func _graph_quantiles(results: Dictionary) -> Dictionary:
+	var median_fps := _median_fps(results)
+	var p50 := _number(results.get("frametime_ms_median"))
+	if p50 <= 0.0 and median_fps > 0.0:
+		p50 = 1000.0 / median_fps
+	if p50 <= 0.0:
+		return {}
+	var p99 := _number(results.get("frametime_ms_p99"))
+	if p99 <= 0.0:
+		var low_fps := _number(results.get("fps_low_1pct", results.get("low_1pct")))
+		if low_fps > 0.0:
+			p99 = 1000.0 / low_fps
+	if p99 < p50:
+		p99 = p50 * 1.6
+	var p95 := _number(results.get("frametime_ms_p95"))
+	if p95 <= 0.0:
+		p95 = lerpf(p50, p99, 0.62)
+	p95 = clampf(p95, p50, p99)
+	var max_ms := _number(results.get("frametime_ms_max"))
+	if max_ms <= p99:
+		max_ms = p99 * 1.15 + 0.5
+	var min_ms := _number(results.get("frametime_ms_min"))
+	if min_ms <= 0.0 or min_ms > p50:
+		min_ms = p50 * 0.55
+	return {
+		"min_ms": min_ms,
+		"p50_ms": p50,
+		"p95_ms": p95,
+		"p99_ms": p99,
+		"max_ms": max_ms,
+	}
+
+## Deterministic quantile curve through min/p50/p95/p99/max. It is a labelled
+## stand-in for raw samples, never presented as measured per-frame data.
+func _synthetic_samples(quantiles: Dictionary) -> Array:
+	var anchors := [
+		Vector2(0.0, float(quantiles.get("min_ms", 0.0))),
+		Vector2(0.5, float(quantiles.get("p50_ms", 0.0))),
+		Vector2(0.95, float(quantiles.get("p95_ms", 0.0))),
+		Vector2(0.99, float(quantiles.get("p99_ms", 0.0))),
+		Vector2(1.0, float(quantiles.get("max_ms", 0.0))),
+	]
+	var count := 96
+	var samples: Array = []
+	for index in range(count):
+		var q := float(index) / float(count - 1)
+		var segment := 0
+		while segment < anchors.size() - 2 and q > anchors[segment + 1].x:
+			segment += 1
+		var left: Vector2 = anchors[segment]
+		var right: Vector2 = anchors[segment + 1]
+		var span := maxf(right.x - left.x, 0.0001)
+		var f := clampf((q - left.x) / span, 0.0, 1.0)
+		samples.append(lerpf(left.y, right.y, f))
+	return samples
+
+func _downsample_samples(samples: Array, limit: int) -> Array:
+	if samples.size() <= limit:
+		return samples.duplicate()
+	var out: Array = []
+	for index in range(limit):
+		var source_index := int(round(
+			float(index) * float(samples.size() - 1) / float(limit - 1)
+		))
+		out.append(samples[source_index])
+	return out
+
+func _frame_graph_for(results: Dictionary, summary: Dictionary, scene_source: String) -> Dictionary:
+	var raw := _raw_frame_samples(summary, results)
+	var source := GRAPH_SOURCE_AGGREGATED
+	var samples: Array = []
+	var p50 := 0.0
+	var p95 := 0.0
+	var p99 := 0.0
+	var max_ms := 0.0
+	if raw.size() >= 2:
+		var sorted := raw.duplicate()
+		sorted.sort()
+		p50 = _percentile_value(sorted, 0.50)
+		p95 = _percentile_value(sorted, 0.95)
+		p99 = _percentile_value(sorted, 0.99)
+		max_ms = float(sorted[sorted.size() - 1])
+		samples = _downsample_samples(raw, GRAPH_MAX_POINTS)
+		if scene_source == "fixture":
+			source = GRAPH_SOURCE_FIXTURE
+		else:
+			source = GRAPH_SOURCE_SUMMARY
+	else:
+		var quantiles := _graph_quantiles(results)
+		if quantiles.is_empty():
+			return {}
+		p50 = float(quantiles.get("p50_ms", 0.0))
+		p95 = float(quantiles.get("p95_ms", 0.0))
+		p99 = float(quantiles.get("p99_ms", 0.0))
+		max_ms = float(quantiles.get("max_ms", 0.0))
+		samples = _synthetic_samples(quantiles)
+		if scene_source == "fixture":
+			source = GRAPH_SOURCE_FIXTURE
+		else:
+			source = GRAPH_SOURCE_AGGREGATED
+	var y_max := maxf(33.3, maxf(max_ms, p99) * 1.08)
+	y_max = ceilf(y_max * 10.0) / 10.0
+	return {
+		"source": source,
+		"synthetic": raw.size() < 2,
+		"samples": samples,
+		"sample_count": samples.size(),
+		"p50_ms": p50,
+		"p95_ms": p95,
+		"p99_ms": p99,
+		"max_ms": max_ms,
+		"axis": {
+			"x": "sample_index",
+			"x_min": 0,
+			"x_max": samples.size() - 1,
+			"y": "frametime_ms",
+			"y_min_ms": 0.0,
+			"y_max_ms": y_max,
+			"ascending": true,
+		},
+		"reference_ms": GRAPH_REFERENCE_MS.duplicate(),
 	}
 
 func _fixture_scene(spec: Dictionary, source_file: String) -> Dictionary:
@@ -735,7 +1012,7 @@ func _build_scene_card(scene: Dictionary) -> PanelContainer:
 
 	var card := PanelContainer.new()
 	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	card.custom_minimum_size = Vector2(0.0, 330.0)
+	card.custom_minimum_size = Vector2(0.0, 500.0)
 	var style := StyleBoxFlat.new()
 	style.bg_color = Color(0.095, 0.11, 0.13)
 	style.border_color = color
@@ -781,6 +1058,10 @@ func _build_scene_card(scene: Dictionary) -> PanelContainer:
 		str(scene.get("sample_unit", "runs")),
 	]))
 
+	var graph_value: Variant = scene.get("frame_graph", {})
+	if typeof(graph_value) == TYPE_DICTIONARY:
+		box.add_child(_build_frame_graph(graph_value, color))
+
 	var rating_label := Label.new()
 	rating_label.text = "Rating: " + rating.capitalize()
 	rating_label.add_theme_font_size_override("font_size", 18)
@@ -807,6 +1088,51 @@ func _build_scene_card(scene: Dictionary) -> PanelContainer:
 	source.add_theme_font_size_override("font_size", 12)
 	box.add_child(source)
 	return card
+
+func _build_frame_graph(graph: Dictionary, tint: Color) -> VBoxContainer:
+	var container := VBoxContainer.new()
+	container.add_theme_constant_override("separation", 3)
+
+	var source := str(graph.get("source", ""))
+	var caption := Label.new()
+	caption.text = "Frame time · %s · %s" % [source, _frame_graph_note(graph)]
+	caption.add_theme_color_override("font_color", Color(0.66, 0.71, 0.78))
+	caption.add_theme_font_size_override("font_size", 12)
+	container.add_child(caption)
+
+	var plot := FrameGraph.new()
+	plot.name = "FrameGraph"
+	plot.tint = tint
+	var axis_value: Variant = graph.get("axis", {})
+	var axis: Dictionary = axis_value if typeof(axis_value) == TYPE_DICTIONARY else {}
+	plot.y_max_ms = _number(axis.get("y_max_ms"), 33.3)
+	plot.p95_ms = _number(graph.get("p95_ms"))
+	plot.p99_ms = _number(graph.get("p99_ms"))
+	var samples_value: Variant = graph.get("samples", [])
+	var samples: Array = samples_value if typeof(samples_value) == TYPE_ARRAY else []
+	var packed := PackedFloat32Array()
+	for value in samples:
+		packed.append(float(value))
+	plot.samples = packed
+	container.add_child(plot)
+	_graph_count += 1
+
+	var stats := Label.new()
+	stats.text = "p50 %.2f ms · p95 %.2f · p99 %.2f · max %.2f" % [
+		_number(graph.get("p50_ms")),
+		_number(graph.get("p95_ms")),
+		_number(graph.get("p99_ms")),
+		_number(graph.get("max_ms")),
+	]
+	stats.add_theme_color_override("font_color", Color(0.55, 0.60, 0.68))
+	stats.add_theme_font_size_override("font_size", 12)
+	container.add_child(stats)
+	return container
+
+func _frame_graph_note(graph: Dictionary) -> String:
+	if bool(graph.get("synthetic", false)):
+		return "synthetic from p50/p95/p99, not raw frames"
+	return "%d frames" % int(_number(graph.get("sample_count")))
 
 func _card_row(key: String, value: String) -> HBoxContainer:
 	var row := HBoxContainer.new()
@@ -837,6 +1163,118 @@ func _on_run_pressed() -> void:
 		push_error("Cannot run benchmark scenes: " + problem)
 		return
 	_run_all(false)
+
+func _graph_problem(graph_value: Variant, expected_source: String, index: int) -> String:
+	if typeof(graph_value) != TYPE_DICTIONARY:
+		return "graph_type_%d" % index
+	var graph: Dictionary = graph_value
+	if str(graph.get("source", "")) != expected_source:
+		return "graph_source_%d" % index
+	var samples_value: Variant = graph.get("samples", [])
+	if typeof(samples_value) != TYPE_ARRAY:
+		return "graph_samples_%d" % index
+	var samples: Array = samples_value
+	if samples.size() < 2:
+		return "graph_count_%d" % index
+	var axis_value: Variant = graph.get("axis", {})
+	if typeof(axis_value) != TYPE_DICTIONARY:
+		return "graph_axis_%d" % index
+	var axis: Dictionary = axis_value
+	if int(_number(axis.get("x_min"), -1.0)) != 0:
+		return "graph_x_min_%d" % index
+	if int(_number(axis.get("x_max"), -1.0)) != samples.size() - 1:
+		return "graph_x_max_%d" % index
+	var y_min := _number(axis.get("y_min_ms"), -1.0)
+	var y_max := _number(axis.get("y_max_ms"), 0.0)
+	if y_min != 0.0 or y_max <= y_min:
+		return "graph_y_axis_%d" % index
+	var p50 := _number(graph.get("p50_ms"), -1.0)
+	var p95 := _number(graph.get("p95_ms"), -1.0)
+	var p99 := _number(graph.get("p99_ms"), -1.0)
+	var max_ms := _number(graph.get("max_ms"), -1.0)
+	if p50 <= 0.0 or p95 < p50 or p99 < p95 or max_ms < p99:
+		return "graph_percentiles_%d" % index
+	if max_ms > y_max:
+		return "graph_max_range_%d" % index
+	var previous := -1.0
+	for sample in samples:
+		if not _is_finite_number(sample):
+			return "graph_sample_finite_%d" % index
+		var value := float(sample)
+		if value <= 0.0 or value > y_max:
+			return "graph_sample_range_%d" % index
+		if bool(graph.get("synthetic", false)) and value + 0.000001 < previous:
+			return "graph_sample_order_%d" % index
+		previous = value
+	var references_value: Variant = graph.get("reference_ms", [])
+	if typeof(references_value) != TYPE_ARRAY:
+		return "graph_refs_%d" % index
+	var references: Array = references_value
+	if not references.has(16.7) or not references.has(33.3):
+		return "graph_refs_%d" % index
+	return ""
+
+## Exercises all three graph source labels: fixture fallback, aggregate-only
+## summary (synthetic curve), and a summary carrying raw frame arrays.
+func _smoke_graph_sources() -> String:
+	var aggregate_summary := {
+		"runs": 3,
+		"results": {
+			"frametime_ms_median": 16.0,
+			"frametime_ms_p95": 24.0,
+			"frametime_ms_p99": 31.0,
+			"fps_low_1pct": 32.2,
+		},
+	}
+	var aggregate_scene := _scene_record(SCENE_SPECS[0], aggregate_summary, "crafted", "summary")
+	var problem := _graph_problem(aggregate_scene.get("frame_graph", {}), GRAPH_SOURCE_AGGREGATED, 0)
+	if problem != "":
+		return "resolver_aggregate_%s" % problem
+
+	var raw_samples: Array = []
+	for index in range(40):
+		raw_samples.append(9.0 + float(index % 8) * 1.5)
+	var raw_summary := aggregate_summary.duplicate(true)
+	raw_summary["frametimes_ms"] = raw_samples
+	var raw_scene := _scene_record(SCENE_SPECS[0], raw_summary, "crafted", "summary")
+	problem = _graph_problem(raw_scene.get("frame_graph", {}), GRAPH_SOURCE_SUMMARY, 0)
+	if problem != "":
+		return "resolver_summary_%s" % problem
+
+	var fixture_scene := _fixture_scene(SCENE_SPECS[0], "crafted")
+	problem = _graph_problem(fixture_scene.get("frame_graph", {}), GRAPH_SOURCE_FIXTURE, 0)
+	if problem != "":
+		return "resolver_fixture_%s" % problem
+	return ""
+
+func _export_graph_problem(original: Dictionary, exported: Dictionary, index: int) -> String:
+	if not exported.has("frame_graph"):
+		return "export_graph_%d" % index
+	var exported_value: Variant = exported.get("frame_graph", {})
+	if typeof(exported_value) != TYPE_DICTIONARY:
+		return "export_graph_type_%d" % index
+	var exported_graph: Dictionary = exported_value
+	var original_value: Variant = original.get("frame_graph", {})
+	var original_graph: Dictionary = original_value if typeof(original_value) == TYPE_DICTIONARY else {}
+	var exported_source := str(exported_graph.get("source", ""))
+	if exported_source == "" or exported_source != str(original_graph.get("source", "")):
+		return "export_graph_source_%d" % index
+	var exported_samples_value: Variant = exported_graph.get("samples", [])
+	var original_samples_value: Variant = original_graph.get("samples", [])
+	if typeof(exported_samples_value) != TYPE_ARRAY or typeof(original_samples_value) != TYPE_ARRAY:
+		return "export_graph_samples_%d" % index
+	var exported_samples: Array = exported_samples_value
+	var original_samples: Array = original_samples_value
+	if exported_samples.size() < 2 or exported_samples.size() != original_samples.size():
+		return "export_graph_samples_%d" % index
+	for key in ["p50_ms", "p95_ms", "p99_ms", "max_ms"]:
+		var original_value_number := _number(original_graph.get(key), -1.0)
+		var exported_value_number := _number(exported_graph.get(key), -1.0)
+		if original_value_number <= 0.0 or exported_value_number <= 0.0:
+			return "export_graph_%s_missing_%d" % [str(key), index]
+		if absf(original_value_number - exported_value_number) > 0.001:
+			return "export_graph_%s_%d" % [str(key), index]
+	return ""
 
 func _run_smoke(report: Dictionary, exported: bool) -> void:
 	var status := "ok"
@@ -897,6 +1335,21 @@ func _run_smoke(report: Dictionary, exported: bool) -> void:
 	elif status == "ok" and _rating_for(29.9) != "low":
 		status = "boundary_below_30"
 
+	if status == "ok" and _graph_count != 3:
+		status = "graph_controls_%d" % _graph_count
+	if status == "ok":
+		for index in range(scenes.size()):
+			var scene: Dictionary = scenes[index]
+			var source := str(scene.get("source", GRAPH_SOURCE_FIXTURE))
+			var problem := _graph_problem(scene.get("frame_graph", {}), source, index)
+			if problem != "":
+				status = problem
+				break
+	if status == "ok":
+		var resolver_problem := _smoke_graph_sources()
+		if resolver_problem != "":
+			status = resolver_problem
+
 	if status == "ok" and not exported:
 		status = "export_failed"
 	if status == "ok":
@@ -934,6 +1387,10 @@ func _run_smoke(report: Dictionary, exported: bool) -> void:
 						status = "export_roundtrip_hitches_%d" % index
 					elif not exported_scene.has("recommended_settings"):
 						status = "export_scene_settings_%d" % index
+					else:
+						var graph_problem := _export_graph_problem(original, exported_scene, index)
+						if graph_problem != "":
+							status = graph_problem
 
 	if status == "ok":
 		var commands := _run_commands(30.0, 3.0)
@@ -962,6 +1419,15 @@ func _run_smoke(report: Dictionary, exported: bool) -> void:
 					float(command.get("duration_s", 0.0)),
 					float(command.get("warmup_s", 0.0)),
 				])
+	if status == "ok":
+		var graph_sources: Array = []
+		for scene_value in scenes:
+			if typeof(scene_value) == TYPE_DICTIONARY:
+				var graph_value: Variant = (scene_value as Dictionary).get("frame_graph", {})
+				if typeof(graph_value) == TYPE_DICTIONARY:
+					graph_sources.append(str((graph_value as Dictionary).get("source", "")))
+		print("BENCH_SCREEN_GRAPH_SOURCES %s" % ",".join(PackedStringArray(graph_sources)))
+		print("BENCH_SCREEN_GRAPHS OK scenes=3")
 	if scenes.size() == 3:
 		print("BENCH_SCREEN_VALUES early=%.1f/%s mid=%.1f/%s late=%.1f/%s" % [
 			_number((scenes[0] as Dictionary).get("median_fps")),

@@ -53,6 +53,9 @@ A benchmark run is not a synthetic fly-through of an empty map. It is a represen
 > [!info] Streaming-scale data harness
 > `cargo run --release -p townsmith-bench --bin streaming_scale` models 100 km² of terrain through a bounded near/mid/far resident set and LOD meshing. Current run: 525 chunks visited, 775 generated, 225 peak resident, ~281 MB peak mesh bytes, 280.3 ms mean generate, 17.4 ms mean mesh, 12.35 s total, checksum `4dfb48204244e377`. It reports `status=capped` when the per-step generation budget skips chunks. Data harness only; not the render gate.
 
+> [!info] Metropolis gate evaluator
+> `./scripts/check_metropolis_gate.py --result PATH` evaluates a recorded `late_metropolis_v1` or `cohort_1m_v1` JSON against the docs/68 thresholds and prints `METROPOLIS_GATE status=pass|fail|insufficient`. `./scripts/check_metropolis_gate.sh` finds the newest file under `benchmarks/results/gate/`. It never renders or measures; a result missing provenance is `insufficient`, and `--require-hardware` fails a non-8c/16t/RTX 3060-12GB run. `--self-test` covers 14 cases. See [[68 - Metropolis Gate]] §8.4.
+
 > [!info] Industrial balance probe
 > `cargo run --release -p townsmith-bench --bin industrial` builds a 20,000-resident Industrial city and runs 30 days at two tax policies. Current result: default 8/4 bankrupt in ~2.3 days at −175,385/day; 20/4 ends +2,288,306 at +64,615/day. Notional construction cost is 195M against 600k of available financing. See [[72 - Industrial Balance]].
 
@@ -297,8 +300,8 @@ The results screen can show a small table:
 
 This is the player-facing version of the benchmark: a clear expectation for the early, mid, and late game.
 
-> [!info] Phase 0 report-only scaffold (2026-11-22)
-> `godot/bench_screen.tscn` now implements the **report/rating/export** part against existing Early/Mid/Late summaries: three scene cards, median FPS, 1% low, hitches, sample count, an overall worst-scene rating, recommended resolution scale plus shadow/LOD presets, and `--output` JSON export. Still open: live scene selection and run, and the 1% low/frame-time graphs. The scaffold is not the gate and does not replace a target-machine run.
+> [!info] Report-only scaffold now draws frame-time graphs (2026-11-23)
+> `godot/bench_screen.tscn` implements the **report/rating/export** part against existing Early/Mid/Late summaries: three scene cards, median FPS, 1% low, hitches, sample count, a frame-time graph per card, an overall worst-scene rating, recommended resolution scale plus shadow/LOD presets, and `--output` JSON export. Each graph draws a ms axis with 16.7/33.3 ms reference lines and p95/p99 markers. Raw per-run frame arrays are used and labelled `summary` when a summary carries them (`frametimes_ms`, `frame_times_ms`, `frames_ms`, or `samples_ms`); the committed summaries keep only medians, so their cards draw a deterministic curve from p50/p95/p99/max labelled `aggregated`, and missing summaries use the embedded fixtures labelled `fixture`. `--run` refreshes the graphs after each live scene, and the export adds `frame_graph: {source, samples, p50_ms, p95_ms, p99_ms, max_ms, axis, reference_ms}` per scene. Still open: player-chosen scene/route/preset, 1% low and 0.1% low graphs, and writing raw per-frame arrays in the normal summary. The scaffold is not the gate and does not replace a target-machine run.
 
 ## 8. Developer and CI mode
 

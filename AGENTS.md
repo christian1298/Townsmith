@@ -315,7 +315,7 @@ cargo run --release -p townsmith-server -- --loopback-smoke
 # Prints SERVER_PROTOCOL and SERVER_AUTHORITY status lines; deterministic, no sleeps
 cargo test -p townsmith-server
 cargo run --release -p townsmith-server -- --loopback-smoke   # protocol + authority + roles + resume + interest goldens
-cargo run --release -p townsmith-server -- --interest-smoke   # viewport filtering loopback
+cargo run --release -p townsmith-server -- --interest-smoke   # viewport + bounded 64-road interest view loopback
 GODOT=/path/to/godot ./scripts/smoke_mp_client.sh
 GODOT=/path/to/godot ./scripts/smoke_movement_stress.sh
 GODOT=/path/to/godot "${GODOT:-godot}" --headless --path godot res://movement_stress.tscn -- --agents 2000
@@ -342,6 +342,8 @@ GODOT=/path/to/godot ./scripts/smoke_city.sh
 # Neither path is the 1M gate.
 GODOT=/path/to/godot ./scripts/smoke_bench_screen.sh
 GODOT=/path/to/godot ./scripts/smoke_bench_live.sh
+GODOT=/path/to/godot ./scripts/smoke_playtest_capture.sh
+"${GODOT:-godot}" --path godot res://playtest_capture.tscn   # standalone Q-101 observer form
 "${GODOT:-godot}" --path godot res://bench_screen.tscn -- --output benchmarks/results/bench_screen_report.json
 # Headless MultiMesh setup harness for 10k/50k/250k boxes (not FPS evidence)
 GODOT=/path/to/godot ./scripts/smoke_metropolis_render.sh
@@ -351,6 +353,12 @@ GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only
 GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --lod
 GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --switch
 GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --buildings 250000
+
+# Evaluate a recorded 1M gate result against docs/68 thresholds
+./scripts/check_metropolis_gate.py --result benchmarks/results/gate/late_metropolis_v1.json
+./scripts/check_metropolis_gate.py --result benchmarks/results/gate/cohort_1m_v1.json
+./scripts/check_metropolis_gate.sh
+./scripts/check_metropolis_gate.py --self-test
 GODOT=/path/to/godot ./scripts/smoke_volume.sh
 GODOT=/path/to/godot ./scripts/smoke_editor.sh
 GODOT=/path/to/godot ./scripts/smoke_locale.sh
