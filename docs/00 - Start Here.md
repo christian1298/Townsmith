@@ -201,7 +201,7 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 | [[35 - Editor Undo Redo]] | Single-edit undo/redo, history shape, smoke | You work on editor history |
 | [[36 - Editor Props]] | Bed/stove/toilet/desk placement, metadata, room effects | You work on props or room inference |
 | [[37 - Room Stats Panel]] | Room totals, room list, selection, panel smoke | You work on the room inspector |
-| [[38 - Editor Localization]] | 96-key EN/DE editor tables, toggle, placeholder checks, layout smoke | You touch editor text or translations |
+| [[38 - Editor Localization]] | 111-key EN/DE editor tables, toggle, placeholder checks, layout smoke | You touch editor text or translations |
 | [[39 - Slice House Benchmark]] | 21-house MultiMesh benchmark, post-winding results, limits | You measure the slice render path |
 | [[40 - Slice Acceptance Results]] | Acceptance matrix, commands, cost model, open playtest | You close Phase 1 or plan Phase 2 |
 | [[66 - Playtest Kit]] | 30-minute route, observer checklist, ratings, Q-101 recording | You run or record the human playtest |
