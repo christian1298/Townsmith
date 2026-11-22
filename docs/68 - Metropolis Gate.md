@@ -180,6 +180,9 @@ These budgets come from [[07 - Simulation and AI]] and the recommended tier in [
 - The traffic grid must add a **spatial index and incremental updates** before the gate. The current linear nearest-node lookup and on-demand full rebuild are acceptable at 32×32, not at 65k nodes (G-06).
 - "No GPU" means the server has no rendering device and still completes 3,600 ticks with the budgets above.
 
+> [!info] Benchmark screen status (2026-11-22)
+> The report-only scaffold has landed: `godot/bench_screen.tscn` reads the existing Early/Mid/Late summary JSON, shows three scene cards (median FPS, 1% low, hitches, sample count), assigns per-scene and overall ratings from median-FPS thresholds **60/45/30**, recommends resolution scale and shadow/LOD presets, and exports a combined `user://benchmark_report.json` (`--output PATH` override). It falls back to embedded deterministic fixtures when a summary is missing. **Still open:** live scene selection/run and 1% low graphs. The screen is a report over existing results, not a gate substitute.
+
 ### 5.4 Load, streaming, save/load, and validity
 
 | Metric | Threshold |
@@ -694,7 +697,7 @@ No single person may both produce and sign off the gate result. With two people,
 - C1 and C2 have three valid runs each on the reference rig.
 - The gate report is signed and includes medians, worst runs, thresholds, verdict, and bottleneck.
 - The 3060 baseline is committed; the CI gate fails on the regression thresholds in §6.4.
-- The player-facing Benchmark screen runs Early/Mid/Late, shows 1% lows, hitches, rating, and recommended settings, and exports JSON.
+- The player-facing Benchmark screen has a **report-only scaffold**: it reads existing Early/Mid/Late summaries, shows 1% lows, hitches, rating, recommended settings, and exports JSON. **Still open:** live scene selection/run and 1% low graphs. The scaffold is not a gate result.
 - Save/load, memory, streaming, and simulation numbers are in the same report as the frame numbers.
 - Any conditional pass or failure has an ADR with the measured ceiling and the next action.
 - [[08 - Roadmap]] Phase 5 and [[15 - Benchmarks]] point at the result; this note is updated with the measured outcome.

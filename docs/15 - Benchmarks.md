@@ -2,7 +2,7 @@
 title: Benchmarks
 project: Townsmith
 status: proposed
-updated: 2026-11-21
+updated: 2026-11-22
 tags:
   - townsmith
   - performance
@@ -33,6 +33,13 @@ A benchmark run is not a synthetic fly-through of an empty map. It is a represen
 > `./scripts/bench_core.sh` runs the core microbenchmarks three times and writes `benchmarks/results/phase0_core_summary.json`: chunk meshing, worldgen/streaming/edit deltas, terrain meshing, and the 1M-cohort tick.
 >
 > `GODOT=/path/to/godot ./scripts/bench_godot.sh` runs the deterministic `phase0_flyover_v1` route three times and writes `benchmarks/results/godot_phase0_summary.json`. For city scenes, set `CITY_TIER=early|mid|late` and pass a `phase0_city_*.json` route; see [[23 - City Rendering Benchmark]]. Pass a third argument to use another route, e.g. `benchmarks/routes/phase0_streaming_flyover.json` for the multi-chunk streaming route; its summary is written to `benchmarks/results/godot_phase0_streaming_flyover_summary.json`. The summary includes `chunks_loaded_min/median/max`. It builds the terrain scene, moves the camera by elapsed time, records frame times, hitches, and 1% lows. It currently runs headless when no display is available; those frame times validate the route/JSON path but are **not** representative of rendering performance. Use a display and the target machine for real numbers. Async terrain streaming also makes chunk completion order scheduling-dependent; camera/settings/route stay fixed, but frame-exact chunk population is not guaranteed yet. Record the streaming counters with the result.
+
+> [!info] Player-facing benchmark report (report only)
+> `godot --path godot res://bench_screen.tscn` opens `godot/bench_screen.tscn`. It reads the existing `benchmarks/results/godot_phase0_city_{early,mid,late}_summary.json` files and shows three scene cards (median FPS, 1% low, hitches, sample count), a per-scene and overall rating, recommended settings, and a combined JSON export. The export defaults to `user://benchmark_report.json`; pass `--output PATH` to override it. Ratings use median-FPS thresholds: **excellent ≥60**, **good ≥45**, **playable ≥30**, **low <30**. The overall rating is the worst scene rating, not an average.
+>
+> This is a **report screen over existing results**. It does not run live scenes, does not produce frame-time graphs, and is not the 1M gate. If a summary is missing, the screen falls back to embedded deterministic fixtures and labels the card "Embedded fixture"; run the city routes with `CITY_TIER=early|mid|late` first for real numbers.
+>
+> Headless structural check (no display needed): `GODOT=/path/to/godot ./scripts/smoke_bench_screen.sh`. It prints `BENCH_SCREEN status=ok scenes=3 rating=...`.
 
 > [!info] Phase 3 traffic microbenchmark
 > `cargo run --release -p townsmith-bench --bin traffic` builds a deterministic 64 × 64 road grid (128 roads, 4,096 nodes, 8,064 edges, 129,024 m). On the current developer machine: graph build ~1.9 ms, 1,000 pair queries ~449 ms, 1,000 flow queries ~4.8 ms, and 64 goal fields ~60 ms. This is a microbenchmark, not the 1M/60 FPS gate.
@@ -171,7 +178,7 @@ A benchmark result is only meaningful if another run can reproduce it.
 - Frame-time graph over the run.
 - Hitch count (>16 ms, >33 ms, >50 ms).
 - Bottleneck: CPU, GPU, streaming, or mixed.
-- Scene rating: Excellent / Good / Playable / Heavy.
+- Scene rating: Excellent / Good / Playable / Low.
 - Recommended settings for the scene on this machine.
 
 ### Developer-facing
@@ -262,7 +269,7 @@ A benchmark result is only meaningful if another run can reproduce it.
 | **Excellent** | Above the target for this scene/hardware tier |
 | **Good** | At or near the target |
 | **Playable** | Below target but consistent; lower settings recommended |
-| **Heavy** | Significantly below target; the scene may be uncomfortable |
+| **Low** | Significantly below target; the scene may be uncomfortable |
 
 - Ratings are scene-specific. A machine can be “Excellent” at Early and “Heavy” at Late.
 - Do not collapse the three scenes into one misleading “score.”
@@ -279,6 +286,9 @@ The results screen can show a small table:
 | Late Metropolis | 27 FPS | 30 | Playable |
 
 This is the player-facing version of the benchmark: a clear expectation for the early, mid, and late game.
+
+> [!info] Phase 0 report-only scaffold (2026-11-22)
+> `godot/bench_screen.tscn` now implements the **report/rating/export** part against existing Early/Mid/Late summaries: three scene cards, median FPS, 1% low, hitches, sample count, an overall worst-scene rating, recommended resolution scale plus shadow/LOD presets, and `--output` JSON export. Still open: live scene selection and run, and the 1% low/frame-time graphs. The scaffold is not the gate and does not replace a target-machine run.
 
 ## 8. Developer and CI mode
 
