@@ -32,6 +32,8 @@ tags:
 
 The engine-agnostic core builds and tests without Godot. The shell is replaceable.
 
+Correctness hardening from the 2026-11-22 audit: terrain quads now use Godot's clockwise front-face winding on every axis and normal sign (culling still disabled pending a display smoke); palettes are built in O(voxels) and decoded palettes are capped at `CHUNK_VOLUME + 1 = 32,769` entries; and the no-sampler terrain path suppresses unknown-neighbor boundary walls instead of emitting a full wall to height 0. Terrain `f32` sampling is exact only to `2^24 m = 16,777,216 m`, now documented as the world-coordinate bound. Pinned `streaming_scale` checksum is unchanged at `f30740380558f66d` because streamed chunks pass a sampler.
+
 ## 2. Rendering measurements
 
 RTX 4080, Ryzen 9 7950X, 1920×1080, vsync off, GL Compatibility, 3 × 5 s runs:
