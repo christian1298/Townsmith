@@ -3,6 +3,7 @@ extends Node3D
 const TerrainStreamer = preload("res://terrain_streamer.gd")
 const CityRenderer = preload("res://city_renderer.gd")
 const VoxelInstances = preload("res://voxel_instances.gd")
+const BenchRoute = preload("res://bench_route.gd")
 
 const CITY_TIERS := {"early": 0, "mid": 1, "late": 2}
 const CITY_SEED := 2026
@@ -243,8 +244,7 @@ func _apply_route(t: float) -> void:
 		Vector3(float(b_pos[0]), float(b_pos[1]), float(b_pos[2])), f)
 	var look := Vector3(float(a_look[0]), float(a_look[1]), float(a_look[2])).lerp(
 		Vector3(float(b_look[0]), float(b_look[1]), float(b_look[2])), f)
-	camera.position = pos
-	camera.look_at(look)
+	BenchRoute.apply_pose(camera, pos, look)
 	camera.fov = lerpf(float(left.get("fov", 70.0)), float(right.get("fov", 70.0)), f)
 
 func _configure_target_window() -> void:

@@ -27,6 +27,7 @@ tags:
 | Room sampling/volume | F-021, F-054 | Fixed | PR #238 (sim M1) |
 | Bench gates | F-031..F-034, F-063, F-066, F-067 | Fixed | PR #239; movement `b50a763030007ef1`, infra `a920cf0c4eb9a4f1`, save-stress `0ce611887161ff62` |
 | Bridge parity, seeds, acceptance volume, docs | F-029, F-030, F-056..F-062 | Fixed | PR #240; 928 workspace tests |
+| Godot shell: HUD cadence + backlog clamp, streamer-derived chunk cells, bench route helper, headless/editor guards, industry animation cache, deterministic smoke budgets | F-035..F-038, F-068..F-071 | Fixed | PR for `fix/audit-godot-display`; `WORLD_SCENE … chunk_cells=ok status=ok`, `BENCH_SCREEN status=ok scenes=3 rating=playable`, `STREAM_ORDER_SMOKE status=ok checksum=ea5bc6f9 commits=59 loaded=30 stages=4`, `MOVEMENT_STRESS_SMOKE status=ok pass1_checksum=f29c282d`, `MP_CLIENT status=ok checksum=f17ed4f094dad32f`; default flyover route runs 263 frames with no `look_at` diagnostic |
 
 ### Deferred
 
@@ -37,7 +38,6 @@ tags:
 | F-015, F-016 | Refund-on-failed-mark-paid and the no-treasury utility/service fallback change charges/checksums. Needs an economy decision, not a mechanical fix. |
 | F-017..F-020, F-022, F-043..F-051, F-053, F-055 | World/mesh/blueprint/structure cluster; design changes (delta reload semantics, winding, palette/blueprint caps, basement depth) need focused PRs and golden updates. |
 | F-024..F-028 | Scale work (flow-field cache, service spatial index, graph build, mod duplicate/recursion guards) needs benchmarks and mod-format decisions. |
-| F-035..F-038, F-068..F-071 | Godot shell cluster; needs a display-backed behavior/smoke pass, not a blind edit. |
 | F-072, F-082, F-084 | Operational: the generated script UID sidecars are tracked; the extension was rebuilt and the world/bench/stream/movement/MP smokes were run in this session. |
 
 ## How to use this document
@@ -55,7 +55,7 @@ tags:
 | `cargo test --workspace` | **909 passed, 0 failed** |
 | `content/` schema (`check_content_schema.py`) | ok (4 files, 32 entries) |
 | `scripts/*.sh` `bash -n`, `scripts/*.py` compile | clean |
-| Godot headless smokes | **not run — no Godot binary on this machine.** Must re-run after fixes. |
+| Godot headless smokes | run 2026-11-23 on Godot 4.7.2: world scene, bench screen/live, stream order, movement stress, and MP client all `status=ok` (markers in the status table above). |
 | Docs frontmatter / wikilinks / D-Q-A IDs | zero broken wikilinks; D-001..D-029, Q-001..Q-102, A-001..A-016 gap/duplicate-free |
 
 Nine parallel deep reviews covered: `godot_ext`, `core_voxel`+`core_world`, `core_city` (two halves), `core_sim`+`core_blueprint`+`core_rooms`+`core_structure`, `server`, `bench` (all 25 bins), `godot/` scripts+scenes, `scripts/`+CI+docs. Full read of ~68k lines Rust and ~15k lines GDScript/scenes.
@@ -131,6 +131,8 @@ Fix: treat write errors like read errors (`session_ended` → end session, keep 
 - **F-034** `crates/bench/src/bin/movement.rs:116-129` — smoke pins no checksum (only in-process reproducibility); deterministically-wrong results pass. Fix: pin like `materialization.rs:47`.
 
 ### Cluster J — Godot shell
+
+> [!success] Fixed 2026-11-23 — see the status table and the smoke markers above.
 
 - **F-035** `godot/world_placement.gd:333-340` — HUD issues ~15 bridge queries per `_advance_construction`, driven at ≥4 Hz plus every count change (the dashboard got a 0.5 s cadence for exactly this reason, comment at 23-27); a >2 s frame stall silently drops accumulated time via `fmod` truncation. Fix: throttle `_update_hud` like `_update_dashboard`; clamp explicitly rather than `fmod`.
 - **F-036** `godot/world_placement.gd:3243-3253` — `_touched_chunks` hardcodes `255` (implicit copy of the streamer's `CHUNK_CELLS - 1`); if chunk resolution changes, terrain edits stop invalidating neighbor chunks and stale borders remesh. Fix: derive the cell count from the streamer or return it from `terrain_edit_height`.
@@ -240,7 +242,7 @@ Fix: treat write errors like read errors (`session_ended` → end session, keep 
 8. **PR8 (mod validation):** F-027, F-028 + duplicate-id tech-tree test.
 9. **PR9 (bridge consistency):** F-029, F-030 + F-056..F-062.
 10. **PR10 (bench gates):** F-031..F-034, F-063, F-066, F-067.
-11. **PR11 (Godot shell):** F-035..F-038 + F-068..F-072; requires `GODOT` binary for smoke verification.
+11. **PR11 (Godot shell):** ~~F-035..F-038 + F-068..F-072~~ Done — F-072 landed earlier; the rest are fixed on `fix/audit-godot-display` with the headless smoke matrix run.
 12. **PR12 (docs/scripts hygiene):** F-073..F-081 + F-083.
 
 > [!note] This doc is intentionally not indexed in `00 - Start Here`; it is a transient work item. Delete or archive it once all findings are resolved.

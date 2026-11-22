@@ -17,7 +17,16 @@ extends Node3D
 
 const TerrainStreamer = preload("res://terrain_streamer.gd")
 const CHUNK_METERS := 256.0
-const STAGE_TIMEOUT_MS := 20000
+## Deterministic pass/fail bound: each stage waits at most this many process
+## frames for the request queue and worker pool to drain. Frame count, not wall
+## time, decides the result, so a loaded CI box cannot flake the sequence.
+const STAGE_FRAME_BUDGET := 12000
+## Liveness backstop only, never a passing criterion: a wedged worker thread can
+## stop frames from arriving, and this turns that into a structured failure
+## instead of a hung smoke. It is deliberately far above what the frame budget
+## needs (a stage drains ~25 chunks) and stays under the wrapper's 120 s
+## per-run `timeout` so the failure is reported by this script, not killed.
+const STAGE_LIVENESS_BACKSTOP_MS := 90000
 const SETTLE_FRAMES := 3
 
 var streamer
@@ -71,13 +80,18 @@ func _settle() -> void:
 		await get_tree().process_frame
 
 func _await_drained(status: Dictionary) -> bool:
-	var deadline := Time.get_ticks_msec() + STAGE_TIMEOUT_MS
+	var deadline := Time.get_ticks_msec() + STAGE_LIVENESS_BACKSTOP_MS
+	var frames := 0
 	while not streamer.is_drained():
 		if not streamer.is_processing():
 			status["error"] = "streamer_stopped"
 			return false
+		frames += 1
+		if frames > STAGE_FRAME_BUDGET:
+			status["error"] = "frame_budget_exceeded"
+			return false
 		if Time.get_ticks_msec() > deadline:
-			status["error"] = "timeout"
+			status["error"] = "liveness_timeout"
 			return false
 		await get_tree().process_frame
 	return true
