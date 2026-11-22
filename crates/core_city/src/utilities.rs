@@ -67,7 +67,18 @@ pub const CAMPAIGN_UTILITY_BUILD_DAYS: f32 = 1.0;
 /// Largest accepted site lead time, a guard against malformed saves.
 pub const MAX_UTILITY_BUILD_DAYS: f32 = 365.0;
 
+/// Share of the construction cost due while a site is still building.
+///
+/// The remainder is due once the lead time elapses and the site becomes
+/// operational. Developer-mode sites have no lead time and owe the full cost
+/// immediately.
+pub const UTILITY_BUILD_PAYMENT_SHARE: f64 = 0.5;
+
 fn is_zero_f32(value: &f32) -> bool {
+    *value == 0.0
+}
+
+fn is_zero_f64(value: &f64) -> bool {
     *value == 0.0
 }
 
@@ -115,8 +126,9 @@ impl UtilityKind {
 
     /// Construction cost of one default site of this kind.
     ///
-    /// Water is 2,500; power is 5,000. These are data-only catalog values and
-    /// are not charged by the live economy yet.
+    /// Water is 2,500; power is 5,000. The bridge charges this through the
+    /// city treasury in two installments when the opt-in campaign clock is
+    /// active; developer mode charges it immediately.
     #[must_use]
     pub fn construction_cost(self) -> f64 {
         match self {
@@ -155,6 +167,17 @@ pub struct UtilitySite {
     /// a positive lead time.
     #[serde(default, skip_serializing_if = "is_zero_f32")]
     pub build_days_remaining: f32,
+    /// Total construction price of the site.
+    ///
+    /// Zero is the legacy fully prepaid path: the site is never charged and
+    /// the field is omitted from the save so existing checksums stay pinned.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub cost_total: f64,
+    /// Construction price paid so far.
+    ///
+    /// Omitted from the save while zero, keeping legacy saves byte-identical.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub cost_paid: f64,
 }
 
 impl UtilitySite {
@@ -167,12 +190,16 @@ impl UtilitySite {
                 radius_m: DEFAULT_WATER_RADIUS_M,
                 capacity: WATER_CAPACITY_PER_SITE,
                 build_days_remaining: 0.0,
+                cost_total: 0.0,
+                cost_paid: 0.0,
             },
             UtilityKind::Power => Self {
                 center: [0.0, 0.0, 0.0],
                 radius_m: DEFAULT_POWER_RADIUS_M,
                 capacity: POWER_CAPACITY_PER_SITE,
                 build_days_remaining: 0.0,
+                cost_total: 0.0,
+                cost_paid: 0.0,
             },
         }
     }
@@ -181,6 +208,45 @@ impl UtilitySite {
     #[must_use]
     pub fn is_operational(&self) -> bool {
         self.build_days_remaining <= 0.0
+    }
+
+    /// Cumulative construction price that should be paid by now.
+    ///
+    /// An operational site owes the full price; a site still inside its lead
+    /// time owes [`UTILITY_BUILD_PAYMENT_SHARE`] of it. A zero-cost legacy
+    /// site always owes zero.
+    #[must_use]
+    pub fn target_paid(&self) -> f64 {
+        if self.cost_total <= 0.0 {
+            return 0.0;
+        }
+        if self.is_operational() {
+            self.cost_total
+        } else {
+            self.cost_total * UTILITY_BUILD_PAYMENT_SHARE
+        }
+    }
+
+    /// Construction price still owed, never negative.
+    #[must_use]
+    pub fn payment_due(&self) -> f64 {
+        (self.target_paid() - self.cost_paid).max(0.0)
+    }
+
+    /// Record an installment payment up to the amount currently due.
+    ///
+    /// The amount must be finite and within `0.0..=payment_due()`. Paying
+    /// more than the current target is rejected, so a site can never be
+    /// charged twice for the same installment.
+    pub fn mark_paid(&mut self, amount: f64) -> Result<(), UtilityError> {
+        let due = self.payment_due();
+        if !amount.is_finite() || amount < 0.0 || amount > due {
+            return Err(UtilityError::Invalid(
+                "payment amount must be finite and within the amount due",
+            ));
+        }
+        self.cost_paid = (self.cost_paid + amount).min(self.target_paid());
+        Ok(())
     }
 }
 
@@ -291,6 +357,35 @@ impl UtilityStore {
         }
     }
 
+    /// One site of a kind.
+    #[must_use]
+    pub fn site(&self, placement_id: u64, kind: UtilityKind) -> Option<&UtilitySite> {
+        self.sites(kind).get(&placement_id)
+    }
+
+    /// One site of a kind, mutable.
+    #[must_use]
+    pub fn site_mut(&mut self, placement_id: u64, kind: UtilityKind) -> Option<&mut UtilitySite> {
+        self.sites_mut(kind).get_mut(&placement_id)
+    }
+
+    /// Construction price still owed on one site.
+    #[must_use]
+    pub fn payment_due(&self, placement_id: u64, kind: UtilityKind) -> f64 {
+        self.site(placement_id, kind)
+            .map_or(0.0, UtilitySite::payment_due)
+    }
+
+    /// Construction price still owed across both kinds.
+    #[must_use]
+    pub fn total_payment_due(&self) -> f64 {
+        self.water_sites
+            .values()
+            .chain(self.power_sites.values())
+            .map(UtilitySite::payment_due)
+            .sum()
+    }
+
     /// Sites of one kind, mutable.
     fn sites_mut(&mut self, kind: UtilityKind) -> &mut BTreeMap<u64, UtilitySite> {
         match kind {
@@ -359,7 +454,9 @@ impl UtilityStore {
     ///
     /// `lead_days` must be finite and within `0.0..=MAX_UTILITY_BUILD_DAYS`.
     /// A non-zero lead time hides the site from supply, coverage, and
-    /// operating upkeep until [`Self::tick`] clears it.
+    /// operating upkeep until [`Self::tick`] clears it. The site is added as
+    /// a legacy zero-cost site; use [`Self::add_priced_site_with_lead_days`]
+    /// to record a construction price and two-installment schedule.
     pub fn add_site_with_lead_days(
         &mut self,
         placement_id: u64,
@@ -367,8 +464,28 @@ impl UtilityStore {
         center: [f32; 3],
         lead_days: f32,
     ) -> Result<(), UtilityError> {
+        self.add_priced_site_with_lead_days(placement_id, kind, center, lead_days, 0.0)
+    }
+
+    /// Add or replace a utility site with a lead time and construction price.
+    ///
+    /// `lead_days` must be finite and within `0.0..=MAX_UTILITY_BUILD_DAYS`.
+    /// `cost_total` must be finite and non-negative; zero keeps the legacy
+    /// prepaid behavior. A priced site owes half of `cost_total` while it is
+    /// building and the remainder once it is operational.
+    pub fn add_priced_site_with_lead_days(
+        &mut self,
+        placement_id: u64,
+        kind: UtilityKind,
+        center: [f32; 3],
+        lead_days: f32,
+        cost_total: f64,
+    ) -> Result<(), UtilityError> {
         if !lead_days.is_finite() || !(0.0..=MAX_UTILITY_BUILD_DAYS).contains(&lead_days) {
             return Err(UtilityError::Invalid("site lead days"));
+        }
+        if !cost_total.is_finite() || cost_total < 0.0 {
+            return Err(UtilityError::Invalid("site construction cost"));
         }
         if placement_id > i64::MAX as u64 {
             return Err(UtilityError::Invalid("site id is above i64::MAX"));
@@ -380,6 +497,7 @@ impl UtilityStore {
         let mut site = UtilitySite::default_for(kind);
         site.center = center;
         site.build_days_remaining = lead_days;
+        site.cost_total = cost_total;
         sites.insert(placement_id, site);
         Ok(())
     }
@@ -545,6 +663,15 @@ impl UtilityStore {
                     || !(0.0..=MAX_UTILITY_BUILD_DAYS).contains(&site.build_days_remaining)
                 {
                     return Err(UtilityError::Invalid("site lead days"));
+                }
+                if !site.cost_total.is_finite() || site.cost_total < 0.0 {
+                    return Err(UtilityError::Invalid("site construction cost"));
+                }
+                if !site.cost_paid.is_finite()
+                    || site.cost_paid < 0.0
+                    || site.cost_paid > site.cost_total
+                {
+                    return Err(UtilityError::Invalid("site construction paid"));
                 }
             }
         }
@@ -990,6 +1117,178 @@ mod tests {
         assert_eq!(decoded, store);
         assert_eq!(decoded.water_sites[&1].build_days_remaining, 1.5);
         assert_eq!(decoded.checksum(), store.checksum());
+    }
+
+    #[test]
+    fn a_priced_developer_site_owes_the_full_cost_at_add() {
+        let mut store = UtilityStore::new(2026);
+        store
+            .add_priced_site_with_lead_days(1, UtilityKind::Water, [0.0; 3], 0.0, 2_500.0)
+            .expect("water");
+        store
+            .add_priced_site_with_lead_days(2, UtilityKind::Power, [0.0; 3], 0.0, 5_000.0)
+            .expect("power");
+        let water = store.site(1, UtilityKind::Water).expect("water");
+        assert!(water.is_operational());
+        assert_eq!(water.target_paid(), 2_500.0);
+        assert_eq!(water.payment_due(), 2_500.0);
+        assert_eq!(store.payment_due(1, UtilityKind::Water), 2_500.0);
+        assert_eq!(store.payment_due(2, UtilityKind::Power), 5_000.0);
+        assert_eq!(store.total_payment_due(), 7_500.0);
+
+        store
+            .site_mut(1, UtilityKind::Water)
+            .expect("water")
+            .mark_paid(2_500.0)
+            .expect("paid");
+        store
+            .site_mut(2, UtilityKind::Power)
+            .expect("power")
+            .mark_paid(5_000.0)
+            .expect("paid");
+        assert_eq!(store.total_payment_due(), 0.0);
+    }
+
+    #[test]
+    fn a_priced_campaign_site_owes_half_while_building_and_half_when_ready() {
+        let mut store = UtilityStore::new(2026);
+        store
+            .add_priced_site_with_lead_days(1, UtilityKind::Power, [0.0; 3], 1.0, 5_000.0)
+            .expect("site");
+        {
+            let site = store.site(1, UtilityKind::Power).expect("site");
+            assert!(!site.is_operational());
+            assert_eq!(site.target_paid(), 2_500.0);
+            assert_eq!(site.payment_due(), 2_500.0);
+        }
+        store
+            .site_mut(1, UtilityKind::Power)
+            .expect("site")
+            .mark_paid(2_500.0)
+            .expect("first installment");
+        assert_eq!(store.payment_due(1, UtilityKind::Power), 0.0);
+
+        store.tick(1.0).expect("tick");
+        {
+            let site = store.site(1, UtilityKind::Power).expect("site");
+            assert!(site.is_operational());
+            assert_eq!(site.target_paid(), 5_000.0);
+            assert_eq!(site.payment_due(), 2_500.0);
+        }
+        store
+            .site_mut(1, UtilityKind::Power)
+            .expect("site")
+            .mark_paid(2_500.0)
+            .expect("second installment");
+        let site = store.site(1, UtilityKind::Power).expect("site");
+        assert_eq!(site.cost_paid, 5_000.0);
+        assert_eq!(site.payment_due(), 0.0);
+    }
+
+    #[test]
+    fn a_paid_installment_is_not_charged_twice() {
+        let mut store = UtilityStore::new(2026);
+        store
+            .add_priced_site_with_lead_days(1, UtilityKind::Water, [0.0; 3], 1.0, 2_500.0)
+            .expect("site");
+        let site = store.site_mut(1, UtilityKind::Water).expect("site");
+        site.mark_paid(1_250.0).expect("first installment");
+        assert!(site.mark_paid(1_250.0).is_err());
+        assert_eq!(site.cost_paid, 1_250.0);
+
+        store.tick(1.0).expect("tick");
+        let site = store.site_mut(1, UtilityKind::Water).expect("site");
+        site.mark_paid(1_250.0).expect("second installment");
+        assert!(site.mark_paid(1_250.0).is_err());
+        assert!(site.mark_paid(0.0).is_ok());
+        assert_eq!(site.cost_paid, 2_500.0);
+    }
+
+    #[test]
+    fn an_unpriced_site_keeps_the_legacy_zero_cost_default() {
+        let mut store = UtilityStore::new(2026);
+        store
+            .add_site(1, UtilityKind::Water, [0.0; 3])
+            .expect("site");
+        let site = store.site(1, UtilityKind::Water).expect("site");
+        assert_eq!(site.cost_total, 0.0);
+        assert_eq!(site.cost_paid, 0.0);
+        assert_eq!(site.target_paid(), 0.0);
+        assert_eq!(site.payment_due(), 0.0);
+        assert_eq!(store.total_payment_due(), 0.0);
+        let json = serde_json::to_string(&store).expect("json");
+        assert!(!json.contains("cost_total"));
+        assert!(!json.contains("cost_paid"));
+    }
+
+    #[test]
+    fn invalid_site_cost_amounts_are_rejected() {
+        let mut store = UtilityStore::new(2026);
+        for invalid in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(store
+                .add_priced_site_with_lead_days(1, UtilityKind::Water, [0.0; 3], 0.0, invalid)
+                .is_err());
+        }
+        assert_eq!(store.site_count(), 0);
+
+        store
+            .add_priced_site_with_lead_days(1, UtilityKind::Water, [0.0; 3], 0.0, 100.0)
+            .expect("site");
+        let site = store.site_mut(1, UtilityKind::Water).expect("site");
+        assert!(site.mark_paid(-1.0).is_err());
+        assert!(site.mark_paid(f64::NAN).is_err());
+        assert!(site.mark_paid(100.5).is_err());
+        assert!(site.mark_paid(100.0).is_ok());
+        assert!(store.validate().is_ok());
+
+        store
+            .site_mut(1, UtilityKind::Water)
+            .expect("site")
+            .cost_paid = 101.0;
+        assert!(store.validate().is_err());
+        store
+            .site_mut(1, UtilityKind::Water)
+            .expect("site")
+            .cost_paid = f64::NAN;
+        assert!(store.validate().is_err());
+        store
+            .site_mut(1, UtilityKind::Water)
+            .expect("site")
+            .cost_total = -1.0;
+        assert!(store.validate().is_err());
+        store
+            .site_mut(1, UtilityKind::Water)
+            .expect("site")
+            .cost_total = f64::INFINITY;
+        assert!(store.validate().is_err());
+    }
+
+    #[test]
+    fn priced_site_payments_round_trip() {
+        let mut store = UtilityStore::new(2026);
+        store
+            .add_priced_site_with_lead_days(1, UtilityKind::Water, [1.0, 2.0, 3.0], 2.0, 2_500.0)
+            .expect("site");
+        store
+            .site_mut(1, UtilityKind::Water)
+            .expect("site")
+            .mark_paid(1_250.0)
+            .expect("installment");
+        let json = store.to_json_pretty().expect("json");
+        let decoded = UtilityStore::from_json(&json).expect("decode");
+        assert_eq!(decoded, store);
+        assert_eq!(decoded.checksum(), store.checksum());
+        assert_eq!(decoded.payment_due(1, UtilityKind::Water), 0.0);
+
+        let mut decoded = decoded;
+        decoded.tick(2.0).expect("tick");
+        assert_eq!(decoded.payment_due(1, UtilityKind::Water), 1_250.0);
+        decoded
+            .site_mut(1, UtilityKind::Water)
+            .expect("site")
+            .mark_paid(1_250.0)
+            .expect("second installment");
+        assert_eq!(decoded.total_payment_due(), 0.0);
     }
 
     #[test]
