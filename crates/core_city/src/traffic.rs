@@ -92,9 +92,20 @@ pub(crate) const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 /// FNV-1a 64-bit prime.
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
+/// Golden-ratio odd multiplier used to mix graph edit counts into versions.
+const GRAPH_VERSION_GOLDEN: u64 = 0x9e37_79b9_7f4a_7c15;
+
 pub(crate) fn fnv1a_feed(hash: &mut u64, value: u64) {
     *hash ^= value;
     *hash = hash.wrapping_mul(FNV_PRIME);
+}
+
+/// SplitMix64 finalizer: cheap avalanche for version tokens.
+const fn mix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(GRAPH_VERSION_GOLDEN);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
 }
 
 /// One planar graph node on the 1 m road grid.
@@ -302,7 +313,12 @@ fn ring_proves_nearest(
 /// appended, [`Self::add_segment`] updates the adjacency, node list, nearest
 /// node index, and road count in place instead of rebuilding. Removing or
 /// changing a road still requires a full rebuild.
-#[derive(Debug, Clone, PartialEq, Default)]
+///
+/// Every graph carries a cheap [`Self::change_version`] token that identifies
+/// its current contents and edit lineage. Caches keyed by graph content (for
+/// example [`FlowFieldCache`]) use it to reject fields built from another
+/// graph.
+#[derive(Debug, Clone, PartialEq)]
 pub struct RoadGraph {
     adjacency: BTreeMap<RoadNode, Vec<(RoadNode, u32)>>,
     nodes: Vec<RoadNode>,
@@ -314,6 +330,27 @@ pub struct RoadGraph {
     /// Graph nodes keyed by column (`x`) for constant-time split-point scans.
     column_nodes: BTreeMap<i32, BTreeSet<i32>>,
     road_count: usize,
+    /// Content checksum captured when the graph was built.
+    base_version: u64,
+    /// Structural appends applied since the base build.
+    edit_count: u64,
+}
+
+impl Default for RoadGraph {
+    fn default() -> Self {
+        Self {
+            adjacency: BTreeMap::new(),
+            nodes: Vec::new(),
+            grid: NodeGrid::default(),
+            roads: BTreeMap::new(),
+            row_nodes: BTreeMap::new(),
+            column_nodes: BTreeMap::new(),
+            road_count: 0,
+            // The checksum of an empty graph is the FNV offset basis.
+            base_version: FNV_OFFSET_BASIS,
+            edit_count: 0,
+        }
+    }
 }
 
 /// One destination's shortest-path field over the road graph.
@@ -378,17 +415,31 @@ impl FlowField {
 /// the existing field instead of running Dijkstra again. Eviction is FIFO and
 /// deterministic: insertion order decides, never hashing or wall time.
 ///
-/// The cache holds no road-edit version. A road edit rebuilds the graph, so
-/// callers must drop the cache (or call [`Self::clear`]) when the roads change.
-/// [`RoadGraph`] itself remains immutable, and its public behavior is
-/// unchanged.
+/// Every entry stores the [`RoadGraph::change_version`] it was built from.
+/// [`Self::get_or_build`] returns a field only when that token still matches
+/// the graph it is given; on a mismatch it rebuilds the field in place instead
+/// of returning stale distances. Calling [`Self::invalidate`] after a road
+/// change also works, but is optional: a cache entry from an older graph can
+/// never leak out of the safe lookup path.
+///
+/// [`Self::get`] is a raw lookup that ignores the graph binding. Prefer
+/// [`Self::get_for`] or [`Self::get_or_build`] when a road edit may have
+/// happened since the field was built.
 #[derive(Debug, Clone)]
 pub struct FlowFieldCache {
-    fields: BTreeMap<[u32; 2], FlowField>,
+    fields: BTreeMap<[u32; 2], CachedField>,
     order: VecDeque<[u32; 2]>,
     capacity: usize,
     hits: u64,
     misses: u64,
+    rebuilds: u64,
+}
+
+/// One cached field plus the graph identity token that produced it.
+#[derive(Debug, Clone)]
+struct CachedField {
+    field: FlowField,
+    graph_version: u64,
 }
 
 impl Default for FlowFieldCache {
@@ -410,25 +461,69 @@ impl FlowFieldCache {
             capacity: capacity.max(1),
             hits: 0,
             misses: 0,
+            rebuilds: 0,
         }
     }
 
     /// Return a cached field for an exact goal point, if present.
+    ///
+    /// This is a raw lookup: it does not compare the stored graph version with
+    /// any graph. Use [`Self::get_for`] or [`Self::get_or_build`] when the road
+    /// network may have changed since the field was built.
     #[must_use]
     pub fn get(&self, goal: [f32; 2]) -> Option<&FlowField> {
-        self.fields.get(&cache_key(goal))
+        self.fields
+            .get(&cache_key(goal))
+            .map(|cached| &cached.field)
     }
 
-    /// Return the field for `goal`, building and caching it on a miss.
+    /// Return a cached field only when it was built from this exact graph
+    /// version.
+    ///
+    /// Does not count a hit or miss and never rebuilds. This is the read-only
+    /// companion to [`Self::get_or_build`].
+    #[must_use]
+    pub fn get_for(&self, graph: &RoadGraph, goal: [f32; 2]) -> Option<&FlowField> {
+        let cached = self.fields.get(&cache_key(goal))?;
+        (cached.graph_version == graph.change_version()).then_some(&cached.field)
+    }
+
+    /// Return the field for `goal`, building or rebuilding it when needed.
+    ///
+    /// A cached entry is reused only when its stored graph version matches
+    /// `graph`. A mismatch counts as a miss and a [`Self::rebuilds`] event,
+    /// then the field is rebuilt from `graph` and replaces the stale entry in
+    /// place (its FIFO position is unchanged).
     ///
     /// Returns `None` when the goal is not finite or the graph has no node for
-    /// it; the miss is still counted. When the cache is full, the oldest
-    /// inserted field is evicted first.
+    /// it; the miss is still counted. If a stale entry cannot be rebuilt, it is
+    /// dropped so no raw [`Self::get`] can return it later. When the cache is
+    /// full, the oldest inserted field is evicted first.
     pub fn get_or_build(&mut self, graph: &RoadGraph, goal: [f32; 2]) -> Option<&FlowField> {
         let key = cache_key(goal);
-        if self.fields.contains_key(&key) {
-            self.hits += 1;
-            return self.fields.get(&key);
+        let graph_version = graph.change_version();
+        match self.fields.get(&key).map(|cached| cached.graph_version) {
+            Some(cached_version) if cached_version == graph_version => {
+                self.hits += 1;
+                return self.fields.get(&key).map(|cached| &cached.field);
+            }
+            Some(_) => {
+                self.misses += 1;
+                self.rebuilds += 1;
+                let Some(field) = graph.flow_to(goal) else {
+                    self.fields.remove(&key);
+                    self.order.retain(|queued| *queued != key);
+                    return None;
+                };
+                let cached = self
+                    .fields
+                    .get_mut(&key)
+                    .expect("stale cache entry was just read");
+                cached.field = field;
+                cached.graph_version = graph_version;
+                return self.fields.get(&key).map(|cached| &cached.field);
+            }
+            None => {}
         }
         self.misses += 1;
         let field = graph.flow_to(goal)?;
@@ -438,8 +533,14 @@ impl FlowFieldCache {
             }
         }
         self.order.push_back(key);
-        self.fields.insert(key, field);
-        self.fields.get(&key)
+        self.fields.insert(
+            key,
+            CachedField {
+                field,
+                graph_version,
+            },
+        );
+        self.fields.get(&key).map(|cached| &cached.field)
     }
 
     /// Number of cached fields.
@@ -466,17 +567,36 @@ impl FlowFieldCache {
         self.hits
     }
 
-    /// Lookups that built a field, including invalid goals.
+    /// Lookups that built a field, including invalid goals and stale rebuilds.
     #[must_use]
     pub const fn misses(&self) -> u64 {
         self.misses
     }
 
-    /// Drop every cached field. Hit and miss counters are cumulative for the
-    /// lifetime of the cache.
-    pub fn clear(&mut self) {
+    /// Fields rebuilt in place because the graph version changed.
+    ///
+    /// A stale entry counts once here and once in [`Self::misses`]. Replacing
+    /// a missing entry and rebuilding after [`Self::invalidate`] do not count.
+    #[must_use]
+    pub const fn rebuilds(&self) -> u64 {
+        self.rebuilds
+    }
+
+    /// Drop every cached field. Hit, miss, and rebuild counters are cumulative
+    /// for the lifetime of the cache.
+    ///
+    /// Call after a full graph rebuild for an immediate release; it is not
+    /// required for correctness, because entries carry their graph version.
+    pub fn invalidate(&mut self) {
         self.fields.clear();
         self.order.clear();
+    }
+
+    /// Drop every cached field, keeping cumulative counters.
+    ///
+    /// Alias for [`Self::invalidate`], retained for existing callers.
+    pub fn clear(&mut self) {
+        self.invalidate();
     }
 }
 
@@ -593,6 +713,7 @@ impl RoadGraph {
         if graph.adjacency.len() > MAX_TRAFFIC_NODES {
             return Err(TrafficError::TooManyNodes(graph.adjacency.len()));
         }
+        graph.base_version = graph.checksum();
         Ok(graph)
     }
 
@@ -613,7 +734,9 @@ impl RoadGraph {
     ///
     /// Only appends are incremental. Removing a road, changing its geometry,
     /// or re-adding an existing id with different coordinates needs a full
-    /// rebuild.
+    /// rebuild. An append that inserts no node or edge (a duplicate id and
+    /// geometry, or already covered geometry) is a no-op and leaves
+    /// [`Self::change_version`] unchanged.
     ///
     /// # Errors
     ///
@@ -652,6 +775,9 @@ impl RoadGraph {
         let changed = self.connect_points(&points);
         self.roads.insert(road.id, road.clone());
         self.road_count += 1;
+        if changed {
+            self.edit_count = self.edit_count.wrapping_add(1);
+        }
         Ok(changed)
     }
 
@@ -1071,6 +1197,10 @@ impl RoadGraph {
     }
 
     /// FNV-1a checksum over the derived graph.
+    ///
+    /// This is the stable content fingerprint used by saves, tests, and the
+    /// bridge. It is not the cache identity token: use
+    /// [`Self::change_version`] for invalidating derived caches.
     #[must_use]
     pub fn checksum(&self) -> u64 {
         let mut hash = FNV_OFFSET_BASIS;
@@ -1086,6 +1216,24 @@ impl RoadGraph {
             }
         }
         hash
+    }
+
+    /// Cheap identity token for the graph's current contents and edit lineage.
+    ///
+    /// Two graphs built from the same segment list start with the same token.
+    /// A structural [`Self::add_segment`] advances the token; a no-op append
+    /// leaves it unchanged. The token is derived from the build-time content
+    /// checksum and a local edit count, so it is deterministic for a given
+    /// construction sequence and needs no I/O or graph scan to read.
+    ///
+    /// A full rebuild of an appended graph produces a *different* token even
+    /// when the content matches (the edit count restarts). That is
+    /// conservative: caches keyed on this token rebuild once instead of
+    /// risking a stale field, then settle again. Do not use the token as a
+    /// save-format checksum; [`Self::checksum`] is the stable content hash.
+    #[must_use]
+    pub const fn change_version(&self) -> u64 {
+        mix64(self.base_version ^ self.edit_count.wrapping_mul(GRAPH_VERSION_GOLDEN))
     }
 
     /// Nearest graph node to a world point and the straight-line distance to
@@ -1492,12 +1640,15 @@ mod tests {
         assert_eq!(cache.capacity(), 4);
         assert_eq!(cache.hits(), 1);
         assert_eq!(cache.misses(), 1);
+        assert_eq!(cache.rebuilds(), 0);
         assert!(cache.get(goal).is_some());
+        assert!(cache.get_for(&graph, goal).is_some());
 
         cache.clear();
         assert!(cache.is_empty());
         assert!(cache.get(goal).is_none());
         assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.rebuilds(), 0);
     }
 
     #[test]
@@ -1550,6 +1701,223 @@ mod tests {
         let from_origin = first.flow_to([0.0, 0.0]).expect("field");
         assert_eq!(from_corner.checksum(), rebuilt.checksum());
         assert_ne!(from_corner.checksum(), from_origin.checksum());
+    }
+
+    #[test]
+    fn graph_change_version_is_stable_and_tracks_appends() {
+        let roads = [road(1, [0, 0], [10, 0]), road(2, [10, 0], [10, 10])];
+        let mut graph = RoadGraph::build(&roads).expect("build");
+        let identical = RoadGraph::build(&roads).expect("build");
+        assert_eq!(graph.change_version(), identical.change_version());
+        assert_eq!(graph.change_version(), graph.clone().change_version());
+        let base = graph.change_version();
+
+        // Duplicate geometry under a new id adds a road record but no graph
+        // structure, so the version must not move.
+        assert!(!graph
+            .add_segment(&road(3, [0, 0], [10, 0]))
+            .expect("duplicate"));
+        assert_eq!(graph.change_version(), base);
+
+        assert!(graph
+            .add_segment(&road(4, [10, 10], [10, 20]))
+            .expect("append"));
+        assert_ne!(graph.change_version(), base);
+
+        // A fresh build has the same content checksum but a new lineage
+        // token: the cache rebuilds once instead of trusting an equal-looking
+        // graph. That is the conservative half of the contract.
+        let rebuilt = RoadGraph::build(&[
+            road(1, [0, 0], [10, 0]),
+            road(2, [10, 0], [10, 10]),
+            road(3, [0, 0], [10, 0]),
+            road(4, [10, 10], [10, 20]),
+        ])
+        .expect("build");
+        assert_eq!(graph.checksum(), rebuilt.checksum());
+        assert_ne!(graph.change_version(), rebuilt.change_version());
+    }
+
+    #[test]
+    fn adding_a_road_rebuilds_the_cached_field() {
+        let roads = [
+            road(1, [0, 0], [64, 0]),
+            road(2, [64, 0], [64, 64]),
+            road(3, [128, 0], [192, 0]),
+        ];
+        let mut graph = RoadGraph::build(&roads).expect("build");
+        let goal = [64.0, 64.0];
+        let mut cache = FlowFieldCache::new(4);
+
+        let base_field = cache.get_or_build(&graph, goal).expect("base field");
+        let base_checksum = base_field.checksum();
+        assert_eq!(base_field.reachable_nodes(), 3);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.misses(), 1);
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.rebuilds(), 0);
+        assert!(cache.get_for(&graph, goal).is_some());
+
+        // Connect the disconnected component. The goal can now reach the
+        // added road's endpoints, so the old field is provably stale.
+        assert!(graph
+            .add_segment(&road(4, [64, 0], [128, 0]))
+            .expect("append"));
+        assert!(cache.get_for(&graph, goal).is_none());
+        let expected_field = graph.flow_to(goal).expect("fresh field");
+        let expected = expected_field.checksum();
+        assert_eq!(expected_field.reachable_nodes(), 5);
+        assert_ne!(expected, base_checksum);
+
+        let rebuilt = cache
+            .get_or_build(&graph, goal)
+            .expect("rebuilt field")
+            .checksum();
+        assert_eq!(rebuilt, expected);
+        assert_eq!(cache.len(), 1, "stale entry is replaced in place");
+        assert_eq!(cache.misses(), 2);
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.rebuilds(), 1);
+        assert_eq!(cache.get(goal).expect("raw entry").checksum(), expected);
+
+        // The rebuilt entry is current: a second query is a plain hit.
+        assert_eq!(
+            cache
+                .get_or_build(&graph, goal)
+                .expect("cached field")
+                .checksum(),
+            expected
+        );
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.rebuilds(), 1);
+    }
+
+    #[test]
+    fn a_different_graph_with_the_same_goal_rebuilds() {
+        let first = RoadGraph::build(&[road(1, [0, 0], [10, 0])]).expect("build");
+        let second = RoadGraph::build(&[road(1, [0, 0], [10, 0]), road(2, [10, 0], [10, 10])])
+            .expect("build");
+        let goal = [10.0, 0.0];
+        let mut cache = FlowFieldCache::new(2);
+
+        let first_checksum = cache
+            .get_or_build(&first, goal)
+            .expect("first field")
+            .checksum();
+        assert_eq!(
+            first_checksum,
+            first.flow_to(goal).expect("fresh first").checksum()
+        );
+
+        let second_checksum = cache
+            .get_or_build(&second, goal)
+            .expect("second field")
+            .checksum();
+        assert_eq!(
+            second_checksum,
+            second.flow_to(goal).expect("fresh second").checksum()
+        );
+        assert_ne!(second_checksum, first_checksum);
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.misses(), 2);
+        assert_eq!(cache.rebuilds(), 1);
+
+        // Raw `get` returns the current entry; `get_for` refuses the old
+        // graph's version.
+        assert!(cache.get(goal).is_some());
+        assert!(cache.get_for(&second, goal).is_some());
+        assert!(cache.get_for(&first, goal).is_none());
+    }
+
+    #[test]
+    fn invalidate_drops_fields_and_keeps_counters() {
+        let graph = RoadGraph::build(&[road(1, [0, 0], [10, 0])]).expect("build");
+        let goal = [10.0, 0.0];
+        let mut cache = FlowFieldCache::new(2);
+        assert!(cache.get_or_build(&graph, goal).is_some());
+        assert!(cache.get_or_build(&graph, goal).is_some());
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.misses(), 1);
+        assert_eq!(cache.rebuilds(), 0);
+
+        cache.invalidate();
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+        assert!(cache.get(goal).is_none());
+        assert!(cache.get_for(&graph, goal).is_none());
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.misses(), 1);
+        assert_eq!(cache.rebuilds(), 0);
+        assert_eq!(cache.capacity(), 2);
+
+        // After invalidation the next lookup is a fresh build, not a rebuild.
+        assert!(cache.get_or_build(&graph, goal).is_some());
+        assert_eq!(cache.misses(), 2);
+        assert_eq!(cache.rebuilds(), 0);
+    }
+
+    #[test]
+    fn a_rebuild_that_cannot_build_drops_the_stale_entry() {
+        let graph = RoadGraph::build(&[road(1, [0, 0], [10, 0])]).expect("build");
+        let empty = RoadGraph::build(&[]).expect("build");
+        let goal = [10.0, 0.0];
+        let mut cache = FlowFieldCache::new(2);
+        assert!(cache.get_or_build(&graph, goal).is_some());
+
+        assert!(cache.get_or_build(&empty, goal).is_none());
+        assert_eq!(cache.misses(), 2);
+        assert_eq!(cache.rebuilds(), 1);
+        assert!(cache.is_empty());
+        assert!(cache.get(goal).is_none());
+    }
+
+    #[test]
+    fn flow_cache_versions_and_counters_are_deterministic() {
+        fn run() -> (u64, u64, u64, u64, Vec<u64>) {
+            let roads = [
+                road(1, [0, 0], [10, 0]),
+                road(2, [10, 0], [10, 10]),
+                road(3, [0, 0], [0, 10]),
+                road(4, [0, 10], [10, 10]),
+            ];
+            let mut graph = RoadGraph::build(&roads).expect("build");
+            let goals = [[10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+            let mut cache = FlowFieldCache::new(4);
+            let mut checksums = Vec::new();
+            for goal in goals {
+                checksums.push(
+                    cache
+                        .get_or_build(&graph, goal)
+                        .expect("cached field")
+                        .checksum(),
+                );
+            }
+            assert!(graph
+                .add_segment(&road(5, [10, 0], [20, 0]))
+                .expect("append"));
+            for goal in goals {
+                checksums.push(
+                    cache
+                        .get_or_build(&graph, goal)
+                        .expect("rebuilt field")
+                        .checksum(),
+                );
+            }
+            (
+                graph.change_version(),
+                cache.hits(),
+                cache.misses(),
+                cache.rebuilds(),
+                checksums,
+            )
+        }
+
+        let first = run();
+        let second = run();
+        assert_eq!(first, second);
+        assert_eq!(first.1, 0, "every goal is rebuilt after the append");
+        assert_eq!(first.2, 6);
+        assert_eq!(first.3, 3);
     }
 
     #[test]

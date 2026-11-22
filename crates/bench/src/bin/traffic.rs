@@ -204,6 +204,95 @@ fn main() {
     }
     let goal_flow_query_ms = goal_query_start.elapsed().as_secs_f64() * 1_000.0;
 
+    // Graph edits: a field cached before an append must not be reused after
+    // it. Build a deliberately disconnected fixture, cache the goal field,
+    // append the connecting road, and compare the rebuilt cache entry with a
+    // fresh `flow_to` on the edited graph.
+    let mut edit_graph = RoadGraph::build(&[
+        RoadSegment {
+            id: 1,
+            start: [0, 0],
+            end: [64, 0],
+            width_m: 8,
+        },
+        RoadSegment {
+            id: 2,
+            start: [64, 0],
+            end: [64, 64],
+            width_m: 8,
+        },
+        RoadSegment {
+            id: 3,
+            start: [128, 0],
+            end: [192, 0],
+            width_m: 8,
+        },
+    ])
+    .expect("edit graph");
+    let edit_goal = [64.0, 64.0];
+    let mut edit_cache = FlowFieldCache::new(4);
+    let base_edit_checksum = edit_cache
+        .get_or_build(&edit_graph, edit_goal)
+        .expect("base edit field")
+        .checksum();
+    let base_edit_nodes = edit_cache
+        .get(edit_goal)
+        .expect("base edit field")
+        .reachable_nodes();
+    let base_version = edit_graph.change_version();
+    assert!(edit_graph
+        .add_segment(&RoadSegment {
+            id: 4,
+            start: [64, 0],
+            end: [128, 0],
+            width_m: 8,
+        })
+        .expect("append edit road"));
+    let edited_version = edit_graph.change_version();
+    assert_ne!(
+        edited_version, base_version,
+        "append must move the graph version"
+    );
+
+    let edit_rebuild_start = Instant::now();
+    let rebuilt_checksum = edit_cache
+        .get_or_build(&edit_graph, edit_goal)
+        .expect("rebuilt edit field")
+        .checksum();
+    let edit_rebuild_ms = edit_rebuild_start.elapsed().as_secs_f64() * 1_000.0;
+    let edit_rebuilds = edit_cache.rebuilds();
+    let edited_nodes = edit_cache
+        .get(edit_goal)
+        .expect("rebuilt edit field")
+        .reachable_nodes();
+    let edit_fresh_start = Instant::now();
+    let edit_fresh_checksum = edit_graph
+        .flow_to(edit_goal)
+        .expect("fresh edit field")
+        .checksum();
+    let edit_fresh_ms = edit_fresh_start.elapsed().as_secs_f64() * 1_000.0;
+    assert_eq!(
+        rebuilt_checksum, edit_fresh_checksum,
+        "cache returned a field from the pre-edit graph"
+    );
+    assert_ne!(
+        rebuilt_checksum, base_edit_checksum,
+        "the appended road did not change the field"
+    );
+    assert_eq!(edit_rebuilds, 1, "stale entry must rebuild once");
+
+    let edit_hit_start = Instant::now();
+    assert_eq!(
+        edit_cache
+            .get_or_build(&edit_graph, edit_goal)
+            .expect("cached edit field")
+            .checksum(),
+        edit_fresh_checksum
+    );
+    let edit_hit_ms = edit_hit_start.elapsed().as_secs_f64() * 1_000.0;
+    assert_eq!(edit_cache.hits(), 1);
+    assert_eq!(edit_cache.rebuilds(), 1);
+
     let result = serde_json::json!({
         "scene": "traffic",
         "grid": grid,
@@ -241,6 +330,22 @@ fn main() {
         "goal_flow_query_ms": goal_flow_query_ms,
         "goal_flow_average_m": if goal_reached == 0 { 0.0 } else { goal_total_m / goal_reached as f64 },
         "flow_checksum": format!("{:016x}", cached_checksum),
+        "flow_cache_graph_edits": {
+            "goal": edit_goal,
+            "base_reachable_nodes": base_edit_nodes,
+            "edited_reachable_nodes": edited_nodes,
+            "version_changed": edited_version != base_version,
+            "base_checksum": format!("{base_edit_checksum:016x}"),
+            "edited_checksum": format!("{rebuilt_checksum:016x}"),
+            "fresh_checksum": format!("{edit_fresh_checksum:016x}"),
+            "matches_fresh_build": rebuilt_checksum == edit_fresh_checksum,
+            "rebuilds": edit_rebuilds,
+            "rebuild_ms": edit_rebuild_ms,
+            "fresh_ms": edit_fresh_ms,
+            "repeat_hit_ms": edit_hit_ms,
+            "hits": edit_cache.hits(),
+            "misses": edit_cache.misses(),
+        },
         "append_roads": append_count,
         "append_ms": append_ms,
         "append_rebuild_ms": append_rebuild_ms,
@@ -367,5 +472,58 @@ mod tests {
             assert!(goal[1] >= 0.0 && goal[1] <= 1_008.0);
             assert!(!goals[..index].contains(goal), "duplicate goal at {index}");
         }
+    }
+
+    #[test]
+    fn a_cached_flow_field_follows_an_appended_road() {
+        let roads = [
+            RoadSegment {
+                id: 1,
+                start: [0, 0],
+                end: [64, 0],
+                width_m: 8,
+            },
+            RoadSegment {
+                id: 2,
+                start: [64, 0],
+                end: [64, 64],
+                width_m: 8,
+            },
+            RoadSegment {
+                id: 3,
+                start: [128, 0],
+                end: [192, 0],
+                width_m: 8,
+            },
+        ];
+        let connector = RoadSegment {
+            id: 4,
+            start: [64, 0],
+            end: [128, 0],
+            width_m: 8,
+        };
+        let goal = [64.0, 64.0];
+        let mut graph = RoadGraph::build(&roads).expect("graph");
+        let mut cache = FlowFieldCache::new(2);
+        let base = cache
+            .get_or_build(&graph, goal)
+            .expect("base field")
+            .checksum();
+
+        assert!(graph.add_segment(&connector).expect("append"));
+        let cached = cache
+            .get_or_build(&graph, goal)
+            .expect("rebuilt field")
+            .checksum();
+
+        let mut combined = roads.to_vec();
+        combined.push(connector);
+        let fresh = RoadGraph::build(&combined).expect("fresh graph");
+        assert_eq!(graph.checksum(), fresh.checksum());
+        assert_eq!(cached, fresh.flow_to(goal).expect("fresh field").checksum());
+        assert_ne!(cached, base, "the append must change the field");
+        assert_eq!(cache.rebuilds(), 1);
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.misses(), 2);
     }
 }
