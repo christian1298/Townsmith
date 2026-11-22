@@ -1,11 +1,13 @@
 //! Headless Townsmith server tick harness.
 //!
-//! Phase 0 only: builds a cohort-scale city, runs a fixed number of ticks on
-//! the CPU, and emits JSON. It does not open a socket or render anything yet.
+//! Phase 0: builds a cohort-scale city, runs a fixed number of ticks on the
+//! CPU, and emits JSON. `--loopback-smoke` exercises protocol v0 over a local
+//! socket instead.
 
 use std::time::Instant;
 
 use core_sim::{Cohort, CohortSimulation};
+use townsmith_server::protocol::run_loopback_smoke;
 
 fn parse_arg(name: &str, default: usize) -> usize {
     let args: Vec<String> = std::env::args().collect();
@@ -25,6 +27,22 @@ fn percentile(samples: &[f64], fraction: f64) -> f64 {
 }
 
 fn main() {
+    if std::env::args().any(|argument| argument == "--loopback-smoke") {
+        match run_loopback_smoke() {
+            Ok(report) => {
+                println!(
+                    "SERVER_PROTOCOL status=ok frames={} checksum={}",
+                    report.frames, report.checksum
+                );
+            }
+            Err(error) => {
+                eprintln!("SERVER_PROTOCOL status=error error={error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     let cohort_count = parse_arg("--cohorts", 10_000).max(1);
     let district_count = parse_arg("--districts", 128).max(1);
     let ticks = parse_arg("--ticks", 100).max(1);

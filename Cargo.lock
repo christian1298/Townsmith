@@ -457,6 +457,8 @@ name = "townsmith-server"
 version = "0.1.0"
 dependencies = [
  "core_sim",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
