@@ -22,6 +22,15 @@ pub enum WorldError {
     InvalidHeight { height: u16 },
     /// Bytes remained after the last delta record.
     TrailingDeltaBytes { remaining: usize },
+    /// Two delta records addressed the same chunk.
+    DuplicateDeltaChunk { x: i64, z: i64 },
+    /// Two edits in one chunk addressed the same local cell.
+    DuplicateDeltaEdit {
+        chunk_x: i64,
+        chunk_z: i64,
+        x: u8,
+        z: u8,
+    },
 }
 
 impl fmt::Display for WorldError {
@@ -44,6 +53,20 @@ impl fmt::Display for WorldError {
             }
             Self::TrailingDeltaBytes { remaining } => {
                 write!(f, "delta stream has {remaining} trailing bytes")
+            }
+            Self::DuplicateDeltaChunk { x, z } => {
+                write!(f, "delta stream repeats chunk ({x}, {z})")
+            }
+            Self::DuplicateDeltaEdit {
+                chunk_x,
+                chunk_z,
+                x,
+                z,
+            } => {
+                write!(
+                    f,
+                    "delta stream repeats cell ({x}, {z}) in chunk ({chunk_x}, {chunk_z})"
+                )
             }
         }
     }

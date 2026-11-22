@@ -2,7 +2,7 @@
 title: Voxel and Scale
 project: Townsmith
 status: accepted
-updated: 2026-11-20
+updated: 2026-11-23
 tags:
   - townsmith
   - voxel
@@ -107,7 +107,7 @@ The world is not a fixed city tile. It is a **large, procedurally generated regi
 | **Settlement** | Soft, player-defined | Named cluster of buildings and roads |
 | **World** | Effectively infinite | No hard map edge; procedural generation + edit deltas |
 
-- **Streaming:** world chunks load within a radius of each player/camera; building voxel data loads only for nearby or edited buildings.
+- **Streaming:** world chunks load within a radius of each player/camera; building voxel data loads only for nearby or edited buildings. `StreamingConfig` clamps `view_radius` to `0..=8` and `unload_margin` to `0..=8` at construction, so a bad config cannot load nothing or synchronously generate an unbounded set (worst case 625 resident chunks, ~117 MiB of dense cells).
 - **Dormant regions:** outside the active set, no per-tick simulation runs. When the player returns, the region is advanced statistically.
 - **Build anywhere:** terrain is 1 m; building detail is 10 cm. The player can place a building anywhere the terrain/access rules allow. There is no lot requirement in the wilderness.
 - **Sparse edits:** the procedural base is deterministic from a seed. The save stores only player edits: terrain height deltas, roads, buildings, harvested resources, and wildlife changes.
@@ -145,7 +145,7 @@ The world is not a fixed city tile. It is a **large, procedurally generated regi
 - Placement validation checks slope, water, foundation depth, road access, and utility connection.
 - Off-grid buildings are allowed but need self-contained utilities; connected settlements are more efficient.
 - The world is **effectively infinite**: there is no authored map edge. Practical limits are streaming radius, save size, and server resources; only visited/edited chunks are stored.
-- **Coordinates:** use 64-bit integer chunk/world coordinates. Rendering uses a **floating origin** that rebases near the player, because 32-bit floats lose precision far from spawn.
+- **Coordinates:** use 64-bit integer chunk/world coordinates. Rendering uses a **floating origin** that rebases near the player, because 32-bit floats lose precision far from spawn. `WorldChunkCoord::origin_m` saturates at the `i64` limits instead of overflowing; `local_from_world` uses floor division/remainder, so cells at `i64::MIN`/`i64::MAX` map exactly; chunks whose origin does not fit are rejected by `checked_origin_m` and skipped by streaming.
 
 ## 5. Voxel data structures
 
