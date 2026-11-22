@@ -261,6 +261,9 @@ cargo run --release -p townsmith-bench --bin modern -- --smoke
 # 2,000 active-agent tick benchmark (sparse + dense)
 cargo run --release -p townsmith-bench --bin agents
 
+# 2,000-citizen N3 route/movement microbenchmark
+cargo run --release -p townsmith-bench --bin movement
+
 # Terrain mesh microbenchmark
 cargo run --release -p townsmith-bench --bin terrain
 

@@ -29,17 +29,17 @@ use core_blueprint::{
 use core_city::named::{age_years_from_days, slot_is_employed, MAX_AGE_DAYS};
 use core_city::{
     advise, diff_selection, evaluate_tutorial, normalize_rotation, starter, summarize,
-    AdvisorInput, AdvisorReport, Age, AgeState, CityLayout, CityRuntime, CitySummary, CityTier,
-    ConstructionPhase, ConstructionSite, ConstructionStore, Economy, Home, Household, IndustryKind,
-    IndustryStore, InfrastructureCosts, LifecycleTick, Lot, LotError, LotRequest, LotStore,
-    MaterializationBudget, MaterializationSelection, MaterializedCitizen, NamedCitizens, NamedSave,
-    Placement, PlacementError, PlacementRequest, PlacementStore, ResearchStore, RoadError,
-    RoadGraph, RoadRequest, RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind,
-    ServiceReport, ServiceStore, ServiceTier, Settlement, SettlementError, SettlementRequest,
-    SettlementStore, TechTree, Trade, TradePool, TutorialInput, UtilityConsumer, UtilityKind,
-    UtilityReport, UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY,
-    DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M,
-    RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    AdvisorInput, AdvisorReport, Age, AgeState, CitizenMotion, CitizenPosition, CityLayout,
+    CityRuntime, CitySummary, CityTier, ConstructionPhase, ConstructionSite, ConstructionStore,
+    Economy, Home, Household, IndustryKind, IndustryStore, InfrastructureCosts, LifecycleTick, Lot,
+    LotError, LotRequest, LotStore, MaterializationBudget, MaterializationSelection,
+    MaterializedCitizen, MotionLeg, NamedCitizens, NamedSave, Placement, PlacementError,
+    PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph, RoadRequest,
+    RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore,
+    ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree, Trade,
+    TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace,
+    Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY,
+    MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -2975,6 +2975,105 @@ impl TownsmithCore {
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = None;
         true
+    }
+
+    /// Read-only per-citizen positions around a camera point at `time_s`.
+    ///
+    /// Selects the active residents exactly like `materialization_state`, then
+    /// builds the `core_city::movement` layer: one cached home-work route per
+    /// household, shared by its residents, sampled at `time_s`.
+    ///
+    /// Returns `{ok, seed, center:[x,z], time_s, routes, citizens,
+    /// positions:[{id, placement_id, slot, position:[x,z], leg,
+    /// route_progress}], checksum}`. `leg` is `"outbound"` or `"return"`.
+    /// Households without a reachable workplace are omitted, not reported as
+    /// errors, so `citizens` may be lower than the materialization count.
+    ///
+    /// `time_s` is finite presentation time in `0..=1,000,000` s (about 11.6
+    /// days). The bound keeps the periodic reduction well-conditioned and
+    /// rejects clock glitches; motion itself wraps within each household cycle.
+    ///
+    /// A missing road store returns `no_roads`. The call is read-only: it does
+    /// not mutate the named pool, population, roads, or save state.
+    #[func]
+    fn citizen_movement(
+        &self,
+        seed: i64,
+        center_x: f64,
+        center_z: f64,
+        active_radius_m: f64,
+        detailed_radius_m: f64,
+        time_s: f64,
+    ) -> VarDictionary {
+        let request = match movement_request(
+            seed,
+            center_x,
+            center_z,
+            active_radius_m,
+            detailed_radius_m,
+            time_s,
+        ) {
+            Ok(request) => request,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+
+        let (placement_centers, workplaces, world_seed) = {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            let construction = self
+                .construction
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match world.as_ref() {
+                Some(store) => (
+                    completed_homes(store, &construction)
+                        .into_iter()
+                        .map(|home| (home.id, home.center))
+                        .collect(),
+                    completed_workplaces(store, &construction),
+                    Some(store.seed),
+                ),
+                None => (BTreeMap::new(), Vec::new(), None),
+            }
+        };
+        let population = self
+            .population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some((code, message)) = movement_seed_error(
+            request.seed,
+            world_seed,
+            population.as_ref().map(|runtime| runtime.seed),
+        ) {
+            return placement_simple_error(code, message);
+        }
+        let named = self.named.lock().unwrap_or_else(|error| error.into_inner());
+        let roads = self.roads.lock().unwrap_or_else(|error| error.into_inner());
+        let graph = match movement_road_graph(request.seed, roads.as_ref()) {
+            Ok(graph) => graph,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        let empty = BTreeMap::new();
+        let households = population
+            .as_ref()
+            .map_or(&empty, |runtime| &runtime.households);
+        let payload = match movement_payload(
+            request.seed,
+            named.as_ref(),
+            households,
+            &placement_centers,
+            &workplaces,
+            &graph,
+            request.center,
+            request.active_radius_m,
+            request.detailed_radius_m,
+            request.time_s,
+        ) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return placement_simple_error("materialization_failed", error.to_string())
+            }
+        };
+        movement_payload_to_dictionary(&payload)
     }
 
     /// Remove every household.
@@ -7648,6 +7747,204 @@ fn materialization_payload_to_dictionary(payload: &MaterializationPayload) -> Va
     result
 }
 
+/// Largest presentation time accepted by `citizen_movement`, in seconds.
+///
+/// One million seconds is about 11.6 days. The bound is far inside f64's
+/// exactly representable integer range, so the periodic `rem_euclid` stays
+/// well-conditioned, and it rejects nonsensical clock jumps.
+const MAX_MOVEMENT_TIME_S: f64 = 1_000_000.0;
+
+/// Validated arguments for one `citizen_movement` call.
+#[derive(Debug)]
+struct MovementRequest {
+    seed: u64,
+    center: [f32; 2],
+    active_radius_m: f32,
+    detailed_radius_m: f32,
+    time_s: f64,
+}
+
+/// Validate the raw Godot arguments before any state is locked.
+fn movement_request(
+    seed: i64,
+    center_x: f64,
+    center_z: f64,
+    active_radius_m: f64,
+    detailed_radius_m: f64,
+    time_s: f64,
+) -> Result<MovementRequest, (&'static str, String)> {
+    let seed = u64::try_from(seed).map_err(|_| {
+        (
+            "invalid_seed",
+            "world seed must be non-negative".to_string(),
+        )
+    })?;
+    let center = [center_x as f32, center_z as f32];
+    if !center.iter().all(|value| value.is_finite()) {
+        return Err((
+            "invalid_center",
+            "movement center must be finite".to_string(),
+        ));
+    }
+    let max_radius_m = f64::from(MAX_WORLD_COORD_M);
+    for (label, value) in [("active", active_radius_m), ("detailed", detailed_radius_m)] {
+        if !value.is_finite() || !(0.0..=max_radius_m).contains(&value) {
+            return Err((
+                "invalid_radius",
+                format!("{label} movement radius must be finite and within 0..=1,000,000 m"),
+            ));
+        }
+    }
+    if !time_s.is_finite() || !(0.0..=MAX_MOVEMENT_TIME_S).contains(&time_s) {
+        return Err((
+            "invalid_time",
+            "movement time must be finite and within 0..=1,000,000 s".to_string(),
+        ));
+    }
+    Ok(MovementRequest {
+        seed,
+        center,
+        active_radius_m: active_radius_m as f32,
+        detailed_radius_m: detailed_radius_m as f32,
+        time_s,
+    })
+}
+
+/// Reject a world or household store that belongs to another seed.
+fn movement_seed_error(
+    seed: u64,
+    world_seed: Option<u64>,
+    population_seed: Option<u64>,
+) -> Option<(&'static str, &'static str)> {
+    if world_seed.is_some_and(|value| value != seed) {
+        return Some((
+            "seed_mismatch",
+            "the placement store belongs to a different seed",
+        ));
+    }
+    if population_seed.is_some_and(|value| value != seed) {
+        return Some((
+            "seed_mismatch",
+            "the household runtime belongs to a different seed",
+        ));
+    }
+    None
+}
+
+/// Build the traffic graph from the live road store.
+///
+/// A missing store is `no_roads`; a store for another seed is
+/// `seed_mismatch`; an invalid segment list is `traffic_failed`.
+fn movement_road_graph(
+    seed: u64,
+    store: Option<&RoadStore>,
+) -> Result<RoadGraph, (&'static str, String)> {
+    let Some(store) = store else {
+        return Err(("no_roads", "no road store is open".to_string()));
+    };
+    if store.seed != seed {
+        return Err((
+            "seed_mismatch",
+            "the road store belongs to a different seed".to_string(),
+        ));
+    }
+    RoadGraph::build(&store.roads).map_err(|error| ("traffic_failed", error.to_string()))
+}
+
+/// Selected movement positions for one materialization selection.
+#[derive(Debug, Clone, PartialEq)]
+struct MovementPayload {
+    seed: u64,
+    center: [f32; 2],
+    time_s: f64,
+    routes: usize,
+    citizens: usize,
+    positions: Vec<CitizenPosition>,
+    checksum: u64,
+}
+
+/// Build the movement layer for the same inputs as [`materialization_payload`].
+///
+/// The selection is built first, then [`CitizenMotion::new`] attaches one
+/// cached route per household and samples every routed citizen at `time_s`.
+/// Citizens in households with no reachable workplace are omitted. Named-pool
+/// or argument errors are returned unchanged from the selection layer.
+#[allow(clippy::too_many_arguments)]
+fn movement_payload(
+    seed: u64,
+    named: Option<&NamedCitizens>,
+    households: &BTreeMap<u64, Household>,
+    placement_centers: &BTreeMap<u64, [f32; 2]>,
+    workplaces: &[Workplace],
+    graph: &RoadGraph,
+    center: [f32; 2],
+    active_radius_m: f32,
+    detailed_radius_m: f32,
+    time_s: f64,
+) -> Result<MovementPayload, core_city::NamedError> {
+    let selection = materialization_payload(
+        seed,
+        named,
+        households,
+        placement_centers,
+        center,
+        active_radius_m,
+        detailed_radius_m,
+    )?;
+    let motion = CitizenMotion::new(
+        &MaterializationSelection {
+            active: selection.active,
+            detailed: selection.detailed,
+        },
+        workplaces,
+        graph,
+        DEFAULT_ROUTE_CACHE_CAPACITY,
+    );
+    Ok(MovementPayload {
+        seed,
+        center,
+        time_s,
+        routes: motion.route_count(),
+        citizens: motion.citizen_count(),
+        positions: motion.positions_at(time_s),
+        checksum: motion.checksum(),
+    })
+}
+
+const fn motion_leg_name(leg: MotionLeg) -> &'static str {
+    match leg {
+        MotionLeg::Outbound => "outbound",
+        MotionLeg::Return => "return",
+    }
+}
+
+fn movement_payload_to_dictionary(payload: &MovementPayload) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set("seed", payload.seed as i64);
+    result.set("center", &PackedFloat32Array::from(payload.center));
+    result.set("time_s", payload.time_s);
+    result.set("routes", payload.routes as i64);
+    result.set("citizens", payload.citizens as i64);
+    let mut positions: Array<VarDictionary> = Array::new();
+    for sample in &payload.positions {
+        let mut item = VarDictionary::new();
+        item.set("id", sample.id as i64);
+        item.set("placement_id", sample.placement_id as i64);
+        item.set("slot", i64::from(sample.slot));
+        item.set("position", &PackedFloat32Array::from(sample.position));
+        item.set("leg", &GString::from(motion_leg_name(sample.leg)));
+        item.set("route_progress", f64::from(sample.route_progress));
+        positions.push(&item);
+    }
+    result.set("positions", &positions.to_variant());
+    result.set(
+        "checksum",
+        &GString::from(&format!("{:016x}", payload.checksum)),
+    );
+    result
+}
+
 struct RoutePreviewState {
     seed: u64,
     graph_checksum: u64,
@@ -9275,6 +9572,184 @@ mod tests {
             core_city::name_for(payload.active[0].id)
         );
         assert_eq!(&payload.detailed[..], &payload.active[..]);
+    }
+
+    fn movement_fixture() -> (
+        CityRuntime,
+        NamedCitizens,
+        BTreeMap<u64, [f32; 2]>,
+        Vec<Workplace>,
+        RoadGraph,
+    ) {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.tick(10.0, 4, &[(1, 4)]);
+        let mut named = NamedCitizens::new(2026);
+        named.sync(&runtime.households);
+        let centers = BTreeMap::from([(1, [10.0_f32, 0.0])]);
+        let workplaces = vec![Workplace {
+            id: 2,
+            slots: 4,
+            center: [90.0, 0.0],
+        }];
+        let graph = RoadGraph::build(&[RoadSegment {
+            id: 1,
+            start: [0, 0],
+            end: [100, 0],
+            width_m: 6,
+        }])
+        .expect("graph");
+        (runtime, named, centers, workplaces, graph)
+    }
+
+    #[test]
+    fn movement_payload_is_deterministic_and_routed() {
+        let (runtime, named, centers, workplaces, graph) = movement_fixture();
+        let first = movement_payload(
+            2026,
+            Some(&named),
+            &runtime.households,
+            &centers,
+            &workplaces,
+            &graph,
+            [10.0, 0.0],
+            50.0,
+            50.0,
+            0.0,
+        )
+        .expect("payload");
+        let second = movement_payload(
+            2026,
+            Some(&named),
+            &runtime.households,
+            &centers,
+            &workplaces,
+            &graph,
+            [10.0, 0.0],
+            50.0,
+            50.0,
+            0.0,
+        )
+        .expect("payload");
+        assert_eq!(first, second);
+        assert_eq!(first.routes, 1);
+        assert_eq!(first.citizens, 4);
+        assert_eq!(first.positions.len(), 4);
+        assert!(first.checksum != 0);
+        assert!(first
+            .positions
+            .iter()
+            .all(|position| position.position.iter().all(|value| value.is_finite())));
+        let later = movement_payload(
+            2026,
+            Some(&named),
+            &runtime.households,
+            &centers,
+            &workplaces,
+            &graph,
+            [10.0, 0.0],
+            50.0,
+            50.0,
+            20.0,
+        )
+        .expect("payload");
+        assert!(later
+            .positions
+            .iter()
+            .any(|position| position.route_progress > 0.0));
+    }
+
+    #[test]
+    fn movement_payload_omits_households_without_a_workplace() {
+        let (runtime, named, centers, _workplaces, graph) = movement_fixture();
+        let payload = movement_payload(
+            2026,
+            Some(&named),
+            &runtime.households,
+            &centers,
+            &[],
+            &graph,
+            [10.0, 0.0],
+            50.0,
+            50.0,
+            0.0,
+        )
+        .expect("payload");
+        assert!(payload.positions.is_empty());
+        assert_eq!(payload.routes, 0);
+    }
+
+    #[test]
+    fn movement_road_graph_rejects_missing_and_mismatched_stores() {
+        assert_eq!(
+            movement_road_graph(2026, None).expect_err("no store").0,
+            "no_roads"
+        );
+        let mut store = RoadStore::new(2026);
+        store.roads.push(RoadSegment {
+            id: 1,
+            start: [0, 0],
+            end: [10, 0],
+            width_m: 6,
+        });
+        assert_eq!(
+            movement_road_graph(2027, Some(&store))
+                .expect_err("seed mismatch")
+                .0,
+            "seed_mismatch"
+        );
+        assert!(movement_road_graph(2026, Some(&store)).is_ok());
+    }
+
+    #[test]
+    fn movement_request_validates_time_and_radii() {
+        assert_eq!(
+            movement_request(2026, 0.0, 0.0, 10.0, 5.0, f64::NAN)
+                .expect_err("nan time")
+                .0,
+            "invalid_time"
+        );
+        assert_eq!(
+            movement_request(2026, 0.0, 0.0, 10.0, 5.0, -1.0)
+                .expect_err("negative time")
+                .0,
+            "invalid_time"
+        );
+        assert_eq!(
+            movement_request(2026, 0.0, 0.0, 10.0, 5.0, 1_000_001.0)
+                .expect_err("too large")
+                .0,
+            "invalid_time"
+        );
+        assert_eq!(
+            movement_request(2026, 0.0, 0.0, -1.0, 5.0, 0.0)
+                .expect_err("negative radius")
+                .0,
+            "invalid_radius"
+        );
+        assert_eq!(
+            movement_request(2026, f64::INFINITY, 0.0, 10.0, 5.0, 0.0)
+                .expect_err("bad center")
+                .0,
+            "invalid_center"
+        );
+        assert!(movement_request(2026, 0.0, 0.0, 10.0, 5.0, 0.0).is_ok());
+    }
+
+    #[test]
+    fn movement_seed_error_checks_world_and_population() {
+        assert!(movement_seed_error(2026, Some(2026), Some(2026)).is_none());
+        assert_eq!(
+            movement_seed_error(2026, Some(2027), None)
+                .expect("world")
+                .0,
+            "seed_mismatch"
+        );
+        assert_eq!(
+            movement_seed_error(2026, None, Some(2027))
+                .expect("population")
+                .0,
+            "seed_mismatch"
+        );
     }
 
     #[test]

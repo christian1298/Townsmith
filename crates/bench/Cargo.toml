@@ -22,6 +22,10 @@ path = "src/bin/rooms.rs"
 name = "traffic"
 path = "src/bin/traffic.rs"
 
+[[bin]]
+name = "movement"
+path = "src/bin/movement.rs"
+
 [dependencies]
 core_voxel.workspace = true
 core_world.workspace = true
