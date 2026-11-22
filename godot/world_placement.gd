@@ -60,6 +60,16 @@ const MATERIALIZATION_FADE_MAX_SECONDS := 1.0
 # reconciliation left over from a truncated diff.
 const MATERIALIZATION_CHANGE_BUDGET := 64
 const MOVEMENT_REFRESH_SECONDS := 0.1
+# Crowd LOD for the F4 movement markers. Routed citizens inside this radius use
+# the full-size near box; farther citizens share a second pooled MultiMesh with
+# a smaller box, stride-sampled from the id-sorted far set to a fixed budget.
+# The split is visual only and never removes simulation state.
+const MOVEMENT_NEAR_RADIUS_M := 120.0
+const MOVEMENT_FAR_BUDGET := 500
+const MOVEMENT_NEAR_HEIGHT := 1.7
+const MOVEMENT_FAR_HEIGHT := 0.9
+const MOVEMENT_NEAR_SIZE := Vector3(0.32, 1.7, 0.32)
+const MOVEMENT_FAR_SIZE := Vector3(0.12, 0.9, 0.12)
 # Follow pulls the Mayor target toward the selected home with an exponential
 # ease. The epsilon is the arrival radius and also the pan detector: a larger
 # target move between follow steps means the player panned and takes over.
@@ -121,15 +131,28 @@ var materialization_fading: Array[MeshInstance3D] = []
 var movement_root: Node3D
 var movement_mesh: BoxMesh
 var movement_material: StandardMaterial3D
+var movement_far_mesh: BoxMesh
+var movement_far_material: StandardMaterial3D
 # One pooled MultiMesh holds every routed citizen marker; the transform buffer
 # is rewritten in place each refresh instead of creating a node per citizen.
+# A container keeps the near/far pools as one child of `CitizenMovement`, so
+# the route mesh plus this container stay the only two direct children.
+var movement_pool_root: Node3D
 var movement_multimesh_instance: MultiMeshInstance3D
 var movement_multimesh: MultiMesh
+var movement_far_multimesh_instance: MultiMeshInstance3D
+var movement_far_multimesh: MultiMesh
 # Cached terrain height keyed by citizen id. Entries are dropped when the
-# citizen leaves the routed set so the cache stays bounded by the route count.
+# citizen leaves the drawn near/far set so the cache stays bounded by
+# (near count + far budget).
 var movement_ground: Dictionary = {}
-# Citizen ids in MultiMesh instance order for the most recent refresh.
+# Citizen ids in MultiMesh instance order for the most recent refresh. Near is
+# every routed citizen inside MOVEMENT_NEAR_RADIUS_M; far is the deterministic
+# stride sample of the id-sorted set beyond it, capped at MOVEMENT_FAR_BUDGET.
 var movement_ids: Array[int] = []
+var movement_far_ids: Array[int] = []
+var movement_far_checksum := 0
+var movement_lod_counts := Vector2i.ZERO
 # One merged line mesh for every routed household, rebuilt only when the
 # bridge movement checksum changes.
 var movement_route_lines: MeshInstance3D
@@ -948,10 +971,17 @@ func _setup_materialization() -> void:
 	movement_root.name = "CitizenMovement"
 	add_child(movement_root)
 	movement_mesh = BoxMesh.new()
-	movement_mesh.size = Vector3(0.32, 1.7, 0.32)
+	movement_mesh.size = MOVEMENT_NEAR_SIZE
 	movement_material = StandardMaterial3D.new()
 	movement_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	movement_material.albedo_color = Color(0.18, 0.95, 0.72)
+	# Far markers are a smaller box, so the pooled sample reads as a crowd
+	# without paying for a full-height agent at 120 m+.
+	movement_far_mesh = BoxMesh.new()
+	movement_far_mesh.size = MOVEMENT_FAR_SIZE
+	movement_far_material = StandardMaterial3D.new()
+	movement_far_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	movement_far_material.albedo_color = Color(0.14, 0.66, 0.5)
 	movement_route_material = StandardMaterial3D.new()
 	movement_route_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	movement_route_material.albedo_color = Color(0.16, 0.62, 0.58, 0.75)
@@ -959,24 +989,45 @@ func _setup_materialization() -> void:
 
 func _setup_movement_pool() -> void:
 	# Created lazily on the first marker refresh so a hidden overlay owns no
-	# child nodes under `CitizenMovement`.
+	# child nodes under `CitizenMovement`. The container keeps both pools behind
+	# one direct child, alongside the merged route mesh.
 	if movement_root == null:
 		return
 	if movement_multimesh_instance != null and is_instance_valid(movement_multimesh_instance):
-		return
-	movement_multimesh = MultiMesh.new()
-	movement_multimesh.mesh = movement_mesh
-	# transform_format and use_colors must be set before instance_count; Godot
-	# rejects both once instances exist.
-	movement_multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	movement_multimesh.use_colors = false
-	movement_multimesh.instance_count = 0
-	movement_multimesh_instance = MultiMeshInstance3D.new()
-	movement_multimesh_instance.name = "CitizenMovementPool"
-	movement_multimesh_instance.multimesh = movement_multimesh
-	movement_multimesh_instance.material_override = movement_material
-	movement_multimesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	movement_root.add_child(movement_multimesh_instance)
+		if movement_far_multimesh_instance != null and is_instance_valid(movement_far_multimesh_instance):
+			return
+	if movement_pool_root == null or not is_instance_valid(movement_pool_root):
+		movement_pool_root = Node3D.new()
+		movement_pool_root.name = "CitizenMovementPools"
+		movement_root.add_child(movement_pool_root)
+	if movement_multimesh_instance == null or not is_instance_valid(movement_multimesh_instance):
+		movement_multimesh = MultiMesh.new()
+		movement_multimesh.mesh = movement_mesh
+		# transform_format and use_colors must be set before instance_count; Godot
+		# rejects both once instances exist.
+		movement_multimesh.transform_format = MultiMesh.TRANSFORM_3D
+		movement_multimesh.use_colors = false
+		movement_multimesh.instance_count = 0
+		movement_multimesh.visible_instance_count = 0
+		movement_multimesh_instance = MultiMeshInstance3D.new()
+		movement_multimesh_instance.name = "CitizenMovementNear"
+		movement_multimesh_instance.multimesh = movement_multimesh
+		movement_multimesh_instance.material_override = movement_material
+		movement_multimesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		movement_pool_root.add_child(movement_multimesh_instance)
+	if movement_far_multimesh_instance == null or not is_instance_valid(movement_far_multimesh_instance):
+		movement_far_multimesh = MultiMesh.new()
+		movement_far_multimesh.mesh = movement_far_mesh
+		movement_far_multimesh.transform_format = MultiMesh.TRANSFORM_3D
+		movement_far_multimesh.use_colors = false
+		movement_far_multimesh.instance_count = 0
+		movement_far_multimesh.visible_instance_count = 0
+		movement_far_multimesh_instance = MultiMeshInstance3D.new()
+		movement_far_multimesh_instance.name = "CitizenMovementFar"
+		movement_far_multimesh_instance.multimesh = movement_far_multimesh
+		movement_far_multimesh_instance.material_override = movement_far_material
+		movement_far_multimesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		movement_pool_root.add_child(movement_far_multimesh_instance)
 
 func _setup_heatmap() -> void:
 	# The root exists even while the overlay is off so F7 can create the pool
@@ -1449,10 +1500,16 @@ func _clear_movement_nodes() -> void:
 				child.free()
 	movement_multimesh_instance = null
 	movement_multimesh = null
+	movement_far_multimesh_instance = null
+	movement_far_multimesh = null
+	movement_pool_root = null
 	movement_route_lines = null
 	movement_route_key = ""
 	movement_ground.clear()
 	movement_ids.clear()
+	movement_far_ids.clear()
+	movement_far_checksum = 0
+	movement_lod_counts = Vector2i.ZERO
 	last_movement_state = {}
 
 
@@ -1492,6 +1549,111 @@ func _refresh_route_lines(state: Dictionary) -> void:
 	movement_route_key = key
 
 
+func _movement_lod_split(samples: Array, center: Vector3) -> Dictionary:
+	# Deterministic split by citizen id: near keeps every routed sample inside
+	# MOVEMENT_NEAR_RADIUS_M, far stride-samples the id-sorted remainder to
+	# MOVEMENT_FAR_BUDGET. Sorting ids (not relying on the bridge's position
+	# order) keeps the far selection and checksum stable across refreshes.
+	var by_id := {}
+	var ids: Array[int] = []
+	for sample in samples:
+		var id := int(sample.get("id", -1))
+		var point: PackedFloat32Array = sample.get("position", PackedFloat32Array())
+		if id < 0 or point.size() != 2 or by_id.has(id):
+			continue
+		var dx := float(point[0]) - center.x
+		var dz := float(point[1]) - center.z
+		by_id[id] = {"id": id, "position": point, "distance_sq": dx * dx + dz * dz}
+		ids.append(id)
+	ids.sort()
+	var near_radius_sq := MOVEMENT_NEAR_RADIUS_M * MOVEMENT_NEAR_RADIUS_M
+	var near: Array = []
+	var far_all: Array = []
+	for id in ids:
+		var entry: Dictionary = by_id[id]
+		if float(entry.get("distance_sq", INF)) <= near_radius_sq:
+			near.append(entry)
+		else:
+			far_all.append(entry)
+	var far: Array = []
+	if far_all.size() <= MOVEMENT_FAR_BUDGET:
+		far = far_all
+	else:
+		# Uniform stride over sorted ids. Bounded by the budget; a far set that
+		# is not a multiple of the stride draws fewer than the cap.
+		var stride := maxi(1, int(ceil(float(far_all.size()) / float(MOVEMENT_FAR_BUDGET))))
+		var index := 0
+		while index < far_all.size() and far.size() < MOVEMENT_FAR_BUDGET:
+			far.append(far_all[index])
+			index += stride
+	return {"near": near, "far": far}
+
+
+func _movement_id_checksum(ids: Array[int]) -> int:
+	# FNV-1a (32-bit) over the id order. The smoke compares this across repeats;
+	# it is presentation-only and never enters save or network state.
+	var digest := 2166136261
+	for id in ids:
+		digest = ((digest ^ (id & 0xFFFFFFFF)) * 16777619) & 0xFFFFFFFF
+	return digest
+
+
+func _movement_draw_set(entries: Array, height: float, seen: Dictionary) -> Dictionary:
+	# Resolves cached ground height for drawn markers only, so the height cache
+	# stays bounded by near + far rather than every routed citizen.
+	var ids: Array[int] = []
+	var transforms: Array[Transform3D] = []
+	for entry in entries:
+		var id := int(entry.get("id", -1))
+		var point: PackedFloat32Array = entry.get("position", PackedFloat32Array())
+		if id < 0 or point.size() != 2:
+			continue
+		if not movement_ground.has(id):
+			var ground: float = core.world_height_at(SEED, point[0], point[1])
+			if ground < 0.0:
+				continue
+			movement_ground[id] = ground
+		ids.append(id)
+		seen[id] = true
+		var y := float(movement_ground[id]) + height
+		transforms.append(Transform3D(Basis.IDENTITY, Vector3(point[0], y, point[1])))
+	return {"ids": ids, "transforms": transforms}
+
+
+func _write_movement_pool(multimesh: MultiMesh, transforms: Array, size: Vector3) -> void:
+	var count := transforms.size()
+	# Capacity grows only; `visible_instance_count` hides spare slots instead of
+	# shrinking and reallocating the buffer when the near set changes size.
+	if multimesh.instance_count < count:
+		multimesh.instance_count = count
+	multimesh.visible_instance_count = count
+	for index in count:
+		multimesh.set_instance_transform(index, transforms[index])
+	if count == 0:
+		multimesh.custom_aabb = AABB()
+		return
+	var min_point := Vector3(INF, INF, INF)
+	var max_point := Vector3(-INF, -INF, -INF)
+	for transform in transforms:
+		var origin: Vector3 = transform.origin
+		min_point.x = minf(min_point.x, origin.x)
+		min_point.y = minf(min_point.y, origin.y)
+		min_point.z = minf(min_point.z, origin.z)
+		max_point.x = maxf(max_point.x, origin.x)
+		max_point.y = maxf(max_point.y, origin.y)
+		max_point.z = maxf(max_point.z, origin.z)
+	var half_x := size.x * 0.5
+	var half_z := size.z * 0.5
+	var half_y := size.y * 0.5
+	multimesh.custom_aabb = AABB(
+		Vector3(min_point.x - half_x, min_point.y - half_y, min_point.z - half_z),
+		Vector3(
+			max_point.x - min_point.x + size.x,
+			max_point.y - min_point.y + size.y,
+			max_point.z - min_point.z + size.z
+		))
+
+
 func _update_movement_markers() -> void:
 	if not materialization_visible or core == null or movement_root == null:
 		return
@@ -1504,56 +1666,30 @@ func _update_movement_markers() -> void:
 	if not bool(state.get("ok", false)):
 		return
 	_setup_movement_pool()
-	if movement_multimesh == null:
+	if movement_multimesh == null or movement_far_multimesh == null:
 		return
 	_refresh_route_lines(state)
-	var ids: Array[int] = []
+	var lod := _movement_lod_split(state.get("positions", []), center)
 	var seen := {}
-	var transforms: Array[Transform3D] = []
-	var min_x := INF
-	var max_x := -INF
-	var min_z := INF
-	var max_z := -INF
-	var min_y := INF
-	var max_y := -INF
-	for sample in state.get("positions", []):
-		var id := int(sample.get("id", -1))
-		var point: PackedFloat32Array = sample.get("position", PackedFloat32Array())
-		if id < 0 or point.size() != 2:
-			continue
-		if not movement_ground.has(id):
-			var ground: float = core.world_height_at(SEED, point[0], point[1])
-			if ground < 0.0:
-				continue
-			movement_ground[id] = ground
-		var y := float(movement_ground[id]) + 0.85
-		ids.append(id)
-		seen[id] = true
-		transforms.append(Transform3D(Basis.IDENTITY, Vector3(point[0], y, point[1])))
-		min_x = minf(min_x, point[0])
-		max_x = maxf(max_x, point[0])
-		min_z = minf(min_z, point[1])
-		max_z = maxf(max_z, point[1])
-		min_y = minf(min_y, y)
-		max_y = maxf(max_y, y)
-	# Drop cached heights for citizens that left the routed set.
+	var near: Dictionary = _movement_draw_set(lod.get("near", []), MOVEMENT_NEAR_HEIGHT * 0.5, seen)
+	var far: Dictionary = _movement_draw_set(lod.get("far", []), MOVEMENT_FAR_HEIGHT * 0.5, seen)
+	# Drop cached heights for citizens that left the drawn near/far set.
 	for id in movement_ground.keys():
 		if not seen.has(id):
 			movement_ground.erase(id)
-	movement_ids = ids
-	# Reuse the same MultiMesh: only the instance count and transforms change.
-	if movement_multimesh.instance_count != ids.size():
-		movement_multimesh.instance_count = ids.size()
-	for index in ids.size():
-		movement_multimesh.set_instance_transform(index, transforms[index])
-	if ids.is_empty():
-		movement_multimesh.custom_aabb = AABB()
-	else:
-		# Markers move, so keep the bounds explicit instead of relying on a
-		# stale scan. Pad by half the box footprint and the full marker height.
-		movement_multimesh.custom_aabb = AABB(
-			Vector3(min_x - 0.16, min_y - 0.85, min_z - 0.16),
-			Vector3(max_x - min_x + 0.32, max_y - min_y + 1.7, max_z - min_z + 0.32))
+	var previous_lod := movement_lod_counts
+	movement_ids.clear()
+	for id in near.get("ids", []):
+		movement_ids.append(int(id))
+	movement_far_ids.clear()
+	for id in far.get("ids", []):
+		movement_far_ids.append(int(id))
+	movement_lod_counts = Vector2i(movement_ids.size(), movement_far_ids.size())
+	movement_far_checksum = _movement_id_checksum(movement_far_ids)
+	_write_movement_pool(movement_multimesh, near.get("transforms", []), MOVEMENT_NEAR_SIZE)
+	_write_movement_pool(movement_far_multimesh, far.get("transforms", []), MOVEMENT_FAR_SIZE)
+	if movement_lod_counts != previous_lod:
+		_update_hud()
 
 
 func _industry_color(kind: String) -> Color:
@@ -2498,6 +2634,8 @@ func _update_hud() -> void:
 		status_label.text += "\n" + i18n.t("base.ui.hud.citizens_near", {
 			"active": i18n.format_int(materialization_counts.x),
 			"detailed": i18n.format_int(materialization_counts.y),
+			"near": i18n.format_int(movement_lod_counts.x),
+			"far": i18n.format_int(movement_lod_counts.y),
 		})
 	var heatmap_state: String = i18n.t("base.ui.heatmap.on") if heatmap_visible else i18n.t("base.ui.heatmap.off")
 	status_label.text += "\n" + i18n.t("base.ui.heatmap.status", {
@@ -3639,6 +3777,7 @@ func _run_scene_smoke() -> void:
 	var movement_scene_ok := false
 	var movement_pool_ok := false
 	var movement_routes_ok := false
+	var movement_lod_ok := false
 	var follow_ok := false
 	var render_ok := false
 	var structure_ok := false
@@ -4129,6 +4268,12 @@ func _run_scene_smoke() -> void:
 				movement_routes_ok = movement_routes_ok and route_mesh.surface_get_array_len(0) == route_vertices
 				movement_routes_ok = movement_routes_ok and movement_route_key.length() > 0
 				var route_mesh_ref := movement_route_lines
+				movement_lod_ok = movement_lod_counts.x + movement_lod_counts.y == movement_positions.size()
+				movement_lod_ok = movement_lod_ok and movement_lod_counts.y <= MOVEMENT_FAR_BUDGET
+				movement_lod_ok = movement_lod_ok and movement_ids.size() == movement_lod_counts.x
+				movement_lod_ok = movement_lod_ok and movement_far_ids.size() == movement_lod_counts.y
+				var first_far_ids: Array[int] = movement_far_ids.duplicate()
+				var first_far_checksum := movement_far_checksum
 				movement_scene_ok = movement_scene_ok and movement_pool_ok and movement_routes_ok
 				var movement_cache: Dictionary = core.movement_cache_state()
 				movement_scene_ok = movement_scene_ok and bool(movement_cache.get("open", false))
@@ -4140,8 +4285,10 @@ func _run_scene_smoke() -> void:
 				# The pool is reused across ticks; only count and transforms change.
 				movement_scene_ok = movement_scene_ok and movement_pool_live and movement_multimesh_instance == movement_pool
 				movement_scene_ok = movement_scene_ok and movement_root.get_child_count() == 2
-				movement_scene_ok = movement_scene_ok and movement_multimesh.instance_count == moved_positions.size()
+				movement_scene_ok = movement_scene_ok and movement_multimesh.instance_count >= movement_lod_counts.x
 				movement_pool_ok = movement_pool_ok and movement_ids.size() == moved_positions.size()
+				movement_lod_ok = movement_lod_ok and movement_far_ids == first_far_ids
+				movement_lod_ok = movement_lod_ok and movement_far_checksum == first_far_checksum
 				movement_routes_ok = movement_routes_ok and movement_route_lines == route_mesh_ref
 				movement_scene_ok = movement_scene_ok and movement_routes_ok
 				_advance_materialization_fades(MATERIALIZATION_FADE_SECONDS + 0.05)
@@ -4770,10 +4917,13 @@ func _run_scene_smoke() -> void:
 		if not campaign_hud_ok:
 			status = "campaign_hud_failed"
 
+	if status == "ok" and not movement_lod_ok:
+		status = "movement_lod_failed"
+
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s heatmap_ui=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s heatmap_ui=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -4805,6 +4955,7 @@ func _run_scene_smoke() -> void:
 		"ok" if movement_scene_ok else "failed",
 		"ok" if movement_pool_ok else "failed",
 		"ok" if movement_routes_ok else "failed",
+		"ok" if movement_lod_ok else "failed",
 		"ok" if occupancy_before_ok and occupancy_after_ok else "failed",
 		"ok" if industry_ok else "failed",
 		"ok" if utility_ok else "failed",
