@@ -82,4 +82,4 @@ Output is deterministic; smoke checksum `a920cf0c4eb9a4f1`.
 3. Add site replacement/refund rules and service-quality funding.
 4. Wire the D-028 building installment schedule through the bridge and construction tick.
 
-> Construction v0 now has an opt-in campaign clock (`ConstructionTimeScale::CampaignDays`) with D-029 phase durations; the default developer clock and existing checksums are unchanged. The bridge exposes the scale, `city_loop` accepts `--campaign-days`, and the HUD toggle is still open. Utility/service site costs still use their separate immediate-charge path.
+> Construction v0 now has an opt-in campaign clock (`ConstructionTimeScale::CampaignDays`) with D-029 phase durations; the default developer clock and existing checksums are unchanged. The bridge exposes the scale, `city_loop` accepts `--campaign-days`, and the HUD has an F8 developer/campaign toggle. Utility/service site costs still use their separate immediate-charge path.
