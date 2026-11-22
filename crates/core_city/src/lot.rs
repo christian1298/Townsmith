@@ -319,6 +319,9 @@ impl LotStore {
     ) -> Result<Lot, LotError> {
         self.validate(request, height_at, roads)?;
         let id = self.next_id;
+        // Assignable ids are `1..i64::MAX`. The ceiling check consumes the
+        // final slot: when `next_id == MAX_LOT_ID` no id is pushed and
+        // `IdExhausted` is reported, so `i64::MAX` itself is never assigned.
         self.next_id = id
             .checked_add(1)
             .filter(|next| *next <= MAX_LOT_ID)
