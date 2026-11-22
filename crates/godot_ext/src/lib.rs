@@ -550,6 +550,7 @@ struct TownsmithCore {
     services: Mutex<Option<ServiceStore>>,
     research: Mutex<Option<ResearchStore>>,
     route_preview: Mutex<Option<RoutePreviewState>>,
+    graph_cache: Mutex<Option<RoadGraphCache>>,
     terrain_deltas: Arc<RwLock<DeltaStore>>,
     terrain_seed: Mutex<Option<u64>>,
 }
@@ -573,6 +574,7 @@ impl Default for TownsmithCore {
             services: Mutex::new(None),
             research: Mutex::new(None),
             route_preview: Mutex::new(None),
+            graph_cache: Mutex::new(None),
             terrain_deltas: Arc::new(RwLock::new(DeltaStore::new())),
             terrain_seed: Mutex::new(None),
         }
@@ -1253,10 +1255,15 @@ impl TownsmithCore {
                 "the road store belongs to a different seed",
             );
         }
-        match RoadGraph::build(&store.roads) {
-            Ok(graph) => traffic_payload(&graph, true),
-            Err(error) => placement_simple_error("traffic_failed", error.to_string()),
-        }
+        let mut cache = self
+            .graph_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let graph = match cached_road_graph(&mut cache, seed, Some(store)) {
+            Ok(graph) => graph,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        traffic_payload(graph.as_ref(), true)
     }
 
     /// Read-only route preview between two world points.
@@ -1300,9 +1307,15 @@ impl TownsmithCore {
                 "the road store belongs to a different seed",
             );
         }
-        let graph = match RoadGraph::build(&store.roads) {
-            Ok(graph) => graph,
-            Err(error) => return placement_simple_error("traffic_failed", error.to_string()),
+        let graph = {
+            let mut cache = self
+                .graph_cache
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match cached_road_graph(&mut cache, seed, Some(store)) {
+                Ok(graph) => graph,
+                Err((code, message)) => return placement_simple_error(code, message),
+            }
         };
         let graph_checksum = graph.checksum();
         let mut guard = self
@@ -1320,7 +1333,7 @@ impl TownsmithCore {
             });
         }
         let state = guard.as_mut().expect("route preview state");
-        match route_preview_data(state, &graph, from, to) {
+        match route_preview_data(state, graph.as_ref(), from, to) {
             Ok(data) => {
                 let mut points = PackedVector2Array::new();
                 for point in &data.points {
@@ -1392,6 +1405,55 @@ impl TownsmithCore {
     fn route_cache_clear(&self) -> bool {
         *self
             .route_preview
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        true
+    }
+
+    /// Cached derived road graph identity and statistics.
+    #[func]
+    fn road_graph_cache_state(&self) -> VarDictionary {
+        let guard = self
+            .graph_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        match guard.as_ref() {
+            Some(cached) => {
+                let stats = cached.graph.stats();
+                result.set("open", true);
+                result.set("seed", cached.seed as i64);
+                result.set(
+                    "roads_checksum",
+                    &GString::from(&format!("{:016x}", cached.roads_checksum)),
+                );
+                result.set(
+                    "graph_checksum",
+                    &GString::from(&format!("{:016x}", cached.graph.checksum())),
+                );
+                result.set("nodes", stats.nodes as i64);
+                result.set("edges", stats.edges as i64);
+                result.set("roads", stats.roads as i64);
+            }
+            None => {
+                result.set("open", false);
+                result.set("seed", 0);
+                result.set("roads_checksum", &GString::from("0000000000000000"));
+                result.set("graph_checksum", &GString::from("0000000000000000"));
+                result.set("nodes", 0);
+                result.set("edges", 0);
+                result.set("roads", 0);
+            }
+        }
+        result
+    }
+
+    /// Drop the cached derived road graph.
+    #[func]
+    fn road_graph_cache_clear(&self) -> bool {
+        *self
+            .graph_cache
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = None;
         true
@@ -3048,9 +3110,15 @@ impl TownsmithCore {
         }
         let named = self.named.lock().unwrap_or_else(|error| error.into_inner());
         let roads = self.roads.lock().unwrap_or_else(|error| error.into_inner());
-        let graph = match movement_road_graph(request.seed, roads.as_ref()) {
-            Ok(graph) => graph,
-            Err((code, message)) => return placement_simple_error(code, message),
+        let graph = {
+            let mut cache = self
+                .graph_cache
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match cached_road_graph(&mut cache, request.seed, roads.as_ref()) {
+                Ok(graph) => graph,
+                Err((code, message)) => return placement_simple_error(code, message),
+            }
         };
         let empty = BTreeMap::new();
         let households = population
@@ -7835,22 +7903,6 @@ fn movement_seed_error(
 ///
 /// A missing store is `no_roads`; a store for another seed is
 /// `seed_mismatch`; an invalid segment list is `traffic_failed`.
-fn movement_road_graph(
-    seed: u64,
-    store: Option<&RoadStore>,
-) -> Result<RoadGraph, (&'static str, String)> {
-    let Some(store) = store else {
-        return Err(("no_roads", "no road store is open".to_string()));
-    };
-    if store.seed != seed {
-        return Err((
-            "seed_mismatch",
-            "the road store belongs to a different seed".to_string(),
-        ));
-    }
-    RoadGraph::build(&store.roads).map_err(|error| ("traffic_failed", error.to_string()))
-}
-
 /// Selected movement positions for one materialization selection.
 #[derive(Debug, Clone, PartialEq)]
 struct MovementPayload {
@@ -7943,6 +7995,45 @@ fn movement_payload_to_dictionary(payload: &MovementPayload) -> VarDictionary {
         &GString::from(&format!("{:016x}", payload.checksum)),
     );
     result
+}
+
+struct RoadGraphCache {
+    seed: u64,
+    roads_checksum: u64,
+    graph: Arc<RoadGraph>,
+}
+
+/// Reuse the derived graph while the seed and road-store checksum match.
+fn cached_road_graph(
+    cache: &mut Option<RoadGraphCache>,
+    seed: u64,
+    store: Option<&RoadStore>,
+) -> Result<Arc<RoadGraph>, (&'static str, String)> {
+    let Some(store) = store else {
+        return Err(("no_roads", "no road store is open".to_string()));
+    };
+    if store.seed != seed {
+        return Err((
+            "seed_mismatch",
+            "the road store belongs to a different seed".to_string(),
+        ));
+    }
+    let roads_checksum = store.checksum();
+    if let Some(cached) = cache
+        .as_ref()
+        .filter(|cached| cached.seed == seed && cached.roads_checksum == roads_checksum)
+    {
+        return Ok(Arc::clone(&cached.graph));
+    }
+    let graph = Arc::new(
+        RoadGraph::build(&store.roads).map_err(|error| ("traffic_failed", error.to_string()))?,
+    );
+    *cache = Some(RoadGraphCache {
+        seed,
+        roads_checksum,
+        graph: Arc::clone(&graph),
+    });
+    Ok(graph)
 }
 
 struct RoutePreviewState {
@@ -9679,9 +9770,12 @@ mod tests {
     }
 
     #[test]
-    fn movement_road_graph_rejects_missing_and_mismatched_stores() {
+    fn road_graph_cache_decisions() {
+        let mut cache = None;
         assert_eq!(
-            movement_road_graph(2026, None).expect_err("no store").0,
+            cached_road_graph(&mut cache, 2026, None)
+                .expect_err("no store")
+                .0,
             "no_roads"
         );
         let mut store = RoadStore::new(2026);
@@ -9691,13 +9785,39 @@ mod tests {
             end: [10, 0],
             width_m: 6,
         });
+        let first = cached_road_graph(&mut cache, 2026, Some(&store)).expect("first");
+        let second = cached_road_graph(&mut cache, 2026, Some(&store)).expect("second");
+        assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(
-            movement_road_graph(2027, Some(&store))
+            cache.as_ref().expect("cache").roads_checksum,
+            store.checksum()
+        );
+        let before_edit = Arc::clone(&first);
+        store.roads.push(RoadSegment {
+            id: 2,
+            start: [10, 0],
+            end: [20, 0],
+            width_m: 6,
+        });
+        let after_edit = cached_road_graph(&mut cache, 2026, Some(&store)).expect("edited");
+        assert!(!Arc::ptr_eq(&before_edit, &after_edit));
+        let cached_after_edit = Arc::clone(&cache.as_ref().expect("cache").graph);
+        assert_eq!(
+            cached_road_graph(&mut cache, 2027, Some(&store))
                 .expect_err("seed mismatch")
                 .0,
             "seed_mismatch"
         );
-        assert!(movement_road_graph(2026, Some(&store)).is_ok());
+        assert!(Arc::ptr_eq(
+            &cached_after_edit,
+            &cache.as_ref().expect("cache unchanged").graph
+        ));
+        let mut empty_cache = None;
+        let empty = RoadStore::new(2026);
+        let empty_first = cached_road_graph(&mut empty_cache, 2026, Some(&empty)).expect("empty");
+        let empty_second =
+            cached_road_graph(&mut empty_cache, 2026, Some(&empty)).expect("empty reuse");
+        assert!(Arc::ptr_eq(&empty_first, &empty_second));
     }
 
     #[test]

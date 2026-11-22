@@ -39,7 +39,7 @@ Out:
 - Sidewalk and pedestrian graphs.
 - Per-agent pathfinding or visible citizens.
 - Road cost, upkeep, or maintenance.
-- Incremental graph updates; the graph is rebuilt on demand.
+- Incremental graph updates; a road edit still rebuilds the whole graph, though the bridge reuses the derived graph until the road-store checksum changes.
 
 ## 2. Graph model
 
@@ -213,15 +213,15 @@ These are microbenchmarks on one machine, not the 1M/60 FPS gate.
 ## 8. Limits
 
 - Graph build scans each segment's integer span; a 512 m segment is 512 lookups. The cap is 10,000 roads / 20,000 nodes.
-- Nearest-node lookup uses a deterministic 32 m uniform grid with an expanding-ring proof and a linear fallback for out-of-bounds or pathological queries. Graph rebuilds still rebuild the index; incremental graph updates remain open.
+- Nearest-node lookup uses a deterministic 32 m uniform grid with an expanding-ring proof and a linear fallback for out-of-bounds or pathological queries. Graph rebuilds still rebuild the index; the bridge caches the derived graph by `(seed, road-store checksum)`, so repeated route/path calls reuse it until a road edit.
 - Width, lanes, direction, and variable speed are ignored for routing. Travel time uses one flat 8 m/s speed and is display-only.
-- The graph is rebuilt on demand; there is no change-driven cache or worker-thread time slicing.
+- The bridge caches one `Arc<RoadGraph>` by `(seed, road-store checksum)`; a road edit rebuilds it once, then `traffic_state`, `route_preview`, and `citizen_movement` reuse it. There is no worker-thread time slicing.
 - Visual cars are decorative and not tied to actual commute flows.
 - The runner's road grid is a benchmark fixture, not a terrain-validated player layout.
 - No congestion, transit, sidewalks, signals, parking, or accidents.
 
 ## 9. Next
 
-1. Add incremental graph updates now that the spatial index is in; a road edit still rebuilds the whole graph and index.
+1. Add incremental graph updates now that the spatial index and bridge graph cache are in; a road edit still rebuilds the whole graph and index once.
 2. Feed actual commute flows into visual car density and variable-speed congestion.
 3. Consider time-based happiness once congestion exists; distance remains the allocation input.
