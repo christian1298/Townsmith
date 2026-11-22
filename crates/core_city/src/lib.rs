@@ -150,8 +150,11 @@ pub use settlement::{
 };
 pub use trades::{Trade, TradeError, TradePool};
 pub use traffic::{
-    FlowField, FlowFieldCache, RoadGraph, RoadNode, TrafficError, TrafficStats, MAX_TRAFFIC_NODES,
-    MAX_TRAFFIC_ROADS,
+    travel_time_seconds, travel_time_seconds_congested, CommuteFlow, CongestionEdge,
+    CongestionReport, FlowField, FlowFieldCache, RoadGraph, RoadNode, TrafficError, TrafficStats,
+    CONGESTION_TOP_EDGES, DEFAULT_EDGE_DAILY_CAPACITY, DEFAULT_TRAVEL_SPEED_MPS,
+    MAX_CONGESTION_EDGES, MAX_CONGESTION_FACTOR, MAX_CONGESTION_FLOWS,
+    MAX_CONGESTION_TRIPS_PER_FLOW, MAX_TRAFFIC_NODES, MAX_TRAFFIC_ROADS,
 };
 pub use tutorial::{
     evaluate as evaluate_tutorial, TutorialInput, TutorialReport, TutorialStep, TutorialStepState,
