@@ -2,7 +2,7 @@
 title: Simulation and AI
 project: Townsmith
 status: proposed
-updated: 2026-11-21
+updated: 2026-11-22
 tags:
   - townsmith
   - simulation
@@ -95,6 +95,9 @@ flowchart TB
 #### The intuition
 
 A city of 1M people does not need to know that citizen #481,222 is 3% hungrier than yesterday. It needs to know that **12% of the Riverside district is hungry**, that the number is rising, and that a new grocery store would fix it. Cohort simulation tracks those groups and the flows between them.
+
+> [!info] First district snapshot
+> `core_city::district::summarize_district` is the first derived district layer: a circular XZ query over completed placements and household records, returning population, housing, vacancies, jobs, employment, resident-weighted needs/happiness/commute, and construction counts. The bridge exposes it as `district_summary(seed, center_x, center_z, radius_m)`; it adds no save field and no UI yet. Cohorts, heatmaps, policies, and district catch-up remain open.
 
 Think of it like traffic: you do not simulate every car's engine to know that a highway is congested. You track how many cars are in each speed band and move them between bands. Cohorts do the same for people and needs.
 

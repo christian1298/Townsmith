@@ -33,6 +33,7 @@
 
 pub mod advisor;
 pub mod construction;
+pub mod district;
 pub mod economy;
 pub mod industry;
 pub mod library;
@@ -65,6 +66,7 @@ pub use construction::{
     MAX_SITE_COST, MAX_TICK_SECONDS,
 };
 pub use core_structure::{StructuralSystem, StructureError, StructureSpec, StructureSummary};
+pub use district::{summarize_district, DistrictSummary};
 pub use economy::{
     Economy, EconomyError, EconomyTick, InfrastructureCosts, Loan, BANKRUPTCY_THRESHOLD,
     DAY_SECONDS, DEFAULT_BUSINESS_TAX_PER_JOB_PER_DAY, DEFAULT_LOAN_RATE_PER_DAY,
