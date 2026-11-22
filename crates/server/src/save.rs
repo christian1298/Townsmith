@@ -766,6 +766,7 @@ mod tests {
                 population,
                 balance,
                 checksum,
+                ..
             } => {
                 assert_eq!(tick, 3);
                 assert_eq!(population, world.population);

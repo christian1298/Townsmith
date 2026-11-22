@@ -14,7 +14,8 @@ use townsmith_server::listen::{run_listen, run_save_load_smoke, ListenConfig};
 use townsmith_server::protocol::{run_loopback_smoke, LOOPBACK_SEED};
 use townsmith_server::save::LoadedWorld;
 use townsmith_server::world::{
-    run_authority_loopback, run_resume_loopback, run_roles_loopback, ClientRole, ServerWorld,
+    run_authority_loopback, run_interest_loopback, run_resume_loopback, run_roles_loopback,
+    ClientRole, ServerWorld,
 };
 
 fn arg_value(name: &str) -> Option<String> {
@@ -121,6 +122,24 @@ fn main() {
             }
             Err(error) => {
                 eprintln!("SERVER_RESUME status=error error={error}");
+                std::process::exit(1);
+            }
+        }
+        match run_interest_loopback() {
+            Ok(report) => print_interest(&report),
+            Err(error) => {
+                eprintln!("SERVER_INTEREST status=error error={error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if has_flag("--interest-smoke") {
+        match run_interest_loopback() {
+            Ok(report) => print_interest(&report),
+            Err(error) => {
+                eprintln!("SERVER_INTEREST status=error error={error}");
                 std::process::exit(1);
             }
         }
@@ -287,6 +306,18 @@ fn run_listen_mode(port: &str) {
             std::process::exit(1);
         }
     }
+}
+
+fn print_interest(report: &townsmith_server::world::InterestReport) {
+    println!(
+        "SERVER_INTEREST status=ok center={:.1},{:.1} radius={:.1} visible={} tick={} checksum={}",
+        report.center[0],
+        report.center[1],
+        report.radius_m,
+        report.visible_roads,
+        report.tick,
+        report.checksum
+    );
 }
 
 fn print_load(path: &Path, loaded: &LoadedWorld) {

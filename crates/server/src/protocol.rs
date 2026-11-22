@@ -45,6 +45,15 @@ pub const MAX_ROAD_LENGTH: u32 = 1024;
 /// Inclusive world coordinate bound for v0 road commands.
 pub const MAX_WORLD_COORD: i32 = 1_000_000;
 
+/// Hard cap on a session's interest radius, in metres.
+///
+/// Interest filtering is view-only in v0: a larger radius is rejected rather
+/// than clamped so the client always knows the radius the server is using.
+pub const MAX_INTEREST_RADIUS_M: f64 = 2_048.0;
+
+/// Default interest radius for a fresh session, in metres (the v0 cap).
+pub const DEFAULT_INTEREST_RADIUS_M: f64 = MAX_INTEREST_RADIUS_M;
+
 /// Fixed seed for the deterministic loopback smoke.
 pub const LOOPBACK_SEED: u64 = 0x544F_574E_534D_4954; // "TOWNSMIT"
 
@@ -91,6 +100,12 @@ pub mod codes {
     // Time votes. The state-machine codes live in `vote::codes`; this one is
     // specific to the transport-only session, which has no vote state.
     pub const VOTE_UNAVAILABLE: &str = "vote.unavailable";
+
+    // Interest filtering. `unavailable` is specific to the transport-only
+    // session, which has no interest state.
+    pub const INTEREST_UNAVAILABLE: &str = "interest.unavailable";
+    pub const INTEREST_INVALID_CENTER: &str = "interest.invalid_center";
+    pub const INTEREST_RADIUS_OUT_OF_RANGE: &str = "interest.radius_out_of_range";
 }
 
 /// A framing or JSON failure. `code()` is stable for logs and tests.
@@ -179,7 +194,7 @@ impl Rejection {
 }
 
 /// Commands a client may send.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientCommand {
     Hello {
@@ -220,6 +235,16 @@ pub enum ClientCommand {
         start: [i32; 2],
         end: [i32; 2],
     },
+    /// Per-session viewport used by interest filtering.
+    ///
+    /// This never changes the authoritative simulation: it only narrows what
+    /// the next snapshot reports. `radius_m` must be finite and within
+    /// `0..=MAX_INTEREST_RADIUS_M`; the centre must be finite.
+    SetInterest {
+        center_x: f64,
+        center_z: f64,
+        radius_m: f64,
+    },
     Disconnect,
 }
 
@@ -233,6 +258,7 @@ impl ClientCommand {
             ClientCommand::TimeVote { .. } => "time_vote",
             ClientCommand::SetTax { .. } => "set_tax",
             ClientCommand::PlaceRoad { .. } => "place_road",
+            ClientCommand::SetInterest { .. } => "set_interest",
             ClientCommand::Disconnect => "disconnect",
         }
     }
@@ -270,7 +296,7 @@ pub enum VoteAction {
 }
 
 /// Messages the authoritative server sends.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
     Welcome {
@@ -296,6 +322,19 @@ pub enum ServerMessage {
         population: u32,
         balance: i64,
         checksum: String,
+        /// Interest viewport centre for this session, `[x, z]` in metres.
+        ///
+        /// Part of the snapshot envelope, **not** of `checksum`.
+        #[serde(default)]
+        interest_center: [f32; 2],
+        /// Interest viewport radius in metres. View-only; not in `checksum`.
+        #[serde(default = "default_interest_radius")]
+        interest_radius_m: f32,
+        /// Roads whose midpoint is inside the interest circle.
+        ///
+        /// Aggregate count only; the authoritative road store is unchanged.
+        #[serde(default)]
+        visible_roads: u32,
     },
     Reject {
         code: String,
@@ -321,6 +360,11 @@ pub enum ServerMessage {
         checksum: String,
     },
     Goodbye,
+}
+
+/// Default radius used when a peer omits `interest_radius_m` (older payloads).
+fn default_interest_radius() -> f32 {
+    DEFAULT_INTEREST_RADIUS_M as f32
 }
 
 /// Write one length-prefixed frame.
@@ -433,6 +477,7 @@ pub fn decode_client_command(payload: &[u8]) -> Result<ClientCommand, Rejection>
         "time_vote",
         "set_tax",
         "place_road",
+        "set_interest",
         "disconnect",
     ];
     if !KNOWN_TAGS.contains(&tag) {
@@ -552,6 +597,32 @@ pub fn validate_road(start: [i32; 2], end: [i32; 2]) -> Result<(), Rejection> {
                 "road length {} exceeds the maximum of {MAX_ROAD_LENGTH} cells",
                 dx.max(dy)
             ),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a set-interest payload.
+///
+/// The centre must be finite and representable as `f32` (the executor stores
+/// it that way); the radius must be finite and within
+/// `0..=MAX_INTEREST_RADIUS_M`. Out-of-range radii are rejected, never
+/// clamped, so a client cannot believe it has a larger view than it does.
+pub fn validate_interest(center_x: f64, center_z: f64, radius_m: f64) -> Result<(), Rejection> {
+    if !center_x.is_finite()
+        || !center_z.is_finite()
+        || !(center_x as f32).is_finite()
+        || !(center_z as f32).is_finite()
+    {
+        return Err(Rejection::new(
+            codes::INTEREST_INVALID_CENTER,
+            "interest centre must be finite",
+        ));
+    }
+    if !radius_m.is_finite() || !(0.0..=MAX_INTEREST_RADIUS_M).contains(&radius_m) {
+        return Err(Rejection::new(
+            codes::INTEREST_RADIUS_OUT_OF_RANGE,
+            format!("interest radius must be within 0..={MAX_INTEREST_RADIUS_M} m"),
         ));
     }
     Ok(())
@@ -751,6 +822,10 @@ impl Session {
                 self.tick = self.tick.saturating_add(1);
                 vec![self.snapshot()]
             }
+            ClientCommand::SetInterest { .. } => reject(
+                codes::INTEREST_UNAVAILABLE,
+                "interest filtering requires the authoritative executor, not the transport-only session",
+            ),
         }
     }
 
@@ -760,6 +835,11 @@ impl Session {
             population: self.population,
             balance: self.balance,
             checksum: self.checksum(),
+            // The transport-only session has no interest state; it answers
+            // with the default viewport and its aggregate road count.
+            interest_center: [0.0, 0.0],
+            interest_radius_m: default_interest_radius(),
+            visible_roads: self.roads,
         }
     }
 }
@@ -897,6 +977,7 @@ fn run_loopback_client(address: SocketAddr) -> io::Result<()> {
             population,
             balance,
             checksum,
+            ..
         } if population > 0 && balance > 0 && checksum.len() == 16 => {}
         other => return Err(unexpected("snapshot", &other)),
     }
@@ -1196,6 +1277,77 @@ mod tests {
             validate_tax_rates(10, MAX_TAX_RATE + 1).unwrap_err().code,
             codes::TAX_RATE_OUT_OF_RANGE
         );
+    }
+
+    #[test]
+    fn set_interest_decodes_and_enforces_the_radius_bound() {
+        let decoded = decode_client_command(
+            br#"{"type":"set_interest","center_x":1.5,"center_z":-2.5,"radius_m":64}"#,
+        )
+        .expect("set_interest decodes");
+        assert_eq!(
+            decoded,
+            ClientCommand::SetInterest {
+                center_x: 1.5,
+                center_z: -2.5,
+                radius_m: 64.0,
+            }
+        );
+        assert_eq!(decoded.tag(), "set_interest");
+
+        for radius in [0.0, 1.0, MAX_INTEREST_RADIUS_M] {
+            assert!(
+                validate_interest(0.0, 0.0, radius).is_ok(),
+                "radius {radius} must be accepted"
+            );
+        }
+        for radius in [
+            -1.0,
+            MAX_INTEREST_RADIUS_M + 0.1,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert_eq!(
+                validate_interest(0.0, 0.0, radius).unwrap_err().code,
+                codes::INTEREST_RADIUS_OUT_OF_RANGE,
+                "radius {radius} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn set_interest_rejects_non_finite_centres() {
+        for center in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
+            assert_eq!(
+                validate_interest(center, 0.0, 10.0).unwrap_err().code,
+                codes::INTEREST_INVALID_CENTER
+            );
+            assert_eq!(
+                validate_interest(0.0, center, 10.0).unwrap_err().code,
+                codes::INTEREST_INVALID_CENTER
+            );
+        }
+        assert!(validate_interest(-1_000_000.0, 1_000_000.0, 2_048.0).is_ok());
+    }
+
+    #[test]
+    fn transport_session_rejects_set_interest_without_state_change() {
+        let mut session = Session::new(LOOPBACK_SEED);
+        session.handle(hello());
+        let tick = session.tick();
+        let checksum = session.checksum();
+
+        expect_reject(
+            &session.handle(ClientCommand::SetInterest {
+                center_x: 10.0,
+                center_z: -5.0,
+                radius_m: 32.0,
+            }),
+            codes::INTEREST_UNAVAILABLE,
+        );
+        assert_eq!(session.tick(), tick);
+        assert_eq!(session.checksum(), checksum);
     }
 
     #[test]

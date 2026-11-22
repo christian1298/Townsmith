@@ -257,6 +257,7 @@ The first stateful executor lives in `crates/server/src/world.rs` and is exporte
 ServerWorld {
     seed, tick, population, employed, buildings,
     economy: Economy, roads: RoadStore,
+    interest_center: [f32; 2], interest_radius_m: f32,
     paused, session_checksum,
 }
 ```
@@ -269,7 +270,7 @@ Population, employment, and building counts are static for v0. `employed` is 60%
 |---|---|
 | `ServerWorld::new(seed)` | Fresh single-session world; deterministic session id |
 | `apply(&ClientCommand) -> ServerMessage` | Validate and apply one command; exactly one response |
-| `snapshot() -> ServerMessage` | Current `tick`, `population`, `balance`, `checksum` |
+| `snapshot() -> ServerMessage` | Current `tick`, `population`, `balance`, `checksum`, plus the session viewport (`interest_center`, `interest_radius_m`, `visible_roads`) |
 | `advance_day(dt_s) -> EconomyTick` | Run one economy tick, capped at `DAY_SECONDS`, then increment `tick` |
 | `tick(dt_s)` | Alias for `advance_day` |
 | `checksum() -> String` | 16-hex FNV-1a over tick, population, balance, road store checksum, economy checksum |
@@ -285,6 +286,7 @@ Population, employment, and building counts are static for v0. `employed` is 60%
 | `time_control` speed | Rejected; v0 has no real-time loop | `time.invalid_action` |
 | `set_tax` | Validates 0–100 and writes the treasury per-day rates; increments tick | `tax.rate_out_of_range`, `not_hello` |
 | `place_road` | Adds a 6 m wide, axis-aligned segment; increments tick | `road.empty`, `road.not_axis_aligned`, `road.out_of_bounds`, `road.too_long` (>512 cells), `road.duplicate`, `road.overlap`, `road.store_full`, `road.id_exhausted` |
+| `set_interest` | View-only: stores the session viewport (`center_x`, `center_z`, `radius_m`) and returns a snapshot; does not advance the tick or move the checksum | `not_hello`, `interest.invalid_center`, `interest.radius_out_of_range` |
 | `disconnect` | Closes the session; returns `goodbye` | `session.closed` |
 
 `hello` and `disconnect` are accepted before `hello`; every other command is rejected with `not_hello`. Rejections never mutate state.
@@ -293,7 +295,7 @@ Population, employment, and building counts are static for v0. `employed` is 60%
 
 **Determinism.** The snapshot checksum is a pure function of the listed state; it excludes the wall clock, seed, and paused flag. `advance_day` never sleeps. `dt_s` is clamped to `0..=DAY_SECONDS`; non-finite and negative values become zero. A paused `advance_day` returns the current ledger without changing the tick.
 
-**Roles, rate limits, audit (dev-only).** `--role viewer|mayor|admin` sets the session role; `--listen` defaults to **mayor**. Viewer may hello/ping/disconnect and call/vote in a time vote; mayor may set tax and place roads; **time control (pause/resume/step) is admin-only** per D-021, while a passed vote applies pause/resume without a direct command. Unknown command tags fail closed to admin. `resume` is rate-limited like other commands; only `disconnect` bypasses the bucket. Each session has a deterministic token bucket (20 commands/s, burst 40) and a 256-entry audit ring (`tick`, role, command, code). `disconnect` bypasses the limiter. Neither role nor audit state is part of the world snapshot checksum. This is not authentication: the role is assigned by the server process for the local harness.
+**Roles, rate limits, audit (dev-only).** `--role viewer|mayor|admin` sets the session role; `--listen` defaults to **mayor**. Viewer may hello/ping/disconnect, set its own interest viewport, and call/vote in a time vote; mayor may set tax and place roads; **time control (pause/resume/step) is admin-only** per D-021, while a passed vote applies pause/resume without a direct command. Unknown command tags fail closed to admin. `resume` is rate-limited like other commands; only `disconnect` bypasses the bucket. Each session has a deterministic token bucket (20 commands/s, burst 40) and a 256-entry audit ring (`tick`, role, command, code). `disconnect` bypasses the limiter. Neither role, audit, nor interest state is part of the world snapshot checksum. This is not authentication: the role is assigned by the server process for the local harness.
 
 `SERVER_ROLES status=ok sessions=3 role_checks=4 rate_limited=1 audit=65 checksum=b6ab299531341226` is the loopback golden (viewer forbidden, mayor accepted, admin step, rate-limited ping).
 
@@ -305,9 +307,10 @@ Population, employment, and building counts are static for v0. `employed` is 60%
 | Authority | Stateful executor; hello, ping, time, tax, road, disconnect | `SERVER_AUTHORITY status=ok commands=6 checksum=70e25aff45867b94` |
 | Save/load | `ServerSave` v1, atomic tmp/fsync/rename, one-step `.bak` recovery | `SERVER_SAVE status=ok bytes=744 tick=2 checksum=70e25aff45867b94`; `--listen PORT --save PATH --load PATH` |
 | Roles | Dev-only viewer/mayor/admin, token bucket, 256-entry audit ring | `SERVER_ROLES ... checksum=b6ab299531341226` |
+| Interest | Per-session viewport; snapshot reports `visible_roads` by midpoint | `SERVER_INTEREST status=ok center=0.0,0.0 radius=16.0 visible=1 tick=2 checksum=6d92be74bdbc11f5` |
 | Godot client | Loopback `hello`/`ping`/tax/road/disconnect | `MP_CLIENT ... frames=12` |
 
-**Limits.** In-memory world with one session, no authentication, content-manifest enforcement, interest management, delta snapshots, reconnect, rollback, terrain sampling, or cost/material checks. Persistence is one file per world; no journal, compression, or remote storage. Roles are assigned by the server process, not authenticated. Direct mutation of public fields does not refresh `session_checksum`; call `checksum()` for live state.
+**Limits.** In-memory world with one session, no authentication, content-manifest enforcement, entity/agent/terrain streaming, delta snapshots, reconnect, rollback, terrain sampling, or cost/material checks. Interest v0 is a per-session viewport that filters aggregate snapshot counts only; it does not activate, deactivate, or hide simulation state. Persistence is one file per world; no journal, compression, or remote storage. Roles are assigned by the server process, not authenticated. Direct mutation of public fields does not refresh `session_checksum`; call `checksum()` for live state.
 
 **Loopback smoke**
 
@@ -316,6 +319,8 @@ cargo run --release -p townsmith-server -- --loopback-smoke
 # SERVER_PROTOCOL status=ok frames=8 checksum=e2f15a193149bb86
 # SERVER_AUTHORITY status=ok commands=6 checksum=70e25aff45867b94
 # SERVER_ROLES status=ok sessions=3 role_checks=4 rate_limited=1 audit=65 checksum=b6ab299531341226
+# SERVER_RESUME status=ok sessions=2 commands=5 frames=11 resumed=true tick=1 checksum=157ba83a1acf65dd
+# SERVER_INTEREST status=ok center=0.0,0.0 radius=16.0 visible=1 tick=2 checksum=6d92be74bdbc11f5
 cargo run --release -p townsmith-server -- --save-load-smoke
 # SERVER_SAVE status=ok action=loopback bytes=744 tick=2 checksum=70e25aff45867b94
 ```
@@ -363,6 +368,9 @@ Open-world multiplayer is mostly a **chunk streaming** problem, not an entity re
 - **Prioritization:** nearby, visible, and recently changed entities are sent first; distant entities are throttled.
 - **Quantization:** positions and rotations are quantized; animations are driven by state, not per-frame transforms.
 - **Delta compression:** snapshots are diffs against the last acknowledged state.
+
+> [!info] Interest filtering v0
+> `set_interest {center_x, center_z, radius_m}` stores a per-session viewport on `ServerWorld` and echoes it in the next snapshot. `radius_m` must be finite and within **0–2,048 m**; the centre must be finite. Out-of-range values are rejected (`interest.radius_out_of_range`, `interest.invalid_center`), never clamped. `visible_roads` counts roads whose midpoint is inside the circle (inclusive); it is an aggregate count, not a road payload. The command is view-only: it does not advance the tick, does not change the world checksum, and is excluded from `ServerSave`. Viewer may set its own viewport; the transport-only `Session` rejects it with `interest.unavailable`. **Limits:** no entity, agent, terrain, or blueprint streaming yet; no delta snapshots, prioritization, or server-side region activation tied to the viewport.
 
 ### Bandwidth target
 
@@ -469,3 +477,13 @@ A disconnected client can resume the same in-memory world with `resume {session_
 `core`/server state machine: `TimeVote` implements D-021's 60-second window, simple majority of the online roster at vote start, minimum two online, one vote per player, initiator auto-yes, 300-tick failed/cancelled cooldown and 120-tick success cooldown. Passing `pause`/`resume` applies the effect once through `ServerWorld`; tie/expiry fails, losing quorum cancels. `time_vote` is a protocol command and returns `TimeVoteStatus` (state, counts, window, cooldown, paused, checksum). Ballots stay counted for the vote lifetime even if a voter disconnects, so a reconnect cannot vote twice. The multi-connection vote loopback is **deferred**: v0 still models one hello session per world, so the harness was removed rather than left failing; the pure state machine and single-world command path are covered by 18 tests.
 
 Limits: the multi-connection vote loopback/smoke is deferred because the v0 world still assumes one hello session; the pure state machine and single-world command path are tested (18 vote tests). No persistence of vote state, proxies, weighted votes, or UI. Q-078 tuning remains open.
+
+### Interest filtering v0
+
+`set_interest {center_x, center_z, radius_m}` is a per-session viewport. The executor stores `interest_center: [f32; 2]` (default `[0, 0]`) and `interest_radius_m` (default **2,048 m**, the cap), and every snapshot reports `interest_center`, `interest_radius_m`, and `visible_roads`. Roads count when their midpoint is inside the circle, including the exact boundary (`distance <= radius`); the count is deterministic and iteration order is irrelevant. The viewport is **view-only**: `set_interest` does not advance the tick, does not mutate roads or the treasury, and is excluded from `checksum()`, so the authority/roles/resume goldens stay pinned. It is also not saved; a loaded world starts at the default viewport. Viewer may set its own interest; mayor/admin also may, and the command consumes a rate credit and is audited (`tag=set_interest`, `code=ok`) like any other command.
+
+Validation: the centre must be finite (and representable as `f32`), otherwise `interest.invalid_center`; the radius must be finite and `0..=2048`, otherwise `interest.radius_out_of_range`. Values are rejected, not clamped. The transport-only `protocol::Session` has no interest state and rejects the command with `interest.unavailable`.
+
+`cargo run --release -p townsmith-server -- --interest-smoke` prints `SERVER_INTEREST status=ok center=0.0,0.0 radius=16.0 visible=1 tick=2 checksum=6d92be74bdbc11f5`. The loopback places one road inside and one outside, narrows the viewport, and compares every response against a local reference world.
+
+Limits: v0 filters only the aggregate snapshot envelope (`visible_roads` plus the echoed viewport). There is no entity, agent, terrain, or blueprint streaming, no delta compression, no prioritization, no server-side region activation, and no per-client `ServerSave` state.
