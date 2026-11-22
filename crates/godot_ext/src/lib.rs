@@ -3596,6 +3596,74 @@ impl TownsmithCore {
         result
     }
 
+    /// Pay any installment now due on operational utility sites.
+    ///
+    /// Callers hold the economy lock; the documented lock order is
+    /// economy -> utilities/services. Unaffordable amounts stay due.
+    fn settle_utility_payments(&self, seed: u64, economy: &mut Economy) -> f64 {
+        let mut guard = self
+            .utilities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(utilities) = guard.as_mut() else {
+            return 0.0;
+        };
+        if utilities.seed != seed {
+            return 0.0;
+        }
+        let mut unpaid = 0.0;
+        for kind in UtilityKind::ALL {
+            let ids: Vec<u64> = match kind {
+                UtilityKind::Water => utilities.water_sites.keys().copied().collect(),
+                UtilityKind::Power => utilities.power_sites.keys().copied().collect(),
+            };
+            for id in ids {
+                let due = utilities.payment_due(id, kind);
+                if due <= 0.0 {
+                    continue;
+                }
+                if economy.try_charge_construction(due) {
+                    if let Some(site) = utilities.site_mut(id, kind) {
+                        let _ = site.mark_paid(due);
+                    }
+                } else {
+                    unpaid += due;
+                }
+            }
+        }
+        unpaid
+    }
+
+    /// Pay any installment now due on operational service sites.
+    fn settle_service_payments(&self, seed: u64, economy: &mut Economy) -> f64 {
+        let mut guard = self
+            .services
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(services) = guard.as_mut() else {
+            return 0.0;
+        };
+        if services.seed != seed {
+            return 0.0;
+        }
+        let ids: Vec<u64> = services.sites.keys().copied().collect();
+        let mut unpaid = 0.0;
+        for id in ids {
+            let due = services.payment_due(id);
+            if due <= 0.0 {
+                continue;
+            }
+            if economy.try_charge_construction(due) {
+                if let Some(site) = services.site_mut(id) {
+                    let _ = site.mark_paid(due);
+                }
+            } else {
+                unpaid += due;
+            }
+        }
+        unpaid
+    }
+
     /// Advance taxes, wages, and upkeep by `seconds`.
     #[func]
     fn economy_tick(&self, seed: i64, seconds: f64) -> VarDictionary {
@@ -3648,6 +3716,8 @@ impl TownsmithCore {
             buildings,
             infrastructure,
         );
+        let utility_payment_due = self.settle_utility_payments(seed, economy);
+        let service_payment_due = self.settle_service_payments(seed, economy);
         let mut result = VarDictionary::new();
         result.set("ok", true);
         result.set("income", tick.income);
@@ -3658,6 +3728,12 @@ impl TownsmithCore {
         result.set("utility_upkeep", infrastructure.utility_per_day());
         result.set("service_upkeep", infrastructure.service_per_day());
         result.set("balance", tick.balance);
+        result.set("utility_payment_due", utility_payment_due);
+        result.set("service_payment_due", service_payment_due);
+        result.set(
+            "infrastructure_payment_due",
+            utility_payment_due + service_payment_due,
+        );
         result.set("days_elapsed", tick.days_elapsed);
         result.set("loan_interest", tick.loan_interest);
         result.set("loan_principal", tick.loan_principal);
@@ -4105,6 +4181,7 @@ impl TownsmithCore {
         };
         let lead_days = construction_lead_days(time_scale, kind.campaign_build_days());
         let cost = kind.construction_cost();
+        let initial_due = if lead_days > 0.0 { cost * 0.5 } else { cost };
         let mut economy = self
             .economy
             .lock()
@@ -4116,10 +4193,12 @@ impl TownsmithCore {
                     "the treasury belongs to a different seed",
                 );
             }
-            if !economy.can_afford(cost) {
+            if !economy.can_afford(initial_due) {
                 return placement_simple_error(
                     "insufficient_funds",
-                    format!("utility site costs {cost} and the treasury cannot cover it"),
+                    format!(
+                        "utility site needs {initial_due} now and the treasury cannot cover it"
+                    ),
                 );
             }
         }
@@ -4138,18 +4217,26 @@ impl TownsmithCore {
                 );
             }
             let utilities = guard.get_or_insert_with(|| UtilityStore::new(seed));
-            if let Err(error) =
-                utilities.add_site_with_lead_days(placement_id, kind, center, lead_days)
-            {
+            if let Err(error) = utilities.add_priced_site_with_lead_days(
+                placement_id,
+                kind,
+                center,
+                lead_days,
+                cost,
+            ) {
                 return placement_simple_error("utility_failed", error.to_string());
             }
+            let due = utilities.payment_due(placement_id, kind);
             if let Some(economy) = economy.as_mut() {
-                if !economy.try_charge_construction(cost) {
+                if !economy.try_charge_construction(due) {
                     utilities.remove_placement(placement_id);
                     return placement_simple_error(
                         "insufficient_funds",
-                        format!("utility site costs {cost} and the treasury cannot cover it"),
+                        format!("utility site needs {due} now and the treasury cannot cover it"),
                     );
+                }
+                if let Some(site) = utilities.site_mut(placement_id, kind) {
+                    let _ = site.mark_paid(due);
                 }
                 true
             } else {
@@ -4161,6 +4248,12 @@ impl TownsmithCore {
         result.set("placement_id", placement_id as i64);
         result.set("kind", &GString::from(kind.as_str()));
         result.set("construction_cost", cost);
+        result.set("cost_total", cost);
+        result.set("cost_paid", if charged { initial_due } else { 0.0 });
+        result.set(
+            "payment_due",
+            (cost - if charged { initial_due } else { 0.0 }).max(0.0),
+        );
         result.set("charged", charged);
         result
     }
@@ -4341,6 +4434,7 @@ impl TownsmithCore {
         };
         let lead_days = construction_lead_days(time_scale, kind.campaign_build_days(tier));
         let cost = kind.construction_cost(tier);
+        let initial_due = if lead_days > 0.0 { cost * 0.5 } else { cost };
         let mut economy = self
             .economy
             .lock()
@@ -4352,10 +4446,12 @@ impl TownsmithCore {
                     "the treasury belongs to a different seed",
                 );
             }
-            if !economy.can_afford(cost) {
+            if !economy.can_afford(initial_due) {
                 return placement_simple_error(
                     "insufficient_funds",
-                    format!("service site costs {cost} and the treasury cannot cover it"),
+                    format!(
+                        "service site needs {initial_due} now and the treasury cannot cover it"
+                    ),
                 );
             }
         }
@@ -4371,18 +4467,27 @@ impl TownsmithCore {
                 );
             }
             let services = guard.get_or_insert_with(|| ServiceStore::new(seed));
-            if let Err(error) =
-                services.add_site_with_lead_days(placement_id, kind, tier, center, lead_days)
-            {
+            if let Err(error) = services.add_priced_site_with_lead_days(
+                placement_id,
+                kind,
+                tier,
+                center,
+                lead_days,
+                cost,
+            ) {
                 return placement_simple_error("service_failed", error.to_string());
             }
+            let due = services.payment_due(placement_id);
             if let Some(economy) = economy.as_mut() {
-                if !economy.try_charge_construction(cost) {
+                if !economy.try_charge_construction(due) {
                     services.remove_placement(placement_id);
                     return placement_simple_error(
                         "insufficient_funds",
-                        format!("service site costs {cost} and the treasury cannot cover it"),
+                        format!("service site needs {due} now and the treasury cannot cover it"),
                     );
+                }
+                if let Some(site) = services.site_mut(placement_id) {
+                    let _ = site.mark_paid(due);
                 }
                 true
             } else {
@@ -4395,6 +4500,12 @@ impl TownsmithCore {
         result.set("kind", &GString::from(kind.as_str()));
         result.set("tier", &GString::from(tier.as_str()));
         result.set("construction_cost", cost);
+        result.set("cost_total", cost);
+        result.set("cost_paid", if charged { initial_due } else { 0.0 });
+        result.set(
+            "payment_due",
+            (cost - if charged { initial_due } else { 0.0 }).max(0.0),
+        );
         result.set("charged", charged);
         result
     }
@@ -7874,6 +7985,9 @@ fn service_closed_payload(consumers: usize) -> VarDictionary {
     result.set("site_count", 0);
     result.set("ready", 0);
     result.set("building", 0);
+    result.set("cost_total", 0.0);
+    result.set("cost_paid", 0.0);
+    result.set("payment_due", 0.0);
     result.set("school_sites", 0);
     result.set("clinic_sites", 0);
     result.set("fire_sites", 0);
@@ -7913,6 +8027,15 @@ fn service_payload(store: &ServiceStore, report: &ServiceReport) -> VarDictionar
     result.set("site_count", store.site_count() as i64);
     result.set("ready", store.ready_count() as i64);
     result.set("building", store.building_count() as i64);
+    result.set(
+        "cost_total",
+        store.sites.values().map(|s| s.cost_total).sum::<f64>(),
+    );
+    result.set(
+        "cost_paid",
+        store.sites.values().map(|s| s.cost_paid).sum::<f64>(),
+    );
+    result.set("payment_due", store.total_payment_due());
     result.set("school_sites", store.count_of(ServiceKind::School) as i64);
     result.set("clinic_sites", store.count_of(ServiceKind::Clinic) as i64);
     result.set("fire_sites", store.count_of(ServiceKind::Fire) as i64);
@@ -7950,6 +8073,9 @@ fn service_payload(store: &ServiceStore, report: &ServiceReport) -> VarDictionar
         item.set("capacity", site.capacity);
         item.set("research_per_day", site.research_per_day);
         item.set("build_days_remaining", f64::from(site.build_days_remaining));
+        item.set("cost_total", site.cost_total);
+        item.set("cost_paid", site.cost_paid);
+        item.set("payment_due", site.payment_due());
         item.set("center_x", f64::from(site.center[0]));
         item.set("center_y", f64::from(site.center[1]));
         item.set("center_z", f64::from(site.center[2]));
@@ -7971,6 +8097,9 @@ fn utility_closed_payload(consumers: usize) -> VarDictionary {
     result.set("site_count", 0);
     result.set("ready", 0);
     result.set("building", 0);
+    result.set("cost_total", 0.0);
+    result.set("cost_paid", 0.0);
+    result.set("payment_due", 0.0);
     result.set("water_sites", 0);
     result.set("power_sites", 0);
     result.set("water_supply", 0.0);
@@ -7999,6 +8128,25 @@ fn utility_payload(store: &UtilityStore, report: &UtilityReport) -> VarDictionar
     result.set("site_count", store.site_count() as i64);
     result.set("ready", store.ready_count() as i64);
     result.set("building", store.building_count() as i64);
+    result.set(
+        "cost_total",
+        store
+            .water_sites
+            .values()
+            .map(|s| s.cost_total)
+            .sum::<f64>()
+            + store
+                .power_sites
+                .values()
+                .map(|s| s.cost_total)
+                .sum::<f64>(),
+    );
+    result.set(
+        "cost_paid",
+        store.water_sites.values().map(|s| s.cost_paid).sum::<f64>()
+            + store.power_sites.values().map(|s| s.cost_paid).sum::<f64>(),
+    );
+    result.set("payment_due", store.total_payment_due());
     result.set("water_sites", store.water_sites.len() as i64);
     result.set("power_sites", store.power_sites.len() as i64);
     result.set("water_supply", f64::from(report.water_supply));
