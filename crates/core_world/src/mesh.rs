@@ -51,6 +51,11 @@ impl TerrainMesh {
 pub const DEFAULT_SKIRT_DEPTH_M: f32 = 2.0;
 
 /// Build a terrain mesh for one chunk.
+///
+/// No neighbor sampler is available, so walls at the chunk boundary are
+/// suppressed: the mesh covers only the surface and interior cliffs of this
+/// chunk. Use [`terrain_mesh_lod_with_sampler`] when a world sampler can supply
+/// the unloaded neighbor heights.
 #[must_use]
 pub fn terrain_mesh(chunk: &WorldChunk) -> TerrainMesh {
     terrain_mesh_lod(chunk, 1)
@@ -60,16 +65,46 @@ pub fn terrain_mesh(chunk: &WorldChunk) -> TerrainMesh {
 ///
 /// `step` is the number of 1 m cells per mesh quad. `1` is full detail; `2`
 /// halves the vertex count per axis, and `4` is suitable for distant chunks.
-/// Heights are sampled at the top-left of each span, and walls are emitted
-/// against the neighboring samples. This is deliberately approximate: LOD
-/// chunks are only used beyond the near view distance.
+/// Heights are sampled at the top-left of each span, and interior walls are
+/// emitted against the neighboring samples. This is deliberately approximate:
+/// LOD chunks are only used beyond the near view distance.
+///
+/// Boundary walls are suppressed because this path has no neighbor sampler.
+/// Adjacent chunks therefore meet without coincident, opposite-facing walls;
+/// use [`terrain_mesh_lod_with_sampler`] or
+/// [`terrain_mesh_lod_with_optional_sampler`] to emit a wall when the
+/// neighboring height is known to be lower.
 ///
 /// `step` is clamped to `1..=WORLD_CHUNK_SIZE`. The final span on each axis is
 /// shortened so non-divisor steps (for example `3`) still end at the chunk
 /// border and never place a vertex outside the 256 m chunk.
 #[must_use]
 pub fn terrain_mesh_lod(chunk: &WorldChunk, step: usize) -> TerrainMesh {
-    terrain_mesh_lod_with_sampler(chunk, step, |_, _| 0)
+    mesh_with_optional_sampler(chunk, step, None)
+}
+
+/// Build a terrain mesh with an optional out-of-chunk height sampler.
+///
+/// `None` suppresses walls on the chunk boundary, matching
+/// [`terrain_mesh_lod`]. `Some(sampler)` behaves like
+/// [`terrain_mesh_lod_with_sampler`]. The sampler receives absolute world
+/// coordinates and is only called for samples outside the chunk.
+#[must_use]
+pub fn terrain_mesh_lod_with_optional_sampler<F>(
+    chunk: &WorldChunk,
+    step: usize,
+    outside_height: Option<F>,
+) -> TerrainMesh
+where
+    F: Fn(i64, i64) -> u16,
+{
+    mesh_with_optional_sampler(
+        chunk,
+        step,
+        outside_height
+            .as_ref()
+            .map(|sampler| sampler as &dyn Fn(i64, i64) -> u16),
+    )
 }
 
 /// Build a terrain mesh and sample out-of-chunk heights from a world sampler.
@@ -88,6 +123,14 @@ pub fn terrain_mesh_lod_with_sampler<F>(
 where
     F: Fn(i64, i64) -> u16,
 {
+    mesh_with_optional_sampler(chunk, step, Some(&outside_height))
+}
+
+fn mesh_with_optional_sampler(
+    chunk: &WorldChunk,
+    step: usize,
+    outside_height: Option<&dyn Fn(i64, i64) -> u16>,
+) -> TerrainMesh {
     let step = step.clamp(1, WORLD_CHUNK_SIZE);
     let origin = chunk.coord().origin_m();
     let mut mesh = TerrainMesh::default();
@@ -138,7 +181,10 @@ where
             ];
 
             for (nx, nz, normal, wx, wz, span) in neighbors {
-                let neighbor_height = sample_height(chunk, origin, &outside_height, nx, nz);
+                let Some(neighbor_height) = sample_height(chunk, origin, outside_height, nx, nz)
+                else {
+                    continue;
+                };
                 if neighbor_height < height {
                     push_wall_span(
                         &mut mesh,
@@ -309,20 +355,17 @@ fn dim(color: [f32; 3]) -> [f32; 3] {
     [color[0] * 0.72, color[1] * 0.72, color[2] * 0.72]
 }
 
-fn sample_height<F>(
+fn sample_height(
     chunk: &WorldChunk,
     origin: TerrainPos,
-    outside_height: &F,
+    outside_height: Option<&dyn Fn(i64, i64) -> u16>,
     x: isize,
     z: isize,
-) -> u16
-where
-    F: Fn(i64, i64) -> u16,
-{
+) -> Option<u16> {
     if x < 0 || z < 0 || x >= WORLD_CHUNK_SIZE as isize || z >= WORLD_CHUNK_SIZE as isize {
-        outside_height(origin.x + x as i64, origin.z + z as i64)
+        outside_height.map(|sampler| sampler(origin.x + x as i64, origin.z + z as i64))
     } else {
-        chunk.height(x as usize, z as usize).unwrap_or(0)
+        chunk.height(x as usize, z as usize)
     }
 }
 
@@ -441,23 +484,21 @@ mod tests {
     }
 
     #[test]
-    fn flat_chunk_has_top_and_edge_walls() {
+    fn flat_chunk_without_a_sampler_has_only_top_quads() {
         let mesh = terrain_mesh(&flat_chunk(24));
-        assert_eq!(mesh.quad_count(), WORLD_CHUNK_CELLS + 4 * WORLD_CHUNK_SIZE);
+        assert_eq!(mesh.quad_count(), WORLD_CHUNK_CELLS);
+        assert!(non_top_quads(&mesh).is_empty());
         assert_eq!(mesh.vertices.len(), mesh.quad_count() * 4);
         assert_eq!(mesh.indices.len(), mesh.quad_count() * 6);
         assert_eq!(mesh, terrain_mesh_lod(&flat_chunk(24), 1));
     }
 
     #[test]
-    fn raised_cell_adds_four_walls() {
+    fn raised_cell_adds_four_interior_walls() {
         let mut chunk = flat_chunk(24);
         chunk.set_height(10, 10, 30).expect("valid cell");
         let mesh = terrain_mesh(&chunk);
-        assert_eq!(
-            mesh.quad_count(),
-            WORLD_CHUNK_CELLS + 4 * WORLD_CHUNK_SIZE + 4
-        );
+        assert_eq!(mesh.quad_count(), WORLD_CHUNK_CELLS + 4);
     }
 
     #[test]
@@ -526,7 +567,7 @@ mod tests {
         let full_stride = terrain_mesh_lod(&chunk, WORLD_CHUNK_SIZE);
 
         assert_eq!(mesh, full_stride);
-        assert_eq!(mesh.quad_count(), 1 + 4);
+        assert_eq!(mesh.quad_count(), 1);
         assert_footprint(&mesh);
         for vertex in &mesh.vertices {
             assert!(vertex.position[0] <= WORLD_CHUNK_SIZE as f32);
@@ -580,6 +621,42 @@ mod tests {
             assert_eq!(vertex.position[0] as usize % step, 0);
             assert_eq!(vertex.position[2] as usize % step, 0);
         }
+    }
+
+    #[test]
+    fn optional_sampler_none_suppresses_boundary_walls() {
+        let chunk = flat_chunk(24);
+        let none = terrain_mesh_lod_with_optional_sampler(&chunk, 1, None::<fn(i64, i64) -> u16>);
+        assert_eq!(none, terrain_mesh(&chunk));
+        assert_eq!(none.quad_count(), WORLD_CHUNK_CELLS);
+        assert!(non_top_quads(&none).is_empty());
+
+        let half = terrain_mesh_lod_with_optional_sampler(&chunk, 2, None::<fn(i64, i64) -> u16>);
+        assert_eq!(half.quad_count(), 128 * 128);
+    }
+
+    #[test]
+    fn optional_sampler_some_matches_the_sampler_variant() {
+        let chunk = flat_chunk(24);
+        let expected =
+            terrain_mesh_lod_with_sampler(&chunk, 2, |x, _| if x >= 256 { 20 } else { 24 });
+        let actual = terrain_mesh_lod_with_optional_sampler(
+            &chunk,
+            2,
+            Some(|x: i64, _z: i64| if x >= 256 { 20 } else { 24 }),
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn unloaded_chunk_edge_does_not_emit_a_wall_to_zero() {
+        let chunk = flat_chunk(24);
+        let mesh = terrain_mesh(&chunk);
+        assert!(!mesh.vertices.iter().any(|vertex| vertex.position[1] == 0.0));
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|vertex| vertex.position[1] == 24.0));
     }
 
     #[test]
@@ -879,8 +956,8 @@ mod tests {
     #[test]
     fn every_terrain_quad_is_godot_clockwise() {
         // Every step gets a raised sample so the mesh has top, all four wall
-        // signs, and perimeter skirts. The sampler keeps the boundary walls
-        // that the no-sampler path emits at this milestone.
+        // signs, and perimeter skirts. The sampler emits boundary walls, while
+        // the no-sampler mesh must still wind its top and interior walls.
         for (step, bump) in [(1, 10), (2, 10), (3, 9), (4, 8)] {
             let mut chunk = flat_chunk(24);
             chunk.set_height(bump, bump, 30).expect("valid cell");
@@ -922,7 +999,7 @@ mod tests {
 
     fn expected_flat_quads(step: usize) -> usize {
         let samples = WORLD_CHUNK_SIZE.div_ceil(step);
-        samples * samples + 4 * samples
+        samples * samples
     }
 
     fn non_top_quads(mesh: &TerrainMesh) -> Vec<[TerrainVertex; 4]> {

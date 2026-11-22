@@ -2,7 +2,7 @@
 title: LOD Seams
 project: Townsmith
 status: active
-updated: 2026-11-19
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-0
@@ -38,6 +38,14 @@ A skirt hides the gap behind a vertical wall instead of trying to make the two L
 ```rust
 pub const DEFAULT_SKIRT_DEPTH_M: f32 = 2.0;
 
+pub fn terrain_mesh_lod_with_optional_sampler<F>(
+    chunk: &WorldChunk,
+    step: usize,
+    outside_height: Option<F>,
+) -> TerrainMesh
+where
+    F: Fn(i64, i64) -> u16;
+
 pub fn terrain_mesh_lod_with_sampler_and_skirt<F>(
     chunk: &WorldChunk,
     step: usize,
@@ -51,7 +59,8 @@ where
 - `outside_height` is the seam-aware world-height sampler (absolute world metres).
 - `skirt_depth_m <= 0`, `NaN`, or infinity disables skirts and returns the same mesh as `terrain_mesh_lod_with_sampler`.
 - `terrain_mesh_lod` and `terrain_mesh_lod_with_sampler` remain skirt-free for tools and tests.
-- The Godot worker and synchronous bridge paths use the 2 m default.
+- `terrain_mesh`, `terrain_mesh_lod`, and `terrain_mesh_lod_with_optional_sampler(..., None)` have no neighbor source, so they suppress out-of-chunk walls entirely instead of treating the neighbor as height 0. This avoids coincident, opposite-facing full-height walls where two chunk meshes meet. Pass `Some(sampler)` to emit a boundary wall when the neighbor height is known to be lower.
+- The Godot worker and synchronous bridge paths pass the generator/delta sampler, so streamed chunks get seam-aware boundary walls plus the 2 m default skirt.
 
 ## 4. Cost
 
@@ -66,11 +75,14 @@ The skirt grows as a share of the coarse mesh: roughly 1.6% of top quads at step
 
 ## 5. Winding and normals
 
-Skirt quads use outward-facing normals and a winding whose triangle cross product matches the normal. The preview material still disables culling, so the skirts are safe even if a future normal convention changes.
+Every terrain corner list is built counter-clockwise around its outward normal; `push_quad` then emits the reversed **Godot-clockwise** index order (`[0, 2, 1, 0, 3, 2]`), matching the voxel mesher. That holds for top quads, all four cliff-wall normal signs, and skirts. `every_terrain_quad_is_godot_clockwise` asserts `dot(cross, normal) < 0` for every emitted triangle at LOD steps 1–4.
+
+The preview material still disables culling (`CULL_DISABLED`). The winding is ready for back-face culling, but it stays off until a display-backed smoke proves chunk seams and overlapping skirt planes render without holes.
 
 ## 6. Limitations
 
 - Skirts hide cracks; they do not fix the underlying LOD height mismatch. A vertical error larger than 2 m on an extreme cliff can still show.
+- The no-sampler meshing path has no boundary walls at all, so a caller that renders isolated chunks without neighbors sees an open edge rather than a wall to height 0. Streamed chunks always pass a sampler.
 - Adjacent chunks can produce coplanar overlapping skirt quads at a seam, and the two sides can sample different biome colors at the boundary. Subtle z-fighting or color patchwork is possible; a small inward offset or depth bias is a follow-up if it becomes visible.
 - Skirts do not hide normal/lighting discontinuities or biome color seams.
 - Skirts are not a substitute for a proper HLOD/impostor pipeline at city scale.

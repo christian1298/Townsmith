@@ -139,13 +139,20 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 
 ## 8. Tests
 
-- `core_world`: 74 tests, including delta-aware sampling, checksum stability, duplicate chunk/cell rejection, byte-identical re-encoding, full-chunk terraform, malformed-stream bounds, unload/reload persistence, config sanitization, coordinate-limit behavior, and streaming roundtrip.
+- `core_world`: 74 tests, including delta-aware sampling, checksum stability, duplicate chunk/cell rejection, byte-identical re-encoding, full-chunk terraform, malformed-stream bounds, unload/reload persistence, config sanitization, coordinate-limit behavior, streaming roundtrip, Godot-CW winding, and no-sampler seam suppression.
 - `godot_ext`: 87 tests, including worker meshing with deltas, hex roundtrip, and world-JSON delta roundtrip/checksum rejection.
 - `cargo test --workspace`: **953 tests** (948 unit/integration + 5 doctests).
 - `smoke_world_scene.sh`: `WORLD_SCENE ... edits=ok ... status=ok`.
 - `smoke_world_placement.sh` still passes on saves without terrain fields.
 
-## 9. Next
+## 9. Mesh and palette conventions
+
+- **Winding:** terrain corners are built counter-clockwise around the outward normal, then emitted in Godot's clockwise front-face index order (`[0, 2, 1, 0, 3, 2]`), matching the voxel mesher. The streamer keeps `CULL_DISABLED` until a display-backed seam smoke proves back-face culling safe; `every_terrain_quad_is_godot_clockwise` checks every triangle at LOD steps 1–4.
+- **Seam policy:** streamed chunks pass the delta-aware world sampler, so a boundary wall is emitted only when the neighbor height is actually lower. `terrain_mesh`/`terrain_mesh_lod` (tools and tests) have no neighbor source and suppress out-of-chunk walls entirely; they no longer emit a wall down to height 0 at every chunk edge.
+- **Palette cap:** `EncodedChunk::decode` rejects palettes larger than `MAX_PALETTE_ENTRIES = CHUNK_VOLUME + 1 = 32,769` with `VoxelError::PaletteTooLarge`. A chunk has 32,768 voxels and air is entry 0, so a larger palette cannot be referenced. `from_chunk` builds a `HashMap<MaterialId, u16>` index once (O(voxels)) instead of scanning the palette per voxel. Blueprint decode surfaces the same error through `BlueprintError::Voxel`.
+- **Precision:** terrain sampling is `f32`, so 1 m cells stay exact only to `2^24 m = 16,777,216 m`; beyond that adjacent cells quantize and terrain flat-steps. Chunk/save coordinates stay `i64` and rendering uses a floating origin. Moving to `f64` requires a `WORLDGEN_VERSION` bump and new worldgen/streaming goldens.
+
+## 10. Next
 
 1. 2C: Mayor camera, selection, and mode switching at a door ([[44 - Mayor Mode]]).
 2. 2D: construction sites and material delivery.
