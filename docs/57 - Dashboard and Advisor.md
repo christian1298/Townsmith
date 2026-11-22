@@ -25,9 +25,10 @@ In:
 - rules for food, water, power, jobs, vacancies, happiness, commute, roads, construction, debt, and bankruptcy;
 - a `City Dashboard` overlay with population, district, work, wellbeing, services, treasury, industry, roads, and construction sections;
 - a District section that queries `district_summary` around the Mayor camera target with a 256 m radius once per dashboard rebuild;
+- an `F7` district heatmap overlay that queries `district_heatmap` at 512 m / 32 m around the same focus, renders up to 1,024 pooled cells, and shows a localized status/legend line;
 - `F1` toggles the dashboard; `Esc` closes it; entering Architect Mode closes it;
-- a world-scene smoke that checks the advisor warning, dashboard text, district values and labels, and localized advisor titles;
-- markers `dashboard=ok` and `district_ui=ok`, enforced by `scripts/smoke_world_scene.sh`.
+- a world-scene smoke that checks the advisor warning, dashboard text, district values and labels, localized advisor titles, and the heatmap grid/instance/teardown contract;
+- markers `dashboard=ok`, `district_ui=ok`, and `heatmap_ui=ok`, enforced by `scripts/smoke_world_scene.sh`.
 
 Out:
 
@@ -132,7 +133,7 @@ cells:[{x,z,population,housing_capacity,jobs,employed,happiness,food,water,rest}
 checksum
 ```
 
-The grid is square (`cols == rows`), derived as `ceil(2 * radius_m / cell_m)`, bounded to **4,096 cells**; `cell_m` must be 4–256 m. Cell `x,z` is the cell centre in metres. Placements outside the circle are zeroed rather than omitted, so `cells.len() == cols * rows` always. Only completed sites contribute, households are attributed by home placement, and needs are resident-weighted per cell. Invalid arguments return `ok=false` (`invalid_seed`, `invalid_center`, `invalid_radius`, `invalid_cell_size`, `invalid_grid`, `seed_mismatch`). The call is read-only and adds no save field. **No UI reads it yet**; it exists for the future district heatmap overlay.
+The grid is square (`cols == rows`), derived as `ceil(2 * radius_m / cell_m)`, bounded to **4,096 cells**; `cell_m` must be 4–256 m. Cell `x,z` is the cell centre in metres. Placements outside the circle are zeroed rather than omitted, so `cells.len() == cols * rows` always. Only completed sites contribute, households are attributed by home placement, and needs are resident-weighted per cell. Invalid arguments return `ok=false` (`invalid_seed`, `invalid_center`, `invalid_radius`, `invalid_cell_size`, `invalid_grid`, `seed_mismatch`). The call is read-only and adds no save field. The `F7` overlay reads it; see §5.1.
 
 ## 5. Dashboard
 
@@ -161,6 +162,18 @@ The District section is local, not city-wide: it uses the Mayor camera target as
 
 Colors: critical red, warning amber, info green. `Esc` closes the panel before other modes; entering Architect Mode closes it. While the panel is visible, `_process` drives a refresh accumulator and rebuilds the panel at most every `0.5` s (2 Hz); opening still refreshes immediately, and closing resets the accumulator so a reopen is never stale. This keeps a world HUD update from triggering the full snapshot plus advisor while the panel is visible. A closed dashboard adds no snapshot cost. The advisor is still computed on demand by `city_advisor` on each refresh and is not cached, so dashboard advice can trail the HUD by up to about `0.5` s.
 
+### 5.1 District heatmap overlay (`F7`)
+
+`F7` toggles a read-only in-world heatmap. It is independent of the dashboard: it does not open, close, or rebuild the panel, and the dashboard District section is unchanged.
+
+- **Query:** `district_heatmap(SEED, center.x, center.z, 512.0, 32.0)`, where the centre is `_materialization_center()` (the selected building or the Mayor camera target). `ceil(1024 / 32) = 32`, so the grid is 32 × 32 = **1,024 cells**, exactly the renderer cap.
+- **Refresh:** opening queries immediately; while visible `_process` refreshes on a `0.5 s` accumulator. Closing frees the pooled node and clears the height/state caches.
+- **Render:** one `DistrictHeatmap` root owns one `MultiMeshInstance3D` with a flat `BoxMesh` (`31 m × 0.05 m × 31 m`). The pool grows `instance_count` once and uses `visible_instance_count` for the current nonzero cells, so panning reuses the same buffer. `use_colors` and an unshaded, translucent, vertex-color material tint each cell.
+- **Cells:** only cells with `population > 0` are instanced; zero cells stay hidden. Cells whose sampled `world_height_at` is negative are skipped. Each visible cell sits at `ground + 0.15 m`.
+- **Colors:** `population / peak` interpolates blue (`0.5`) → yellow (`0.5`) → red (`1.0`); alpha stays below `0.75` so terrain and buildings remain readable. The peak cell is always red.
+- **Bounds:** the pool is capped at `HEATMAP_MAX_CELLS = 1024` instances. The ground cache is keyed by rounded cell centre, capped at 2 × 1,024 entries, and invalidated by `terrain_delta_checksum` so terrain edits cannot leave stale heights.
+- **HUD:** one localized status line is always present: `District heatmap: on/off · {cells} cells · peak {peak}` (`cells` is the number of rendered, nonzero cells). When on, a legend line gives the blue/yellow/red scale and the `512 m / 32 m` query. With no residents in range the localized empty line replaces the legend detail; a bridge error shows the localized `unavailable` line with its code.
+
 ## 6. Smoke
 
 `smoke_world_scene.sh` now checks:
@@ -172,12 +185,16 @@ Colors: critical red, warning amber, info green. `Esc` closes the panel before o
 - `district_summary` around the fixture house at a 256 m radius reports `ok`, population 2, jobs 2, a matching `radius_m`, and finite/non-negative values;
 - the District section renders in EN (`District`, `Within 256 m of the camera target`) and DE (`Stadtteil`, `Im Umkreis von 256 m`), contains the fixture population/jobs values, and falls back to the localized unavailable line;
 - world, population, and construction checksums are unchanged by the district query;
-- markers include `dashboard=ok` and `district_ui=ok`; the script requires both.
+- `F7` starts hidden (zero `DistrictHeatmap` children), opens with no error, and returns a 32 × 32 grid with 1,024 cells, a 512 m radius, and 32 m cells;
+- the nonzero cell count equals `heatmap_cells`, the peak matches the bridge cells, the single pooled `DistrictHeatmapPool` node reports the same `visible_instance_count`, the pool stays at or below 1,024 instances, and the checksum is 16 hex characters and repeatable;
+- the HUD shows the EN and DE on/off status, the legend, the `F7` help text, and the localized empty line when the fixture has no populated cell;
+- a second `F7` frees the pool and caches and returns the root to zero children;
+- markers include `dashboard=ok`, `district_ui=ok`, and `heatmap_ui=ok`; the script requires all three.
 
 Final marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok trades=ok render=ok structure=ok age=ok research=ok starter=ok named=ok occupancy=ok industry=ok utilities=ok services=ok economy=ok dashboard=ok district_ui=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok trades=ok render=ok structure=ok age=ok research=ok starter=ok named=ok occupancy=ok industry=ok utilities=ok services=ok economy=ok dashboard=ok district_ui=ok heatmap_ui=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 ## 7. Tests
@@ -191,6 +208,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 ## 8. Limits
 
 - Advisor advice is city-wide; the dashboard District section is read-only and camera-centred (256 m), not a selectable settlement/district panel. No building drill-down from advice.
+- The heatmap is also camera/selection-centred (`_materialization_center`, 512 m), read-only, and does not aggregate cohorts, settlements, or off-screen districts. It draws one density metric (population) and only nonzero cells; needs, jobs, and happiness are in the bridge payload but not rendered yet.
 - Thresholds are fixed; no difficulty, policy, or player preference.
 - Advice is not persisted, acknowledged, or suppressed.
 - No click-to-select, camera focus, or one-click policy action.
@@ -206,4 +224,4 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 2. Make advice clickable to select the relevant building or district.
 3. Add persisted acknowledgement and a notification history.
 4. Finish number formatting, remaining content names, and error-code display.
-5. Add selectable district/settlement panels with per-settlement budgets, policies, and heatmaps; the current District section is a camera-centred preview.
+5. Add selectable district/settlement panels with per-settlement budgets and policies; the current District section is a camera-centred preview and the F7 overlay is a single-metric heatmap.

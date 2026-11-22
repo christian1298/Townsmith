@@ -29,6 +29,16 @@ const DASHBOARD_REFRESH_SECONDS := 0.5
 # Mayor camera target; this matches the 512 m aggregate district cell scale in
 # docs/07 and stays well inside the bridge's 0..=1,000,000 m radius guard.
 const DISTRICT_RADIUS_M := 256.0
+# F7 district heatmap overlay: one read-only query per refresh around the same
+# focus as the materialization layer. 512 m / 32 m rounds up to a 32 x 32 grid,
+# which is exactly the 1,024-cell cap the renderer accepts. Cells with no
+# residents are omitted (zero cells stay hidden), and each visible cell is a
+# flat pooled box lifted 0.15 m above the sampled terrain height.
+const HEATMAP_REFRESH_SECONDS := 0.5
+const HEATMAP_RADIUS_M := 512.0
+const HEATMAP_CELL_M := 32.0
+const HEATMAP_MAX_CELLS := 1024
+const HEATMAP_LIFT_M := 0.15
 # Materialization is a derived, read-only selection around the Mayor focus or
 # selected building. Rebuild on toggle/selection change and at the same 0.5 s
 # cadence as the dashboard so a panning camera follows without per-frame nodes.
@@ -128,6 +138,23 @@ var movement_route_key := ""
 var movement_accum := 0.0
 var movement_time := 0.0
 var last_movement_state: Dictionary = {}
+# F7 district heatmap overlay. One MultiMesh holds up to HEATMAP_MAX_CELLS flat
+# boxes; instance_count only grows, while visible_instance_count tracks the
+# current nonzero-population cell count. The ground cache is keyed by rounded
+# cell centre and invalidated by the terrain-delta checksum.
+var heatmap_root: Node3D
+var heatmap_mesh: BoxMesh
+var heatmap_material: StandardMaterial3D
+var heatmap_multimesh_instance: MultiMeshInstance3D
+var heatmap_multimesh: MultiMesh
+var heatmap_visible := false
+var heatmap_refresh_accum := 0.0
+var heatmap_ground: Dictionary = {}
+var heatmap_terrain_key := ""
+var heatmap_last_state: Dictionary = {}
+var heatmap_cells := 0
+var heatmap_peak := 0
+var heatmap_error := ""
 var industry_root: Node3D
 var industry_nodes: Dictionary = {}
 var industry_kinds: Dictionary = {}
@@ -215,6 +242,7 @@ func _ready() -> void:
 	_setup_utilities()
 	_setup_services()
 	_setup_materialization()
+	_setup_heatmap()
 	if _ensure_blueprint():
 		_refresh_preview(true)
 	else:
@@ -258,6 +286,13 @@ func _process(delta: float) -> void:
 			_update_citizen_panel()
 	else:
 		citizen_refresh_accum = 0.0
+	if heatmap_visible:
+		heatmap_refresh_accum += delta
+		if heatmap_refresh_accum >= HEATMAP_REFRESH_SECONDS:
+			heatmap_refresh_accum = 0.0
+			_refresh_heatmap()
+	else:
+		heatmap_refresh_accum = 0.0
 	if lifecycle_clock_enabled:
 		_advance_lifecycle_clock(delta)
 	construction_tick_accum += delta
@@ -370,6 +405,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					_toggle_follow()
 				KEY_F4:
 					_toggle_materialization()
+				KEY_F7:
+					_toggle_heatmap()
 				KEY_T:
 					_cycle_tax_policy()
 				KEY_L:
@@ -926,6 +963,171 @@ func _setup_movement_pool() -> void:
 	movement_multimesh_instance.material_override = movement_material
 	movement_multimesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	movement_root.add_child(movement_multimesh_instance)
+
+func _setup_heatmap() -> void:
+	# The root exists even while the overlay is off so F7 can create the pool
+	# lazily; a hidden overlay owns no child nodes or instance buffers.
+	heatmap_root = Node3D.new()
+	heatmap_root.name = "DistrictHeatmap"
+	add_child(heatmap_root)
+	heatmap_mesh = BoxMesh.new()
+	heatmap_mesh.size = Vector3(HEATMAP_CELL_M * 0.94, 0.05, HEATMAP_CELL_M * 0.94)
+	heatmap_material = StandardMaterial3D.new()
+	heatmap_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	heatmap_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	heatmap_material.vertex_color_use_as_albedo = true
+	heatmap_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+
+func _ensure_heatmap_pool() -> void:
+	if heatmap_root == null:
+		return
+	if heatmap_multimesh_instance != null and is_instance_valid(heatmap_multimesh_instance):
+		return
+	heatmap_multimesh = MultiMesh.new()
+	heatmap_multimesh.mesh = heatmap_mesh
+	# transform_format and use_colors must be set before instance_count; Godot
+	# rejects both once instances exist.
+	heatmap_multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	heatmap_multimesh.use_colors = true
+	heatmap_multimesh.instance_count = 0
+	heatmap_multimesh.visible_instance_count = 0
+	heatmap_multimesh_instance = MultiMeshInstance3D.new()
+	heatmap_multimesh_instance.name = "DistrictHeatmapPool"
+	heatmap_multimesh_instance.multimesh = heatmap_multimesh
+	heatmap_multimesh_instance.material_override = heatmap_material
+	heatmap_multimesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	heatmap_root.add_child(heatmap_multimesh_instance)
+
+func _heatmap_color(ratio: float) -> Color:
+	# Blue (sparse) -> yellow (mid) -> red (peak). Alpha stays translucent so
+	# the terrain and buildings remain readable under the overlay.
+	var low := Color(0.16, 0.38, 1.0, 0.62)
+	var mid := Color(1.0, 0.85, 0.16, 0.68)
+	var high := Color(1.0, 0.2, 0.1, 0.74)
+	var value := clampf(ratio, 0.0, 1.0)
+	if value <= 0.5:
+		return low.lerp(mid, value * 2.0)
+	return mid.lerp(high, (value - 0.5) * 2.0)
+
+func _heatmap_ground_at(x: float, z: float) -> float:
+	var key := Vector2i(roundi(x), roundi(z))
+	if heatmap_ground.has(key):
+		return float(heatmap_ground[key])
+	# Cells move with the camera, so cap the cache; a terrain edit clears it.
+	if heatmap_ground.size() >= HEATMAP_MAX_CELLS * 2:
+		heatmap_ground.clear()
+	var ground: float = core.world_height_at(SEED, x, z)
+	if ground >= 0.0:
+		heatmap_ground[key] = ground
+	return ground
+
+func _clear_heatmap() -> void:
+	if heatmap_root != null:
+		for child in heatmap_root.get_children():
+			if is_instance_valid(child):
+				child.free()
+	heatmap_multimesh_instance = null
+	heatmap_multimesh = null
+	heatmap_ground.clear()
+	heatmap_terrain_key = ""
+	heatmap_last_state = {}
+	heatmap_cells = 0
+	heatmap_peak = 0
+	heatmap_error = ""
+
+func _refresh_heatmap() -> void:
+	if not heatmap_visible or core == null or heatmap_root == null:
+		return
+	var center := _materialization_center()
+	var state: Dictionary = core.district_heatmap(
+		SEED, center.x, center.z, HEATMAP_RADIUS_M, HEATMAP_CELL_M
+	)
+	heatmap_last_state = state
+	heatmap_cells = 0
+	heatmap_peak = 0
+	heatmap_error = ""
+	if not bool(state.get("ok", false)):
+		heatmap_error = str(state.get("error_code", "unavailable"))
+		_ensure_heatmap_pool()
+		if heatmap_multimesh != null:
+			heatmap_multimesh.visible_instance_count = 0
+			heatmap_multimesh.custom_aabb = AABB()
+		return
+	var cells: Array = state.get("cells", [])
+	var peak := 0
+	for cell in cells:
+		peak = maxi(peak, int(cell.get("population", 0)))
+	heatmap_peak = peak
+	# A terrain edit changes the sampled heights, so keep the cache honest
+	# without querying the height field for every cell on every refresh.
+	var terrain_key := str(core.terrain_delta_checksum())
+	if terrain_key != heatmap_terrain_key:
+		heatmap_terrain_key = terrain_key
+		heatmap_ground.clear()
+	var transforms: Array[Transform3D] = []
+	var colors: Array[Color] = []
+	var min_x := INF
+	var max_x := -INF
+	var min_z := INF
+	var max_z := -INF
+	var min_y := INF
+	var max_y := -INF
+	for cell in cells:
+		var population := int(cell.get("population", 0))
+		if population <= 0:
+			continue
+		var x := float(cell.get("x", 0.0))
+		var z := float(cell.get("z", 0.0))
+		var ground := _heatmap_ground_at(x, z)
+		if ground < 0.0:
+			continue
+		var y := ground + HEATMAP_LIFT_M
+		var ratio := float(population) / float(maxi(peak, 1))
+		transforms.append(Transform3D(Basis.IDENTITY, Vector3(x, y, z)))
+		colors.append(_heatmap_color(ratio))
+		min_x = minf(min_x, x)
+		max_x = maxf(max_x, x)
+		min_z = minf(min_z, z)
+		max_z = maxf(max_z, z)
+		min_y = minf(min_y, y)
+		max_y = maxf(max_y, y)
+	heatmap_cells = transforms.size()
+	_ensure_heatmap_pool()
+	if heatmap_multimesh == null:
+		return
+	# Grow the buffer once, then hide the unused tail with visible_instance_count
+	# so a camera pan reuses the same MultiMesh instead of reallocating it.
+	var count := transforms.size()
+	if count > HEATMAP_MAX_CELLS:
+		count = HEATMAP_MAX_CELLS
+	if heatmap_multimesh.instance_count < count:
+		heatmap_multimesh.instance_count = count
+	heatmap_multimesh.visible_instance_count = count
+	for index in count:
+		heatmap_multimesh.set_instance_transform(index, transforms[index])
+		heatmap_multimesh.set_instance_color(index, colors[index])
+	if count == 0:
+		heatmap_multimesh.custom_aabb = AABB()
+	else:
+		var half_x := HEATMAP_CELL_M * 0.47
+		var half_z := HEATMAP_CELL_M * 0.47
+		heatmap_multimesh.custom_aabb = AABB(
+			Vector3(min_x - half_x, min_y - 0.025, min_z - half_z),
+			Vector3(
+				max_x - min_x + half_x * 2.0,
+				max_y - min_y + 0.05,
+				max_z - min_z + half_z * 2.0
+			))
+
+func _toggle_heatmap() -> bool:
+	heatmap_visible = not heatmap_visible
+	heatmap_refresh_accum = 0.0
+	if heatmap_visible:
+		_refresh_heatmap()
+	else:
+		_clear_heatmap()
+	_update_hud()
+	return heatmap_visible
 
 func _materialization_center() -> Vector3:
 	if selected_id >= 0:
@@ -2279,6 +2481,18 @@ func _update_hud() -> void:
 			"active": i18n.format_int(materialization_counts.x),
 			"detailed": i18n.format_int(materialization_counts.y),
 		})
+	var heatmap_state: String = i18n.t("base.ui.heatmap.on") if heatmap_visible else i18n.t("base.ui.heatmap.off")
+	status_label.text += "\n" + i18n.t("base.ui.heatmap.status", {
+		"state": heatmap_state,
+		"cells": i18n.format_int(heatmap_cells),
+		"peak": i18n.format_int(heatmap_peak),
+	})
+	if heatmap_visible:
+		status_label.text += "\n" + i18n.t("base.ui.heatmap.legend")
+		if heatmap_error != "":
+			status_label.text += "\n" + i18n.t("base.ui.heatmap.unavailable", {"code": heatmap_error})
+		elif heatmap_peak == 0:
+			status_label.text += "\n" + i18n.t("base.ui.heatmap.empty")
 
 func _toggle_citizen_panel() -> bool:
 	citizen_visible = not citizen_visible
@@ -3377,6 +3591,7 @@ func _run_scene_smoke() -> void:
 	var economy_ok := false
 	var dashboard_ok := false
 	var district_ui_ok := false
+	var heatmap_ui_ok := false
 	var advisor_i18n_ok := false
 	var advisor_detail_i18n_ok := false
 	var hud_i18n_ok := false
@@ -4073,6 +4288,93 @@ func _run_scene_smoke() -> void:
 				district_ui_ok = district_ui_ok and str(core.construction_checksum()) == district_construction_checksum
 				_toggle_dashboard()
 				dashboard_ok = dashboard_ok and not dashboard_panel.visible
+				var heatmap_checksum := ""
+				heatmap_ui_ok = not heatmap_visible
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_root != null and heatmap_root.name == "DistrictHeatmap"
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_root.get_child_count() == 0
+				heatmap_ui_ok = heatmap_ui_ok and status_label.text.contains(i18n.t("base.ui.heatmap.status", {
+					"state": i18n.t("base.ui.heatmap.off"),
+					"cells": i18n.format_int(0),
+					"peak": i18n.format_int(0),
+				}))
+				heatmap_ui_ok = heatmap_ui_ok and _toggle_heatmap()
+				var heatmap_state: Dictionary = heatmap_last_state
+				heatmap_ui_ok = heatmap_ui_ok and bool(heatmap_state.get("ok", false))
+				var heatmap_cols := int(heatmap_state.get("cols", 0))
+				var heatmap_rows := int(heatmap_state.get("rows", 0))
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_cols == 32 and heatmap_rows == 32
+				heatmap_ui_ok = heatmap_ui_ok and absf(float(heatmap_state.get("radius_m", 0.0)) - HEATMAP_RADIUS_M) < 0.001
+				heatmap_ui_ok = heatmap_ui_ok and absf(float(heatmap_state.get("cell_m", 0.0)) - HEATMAP_CELL_M) < 0.001
+				var heatmap_cell_list: Array = heatmap_state.get("cells", [])
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_cell_list.size() == heatmap_cols * heatmap_rows
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_cell_list.size() <= HEATMAP_MAX_CELLS
+				var heatmap_nonzero := 0
+				var heatmap_expected_peak := 0
+				for heatmap_cell in heatmap_cell_list:
+					var heatmap_population := int(heatmap_cell.get("population", 0))
+					if heatmap_population > 0:
+						heatmap_nonzero += 1
+						heatmap_expected_peak = maxi(heatmap_expected_peak, heatmap_population)
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_nonzero == heatmap_cells
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_expected_peak == heatmap_peak
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_root.get_child_count() == 1
+				var heatmap_pool: MultiMeshInstance3D = heatmap_multimesh_instance
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_pool != null and is_instance_valid(heatmap_pool)
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_pool.get_parent() == heatmap_root
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_multimesh != null
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_multimesh.visible_instance_count == heatmap_nonzero
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_multimesh.instance_count <= HEATMAP_MAX_CELLS
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_multimesh.instance_count >= heatmap_nonzero
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_multimesh.use_colors
+				heatmap_checksum = str(heatmap_state.get("checksum", ""))
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_checksum.length() == 16
+				print("HEATMAP_UI cells=%d instances=%d peak=%d checksum=%s" % [
+					heatmap_nonzero,
+					heatmap_multimesh.visible_instance_count if heatmap_multimesh != null else -1,
+					heatmap_peak,
+					heatmap_checksum,
+				])
+				var heatmap_center: PackedFloat32Array = heatmap_state.get("center", PackedFloat32Array())
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_center.size() == 2
+				if heatmap_center.size() == 2:
+					var heatmap_repeat: Dictionary = core.district_heatmap(
+						SEED, heatmap_center[0], heatmap_center[1], HEATMAP_RADIUS_M, HEATMAP_CELL_M
+					)
+					heatmap_ui_ok = heatmap_ui_ok and bool(heatmap_repeat.get("ok", false))
+					heatmap_ui_ok = heatmap_ui_ok and str(heatmap_repeat.get("checksum", "")) == heatmap_checksum
+				else:
+					heatmap_ui_ok = false
+				heatmap_ui_ok = heatmap_ui_ok and status_label.text.contains(i18n.t("base.ui.heatmap.legend"))
+				if heatmap_nonzero > 0:
+					heatmap_ui_ok = heatmap_ui_ok and not status_label.text.contains(i18n.t("base.ui.heatmap.empty"))
+				else:
+					# The fixture may have too few placements for a populated
+					# cell; keep the grid/instance contract and show the empty
+					# legend instead of requiring residents.
+					heatmap_ui_ok = heatmap_ui_ok and status_label.text.contains(i18n.t("base.ui.heatmap.empty"))
+				heatmap_ui_ok = heatmap_ui_ok and status_label.text.contains(i18n.t("base.ui.heatmap.status", {
+					"state": i18n.t("base.ui.heatmap.on"),
+					"cells": i18n.format_int(heatmap_nonzero),
+					"peak": i18n.format_int(heatmap_peak),
+				}))
+				heatmap_ui_ok = heatmap_ui_ok and hud.text.contains("F7 heatmap")
+				i18n.set_locale("de")
+				_update_hud()
+				heatmap_ui_ok = heatmap_ui_ok and status_label.text.contains("Stadtteil-Heatmap: an")
+				heatmap_ui_ok = heatmap_ui_ok and hud.text.contains("F7: Heatmap")
+				i18n.set_locale("en")
+				_update_hud()
+				heatmap_ui_ok = heatmap_ui_ok and not _toggle_heatmap()
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_root.get_child_count() == 0
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_multimesh_instance == null
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_multimesh == null
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_ground.is_empty()
+				heatmap_ui_ok = heatmap_ui_ok and heatmap_last_state.is_empty()
+				heatmap_ui_ok = heatmap_ui_ok and status_label.text.contains(i18n.t("base.ui.heatmap.status", {
+					"state": i18n.t("base.ui.heatmap.off"),
+					"cells": i18n.format_int(0),
+					"peak": i18n.format_int(0),
+				}))
 				i18n.set_locale("de")
 				_update_dashboard()
 				_update_hud()
@@ -4311,6 +4613,8 @@ func _run_scene_smoke() -> void:
 					status = "dashboard_failed"
 				elif not district_ui_ok:
 					status = "district_ui_failed"
+				elif not heatmap_ui_ok:
+					status = "heatmap_ui_failed"
 			if not load_ok:
 				status = "load_failed"
 
@@ -4374,7 +4678,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s heatmap_ui=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -4413,6 +4717,7 @@ func _run_scene_smoke() -> void:
 		"ok" if economy_ok else "failed",
 		"ok" if dashboard_ok else "failed",
 		"ok" if district_ui_ok else "failed",
+		"ok" if heatmap_ui_ok else "failed",
 		"ok" if hud_i18n_ok else "failed",
 		"ok" if hud_body_i18n_ok else "failed",
 		"ok" if hud_status_i18n_ok else "failed",
