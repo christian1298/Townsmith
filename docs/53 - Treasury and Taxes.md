@@ -220,4 +220,4 @@ The world-scene smoke checks:
 3. Service funding and per-building upkeep once service buildings exist.
 4. Balance the default tax/wage rates against the 30-day and 1M-scale runners.
 
-> Construction v0 now has an opt-in `ConstructionTimeScale::CampaignDays` (default 1 game day = 60 real seconds) using the D-029 duration curve; `DeveloperSeconds` remains the default and old saves load unchanged. The bridge/HUD opt-in and live financing replacement are still open.
+> Construction v0 now has an opt-in `ConstructionTimeScale::CampaignDays` (default 1 game day = 60 real seconds) using the D-029 duration curve; `DeveloperSeconds` remains the default and old saves load unchanged. The bridge exposes `set_construction_time_scale`/`construction_time_scale_state` and the headless city loop has `--campaign-days [--seconds-per-day N]`; the HUD toggle and live financing replacement are still open.
