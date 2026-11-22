@@ -1237,7 +1237,7 @@ Placement currently checks and charges the full material price up front, while t
 **Negative**
 - Players can start a site and later stall it by running out of money.
 - Abandoned sites leave sunk cost and unfinished buildings.
-- The bridge must charge installments and surface the stall reason; this slice only lands the core schedule.
+- The bridge must charge installments and surface the stall reason; placement and the construction tick now do, and a failed installment stalls the site until a later retry.
 
 ### Alternatives considered
 

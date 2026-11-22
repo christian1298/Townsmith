@@ -3250,9 +3250,10 @@ func _run_scene_smoke() -> void:
 		place_ok = absf(node.rotation_degrees.y - 90.0) < 0.001 and _foundation_matches_bounds(node)
 		var economy_after_place: Dictionary = core.economy_state()
 		var construction_spent := float(economy_after_place.get("construction_spent", 0.0))
-		var expected_cost := float(blueprint_info.get("material_cost", -1.0))
+		var material_cost := float(blueprint_info.get("material_cost", -1.0))
+		var expected_cost := snappedf(material_cost * 0.03, 0.01)
 		place_ok = place_ok and bool(economy_after_place.get("open", false))
-		place_ok = place_ok and expected_cost > 0.0
+		place_ok = place_ok and material_cost > 0.0
 		place_ok = place_ok and absf(construction_spent - expected_cost) < 0.01
 		place_ok = place_ok and absf(float(economy_after_place.get("balance", 0.0)) - (STARTING_TREASURY - expected_cost)) < 0.01
 	if not place_ok and status == "ok":
@@ -3260,7 +3261,9 @@ func _run_scene_smoke() -> void:
 
 	if status == "ok":
 		var site := _construction_site_for(1)
-		build_ok = not site.is_empty() and core.construction_summary().sites == 1
+		var construction_summary: Dictionary = core.construction_summary()
+		build_ok = not site.is_empty() and construction_summary.sites == 1
+		build_ok = build_ok and construction_summary.has("payment_due") and construction_summary.has("payment_stalled")
 		build_ok = build_ok and construction_nodes.has(1) and int(site.get("crew_required", 0)) >= 1
 		var before_progress := float(site.get("progress", 0.0))
 		_advance_construction(2.0)
