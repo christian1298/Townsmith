@@ -44,6 +44,7 @@ pub mod named;
 pub mod placement;
 pub mod population;
 pub mod progression;
+pub mod registry;
 pub mod research;
 pub mod road;
 pub mod route_cache;
@@ -114,6 +115,10 @@ pub use population::{
     WAGE_PER_WORKER_PER_DAY,
 };
 pub use progression::{Age, AgeState};
+pub use registry::{
+    ContentRegistry, MaterialCategory, MaterialDef, PropDef, RegistryError, RoomCategory, RoomDef,
+    CONTENT_FORMAT_VERSION,
+};
 pub use research::{
     ResearchError, ResearchStore, ResearchTick, ResearchUnlock, TechNode, TechTree,
     MAX_RESEARCH_POINTS, MAX_RESEARCH_RATE_PER_DAY, MAX_RESEARCH_TICK_SECONDS, MAX_TECH_COST,
