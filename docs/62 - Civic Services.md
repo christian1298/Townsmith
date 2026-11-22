@@ -158,9 +158,9 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 See [[63 - Starter Library]] for the age-gated building catalog and generated packages.
 
 - `core_city::services`: 13 tests — empty, school coverage/research, clinic/fire/police, capacity shortage, out-of-range, overlapping research, tier-stat validation, zero demand, tiers/aliases, remove/clear, JSON/checksum, invalid ranges.
-- `core_city`: **432 tests**.
+- `core_city`: **460 tests**.
 - `godot_ext`: 3 new tests — service JSON roundtrip/old save, invalid sites, civic research rate; **87 tests**.
-- Workspace: **858 tests** (854 unit/integration + 4 doctests, all passing).
+- Workspace: **909 tests** (905 unit/integration + 4 doctests, all passing).
 
 ## 10. Limits
 

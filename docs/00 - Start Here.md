@@ -59,14 +59,14 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 
 ## Code inventory
 
-`cargo test --workspace`: **858 tests**, all passing (**854 unit/integration + 4 doctests**); fmt and clippy clean.
+`cargo test --workspace`: **909 tests**, all passing (**905 unit/integration + 4 doctests**); fmt and clippy clean.
 
 | Area | Tests |
 |---|---:|
-| `core_city` | 432 |
+| `core_city` | 460 |
 | `godot_ext` (bridge) | 87 |
 | `core_world` | 62 |
-| `townsmith-server` | 56 |
+| `townsmith-server` | 83 |
 | `core_voxel` | 52 |
 | `core_sim` | 40 |
 | `core_structure` | 19 |

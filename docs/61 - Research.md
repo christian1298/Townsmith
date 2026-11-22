@@ -168,7 +168,7 @@ The scene smoke:
 - `core_city::progression`: 6 tests including age id aliases.
 - `core_structure`: 19 tests + 1 doctest, including minimum-age mapping.
 - `godot_ext`: 87 tests, including research JSON roundtrip/old save, unknown completed nodes, and structure age helpers.
-- Workspace: **858 tests** (854 unit/integration + 4 doctests, all passing).
+- Workspace: **909 tests** (905 unit/integration + 4 doctests, all passing).
 
 ## 9. Limits
 

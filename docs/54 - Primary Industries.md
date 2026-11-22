@@ -219,7 +219,7 @@ Food now reaches the city and stays at 100%; [[55 - Utilities]] keeps water and 
 - `core_city::population`: 3 new tests — per-workplace staffing, food replenishment, old saves without staffing.
 - `godot_ext`: 4 new tests — industry JSON roundtrip/old save, unknown kind/invalid stock, staffing roundtrip, stale-staffing sanitize.
 - `city_loop`: the five-house test asserts sites, food stock, wood production, full supply, and happiness > 0.6; the 15-house test covers a road commute.
-- Workspace: **858 tests** (854 unit/integration + 4 doctests): 52 voxel, 62 world, 40 simulation, 432 city, 15 blueprint, 12 rooms, 87 bridge, 19 structure, 56 server, and 79 bench-bin tests (city_loop 8, cohort_validate 9, dormant 5, financing 8, industrial 4, infra_cost 1, materialization 2, metropolis 4, metropolis_balance 4, modern 5, movement 4, placements 2, save_1m 6, save_stress 6, streaming_scale 7, traffic 4).
+- Workspace: **909 tests** (905 unit/integration + 4 doctests): 52 voxel, 62 world, 40 simulation, 460 city, 15 blueprint, 12 rooms, 87 bridge, 19 structure, 83 server, and 79 bench-bin tests (city_loop 8, cohort_validate 9, dormant 5, financing 8, industrial 4, infra_cost 1, materialization 2, metropolis 4, metropolis_balance 4, modern 5, movement 4, placements 2, save_1m 6, save_stress 6, streaming_scale 7, traffic 4).
 
 ## 8. Limits
 

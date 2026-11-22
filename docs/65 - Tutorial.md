@@ -116,8 +116,8 @@ Marker adds `tutorial=ok`; `scripts/smoke_world_scene.sh` requires it.
 ## 6. Tests
 
 - `core_city::tutorial`: 5 tests — empty city, out-of-order steps, complete town, first missing step, stable ids/titles/hints.
-- `core_city`: **432 tests**.
-- Workspace: **858 tests** (854 unit/integration + 4 doctests, all passing).
+- `core_city`: **460 tests**.
+- Workspace: **909 tests** (905 unit/integration + 4 doctests, all passing).
 - Scene smoke covers the bridge and UI path.
 
 ## 7. Limits
