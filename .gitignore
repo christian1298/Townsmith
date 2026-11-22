@@ -3,7 +3,10 @@
 /godot/bin/*.so
 /godot/bin/*.dll
 /godot/bin/*.dylib
-/benchmarks/results/
+/benchmarks/results/*
+!/benchmarks/results/gate/
+/benchmarks/results/gate/*
+!/benchmarks/results/gate/README.md
 /playtest_sessions/
 *.swp
 .DS_Store
