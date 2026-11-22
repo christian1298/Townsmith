@@ -6,15 +6,19 @@ extends Control
 ## `scripts/bench_godot.sh` and shows three scene cards, a per-scene and
 ## overall rating, recommended settings, and a combined JSON export.
 ##
-## This is a **report over existing results**, not a live scene runner and not
-## the 1M gate. If a summary file is missing, the screen falls back to embedded
+## By default this is a **report over existing results**. With `--run` (or the
+## "Run Early / Mid / Late" button) it runs `res://benchmark.tscn` once per tier,
+## sequentially, writing a fresh single-run summary and refreshing the cards
+## after each scene. It still does not produce frame-time graphs and is not the
+## 1M/3060 gate. If a summary file is missing, the screen falls back to embedded
 ## deterministic fixtures so the report stays usable in a clean checkout.
 ##
 ## Run:
 ##   godot --path godot res://bench_screen.tscn
 ##   godot --path godot res://bench_screen.tscn -- --output /tmp/report.json
+##   godot --path godot res://bench_screen.tscn -- --run --duration 30 --warmup 3
 ##
-## Headless structural smoke:
+## Headless structural smoke (no display, no scene runs):
 ##   godot --headless --path godot res://bench_screen.tscn -- --smoke
 ##
 ## See docs/15 - Benchmarks.md and docs/68 - Metropolis Gate.md §5.3.
@@ -23,11 +27,29 @@ const RESULT_DIR := "benchmarks/results"
 const DEFAULT_OUTPUT := "user://benchmark_report.json"
 const REPORT_SUITE := "bench_screen_report"
 const REPORT_FORMAT_VERSION := 1
+const BENCHMARK_SCENE := "res://benchmark.tscn"
+const LIVE_DURATION_S := 30.0
+const LIVE_WARMUP_S := 3.0
 
 const SCENE_SPECS := [
-	{"id": "early", "label": "Early Settlement", "file": "godot_phase0_city_early_summary.json"},
-	{"id": "mid", "label": "Mid City", "file": "godot_phase0_city_mid_summary.json"},
-	{"id": "late", "label": "Late Metropolis", "file": "godot_phase0_city_late_summary.json"},
+	{
+		"id": "early",
+		"label": "Early Settlement",
+		"file": "godot_phase0_city_early_summary.json",
+		"route": "benchmarks/routes/phase0_city_early.json",
+	},
+	{
+		"id": "mid",
+		"label": "Mid City",
+		"file": "godot_phase0_city_mid_summary.json",
+		"route": "benchmarks/routes/phase0_city_mid.json",
+	},
+	{
+		"id": "late",
+		"label": "Late Metropolis",
+		"file": "godot_phase0_city_late_summary.json",
+		"route": "benchmarks/routes/phase0_city_late.json",
+	},
 ]
 
 const RATING_ORDER := {"low": 0, "playable": 1, "good": 2, "excellent": 3}
@@ -96,30 +118,50 @@ const FIXTURES := {
 }
 
 var smoke_mode := false
+var run_mode := false
 var output_path := DEFAULT_OUTPUT
+var live_duration_s := LIVE_DURATION_S
+var live_warmup_s := LIVE_WARMUP_S
 var _export_status: Label
+var _run_status: Label
+var _run_button: Button
 var _card_count := 0
+var _report: Dictionary = {}
+var _running := false
+var _completed_tiers: Array[String] = []
 
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
 	smoke_mode = args.has("--smoke")
+	run_mode = args.has("--run") and not smoke_mode
 	output_path = _arg(args, "--output", DEFAULT_OUTPUT)
+	live_duration_s = _positive_float(_arg(args, "--duration", str(LIVE_DURATION_S)), LIVE_DURATION_S)
+	live_warmup_s = _positive_float(_arg(args, "--warmup", str(LIVE_WARMUP_S)), LIVE_WARMUP_S)
 
-	var report := _build_report(smoke_mode)
-	_build_ui(report)
-	var exported := _export_report(report)
-	if _export_status != null:
-		_export_status.text = ("Exported to " if exported else "Export failed: ") + output_path
+	_report = _build_report(smoke_mode)
+	_build_ui(_report)
+	var exported := _export_report(_report)
+	_set_export_status(exported)
 
 	if smoke_mode:
-		_run_smoke(report, exported)
+		_run_smoke(_report, exported)
 		return
+
+	if run_mode:
+		if DisplayServer.get_name() == "headless":
+			push_error("Live benchmark runs need a display; run without --headless.")
+			print("BENCH_SCREEN status=display_required scenes=0 rating=unknown mode=run")
+			get_tree().quit(2)
+			return
+		await _run_all(true)
+		return
+
 	if not exported:
 		push_error("Benchmark report was not written: " + output_path)
 	print("BENCH_SCREEN_REPORT output=%s rating=%s scenes=%d" % [
 		output_path,
-		str((report.get("overall", {}) as Dictionary).get("rating", "unknown")),
-		(report.get("scenes", []) as Array).size(),
+		str((_report.get("overall", {}) as Dictionary).get("rating", "unknown")),
+		(_report.get("scenes", []) as Array).size(),
 	])
 
 func _arg(args: PackedStringArray, name: String, fallback: String) -> String:
@@ -127,6 +169,230 @@ func _arg(args: PackedStringArray, name: String, fallback: String) -> String:
 	if index >= 0 and index + 1 < args.size():
 		return args[index + 1]
 	return fallback
+
+func _positive_float(value: String, fallback: float) -> float:
+	if not value.is_valid_float():
+		return fallback
+	var number := float(value)
+	return number if number > 0.0 else fallback
+
+func _command_for(spec: Dictionary, duration_s: float, warmup_s: float) -> Dictionary:
+	var tier := str(spec.get("id", ""))
+	var route_rel := str(spec.get("route", ""))
+	var summary_rel := RESULT_DIR.path_join(str(spec.get("file", "")))
+	var route_abs := _project_root().path_join(route_rel)
+	var summary_abs := _project_root().path_join(summary_rel)
+	var raw_abs := ProjectSettings.globalize_path("user://bench_screen_%s_run.json" % tier)
+	var args := PackedStringArray([
+		"--path",
+		ProjectSettings.globalize_path("res://"),
+		BENCHMARK_SCENE,
+		"--",
+		"--city-tier",
+		tier,
+		"--route",
+		route_abs,
+		"--output",
+		raw_abs,
+		"--duration",
+		str(duration_s),
+		"--warmup",
+		str(warmup_s),
+	])
+	return {
+		"tier": tier,
+		"label": str(spec.get("label", "")),
+		"executable": OS.get_executable_path(),
+		"args": args,
+		"route_rel": route_rel,
+		"route": route_abs,
+		"summary_rel": summary_rel,
+		"summary": summary_abs,
+		"raw_output": raw_abs,
+		"duration_s": duration_s,
+		"warmup_s": warmup_s,
+	}
+
+func _run_commands(duration_s: float, warmup_s: float) -> Array:
+	var commands: Array = []
+	for spec_value in SCENE_SPECS:
+		var spec: Dictionary = spec_value
+		commands.append(_command_for(spec, duration_s, warmup_s))
+	return commands
+
+func _preflight(commands: Array) -> String:
+	if OS.get_executable_path().is_empty():
+		return "executable"
+	if not ResourceLoader.exists(BENCHMARK_SCENE):
+		return "scene"
+	for command_value in commands:
+		if typeof(command_value) != TYPE_DICTIONARY:
+			return "command"
+		var command: Dictionary = command_value
+		var tier := str(command.get("tier", ""))
+		if not FileAccess.file_exists(str(command.get("route", ""))):
+			return "route_%s" % tier
+		if str(command.get("raw_output", "")).is_empty():
+			return "output_%s" % tier
+	return ""
+
+func _summary_from_run(raw: Dictionary, tier: String, runs: int) -> Dictionary:
+	var results_value: Variant = raw.get("results", {})
+	if typeof(results_value) != TYPE_DICTIONARY:
+		return {}
+	var results: Dictionary = (results_value as Dictionary).duplicate(true)
+	if _median_fps(results) <= 0.0:
+		return {}
+	var frames := int(_number(raw.get("frames"), 0.0))
+	if frames <= 0:
+		frames = int(_number(results.get("frames"), 0.0))
+	var summary := {
+		"format_version": REPORT_FORMAT_VERSION,
+		"suite": "phase0_godot_route",
+		"generated_at": Time.get_datetime_string_from_system(true) + "Z",
+		"generated_by": "bench_screen_live",
+		"live": true,
+		"tier": tier,
+		"runs": maxi(runs, 1),
+		"frames": frames,
+		"duration_s": _number(raw.get("duration_s")),
+		"warmup_s": _number(raw.get("warmup_s")),
+		"headless": bool(raw.get("headless", false)),
+		"hardware": raw.get("hardware", {}),
+		"engine": raw.get("engine", {}),
+		"route": str(raw.get("route", "")),
+		"results": results,
+	}
+	if raw.has("city"):
+		summary["city"] = raw["city"]
+	if raw.has("voxel_instances"):
+		summary["voxel_instances"] = raw["voxel_instances"]
+	return summary
+
+func _summary_from_run_file(path: String, tier: String) -> Dictionary:
+	var text := FileAccess.get_file_as_string(path)
+	if text.is_empty():
+		push_error("Live benchmark run did not write a result: " + path)
+		return {}
+	var parsed: Variant = JSON.parse_string(text)
+	if typeof(parsed) != TYPE_DICTIONARY:
+		push_error("Live benchmark result is not a JSON object: " + path)
+		return {}
+	var raw: Dictionary = parsed
+	if raw.has("city") and typeof(raw["city"]) == TYPE_DICTIONARY:
+		var city: Dictionary = raw["city"]
+		if city.has("tier") and str(city["tier"]) != tier:
+			push_error("Live benchmark result tier mismatch: %s != %s" % [str(city["tier"]), tier])
+			return {}
+	return _summary_from_run(raw, tier, 1)
+
+func _run_all(quit_when_done: bool) -> void:
+	if _running:
+		return
+	_running = true
+	var commands := _run_commands(live_duration_s, live_warmup_s)
+	var problem := _preflight(commands)
+	if problem != "":
+		_finish_run(quit_when_done, "preflight_%s" % problem, 0)
+		return
+	var completed := 0
+	var status := "ok"
+	for command_value in commands:
+		var command: Dictionary = command_value
+		var tier := str(command.get("tier", ""))
+		var label := str(command.get("label", tier))
+		_set_run_status("Running %s (%d/%d)..." % [label, completed + 1, commands.size()])
+		await get_tree().process_frame
+		var raw_path := str(command.get("raw_output", ""))
+		DirAccess.remove_absolute(raw_path)
+		var captured: Array = []
+		var args_value: Variant = command.get("args", PackedStringArray())
+		var args: PackedStringArray = args_value if typeof(args_value) == TYPE_PACKED_STRING_ARRAY else PackedStringArray()
+		var exit_code := OS.execute(
+			str(command.get("executable", "")),
+			args,
+			captured,
+			true
+		)
+		for line in captured:
+			print(str(line))
+		if exit_code != 0:
+			status = "run_%s_exit_%d" % [tier, exit_code]
+			break
+		var summary := _summary_from_run_file(raw_path, tier)
+		DirAccess.remove_absolute(raw_path)
+		if summary.is_empty():
+			status = "result_%s" % tier
+			break
+		if not _write_json(str(command.get("summary", "")), summary):
+			status = "write_%s" % tier
+			break
+		completed += 1
+		if not _completed_tiers.has(tier):
+			_completed_tiers.append(tier)
+		_report = _build_report(false, true)
+		_set_export_status(_export_report(_report))
+		_refresh_ui(_report, "Ran %s (%d/%d)." % [label, completed, commands.size()])
+		await get_tree().process_frame
+	if status == "ok" and completed != commands.size():
+		status = "completed_%d" % completed
+	_finish_run(quit_when_done, status, completed)
+
+func _finish_run(quit_when_done: bool, status: String, completed: int) -> void:
+	_running = false
+	_report = _build_report(false, completed > 0)
+	var exported := _export_report(_report)
+	var overall_value: Variant = _report.get("overall", {})
+	var overall: Dictionary = overall_value if typeof(overall_value) == TYPE_DICTIONARY else {}
+	var rating := str(overall.get("rating", "unknown"))
+	var scenes := (_report.get("scenes", []) as Array).size()
+	if status == "ok":
+		_refresh_ui(_report, "Live run complete: %d scenes, rating %s." % [scenes, rating])
+	else:
+		_refresh_ui(_report, "Live run failed: " + status)
+	_set_export_status(exported)
+	if status != "ok":
+		push_error("Benchmark screen live run failed: " + status)
+	print("BENCH_SCREEN status=%s scenes=%d rating=%s mode=run" % [status, scenes, rating])
+	print("BENCH_SCREEN_LIVE status=%s completed=%d output=%s" % [status, completed, output_path])
+	if quit_when_done:
+		get_tree().quit(0 if status == "ok" else 1)
+
+func _set_export_status(exported: bool) -> void:
+	if _export_status != null:
+		_export_status.text = ("Exported to " if exported else "Export failed: ") + output_path
+
+func _set_run_status(text: String) -> void:
+	if _run_status != null:
+		_run_status.text = text
+
+func _refresh_ui(report: Dictionary, run_status: String) -> void:
+	for child in get_children():
+		remove_child(child)
+		child.queue_free()
+	_card_count = 0
+	_export_status = null
+	_run_status = null
+	_run_button = null
+	_build_ui(report)
+	_set_run_status(run_status)
+
+func _write_json(path: String, data: Dictionary) -> bool:
+	var absolute := _global_path(path)
+	var directory_error := DirAccess.make_dir_recursive_absolute(absolute.get_base_dir())
+	if directory_error != OK and directory_error != ERR_ALREADY_EXISTS:
+		push_error("Could not create benchmark output directory: " + absolute.get_base_dir())
+		return false
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		push_error("Could not write benchmark JSON: %s (%s)" % [
+			path,
+			error_string(FileAccess.get_open_error()),
+		])
+		return false
+	file.store_string(JSON.stringify(data, "  "))
+	file.close()
+	return true
 
 func _project_root() -> String:
 	return ProjectSettings.globalize_path("res://").path_join("..").simplify_path()
@@ -194,10 +460,15 @@ func _scene_record(spec: Dictionary, summary: Dictionary, source_file: String, s
 	var hitches := _number(results.get("hitches_16ms", results.get("hitches_33ms")))
 	var sample_count := 0
 	var sample_unit := "runs"
-	if _is_finite_number(summary.get("runs")) and float(summary["runs"]) > 0.0:
+	var frames_value: Variant = summary.get("frames")
+	var live_summary := bool(summary.get("live", false))
+	if live_summary and _is_finite_number(frames_value) and float(frames_value) > 0.0:
+		sample_count = int(float(frames_value))
+		sample_unit = "frames"
+	elif _is_finite_number(summary.get("runs")) and float(summary["runs"]) > 0.0:
 		sample_count = int(float(summary["runs"]))
-	elif _is_finite_number(summary.get("frames")):
-		sample_count = int(float(summary["frames"]))
+	elif _is_finite_number(frames_value) and float(frames_value) > 0.0:
+		sample_count = int(float(frames_value))
 		sample_unit = "frames"
 	var rating := _rating_for(median_fps)
 	return {
@@ -222,17 +493,26 @@ func _fixture_scene(spec: Dictionary, source_file: String) -> Dictionary:
 	var fixture: Dictionary = fixture_value
 	return _scene_record(spec, fixture, source_file, "fixture")
 
+func _load_scene_from_path(spec: Dictionary, path: String, source_file: String) -> Dictionary:
+	var text := FileAccess.get_file_as_string(path)
+	if text.is_empty():
+		return {}
+	var parsed: Variant = JSON.parse_string(text)
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return {}
+	var summary: Dictionary = parsed
+	var source := "live" if bool(summary.get("live", false)) else "summary"
+	var scene := _scene_record(spec, summary, source_file, source)
+	if not scene.is_empty() and _number(scene.get("median_fps")) > 0.0:
+		return scene
+	return {}
+
 func _load_scene(spec: Dictionary) -> Dictionary:
 	var source_file := RESULT_DIR.path_join(str(spec.get("file", "")))
 	var path := _project_root().path_join(source_file)
-	var text := FileAccess.get_file_as_string(path)
-	if not text.is_empty():
-		var parsed: Variant = JSON.parse_string(text)
-		if typeof(parsed) == TYPE_DICTIONARY:
-			var summary: Dictionary = parsed
-			var scene := _scene_record(spec, summary, source_file, "summary")
-			if not scene.is_empty() and _number(scene.get("median_fps")) > 0.0:
-				return scene
+	var scene := _load_scene_from_path(spec, path, source_file)
+	if not scene.is_empty():
+		return scene
 	return _fixture_scene(spec, source_file)
 
 func _overall(scenes: Array) -> Dictionary:
@@ -262,7 +542,13 @@ func _overall(scenes: Array) -> Dictionary:
 		"limiting_scene": str(worst.get("id", "")),
 	}
 
-func _build_report(use_fixtures: bool) -> Dictionary:
+func _scenes_have_live(scenes: Array) -> bool:
+	for value in scenes:
+		if typeof(value) == TYPE_DICTIONARY and str((value as Dictionary).get("source", "")) == "live":
+			return true
+	return false
+
+func _build_report(use_fixtures: bool, live_hint: bool = false) -> Dictionary:
 	var scenes: Array = []
 	for spec_value in SCENE_SPECS:
 		var spec: Dictionary = spec_value
@@ -272,19 +558,30 @@ func _build_report(use_fixtures: bool) -> Dictionary:
 		else:
 			scenes.append(_load_scene(spec))
 	var overall := _overall(scenes)
-	return {
+	var live := live_hint or _scenes_have_live(scenes)
+	var report := {
 		"format_version": REPORT_FORMAT_VERSION,
 		"suite": REPORT_SUITE,
 		"generated_at": Time.get_datetime_string_from_system(true) + "Z",
 		"headless": DisplayServer.get_name() == "headless",
-		"report_only": true,
-		"note": "Report over existing summary JSON; this screen does not run benchmark scenes.",
+		"report_only": not live,
+		"mode": "run" if live else "report",
+		"note": (
+			"Live single-run results produced by this screen; one run per scene."
+			if live
+			else "Report over existing summary JSON; this screen does not run benchmark scenes."
+		),
 		"rating_policy": "overall is the worst scene rating",
 		"rating_thresholds_fps": {"excellent": 60, "good": 45, "playable": 30},
 		"overall": overall,
 		"recommended_settings": _settings_for(str(overall.get("rating", "low"))),
 		"scenes": scenes,
 	}
+	if live:
+		report["live_runs"] = _completed_tiers.duplicate()
+		report["live_duration_s"] = live_duration_s
+		report["live_warmup_s"] = live_warmup_s
+	return report
 
 func _global_path(path: String) -> String:
 	if path.begins_with("user://") or path.begins_with("res://"):
@@ -292,20 +589,9 @@ func _global_path(path: String) -> String:
 	return path
 
 func _export_report(report: Dictionary) -> bool:
-	var absolute := _global_path(output_path)
-	var directory_error := DirAccess.make_dir_recursive_absolute(absolute.get_base_dir())
-	if directory_error != OK and directory_error != ERR_ALREADY_EXISTS:
-		push_error("Could not create benchmark report directory: " + absolute.get_base_dir())
+	if not _write_json(output_path, report):
+		push_error("Benchmark report was not written: " + output_path)
 		return false
-	var file := FileAccess.open(output_path, FileAccess.WRITE)
-	if file == null:
-		push_error("Could not write benchmark report: %s (%s)" % [
-			output_path,
-			error_string(FileAccess.get_open_error()),
-		])
-		return false
-	file.store_string(JSON.stringify(report, "  "))
-	file.close()
 	return true
 
 func _build_ui(report: Dictionary) -> void:
@@ -335,7 +621,7 @@ func _build_ui(report: Dictionary) -> void:
 	root.add_child(title)
 
 	var subtitle := Label.new()
-	subtitle.text = "Early / Mid / Late summary files. Report only: no benchmark scenes are run."
+	subtitle.text = "Early / Mid / Late summaries. Report only until you press Run; live runs need a display and take one run per scene."
 	subtitle.add_theme_color_override("font_color", Color(0.70, 0.75, 0.82))
 	subtitle.add_theme_font_size_override("font_size", 16)
 	root.add_child(subtitle)
@@ -366,11 +652,28 @@ func _build_ui(report: Dictionary) -> void:
 	export_button.pressed.connect(_on_export_pressed)
 	footer.add_child(export_button)
 
+	_run_button = Button.new()
+	_run_button.text = "Run Early / Mid / Late"
+	_run_button.pressed.connect(_on_run_pressed)
+	_run_button.disabled = _running or smoke_mode or DisplayServer.get_name() == "headless"
+	footer.add_child(_run_button)
+
 	_export_status = Label.new()
 	_export_status.text = "Exported to " + output_path
 	_export_status.add_theme_color_override("font_color", Color(0.70, 0.75, 0.82))
 	_export_status.add_theme_font_size_override("font_size", 14)
 	footer.add_child(_export_status)
+
+	_run_status = Label.new()
+	if _running:
+		_run_status.text = "Running live scenes..."
+	elif DisplayServer.get_name() == "headless":
+		_run_status.text = "Live runs need a display."
+	else:
+		_run_status.text = "Report only. Live runs are sequential and are not the 1M gate."
+	_run_status.add_theme_color_override("font_color", Color(0.70, 0.75, 0.82))
+	_run_status.add_theme_font_size_override("font_size", 14)
+	footer.add_child(_run_status)
 
 func _build_overall_panel(report: Dictionary) -> PanelContainer:
 	var overall_value: Variant = report.get("overall", {})
@@ -492,7 +795,12 @@ func _build_scene_card(scene: Dictionary) -> PanelContainer:
 	box.add_child(reason)
 
 	var source := Label.new()
-	var source_kind := "Summary" if str(scene.get("source", "")) == "summary" else "Embedded fixture"
+	var source_kind := "Embedded fixture"
+	match str(scene.get("source", "")):
+		"summary":
+			source_kind = "Summary"
+		"live":
+			source_kind = "Live run"
 	source.text = "%s: %s" % [source_kind, str(scene.get("source_file", ""))]
 	source.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	source.add_theme_color_override("font_color", Color(0.55, 0.60, 0.68))
@@ -517,8 +825,18 @@ func _card_row(key: String, value: String) -> HBoxContainer:
 func _on_export_pressed() -> void:
 	var report := _build_report(false)
 	var exported := _export_report(report)
-	if _export_status != null:
-		_export_status.text = ("Exported to " if exported else "Export failed: ") + output_path
+	_set_export_status(exported)
+
+func _on_run_pressed() -> void:
+	if _running:
+		return
+	var commands := _run_commands(live_duration_s, live_warmup_s)
+	var problem := _preflight(commands)
+	if problem != "":
+		_set_run_status("Cannot run: " + problem)
+		push_error("Cannot run benchmark scenes: " + problem)
+		return
+	_run_all(false)
 
 func _run_smoke(report: Dictionary, exported: bool) -> void:
 	var status := "ok"
@@ -617,6 +935,33 @@ func _run_smoke(report: Dictionary, exported: bool) -> void:
 					elif not exported_scene.has("recommended_settings"):
 						status = "export_scene_settings_%d" % index
 
+	if status == "ok":
+		var commands := _run_commands(30.0, 3.0)
+		if commands.size() != 3:
+			status = "run_commands=%d" % commands.size()
+		for index in range(commands.size()):
+			if status != "ok":
+				break
+			var command: Dictionary = commands[index]
+			var args: PackedStringArray = command.get("args", PackedStringArray())
+			var route_path := str(command.get("route", ""))
+			var args_ok := args.has("--city-tier") and args.has("--route") and args.has("--output")
+			args_ok = args_ok and args.has("--duration") and args.has("--warmup")
+			if not args_ok:
+				status = "run_args_%d" % index
+			elif str(command.get("tier", "")) != expected_ids[index]:
+				status = "run_tier_%d" % index
+			elif not FileAccess.file_exists(route_path):
+				status = "run_route_%d" % index
+			else:
+				print("BENCH_SCREEN_RUN tier=%s scene=%s route=%s output=%s duration=%.1f warmup=%.1f" % [
+					str(command.get("tier", "")),
+					BENCHMARK_SCENE,
+					route_path,
+					str(command.get("raw_output", "")),
+					float(command.get("duration_s", 0.0)),
+					float(command.get("warmup_s", 0.0)),
+				])
 	if scenes.size() == 3:
 		print("BENCH_SCREEN_VALUES early=%.1f/%s mid=%.1f/%s late=%.1f/%s" % [
 			_number((scenes[0] as Dictionary).get("median_fps")),
@@ -626,7 +971,7 @@ func _run_smoke(report: Dictionary, exported: bool) -> void:
 			_number((scenes[2] as Dictionary).get("median_fps")),
 			str((scenes[2] as Dictionary).get("rating", "")),
 		])
-	print("BENCH_SCREEN status=%s scenes=%d rating=%s" % [
+	print("BENCH_SCREEN status=%s scenes=%d rating=%s mode=smoke" % [
 		status,
 		scenes.size(),
 		str(overall.get("rating", "unknown")),
