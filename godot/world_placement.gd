@@ -1808,12 +1808,12 @@ func _update_hud() -> void:
 		if bool(structure.get("valid", false)):
 			structure_text = i18n.t("base.ui.hud.structure_valid", {
 				"system": str(structure.get("system_name", "?")),
-				"stories": int(structure.get("stories", 0)),
-				"max_stories": int(structure.get("effective_max_stories", 0)),
-				"span": "%.1f" % float(structure.get("max_span_m", 0.0)),
-				"max_span": "%.1f" % float(structure.get("effective_max_span_m", 0.0)),
-				"foundation": "%.1f" % float(structure.get("foundation_depth_m", 0.0)),
-				"required": "%.1f" % float(structure.get("required_foundation_m", 0.0)),
+				"stories": i18n.format_int(int(structure.get("stories", 0))),
+				"max_stories": i18n.format_int(int(structure.get("effective_max_stories", 0))),
+				"span": i18n.format_float(float(structure.get("max_span_m", 0.0)), 1),
+				"max_span": i18n.format_float(float(structure.get("effective_max_span_m", 0.0)), 1),
+				"foundation": i18n.format_float(float(structure.get("foundation_depth_m", 0.0)), 1),
+				"required": i18n.format_float(float(structure.get("required_foundation_m", 0.0)), 1),
 			})
 		else:
 			structure_text = i18n.t("base.ui.hud.structure_invalid", {
@@ -1828,13 +1828,16 @@ func _update_hud() -> void:
 		var footprint: PackedFloat32Array = selected.get("footprint", PackedFloat32Array())
 		var footprint_text := "? × ? m"
 		if footprint.size() == 2:
-			footprint_text = "%.0f × %.0f m" % [footprint[0], footprint[1]]
+			footprint_text = "%s × %s m" % [
+				i18n.format_float(footprint[0]),
+				i18n.format_float(footprint[1]),
+			]
 		selected_line = i18n.t("base.ui.hud.selected", {
 			"id": selected_id,
 			"name": str(selected.get("name", "?")),
-			"rooms": int(selected_info.get("rooms", 0)),
-			"capacity": int(selected.get("resident_capacity", 0)),
-			"jobs": int(selected.get("job_slots", 0)),
+			"rooms": i18n.format_int(int(selected_info.get("rooms", 0))),
+			"capacity": i18n.format_int(int(selected.get("resident_capacity", 0))),
+			"jobs": i18n.format_int(int(selected.get("job_slots", 0))),
 			"footprint": footprint_text,
 		})
 		var center: PackedFloat32Array = selected.get("center", PackedFloat32Array())
@@ -1864,7 +1867,7 @@ func _update_hud() -> void:
 		if bool(selected_structure.get("present", false)):
 			selected_line += i18n.t("base.ui.hud.selected_stories", {
 				"system": str(selected_structure.get("system_name", "?")),
-				"stories": int(selected_structure.get("stories", 0)),
+				"stories": i18n.format_int(int(selected_structure.get("stories", 0))),
 			})
 		var named: Dictionary = core.named_citizens_for(SEED, selected_id)
 		if int(named.get("count", 0)) > 0:
@@ -1886,8 +1889,8 @@ func _update_hud() -> void:
 			i18n.t("base.ui.hud.mayor.title", {"seed": SEED}),
 			i18n.t("base.ui.hud.blueprint_mayor", {
 				"name": blueprint_name,
-				"rooms": rooms,
-				"capacity": capacity,
+				"rooms": i18n.format_int(rooms),
+				"capacity": i18n.format_int(capacity),
 			}),
 			structure_text,
 			i18n.t("base.ui.help.move"),
@@ -1913,8 +1916,8 @@ func _update_hud() -> void:
 			age_text = i18n.t("base.ui.hud.age_next", {
 				"age": str(progression.get("age", "?")),
 				"next": next_age,
-				"threshold": int(progression.get("next_threshold", 0)),
-				"progress": roundi(float(progression.get("progress", 0.0)) * 100.0),
+				"threshold": i18n.format_int(int(progression.get("next_threshold", 0))),
+				"progress": i18n.format_int(roundi(float(progression.get("progress", 0.0)) * 100.0)),
 			})
 	var research: Dictionary = core.research_state(SEED)
 	var research_text := "—"
@@ -3064,6 +3067,7 @@ func _run_scene_smoke() -> void:
 	var advisor_detail_i18n_ok := false
 	var hud_i18n_ok := false
 	var modal_i18n_ok := false
+	var number_i18n_ok := false
 	var hud_body_i18n_ok := false
 	var hud_status_i18n_ok := false
 	var dashboard_body_i18n_ok := false
@@ -3708,6 +3712,10 @@ func _run_scene_smoke() -> void:
 				i18n.set_locale("en")
 				_cycle_industry()
 				modal_i18n_ok = modal_i18n_ok and modal_label.text.contains("Select a building first")
+				i18n.set_locale("de")
+				number_i18n_ok = i18n.format_int(1000) == "1.000" and i18n.format_float(1234.5, 1) == "1.234,5"
+				i18n.set_locale("en")
+				number_i18n_ok = number_i18n_ok and i18n.format_int(1000) == "1,000" and i18n.format_float(1234.5, 1) == "1,234.5"
 				selected_id = saved_selected
 				_set_modal("", false)
 				var balance_before_loan := float(economy_after.get("balance", 0.0))
@@ -3919,7 +3927,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -3960,6 +3968,7 @@ func _run_scene_smoke() -> void:
 		"ok" if advisor_i18n_ok else "failed",
 		"ok" if advisor_detail_i18n_ok else "failed",
 		"ok" if modal_i18n_ok else "failed",
+		"ok" if number_i18n_ok else "failed",
 		"ok" if traffic_ok else "failed",
 		"ok" if select_ok else "failed",
 		"ok" if enter_ok else "failed",

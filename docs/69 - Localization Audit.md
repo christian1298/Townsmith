@@ -43,6 +43,8 @@ Facts about the current table:
 
 ## 2. Hard-coded player-facing strings
 
+Number formatting now has `WorldI18n.format_int` / `format_float`: EN `1,234.5`, DE `1.234,5`. HUD/dashboard use is partial; ids, coordinates, and seeded values stay raw. Smoke checks `number_i18n=ok`.
+
 The largest gap is `godot/world_placement.gd`. Almost every string in the Mayor/Architect HUD, dashboard shell, modal line, and content label is a literal. The Rust dashboard and advisor are a second, separate gap: they cannot be fixed in GDScript alone.
 
 ### 2.1 HUD, status, and help
