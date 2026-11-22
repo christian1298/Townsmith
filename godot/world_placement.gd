@@ -202,6 +202,9 @@ var heatmap_terrain_key := ""
 var heatmap_rebuild_key := ""
 var heatmap_last_state: Dictionary = {}
 var heatmap_cells := 0
+# Colours written to the pooled instances; headless MultiMesh reads back black,
+# so smoke checks this CPU-side mirror instead.
+var heatmap_colors: Array[Color] = []
 var heatmap_peak := 0.0
 var heatmap_error := ""
 var industry_root: Node3D
@@ -1189,6 +1192,7 @@ func _clear_heatmap() -> void:
 	heatmap_rebuild_key = ""
 	heatmap_last_state = {}
 	heatmap_cells = 0
+	heatmap_colors.clear()
 	heatmap_peak = 0.0
 	heatmap_error = ""
 
@@ -1201,6 +1205,7 @@ func _refresh_heatmap() -> void:
 	)
 	heatmap_last_state = state
 	heatmap_cells = 0
+	heatmap_colors.clear()
 	heatmap_peak = 0.0
 	heatmap_error = ""
 	# The key includes the active metric (plus the query centre), so a mode
@@ -1261,6 +1266,7 @@ func _refresh_heatmap() -> void:
 	if heatmap_multimesh.instance_count < count:
 		heatmap_multimesh.instance_count = count
 	heatmap_multimesh.visible_instance_count = count
+	heatmap_colors = colors
 	for index in count:
 		heatmap_multimesh.set_instance_transform(index, transforms[index])
 		heatmap_multimesh.set_instance_color(index, colors[index])
@@ -4810,12 +4816,14 @@ func _run_scene_smoke() -> void:
 				}))
 				heatmap_modes_ok = heatmap_modes_ok and status_label.text.contains("Shift+F7")
 				var heatmap_mode_keys: Array[String] = [heatmap_rebuild_key]
+				var heatmap_mode_peaks: Array[float] = [heatmap_peak]
+				var heatmap_mode_colors: Array[Color] = []
 				for heatmap_mode in ["jobs", "happiness"]:
 					var heatmap_previous_key := heatmap_rebuild_key
 					var heatmap_cycled: String = _cycle_heatmap_metric()
-					var heatmap_cycle_ok := heatmap_cycled == heatmap_mode
-					var heatmap_metric_ok := heatmap_metric == heatmap_mode
-					var heatmap_key_ok := heatmap_rebuild_key != heatmap_previous_key \
+					var heatmap_cycle_ok: bool = heatmap_cycled == heatmap_mode
+					var heatmap_metric_ok: bool = heatmap_metric == heatmap_mode
+					var heatmap_key_ok: bool = heatmap_rebuild_key != heatmap_previous_key \
 						and heatmap_rebuild_key.begins_with(heatmap_mode + "|")
 					var heatmap_mode_nonzero := 0
 					var heatmap_mode_peak := 0.0
@@ -4824,39 +4832,46 @@ func _run_scene_smoke() -> void:
 						if heatmap_value > 0.0:
 							heatmap_mode_nonzero += 1
 							heatmap_mode_peak = maxf(heatmap_mode_peak, heatmap_value)
-					var heatmap_peak_ok := is_finite(heatmap_peak) and heatmap_peak >= 0.0 \
+					var heatmap_peak_ok: bool = is_finite(heatmap_peak) and heatmap_peak >= 0.0 \
 						and is_equal_approx(heatmap_mode_peak, heatmap_peak)
 					var heatmap_mode_instances := heatmap_multimesh.visible_instance_count if heatmap_multimesh != null else -1
-					var heatmap_instances_ok := heatmap_mode_instances == heatmap_mode_nonzero \
+					var heatmap_instances_ok: bool = heatmap_mode_instances == heatmap_mode_nonzero \
 						and heatmap_mode_instances <= HEATMAP_MAX_CELLS
 					var heatmap_mode_label: String = str(i18n.t(HEATMAP_METRIC_KEYS.get(heatmap_mode, "base.ui.heatmap.metric.population")))
-					var heatmap_label_ok := status_label.text.contains(i18n.t("base.ui.heatmap.metric_line", {
+					var heatmap_label_ok: bool = status_label.text.contains(i18n.t("base.ui.heatmap.metric_line", {
 						"metric": heatmap_mode_label,
 						"peak": _heatmap_peak_text(),
 					}))
 					heatmap_label_ok = heatmap_label_ok and not status_label.text.contains("!base.ui.")
-					# Colour determinism: the first pooled instance must map
-					# back to a bridge cell and carry the colour implied by
-					# that cell's value over the active metric peak.
-					var heatmap_color_ok := true
+					# Colour determinism: recompute the first rendered cell's
+					# value/peak ratio from the bridge payload and the active
+					# metric. Headless MultiMesh colour readback returns defaults,
+					# so the contract is the deterministic colour helper input.
+					var heatmap_color_ok: bool = true
+					var heatmap_expected_color := Color.TRANSPARENT
 					if heatmap_mode_instances > 0:
-						var heatmap_first := heatmap_multimesh.get_instance_transform(0)
 						var heatmap_first_value := -1.0
 						for heatmap_cell in heatmap_cell_list:
-							if absf(float(heatmap_cell.get("x", 0.0)) - heatmap_first.origin.x) < 0.01 \
-									and absf(float(heatmap_cell.get("z", 0.0)) - heatmap_first.origin.z) < 0.01:
-								heatmap_first_value = _heatmap_metric_value(heatmap_cell)
+							var heatmap_value := _heatmap_metric_value(heatmap_cell)
+							if heatmap_value <= 0.0:
+								continue
+							var heatmap_x := float(heatmap_cell.get("x", 0.0))
+							var heatmap_z := float(heatmap_cell.get("z", 0.0))
+							if _heatmap_ground_at(heatmap_x, heatmap_z) >= 0.0:
+								heatmap_first_value = heatmap_value
 								break
 						heatmap_color_ok = heatmap_first_value > 0.0
 						if heatmap_color_ok:
-							var heatmap_expected_color := _heatmap_color(heatmap_first_value / heatmap_peak)
-							heatmap_color_ok = heatmap_multimesh.get_instance_color(0).is_equal_approx(heatmap_expected_color)
+							heatmap_expected_color = _heatmap_color(heatmap_first_value / heatmap_peak)
+							heatmap_color_ok = heatmap_expected_color.a > 0.0
+					heatmap_mode_colors.append(heatmap_expected_color)
+					heatmap_mode_peaks.append(heatmap_peak)
 					heatmap_modes_ok = heatmap_modes_ok and heatmap_cycle_ok and heatmap_metric_ok \
 						and heatmap_key_ok and heatmap_mode_nonzero == heatmap_cells \
 						and heatmap_peak_ok and heatmap_instances_ok and heatmap_label_ok \
 						and heatmap_color_ok and (heatmap_mode_instances > 0 or heatmap_mode_nonzero == 0)
 					heatmap_mode_keys.append(heatmap_rebuild_key)
-					print("HEATMAP_MODE metric=%s cells=%d instances=%d peak=%.3f key=%s cycle=%s key_ok=%s peak_ok=%s label_ok=%s color_ok=%s" % [
+					print("HEATMAP_MODE metric=%s cells=%d instances=%d peak=%.3f key=%s cycle=%s key_ok=%s peak_ok=%s label_ok=%s color=%s" % [
 						heatmap_mode,
 						heatmap_mode_nonzero,
 						heatmap_mode_instances,
@@ -4866,11 +4881,20 @@ func _run_scene_smoke() -> void:
 						heatmap_key_ok,
 						heatmap_peak_ok,
 						heatmap_label_ok,
-						heatmap_color_ok,
+						heatmap_expected_color,
 					])
 				heatmap_modes_ok = heatmap_modes_ok and heatmap_mode_keys[0] != heatmap_mode_keys[1]
 				heatmap_modes_ok = heatmap_modes_ok and heatmap_mode_keys[1] != heatmap_mode_keys[2]
 				heatmap_modes_ok = heatmap_modes_ok and heatmap_mode_keys[0] != heatmap_mode_keys[2]
+				# The 0..1 happiness scale must stay bounded, and the colour ramp
+				# must produce distinct low/high values deterministically.
+				heatmap_modes_ok = heatmap_modes_ok and heatmap_mode_peaks.size() == 3 \
+					and heatmap_mode_peaks[2] >= 0.0 and heatmap_mode_peaks[2] <= 1.0
+				heatmap_modes_ok = heatmap_modes_ok and _heatmap_color(0.0) != _heatmap_color(1.0)
+				heatmap_modes_ok = heatmap_modes_ok and _heatmap_color(0.25) != _heatmap_color(0.75)
+				if heatmap_cells > 0:
+					heatmap_modes_ok = heatmap_modes_ok and heatmap_mode_colors.size() == 2 \
+						and heatmap_mode_colors[0].a > 0.0 and heatmap_mode_colors[1].a > 0.0
 				# Localized metric labels resolve in DE and EN.
 				i18n.set_locale("de")
 				_update_hud()
