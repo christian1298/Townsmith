@@ -112,6 +112,15 @@ open, roads, nodes, edges, components, connected,
 total_length_m, checksum
 ```
 
+`route_preview(seed, from_x, from_z, to_x, to_z)` returns a cached road polyline:
+
+```text
+ok, seed, from, to, points, length_m, time_s,
+cached, cache_hits, cache_misses, checksum
+```
+
+The bridge-owned LRU is keyed by `(seed, graph checksum)`, so a road edit invalidates it. `route_cache_state()` reports entries/capacity/hits/misses; `route_cache_clear()` drops the state and counters. Disconnected pairs return `route_unavailable` and are not cached.
+
 The graph is derived state and is not saved. `population_tick` rebuilds it from the live road store and passes it into the household tick.
 
 The world scene:

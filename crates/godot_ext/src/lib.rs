@@ -34,11 +34,11 @@ use core_city::{
     LifecycleTick, Lot, LotError, LotRequest, LotStore, MaterializationBudget,
     MaterializationSelection, MaterializedCitizen, NamedCitizens, NamedSave, Placement,
     PlacementError, PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph,
-    RoadRequest, RoadSegment, RoadStore, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore,
-    ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree, Trade,
-    TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace,
-    Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT,
-    MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    RoadRequest, RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind, ServiceReport,
+    ServiceStore, ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore,
+    TechTree, Trade, TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport,
+    UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS,
+    MAX_TOTAL_DEBT, MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -548,6 +548,7 @@ struct TownsmithCore {
     utilities: Mutex<Option<UtilityStore>>,
     services: Mutex<Option<ServiceStore>>,
     research: Mutex<Option<ResearchStore>>,
+    route_preview: Mutex<Option<RoutePreviewState>>,
     terrain_deltas: Arc<RwLock<DeltaStore>>,
     terrain_seed: Mutex<Option<u64>>,
 }
@@ -570,6 +571,7 @@ impl Default for TownsmithCore {
             utilities: Mutex::new(None),
             services: Mutex::new(None),
             research: Mutex::new(None),
+            route_preview: Mutex::new(None),
             terrain_deltas: Arc::new(RwLock::new(DeltaStore::new())),
             terrain_seed: Mutex::new(None),
         }
@@ -1245,6 +1247,144 @@ impl TownsmithCore {
             Ok(graph) => traffic_payload(&graph, true),
             Err(error) => placement_simple_error("traffic_failed", error.to_string()),
         }
+    }
+
+    /// Read-only route preview between two world points.
+    #[func]
+    fn route_preview(
+        &self,
+        seed: i64,
+        from_x: f64,
+        from_z: f64,
+        to_x: f64,
+        to_z: f64,
+    ) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "traffic seed must be non-negative");
+        };
+        let from = [from_x as f32, from_z as f32];
+        let to = [to_x as f32, to_z as f32];
+        let limit = MAX_WORLD_COORD_M as f64;
+        for value in [from_x, from_z, to_x, to_z] {
+            if !value.is_finite() || value.abs() > limit {
+                return placement_simple_error(
+                    "coordinate_out_of_range",
+                    "route coordinates must be finite and within the world bounds",
+                );
+            }
+        }
+        let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        if world.as_ref().is_some_and(|store| store.seed != seed) {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the world belongs to a different seed",
+            );
+        }
+        let roads = self.roads.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(store) = roads.as_ref() else {
+            return placement_simple_error("route_unavailable", "no road store is open");
+        };
+        if store.seed != seed {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the road store belongs to a different seed",
+            );
+        }
+        let graph = match RoadGraph::build(&store.roads) {
+            Ok(graph) => graph,
+            Err(error) => return placement_simple_error("traffic_failed", error.to_string()),
+        };
+        let graph_checksum = graph.checksum();
+        let mut guard = self
+            .route_preview
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if guard
+            .as_ref()
+            .is_none_or(|state| state.seed != seed || state.graph_checksum != graph_checksum)
+        {
+            *guard = Some(RoutePreviewState {
+                seed,
+                graph_checksum,
+                cache: RouteCache::new(core_city::DEFAULT_ROUTE_CACHE_CAPACITY),
+            });
+        }
+        let state = guard.as_mut().expect("route preview state");
+        match route_preview_data(state, &graph, from, to) {
+            Ok(data) => {
+                let mut points = PackedVector2Array::new();
+                for point in &data.points {
+                    points.push(Vector2::new(point[0], point[1]));
+                }
+                let mut result = VarDictionary::new();
+                result.set("ok", true);
+                result.set("seed", seed as i64);
+                result.set("from", &PackedFloat32Array::from(from));
+                result.set("to", &PackedFloat32Array::from(to));
+                result.set("points", &points);
+                result.set("length_m", f64::from(data.length_m));
+                result.set("time_s", f64::from(data.time_s));
+                result.set("cached", data.cached);
+                result.set("cache_hits", data.hits as i64);
+                result.set("cache_misses", data.misses as i64);
+                result.set(
+                    "checksum",
+                    &GString::from(&format!("{:016x}", data.checksum)),
+                );
+                result
+            }
+            Err(code) => placement_simple_error(code, "no route connects the two points"),
+        }
+    }
+
+    /// Route cache counters and state.
+    #[func]
+    fn route_cache_state(&self) -> VarDictionary {
+        let guard = self
+            .route_preview
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        match guard.as_ref() {
+            Some(state) => {
+                result.set("open", true);
+                result.set("seed", state.seed as i64);
+                result.set(
+                    "graph_checksum",
+                    &GString::from(&format!("{:016x}", state.graph_checksum)),
+                );
+                result.set("entries", state.cache.len() as i64);
+                result.set("capacity", state.cache.capacity() as i64);
+                result.set("hits", state.cache.hits() as i64);
+                result.set("misses", state.cache.misses() as i64);
+                result.set(
+                    "checksum",
+                    &GString::from(&format!("{:016x}", state.cache.checksum())),
+                );
+            }
+            None => {
+                result.set("open", false);
+                result.set("seed", 0);
+                result.set("graph_checksum", &GString::from("0000000000000000"));
+                result.set("entries", 0);
+                result.set("capacity", 0);
+                result.set("hits", 0);
+                result.set("misses", 0);
+                result.set("checksum", &GString::from("0000000000000000"));
+            }
+        }
+        result
+    }
+
+    /// Drop the route preview cache and its counters.
+    #[func]
+    fn route_cache_clear(&self) -> bool {
+        *self
+            .route_preview
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        true
     }
 
     /// Validate a straight road without mutating the world.
@@ -7383,6 +7523,44 @@ fn materialization_payload_to_dictionary(payload: &MaterializationPayload) -> Va
     result
 }
 
+struct RoutePreviewState {
+    seed: u64,
+    graph_checksum: u64,
+    cache: RouteCache,
+}
+
+struct RoutePreviewData {
+    points: Vec<[f32; 2]>,
+    length_m: f32,
+    time_s: f32,
+    cached: bool,
+    hits: u64,
+    misses: u64,
+    checksum: u64,
+}
+
+fn route_preview_data(
+    state: &mut RoutePreviewState,
+    graph: &RoadGraph,
+    from: [f32; 2],
+    to: [f32; 2],
+) -> Result<RoutePreviewData, &'static str> {
+    let cached = state.cache.get(from, to).is_some();
+    let route = state
+        .cache
+        .get_or_build(graph, from, to)
+        .ok_or("route_unavailable")?;
+    Ok(RoutePreviewData {
+        points: route.points().to_vec(),
+        length_m: route.length_m(),
+        time_s: route.time_s(),
+        cached,
+        hits: state.cache.hits(),
+        misses: state.cache.misses(),
+        checksum: state.cache.checksum(),
+    })
+}
+
 fn attach_roads(json: &str, store: &RoadStore) -> Result<String, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(json).map_err(|error| error.to_string())?;
@@ -9048,6 +9226,32 @@ mod tests {
                     .expect("starter structure");
             }
         }
+    }
+
+    #[test]
+    fn route_preview_reuses_the_cache() {
+        let graph = RoadGraph::build(&[RoadSegment {
+            id: 1,
+            start: [0, 0],
+            end: [100, 0],
+            width_m: 6,
+        }])
+        .expect("graph");
+        let mut state = RoutePreviewState {
+            seed: 2026,
+            graph_checksum: graph.checksum(),
+            cache: RouteCache::new(8),
+        };
+        let first =
+            route_preview_data(&mut state, &graph, [10.0, 0.0], [90.0, 0.0]).expect("first route");
+        assert!(!first.cached);
+        assert_eq!(first.misses, 1);
+        assert!(!first.points.is_empty());
+        let second =
+            route_preview_data(&mut state, &graph, [10.0, 0.0], [90.0, 0.0]).expect("second route");
+        assert!(second.cached);
+        assert_eq!(second.hits, 1);
+        assert_eq!(first.checksum, second.checksum);
     }
 
     #[test]

@@ -98,6 +98,8 @@ A pinned citizen outside the active cap replaces the furthest non-pinned citizen
 
 The call is read-only: it does not mutate the live named pool, population, save state, or checksums. Detailed is a prefix of active. The bridge test checks ordering, counts, names, and the prefix invariant.
 
+`route_preview`/`route_cache_state` expose the road polyline and bounded LRU described in [[56 - Traffic]]; routes are not yet attached to materialized citizens or movement.
+
 ### Stateful bridge scheduler
 
 `materialization_step(seed, center_x, center_z, inner_radius_m, outer_radius_m, detailed_radius_m, pinned_id)` keeps the previous selection in `TownsmithCore.materialization`:
