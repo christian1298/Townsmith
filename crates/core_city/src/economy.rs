@@ -121,6 +121,64 @@ pub struct Economy {
     pub loans: Vec<Loan>,
 }
 
+/// Daily operating upkeep totals for utility and civic service sites.
+///
+/// The bridge builds this from
+/// [`UtilityStore::total_upkeep_per_day`](crate::utilities::UtilityStore::total_upkeep_per_day)
+/// and
+/// [`ServiceStore::total_upkeep_per_day`](crate::services::ServiceStore::total_upkeep_per_day)
+/// so the treasury charges the real per-kind and per-tier catalog costs
+/// instead of one aggregate per-site rate. Totals must be finite and
+/// non-negative; [`InfrastructureCosts::new`] is the only public constructor.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct InfrastructureCosts {
+    utility_per_day: f64,
+    service_per_day: f64,
+}
+
+impl InfrastructureCosts {
+    /// No utility or civic service upkeep.
+    pub const ZERO: Self = Self {
+        utility_per_day: 0.0,
+        service_per_day: 0.0,
+    };
+
+    /// Validate daily upkeep totals from the utility and service stores.
+    ///
+    /// Negative and non-finite totals are rejected so a corrupt store cannot
+    /// turn upkeep into income or poison the treasury with NaN.
+    pub fn new(utility_per_day: f64, service_per_day: f64) -> Result<Self, EconomyError> {
+        if !utility_per_day.is_finite() || utility_per_day < 0.0 {
+            return Err(EconomyError::Invalid("utility infrastructure upkeep"));
+        }
+        if !service_per_day.is_finite() || service_per_day < 0.0 {
+            return Err(EconomyError::Invalid("service infrastructure upkeep"));
+        }
+        Ok(Self {
+            utility_per_day,
+            service_per_day,
+        })
+    }
+
+    /// Utility upkeep per game day.
+    #[must_use]
+    pub fn utility_per_day(self) -> f64 {
+        self.utility_per_day
+    }
+
+    /// Civic service upkeep per game day.
+    #[must_use]
+    pub fn service_per_day(self) -> f64 {
+        self.service_per_day
+    }
+
+    /// Combined utility and civic service upkeep per game day.
+    #[must_use]
+    pub fn total_per_day(self) -> f64 {
+        self.utility_per_day + self.service_per_day
+    }
+}
+
 /// Result of one economy tick.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EconomyTick {
@@ -296,6 +354,11 @@ impl Economy {
 
     /// Advance taxes, wages, building and infrastructure upkeep, and loan
     /// service by `dt_s` seconds.
+    ///
+    /// This wrapper charges the configured per-site rates. Callers that have
+    /// the real catalog totals from the utility and service stores should use
+    /// [`Self::tick_with_infrastructure_costs`] to charge the actual per-kind
+    /// and per-tier upkeep.
     pub fn tick_with_infrastructure(
         &mut self,
         dt_s: f64,
@@ -304,6 +367,24 @@ impl Economy {
         completed_buildings: u64,
         utility_sites: u64,
         service_sites: u64,
+    ) -> EconomyTick {
+        let costs = self.infrastructure_costs(utility_sites, service_sites);
+        self.tick_with_infrastructure_costs(dt_s, population, employed, completed_buildings, costs)
+    }
+
+    /// Advance taxes, wages, building upkeep, explicit infrastructure costs,
+    /// and loan service by `dt_s` seconds.
+    ///
+    /// `costs` carries the validated daily utility and civic service upkeep
+    /// from the stores, so per-kind and per-tier catalog costs are charged
+    /// instead of one aggregate rate per site.
+    pub fn tick_with_infrastructure_costs(
+        &mut self,
+        dt_s: f64,
+        population: u64,
+        employed: u64,
+        completed_buildings: u64,
+        costs: InfrastructureCosts,
     ) -> EconomyTick {
         let dt = if dt_s.is_finite() {
             dt_s.clamp(0.0, MAX_ECONOMY_TICK_SECONDS)
@@ -314,8 +395,7 @@ impl Economy {
         let income = (population as f64 * self.tax_per_resident_per_day
             + employed as f64 * self.business_tax_per_job_per_day)
             * days;
-        let infrastructure =
-            self.infrastructure_upkeep_per_day(utility_sites, service_sites) * days;
+        let infrastructure = costs.total_per_day() * days;
         let operating = (employed as f64 * WAGE_PER_WORKER_PER_DAY
             + completed_buildings as f64 * self.upkeep_per_building_per_day)
             * days
@@ -353,6 +433,25 @@ impl Economy {
             + service_sites as f64 * self.service_upkeep_per_site_per_day
     }
 
+    /// Build validated infrastructure costs from site counts and configured
+    /// per-site rates.
+    ///
+    /// Counts and the clamped per-site rates can only produce finite,
+    /// non-negative totals, so this conversion is infallible.
+    #[must_use]
+    pub fn infrastructure_costs(
+        &self,
+        utility_sites: u64,
+        service_sites: u64,
+    ) -> InfrastructureCosts {
+        let utility = utility_sites as f64
+            * clamp_infrastructure_upkeep(self.utility_upkeep_per_site_per_day);
+        let service = service_sites as f64
+            * clamp_infrastructure_upkeep(self.service_upkeep_per_site_per_day);
+        InfrastructureCosts::new(utility, service)
+            .expect("clamped infrastructure rates and site counts are finite and non-negative")
+    }
+
     /// Net cash flow per game day at current rates.
     ///
     /// This is the legacy path: it charges no utility or civic service upkeep.
@@ -363,6 +462,10 @@ impl Economy {
     }
 
     /// Net cash flow per game day including utility and civic service upkeep.
+    ///
+    /// This wrapper charges the configured per-site rates. Callers with the
+    /// real catalog totals should use
+    /// [`Self::daily_net_with_infrastructure_costs`].
     #[must_use]
     pub fn daily_net_with_infrastructure(
         &self,
@@ -372,11 +475,28 @@ impl Economy {
         utility_sites: u64,
         service_sites: u64,
     ) -> f64 {
+        self.daily_net_with_infrastructure_costs(
+            population,
+            employed,
+            completed_buildings,
+            self.infrastructure_costs(utility_sites, service_sites),
+        )
+    }
+
+    /// Net cash flow per game day including explicit infrastructure costs.
+    #[must_use]
+    pub fn daily_net_with_infrastructure_costs(
+        &self,
+        population: u64,
+        employed: u64,
+        completed_buildings: u64,
+        costs: InfrastructureCosts,
+    ) -> f64 {
         let income = population as f64 * self.tax_per_resident_per_day
             + employed as f64 * self.business_tax_per_job_per_day;
         let expenses = employed as f64 * WAGE_PER_WORKER_PER_DAY
             + completed_buildings as f64 * self.upkeep_per_building_per_day
-            + self.infrastructure_upkeep_per_day(utility_sites, service_sites)
+            + costs.total_per_day()
             + self.loan_interest_per_day()
             + self.loan_payment_per_day();
         income - expenses
@@ -576,6 +696,68 @@ mod tests {
         assert!((tick.infrastructure - expected).abs() < 0.001);
         assert!((tick.expenses - (1700.0 + expected)).abs() < 0.001);
         assert!((tick.balance - (STARTING_BALANCE + 1120.0 - 1700.0 - expected)).abs() < 0.001);
+    }
+
+    #[test]
+    fn explicit_infrastructure_costs_change_the_balance() {
+        let mut economy = Economy::new(2026);
+        let costs = InfrastructureCosts::new(386.0, 493.0).expect("costs");
+        let tick = economy.tick_with_infrastructure_costs(DAY_SECONDS, 100, 80, 20, costs);
+        let expected = 879.0;
+        assert!((tick.infrastructure - expected).abs() < 0.001);
+        assert!((tick.expenses - (1700.0 + expected)).abs() < 0.001);
+        assert!((tick.balance - (STARTING_BALANCE + 1120.0 - 1700.0 - expected)).abs() < 0.001);
+        assert!((tick.days_elapsed - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn empty_infrastructure_costs_charge_nothing() {
+        let mut legacy = Economy::new(2026);
+        let mut explicit = Economy::new(2026);
+        let left = legacy.tick(DAY_SECONDS, 100, 80, 20);
+        let right = explicit.tick_with_infrastructure_costs(
+            DAY_SECONDS,
+            100,
+            80,
+            20,
+            InfrastructureCosts::ZERO,
+        );
+        assert_eq!(left, right);
+        assert_eq!(left.infrastructure, 0.0);
+    }
+
+    #[test]
+    fn invalid_infrastructure_costs_are_rejected() {
+        assert!(InfrastructureCosts::new(-1.0, 0.0).is_err());
+        assert!(InfrastructureCosts::new(0.0, -1.0).is_err());
+        assert!(InfrastructureCosts::new(f64::NAN, 0.0).is_err());
+        assert!(InfrastructureCosts::new(0.0, f64::NAN).is_err());
+        assert!(InfrastructureCosts::new(f64::INFINITY, 0.0).is_err());
+        assert!(InfrastructureCosts::new(0.0, f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn count_based_infrastructure_matches_explicit_costs() {
+        let mut counted = Economy::new(2026);
+        let mut explicit = Economy::new(2026);
+        let costs = counted.infrastructure_costs(10, 5);
+        assert!((costs.total_per_day() - 45.0).abs() < 0.001);
+        let left = counted.tick_with_infrastructure(DAY_SECONDS, 100, 80, 20, 10, 5);
+        let right = explicit.tick_with_infrastructure_costs(DAY_SECONDS, 100, 80, 20, costs);
+        assert_eq!(left, right);
+        let count_net = counted.daily_net_with_infrastructure(100, 80, 20, 10, 5);
+        let cost_net = counted.daily_net_with_infrastructure_costs(100, 80, 20, costs);
+        assert!((count_net - cost_net).abs() < 0.001);
+    }
+
+    #[test]
+    fn custom_rates_reach_the_count_based_costs() {
+        let mut economy = Economy::new(2026);
+        economy.set_infrastructure_upkeep(7.0, 11.0);
+        let costs = economy.infrastructure_costs(10, 5);
+        assert!((costs.utility_per_day() - 70.0).abs() < 0.001);
+        assert!((costs.service_per_day() - 55.0).abs() < 0.001);
+        assert!((costs.total_per_day() - 125.0).abs() < 0.001);
     }
 
     #[test]

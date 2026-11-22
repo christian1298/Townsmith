@@ -31,7 +31,7 @@ use core_city::{
     advise, diff_selection, evaluate_tutorial, normalize_rotation, starter, summarize,
     AdvisorInput, AdvisorReport, Age, AgeState, CityLayout, CityRuntime, CitySummary, CityTier,
     ConstructionSite, ConstructionStore, Economy, Home, Household, IndustryKind, IndustryStore,
-    LifecycleTick, Lot, LotError, LotRequest, LotStore, MaterializationBudget,
+    InfrastructureCosts, LifecycleTick, Lot, LotError, LotRequest, LotStore, MaterializationBudget,
     MaterializationSelection, MaterializedCitizen, NamedCitizens, NamedSave, Placement,
     PlacementError, PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph,
     RoadRequest, RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind, ServiceReport,
@@ -2972,7 +2972,7 @@ impl TownsmithCore {
         GString::from(&format!("{checksum:016x}"))
     }
 
-    fn utility_site_count_for_seed(&self, seed: u64) -> u64 {
+    fn utility_infrastructure_for_seed(&self, seed: u64) -> (u64, f64) {
         let guard = self
             .utilities
             .lock()
@@ -2980,10 +2980,12 @@ impl TownsmithCore {
         guard
             .as_ref()
             .filter(|store| store.seed == seed)
-            .map_or(0, |store| store.site_count() as u64)
+            .map_or((0, 0.0), |store| {
+                (store.site_count() as u64, store.total_upkeep_per_day())
+            })
     }
 
-    fn service_site_count_for_seed(&self, seed: u64) -> u64 {
+    fn service_infrastructure_for_seed(&self, seed: u64) -> (u64, f64) {
         let guard = self
             .services
             .lock()
@@ -2991,7 +2993,9 @@ impl TownsmithCore {
         guard
             .as_ref()
             .filter(|store| store.seed == seed)
-            .map_or(0, |store| store.site_count() as u64)
+            .map_or((0, 0.0), |store| {
+                (store.site_count() as u64, store.total_upkeep_per_day())
+            })
     }
 
     /// Return the treasury state.
@@ -3005,18 +3009,24 @@ impl TownsmithCore {
         let buildings = summary
             .get("completed_buildings")
             .map_or(0, |value| value.to::<i64>()) as u64;
-        // Read the site counts before taking the economy lock: the lock order is
-        // world -> ... -> economy -> utilities/services.
+        // Read the site counts and upkeep totals before taking the economy lock:
+        // the lock order is world -> ... -> economy -> utilities/services.
         let seed = {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             world.as_ref().map(|store| store.seed)
         };
-        let (utility_sites, service_sites) = seed.map_or((0, 0), |seed| {
-            (
-                self.utility_site_count_for_seed(seed),
-                self.service_site_count_for_seed(seed),
-            )
-        });
+        let (utility_sites, utility_upkeep, service_sites, service_upkeep) =
+            seed.map_or((0, 0.0, 0, 0.0), |seed| {
+                let (utility_sites, utility_upkeep) = self.utility_infrastructure_for_seed(seed);
+                let (service_sites, service_upkeep) = self.service_infrastructure_for_seed(seed);
+                (utility_sites, utility_upkeep, service_sites, service_upkeep)
+            });
+        let infrastructure = match InfrastructureCosts::new(utility_upkeep, service_upkeep) {
+            Ok(costs) => costs,
+            Err(error) => {
+                return placement_simple_error("invalid_infrastructure", error.to_string());
+            }
+        };
         let guard = self
             .economy
             .lock()
@@ -3051,20 +3061,18 @@ impl TownsmithCore {
                 );
                 result.set(
                     "daily_net",
-                    economy.daily_net_with_infrastructure(
+                    economy.daily_net_with_infrastructure_costs(
                         population,
                         employed,
                         buildings,
-                        utility_sites,
-                        service_sites,
+                        infrastructure,
                     ),
                 );
-                result.set(
-                    "infrastructure_per_day",
-                    economy.infrastructure_upkeep_per_day(utility_sites, service_sites),
-                );
+                result.set("infrastructure_per_day", infrastructure.total_per_day());
                 result.set("utility_sites", utility_sites as i64);
                 result.set("service_sites", service_sites as i64);
+                result.set("utility_upkeep", infrastructure.utility_per_day());
+                result.set("service_upkeep", infrastructure.service_per_day());
                 result.set("bankrupt", economy.bankrupt);
                 result.set(
                     "checksum",
@@ -3079,6 +3087,8 @@ impl TownsmithCore {
                 result.set("infrastructure_per_day", 0.0);
                 result.set("utility_sites", 0);
                 result.set("service_sites", 0);
+                result.set("utility_upkeep", 0.0);
+                result.set("service_upkeep", 0.0);
                 result.set("checksum", &GString::from("0000000000000000"));
             }
         }
@@ -3102,10 +3112,16 @@ impl TownsmithCore {
         let buildings = summary
             .get("completed_buildings")
             .map_or(0, |value| value.to::<i64>()) as u64;
-        // Read the site counts before taking the economy lock: the lock order is
-        // world -> ... -> economy -> utilities/services.
-        let utility_sites = self.utility_site_count_for_seed(seed);
-        let service_sites = self.service_site_count_for_seed(seed);
+        // Read the site counts and upkeep totals before taking the economy lock:
+        // the lock order is world -> ... -> economy -> utilities/services.
+        let (utility_sites, utility_upkeep) = self.utility_infrastructure_for_seed(seed);
+        let (service_sites, service_upkeep) = self.service_infrastructure_for_seed(seed);
+        let infrastructure = match InfrastructureCosts::new(utility_upkeep, service_upkeep) {
+            Ok(costs) => costs,
+            Err(error) => {
+                return placement_simple_error("invalid_infrastructure", error.to_string());
+            }
+        };
         let mut guard = self
             .economy
             .lock()
@@ -3117,13 +3133,12 @@ impl TownsmithCore {
             );
         }
         let economy = guard.get_or_insert_with(|| Economy::new(seed));
-        let tick = economy.tick_with_infrastructure(
+        let tick = economy.tick_with_infrastructure_costs(
             seconds,
             population,
             employed,
             buildings,
-            utility_sites,
-            service_sites,
+            infrastructure,
         );
         let mut result = VarDictionary::new();
         result.set("ok", true);
@@ -3132,6 +3147,8 @@ impl TownsmithCore {
         result.set("infrastructure", tick.infrastructure);
         result.set("utility_sites", utility_sites as i64);
         result.set("service_sites", service_sites as i64);
+        result.set("utility_upkeep", infrastructure.utility_per_day());
+        result.set("service_upkeep", infrastructure.service_per_day());
         result.set("balance", tick.balance);
         result.set("days_elapsed", tick.days_elapsed);
         result.set("loan_interest", tick.loan_interest);
