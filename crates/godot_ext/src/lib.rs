@@ -2824,9 +2824,11 @@ impl TownsmithCore {
     ///
     /// A registry that has never been created reports `count: 0`, an empty
     /// `policies` array, and a zero checksum. A registry from another seed is
-    /// a `seed_mismatch`. Data only: no simulation or UI consumer reads these
-    /// values yet, and saving them applies no tax, funding, construction, or
-    /// allowlist effect.
+    /// a `seed_mismatch`. The standalone developer script
+    /// `godot/policy_editor.gd` is the only UI consumer; no simulation,
+    /// household, treasury, or economy code reads these values. The registry
+    /// is persisted in the world save, but saving it applies no tax, funding,
+    /// construction, or allowlist effect.
     #[func]
     fn district_policies_state(&self, seed: i64) -> VarDictionary {
         let Ok(seed) = u64::try_from(seed) else {

@@ -483,6 +483,87 @@ mod tests {
     }
 
     #[test]
+    fn sessions_cap_serves_a_reconnect_on_the_same_world() {
+        use crate::world::ClientRole;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        let address = listener.local_addr().expect("address");
+        let config = ListenConfig::default();
+
+        let server = thread::spawn(move || {
+            run_listen(
+                listener,
+                ServerWorld::with_role(LOOPBACK_SEED, ClientRole::Mayor),
+                config,
+                Some(2),
+            )
+        });
+
+        let first = client_exchange(
+            address,
+            &[
+                hello(),
+                ClientCommand::PlaceRoad {
+                    start: [0, 0],
+                    end: [8, 0],
+                },
+                ClientCommand::Disconnect,
+            ],
+        )
+        .expect("first session");
+        let token = match &first[0] {
+            ServerMessage::Welcome {
+                session_token,
+                tick: 0,
+                resumed: false,
+                ..
+            } => session_token.clone(),
+            other => panic!("expected a fresh welcome, got {other:?}"),
+        };
+        assert!(matches!(first[1], ServerMessage::Snapshot { tick: 1, .. }));
+        assert_eq!(first[2], ServerMessage::Goodbye);
+
+        // The resume window left by `disconnect` is process-local and survives
+        // into the next accepted connection.
+        let mut second = TcpStream::connect_timeout(&address, SESSION_IO_TIMEOUT).expect("connect");
+        configure_stream(&second).expect("configure");
+        write_json_frame(
+            &mut second,
+            &ClientCommand::Resume {
+                session_id: token.clone(),
+                last_tick: 1,
+            },
+        )
+        .expect("resume");
+        let resumed: ServerMessage = read_json_frame(&mut second).expect("resume welcome");
+        match &resumed {
+            ServerMessage::Welcome {
+                session_token,
+                resumed: true,
+                tick: 1,
+                ..
+            } => assert_eq!(session_token, &token),
+            other => panic!("expected a resumed welcome, got {other:?}"),
+        }
+        let snapshot: ServerMessage = read_json_frame(&mut second).expect("resume snapshot");
+        assert!(matches!(snapshot, ServerMessage::Snapshot { tick: 1, .. }));
+
+        write_json_frame(&mut second, &ClientCommand::Ping { nonce: 7 }).expect("ping");
+        let pong: ServerMessage = read_json_frame(&mut second).expect("pong");
+        assert_eq!(pong, ServerMessage::Pong { nonce: 7 });
+
+        write_json_frame(&mut second, &ClientCommand::Disconnect).expect("disconnect");
+        let goodbye: ServerMessage = read_json_frame(&mut second).expect("goodbye");
+        assert_eq!(goodbye, ServerMessage::Goodbye);
+
+        let report = server.join().expect("server thread").expect("listen");
+        assert_eq!(report.sessions, 2);
+        assert_eq!(report.commands, 6);
+        assert_eq!(report.tick, 1);
+        assert!(report.saves == 0);
+    }
+
+    #[test]
     fn save_load_smoke_is_deterministic() {
         let first = run_save_load_smoke().expect("first smoke");
         let second = run_save_load_smoke().expect("second smoke");

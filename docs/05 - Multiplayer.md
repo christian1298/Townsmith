@@ -192,6 +192,7 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. It is **tr
 | Tag | Fields |
 |---|---|
 | `hello` | `protocol_version`, `content_hash`, `player_name` |
+| `resume` | `session_id` (the `session_token` from `welcome`), `last_tick` |
 | `ping` | `nonce` |
 | `time_control` | `action`: `pause`, `resume`, `step`, `speed_1x`, `speed_2x`, `speed_4x` |
 | `set_tax` | `resident_rate`, `business_rate` (percent, 0–100) |
@@ -203,7 +204,7 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. It is **tr
 
 | Tag | Fields |
 |---|---|
-| `welcome` | `session_id`, `tick`, `protocol_version` |
+| `welcome` | `session_id`, `session_token`, `tick`, `protocol_version`, `resumed` |
 | `pong` | `nonce` |
 | `snapshot` | `tick`, `population`, `balance`, `checksum`, `interest_center`, `interest_radius_m`, `visible_roads` |
 | `interest_view` | `tick`, `center`, `radius_m`, `roads` (≤64 × `{id, start, end, width_m}`), `truncated` |
@@ -241,15 +242,24 @@ The harness binds `127.0.0.1:0`, runs `hello → welcome`, `ping → pong`, `set
 
 **Client v0**
 
-`godot/mp_client.gd` + `mp_client.tscn` speak the same framing over `StreamPeerTCP` (big-endian length prefix, JSON, 1 MiB cap). The client sends `hello`, `ping`, a valid and an invalid `set_tax`, a `place_road`, a `set_interest`, then `disconnect`, and asserts `welcome`, `pong`, three snapshots, a rejection, one `interest_view`, and `goodbye`. Seven command frames and eight response frames cross the socket. `townsmith-server --listen PORT` binds loopback only and serves one session at a time.
+`godot/mp_client.gd` + `mp_client.tscn` speak the same framing over `StreamPeerTCP` (big-endian length prefix, JSON, 1 MiB cap). In the normal path the client sends `hello`, `ping`, a valid and an invalid `set_tax`, a `place_road`, a `set_interest`, then `disconnect`, and asserts `welcome`, `pong`, three snapshots, a rejection, one `interest_view`, and `goodbye`. Seven command frames and eight response frames cross the socket.
+
+`--reconnect` runs the session-resume path instead: the first connection sends `hello`, `ping`, and `place_road`, captures `session_token` and the last snapshot tick, then disconnects. A second connection sends `resume {session_id, last_tick}` and asserts `welcome {resumed:true}` with the same token, a snapshot at or past `last_tick`, a resumed `pong`, and `goodbye`. Both connections together exchange seven command and eight response frames (four each on the first, three/four on the resumed one). The two connections must reach the same server process; `--listen PORT --sessions N` caps a run at N accepted sessions, and `--once` remains the `--sessions 1` shorthand. Without `--sessions`, the listener serves until stopped. v0 accepts one session at a time and keeps the world in memory, so the resume window lives in the same process.
 
 ```bash
 GODOT=/path/to/godot ./scripts/smoke_mp_client.sh
-# MP_CLIENT status=ok welcome=ok ping=ok snapshot=ok reject=ok road=ok interest=ok roads=1 truncated=false ...
+# Block 1: server `--once`, normal path
+# MP_CLIENT status=ok welcome=ok ping=ok snapshot=ok reject=ok road=ok interest=ok roads=1 truncated=false ... \
+#   interest_render=ok roads=1 checksum=88903a371d42b367 rendered=1 cleared=true ...
 # MP_CLIENT_SMOKE status=ok ... frames=15
+# Block 2: server `--sessions 2`, reconnect path
+# MP_CLIENT_RECONNECT status=ok resumed=true token=session-... tick=1 snapshot_checksum=... frames_sent=7 frames_received=8 frames=15
+# MP_CLIENT_RECONNECT_SMOKE status=ok ... frames=15
 ```
 
-Limits: loopback only; no render integration, real authentication, remote roles, entity/terrain streaming, delta compression, reconnect, or persistent server state. The client is a protocol/smoke harness, not the multiplayer UI.
+The smoke starts a fresh server per block, waits for the `SERVER_LISTEN status=ok address=` line instead of sleeping, and checks the server reports `sessions=1 commands=7` for the normal path and `sessions=2 commands=7` for the reconnect path.
+
+Limits: loopback only; the resume token is the seed-derived session id and is **not** authentication; no render integration, remote roles, entity/terrain streaming, delta compression, or persistent server state. Resume state is process-local, is not written to `ServerSave`, and cannot survive a server restart. The listener still serves one session at a time (sequentially, not concurrently). The client is a protocol/smoke harness, not the multiplayer UI.
 
 ### Authoritative executor (v0.1)
 
@@ -315,9 +325,9 @@ Population, employment, and building counts are static for v0. `employed` is 60%
 | Save/load | `ServerSave` v1, atomic tmp/fsync/rename, one-step `.bak` recovery | `SERVER_SAVE status=ok bytes=744 tick=2 checksum=70e25aff45867b94`; `--listen PORT --save PATH --load PATH` |
 | Roles | Dev-only viewer/mayor/admin, token bucket, 256-entry audit ring | `SERVER_ROLES ... checksum=b6ab299531341226` |
 | Interest | Per-session viewport; snapshot reports `visible_roads`, plus a ≤64-road `InterestView` | `SERVER_INTEREST status=ok center=0.0,0.0 radius=16.0 visible=1 roads=1 truncated=false tick=2 checksum=6d92be74bdbc11f5` |
-| Godot client | Loopback `hello`/`ping`/tax/road/interest/disconnect | `MP_CLIENT ... interest=ok roads=1 truncated=false ... frames=15` |
+| Godot client | Loopback `hello`/`ping`/tax/road/interest/disconnect; `--reconnect` resumes a session with the token from `welcome` | `MP_CLIENT ... interest=ok roads=1 truncated=false ... frames=15`; `MP_CLIENT_RECONNECT status=ok resumed=true ... frames=15` |
 
-**Limits.** In-memory world with one session, no authentication, content-manifest enforcement, entity/agent/terrain streaming, delta snapshots, reconnect, rollback, terrain sampling, or cost/material checks. Interest v0 is a per-session viewport that filters aggregate snapshot counts and a bounded 64-road detail list; it does not stream other entity kinds or activate, deactivate, or hide simulation state. Persistence is one file per world; no journal, compression, or remote storage. Roles are assigned by the server process, not authenticated. Direct mutation of public fields does not refresh `session_checksum`; call `checksum()` for live state.
+**Limits.** In-memory world with one session at a time; reconnect/resume works only inside the same server process (300-tick window), is not persisted, and its token is not authentication. No content-manifest enforcement, entity/agent/terrain streaming, delta snapshots, rollback, terrain sampling, or cost/material checks. Interest v0 is a per-session viewport that filters aggregate snapshot counts and a bounded 64-road detail list; it does not stream other entity kinds or activate, deactivate, or hide simulation state. Persistence is one file per world; no journal, compression, or remote storage. Roles are assigned by the server process, not authenticated. Direct mutation of public fields does not refresh `session_checksum`; call `checksum()` for live state.
 
 **Loopback smoke**
 
@@ -395,7 +405,7 @@ These are planning targets. The Phase 0 spike and a network test must measure th
 ## 8. Persistence and reconnect
 
 > [!info] Server save v0
-> `crates/server/src/save.rs` implements the first server-world save: a deterministic `ServerSave` v1 JSON containing seed, tick, population/employment/building counts, paused state, economy, and roads. `save_to` writes `<path>.tmp`, fsyncs, renames, syncs the parent directory on Unix, and rotates a valid primary to `<path>.bak`. `load_from` falls back to the backup when the primary is missing/corrupt and rejects when both are corrupt. `crates/server/src/listen.rs` saves on disconnect/EOF/reset/idle timeout and optionally autosaves every N ticks. CLI: `--listen PORT --save PATH --load PATH [--autosave-ticks N] [--once]` and `--save-load-smoke`. Limits: one world file, no journal, compression, remote storage, authentication, or reconnect tokens yet.
+> `crates/server/src/save.rs` implements the first server-world save: a deterministic `ServerSave` v1 JSON containing seed, tick, population/employment/building counts, paused state, economy, and roads. `save_to` writes `<path>.tmp`, fsyncs, renames, syncs the parent directory on Unix, and rotates a valid primary to `<path>.bak`. `load_from` falls back to the backup when the primary is missing/corrupt and rejects when both are corrupt. `crates/server/src/listen.rs` saves on disconnect/EOF/reset/idle timeout and optionally autosaves every N ticks. CLI: `--listen PORT --save PATH --load PATH [--autosave-ticks N] [--sessions N]` and `--save-load-smoke`; `--once` is the `--sessions 1` shorthand. Limits: one world file, no journal, compression, remote storage, or authentication. Resume windows and tokens are process-local and are **not** part of `ServerSave`, so a restarted server always needs a fresh `hello`.
 
 - **Save format:** world seed + terrain/resource deltas + SQLite for world state + binary blueprint files (see [[03 - Voxel and Scale]] and [[12 - Technical Architecture]]).
 - **Autosave:** every 5–10 minutes, atomic (temp file → fsync → rename), with rotating backups.
@@ -478,6 +488,8 @@ See [[09 - Open Questions]] and [[10 - Decisions]].
 
 A disconnected client can resume the same in-memory world with `resume {session_id, last_tick}` inside a 300-tick grace window. The token is the seed-derived session id returned in `welcome`; it is **not** authentication. Success returns `welcome {resumed:true}` plus a snapshot, restores the player to the online roster, and preserves the dev role. Unknown/empty token, a last tick ahead of the authority, an expired window, or resuming while a session is active are rejected (`resume.*`). A fresh `hello` is normally rejected with `hello.resumable` while the window is open, but after **three** attempts the stale window is abandoned so a client that lost its token is never blocked forever. A duplicate online player name is rejected (`player_name.duplicate`). Reconnect state is process-local and is not restored by `ServerSave`; a fresh `hello` after expiry starts a new session.
 
+The Godot client covers the same path with `--reconnect`: it captures the token and tick from its first session, disconnects, and resumes on a second connection. `scripts/smoke_mp_client.sh` starts the server with `--sessions 2`, then asserts `MP_CLIENT_RECONNECT status=ok resumed=true ... frames=15` alongside the normal-path block. The listener still accepts one session at a time, so the reconnect is accepted only after the first disconnects; the token and window do not survive a restart.
+
 `cargo run --release -p townsmith-server -- --resume-smoke` prints `SERVER_RESUME status=ok ...`.
 ### Time-control vote v0
 
@@ -498,3 +510,7 @@ Validation: the centre must be finite (and representable as `f32`), otherwise `i
 `cargo run --release -p townsmith-server -- --interest-smoke` prints `SERVER_INTEREST status=ok center=0.0,0.0 radius=16.0 visible=1 roads=1 truncated=false tick=2 checksum=6d92be74bdbc11f5`. The loopback places one road inside and one outside, narrows the viewport, moves it to the far road, and restores it; every batch must be `snapshot` + `interest_view` and match a local reference world.
 
 Limits: v0 streams only static road geometry. There is no entity, agent, terrain, or blueprint streaming, no delta compression, no prioritization, no server-side region activation, and no per-client `ServerSave` state.
+
+### Interest road preview
+
+The Godot client draws the `interest_view` road list in a flat top-down `Control` preview (`godot/mp_interest_render.gd` + `mp_interest_canvas.gd`): fitted circle, one line per road, width clamped 1–32 px, at most 64 roads, deterministic 16-hex checksum. The smoke asserts `interest_render=ok roads=1 checksum=… rendered=1 cleared=true`; the snapshot checksum is reported as `snapshot_checksum=`. Limits: debug visualization only; no terrain, chunks, entities, map projection, clipping policy, or AOI activation.

@@ -316,7 +316,7 @@ cargo run --release -p townsmith-server -- --loopback-smoke
 cargo test -p townsmith-server
 cargo run --release -p townsmith-server -- --loopback-smoke   # protocol + authority + roles + resume + interest goldens
 cargo run --release -p townsmith-server -- --interest-smoke   # viewport + bounded 64-road interest view loopback
-GODOT=/path/to/godot ./scripts/smoke_mp_client.sh
+GODOT=/path/to/godot ./scripts/smoke_mp_client.sh   # normal path (frames 7/8) + reconnect resume via --sessions 2
 GODOT=/path/to/godot ./scripts/smoke_movement_stress.sh
 GODOT=/path/to/godot "${GODOT:-godot}" --headless --path godot res://movement_stress.tscn -- --agents 2000
 
@@ -344,6 +344,10 @@ GODOT=/path/to/godot ./scripts/smoke_bench_screen.sh
 GODOT=/path/to/godot ./scripts/smoke_bench_live.sh
 GODOT=/path/to/godot ./scripts/smoke_playtest_capture.sh
 "${GODOT:-godot}" --path godot res://playtest_capture.tscn   # standalone Q-101 observer form
+# Q-101 capture summary (docs/66 §9); no reports prints usage and exits 2
+./scripts/check_playtest_report.sh --self-test
+./scripts/check_playtest_report.sh                  # docs/playtest/*.json
+./scripts/check_playtest_report.sh path/to/q101_capture.json --markdown /tmp/q101_summary.md
 "${GODOT:-godot}" --path godot res://bench_screen.tscn -- --output benchmarks/results/bench_screen_report.json
 # Headless MultiMesh setup harness for 10k/50k/250k boxes (not FPS evidence)
 GODOT=/path/to/godot ./scripts/smoke_metropolis_render.sh
@@ -367,6 +371,10 @@ GODOT=/path/to/godot ./scripts/smoke_acceptance.sh
 GODOT=/path/to/godot ./scripts/smoke_world_placement.sh
 GODOT=/path/to/godot ./scripts/smoke_world_scene.sh
 GODOT=/path/to/godot ./scripts/smoke_blueprint.sh
+
+# Standalone district policy CRUD editor (developer scene; not the dashboard)
+"${GODOT:-godot}" --path godot res://policy_editor.tscn
+GODOT=/path/to/godot ./scripts/smoke_policy_editor.sh
 
 # 200 real voxel-hut instances
 VOXEL_INSTANCES=200 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_voxel_instances.json
