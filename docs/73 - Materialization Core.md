@@ -98,7 +98,9 @@ A pinned citizen outside the active cap replaces the furthest non-pinned citizen
 
 The call is read-only: it does not mutate the live named pool, population, save state, or checksums. Detailed is a prefix of active. The bridge test checks ordering, counts, names, and the prefix invariant.
 
-`route_preview`/`route_cache_state` expose the road polyline and bounded LRU described in [[56 - Traffic]]. `core_city::movement` now attaches one cached route per household to the selection and returns deterministic per-citizen positions; the bridge and scene still need to surface and drive them.
+`route_preview`/`route_cache_state` expose the road polyline and bounded LRU described in [[56 - Traffic]]. `core_city::movement` attaches one cached route per household to the selection and returns deterministic per-citizen positions.
+
+`citizen_movement(seed, center_x, center_z, active_radius_m, detailed_radius_m, time_s)` builds the same selection, one `CitizenMotion`, and returns `{ok, seed, center:[x,z], time_s, routes, citizens, positions:[{id, placement_id, slot, position:[x,z], leg, route_progress}], checksum}`. `time_s` is finite and bounded to `0..=1,000,000` s. Unrouted or disconnected households are omitted, not an error; a missing road store returns `no_roads`. The call is read-only and does not alter jobs, needs, save state, or named checksums. Tests cover determinism, time sampling, missing workplaces, store/seed validation, and argument bounds. The scene agent drive is still open.
 
 ### Stateful bridge scheduler
 
@@ -225,7 +227,7 @@ not a CI gate.
 
 ## 11. Next
 
-1. ~~Add a bounded home-work route cache and per-citizen movement.~~ Core landed in `core_city::movement`; bridge payload and scene drive are next.
+1. ~~Add a bounded home-work route cache and per-citizen movement.~~ Core landed in `core_city::movement`; bridge payload landed (`citizen_movement`); the scene agent drive is next.
 2. Replace debug markers with pooled materialized agents and add the 2k-active/200-detailed render route.
 3. Add crowd LOD and fade pooling to avoid per-node material duplicates.
 3. Add per-client interest filtering.
