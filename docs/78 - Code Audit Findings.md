@@ -27,7 +27,7 @@ tags:
 | Room sampling/volume | F-021, F-054 | Fixed | PR #238 (sim M1) |
 | Bench gates | F-031..F-034, F-063, F-066, F-067 | Fixed | PR #239; movement `b50a763030007ef1`, infra `a920cf0c4eb9a4f1`, save-stress `0ce611887161ff62` |
 | Bridge parity, seeds, acceptance volume, docs | F-029, F-030, F-056..F-062 | Fixed | PR #240; 928 workspace tests |
-| Cohort integration (NaN services/state, multi-day `dt`, fractional employment carry) | F-010, F-011, F-023 | Fixed | `cohort_validate` `a00cc463d7cb9e72` (was `f265539bcb8804fc`), `dt_max_delta` `0.000006`, 450 vs 450 employed; `dormant` `df136e2d51c0d0f8`/`cee14784f2a131c1` with 0.0 measured deltas |
+| Cohort integration (NaN services/state, multi-day `dt`, fractional employment carry) | F-010, F-011, F-023 | Fixed | PR #250; `cohort_validate` `a00cc463d7cb9e72` (was `f265539bcb8804fc`), `dt_max_delta` `0.000006`, 450 vs 450 employed; `dormant` `df136e2d51c0d0f8`/`cee14784f2a131c1` with 0.0 measured deltas |
 
 ### Deferred
 
