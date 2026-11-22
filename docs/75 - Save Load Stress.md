@@ -2,7 +2,7 @@
 title: Save Load Stress
 project: Townsmith
 status: active
-updated: 2026-11-22
+updated: 2026-11-23
 tags:
   - townsmith
   - testing
@@ -141,7 +141,7 @@ panicking. This is a bounded envelope fuzz, not a schema-aware generator.
 
 ## 7. Next
 
-The 1M core-store save/load harness is `cargo run --release -p townsmith-bench --bin save_1m`; see [[68 - Metropolis Gate]] §7.4 for the measured 134.5 MB envelope and 30 s headroom. This harness still omits the full world layers.
+The full-world 1M save/load harness is `cargo run --release -p townsmith-bench --bin save_1m`; see [[68 - Metropolis Gate]] §7.4 for the measured 182.8 MB / 232.5 ms save / 694.7 ms load envelope. It includes all 13 core stores and terrain deltas; Godot envelope and disk-durability overhead remain out.
 
 1. Add a bridge-level stress harness once the Godot test runtime is available.
 2. Add a mutation fuzzer for each store's validator.

@@ -20,7 +20,11 @@ pub const CONSTRUCTION_FORMAT_VERSION: u16 = 1;
 pub const MAX_TICK_SECONDS: f64 = 3600.0;
 
 /// Maximum construction sites in one save, a guard against malformed input.
-pub const MAX_SITES: usize = 100_000;
+///
+/// The Phase 5 1M-city shape has 250,000 buildings and one site per building;
+/// the cap leaves room for single-building sites up to the 1M-resident save
+/// without letting a malformed save allocate unbounded memory.
+pub const MAX_SITES: usize = 1_000_000;
 
 /// Upper bound for one construction site's total placement price.
 pub const MAX_SITE_COST: f64 = 1_000_000_000.0;

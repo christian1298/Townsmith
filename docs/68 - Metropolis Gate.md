@@ -2,7 +2,7 @@
 title: Metropolis Gate
 project: Townsmith
 status: proposed
-updated: 2026-11-22
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-5
@@ -422,28 +422,28 @@ This validates the overlap-index path and the record envelope at the Phase 5 bui
 
 #### 1M save/load data harness
 
-`cargo run --release -p townsmith-bench --bin save_1m` builds 250,000 placements, 250,000 households × 4 residents = **1,000,000 population**, and 2,000 named citizens, composes the three core stores into one JSON envelope, writes a real temp file, reads it back, parses and validates every store, and reports save/load timings plus peak RSS. `--strict` exits nonzero when either direction exceeds the 30,000 ms target.
+`cargo run --release -p townsmith-bench --bin save_1m` builds 250,000 placements, 250,000 households × 4 residents = **1,000,000 population**, 2,000 named citizens, 250,000 completed construction sites, industry/utilities/services/research, economy, a 64×64-block road grid (1,300 segments), 4,096 lots, 4 settlements, and 2,000 terrain edits across 64 chunks. It composes all 13 core stores plus `terrain_deltas` into one JSON envelope, writes a real temp file, reads it back, parses and validates every store plus cross-store invariants, and reports save/load timings, per-store checksums, and peak RSS. `--strict` exits nonzero when either direction exceeds the 30,000 ms target.
 
-Measured on a 32-thread developer machine, release build, tmpfs default and NVMe (`--json`):
+Measured on a 32-thread developer machine, release build, tmpfs:
 
-| Metric | 1M tmpfs | 1M NVMe |
+| Metric | Run 1 | Run 2 |
 |---|---:|---:|
 | Placements / households / population / named | 250,000 / 250,000 / 1,000,000 / 2,000 | same |
-| Build | 102.7 ms | 109.5 ms |
-| Serialize | 141.5 ms | 155.2 ms |
-| File write | 30.9 ms | 424.0 ms |
-| File read | 21.1 ms | 21.5 ms |
-| Parse | 188.3 ms | 177.9 ms |
-| Verify | 311.4 ms | 315.1 ms |
-| **Total save** | **172.4 ms** | **579.2 ms** |
-| **Total load** | **520.8 ms** | **514.5 ms** |
-| JSON bytes | 134,515,727 | same |
-| Peak RSS | 365.8 MB | 364.0 MB |
-| Combined checksum | `cc4f4553ddd97794` | same |
+| Build | 2,489 ms | same shape |
+| Serialize | 189.9 ms | — |
+| File write | 42.6 ms | — |
+| File read | 31.4 ms | — |
+| Parse | 238.4 ms | — |
+| Verify (all stores + terrain) | 424.9 ms | — |
+| **Total save** | **232.5 ms** | **238.0 ms** |
+| **Total load** | **694.7 ms** | **706.4 ms** |
+| JSON bytes | 182,808,978 | same |
+| Peak RSS | 499.1 MB | 497.7 MB |
+| Combined checksum | `8b3833b221f783d1` | same |
 
-Both directions are far under the 30 s target (about 52–58× headroom). `--smoke` uses 25,000 placements / 100,000 population / 2,000 named and runs twice; smoke checksum `e24deb9ebadfbf6a`.
+Both directions are far under the 30 s target. `--smoke` uses 25,000 placements / 100,000 population / 2,000 named and runs twice; smoke checksum `b9ecb8d06628eb68`, save 26.5 ms / load 69.9 ms, 18.5 MB JSON, 60 MB RSS.
 
-This is **core-store evidence**, not the full world save: it omits construction, economy, industry, utilities, services, research, roads, lots, settlements, terrain deltas, Godot `world_save` envelope overhead, and disk atomicity/durability. It also raises `MAX_HOUSEHOLDS` to 1,000,000 for the 250k-household shape. It does not close G-07 by itself.
+This is the **full core-world envelope**, but it is still not the Godot `world_save` path: `VarDictionary`/engine overhead, disk atomicity and durability, compression, VRAM, streaming, and rendering remain out. `MAX_HOUSEHOLDS` and `MAX_SITES` are raised to 1,000,000 for this shape. It substantially closes the save/load timing part of G-07 but does not close the gate by itself.
 
 ### 7.5 CPU setup harness
 

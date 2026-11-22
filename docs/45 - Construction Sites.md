@@ -2,7 +2,7 @@
 title: Construction Sites
 project: Townsmith
 status: active
-updated: 2026-11-20
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-2
@@ -174,7 +174,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 - Construction advances with frame time; pause/time controls are not wired yet (D-021).
 - Construction visuals are a scaled translucent mesh, not a true partial-voxel build.
 - No demolition, renovation, or blueprint upgrade projects.
-- The store is capped at 100,000 sites (`MAX_SITES`); a larger legacy save cannot be loaded and a new placement beyond the cap is rolled back with `construction_failed`.
+- The store is capped at 1,000,000 sites (`MAX_SITES`); a larger legacy save cannot be loaded and a new placement beyond the cap is rolled back with `construction_failed`.
 - No multiplayer authority validation for construction commands.
 
 ## 9. Tests
