@@ -277,7 +277,7 @@ func _on_reject(message: Dictionary) -> void:
 	_ok_reject = true
 	_set_status("Rejected tax as expected; placing a road.")
 	_refresh_ui()
-	if not _send({"type": "place_road", "start": [0, 0], "end": [8, 4]}):
+	if not _send({"type": "place_road", "start": [0, 0], "end": [8, 0]}):
 		return
 	_phase = Phase.ROAD_SENT
 	_arm_deadline(_timeout_ms)

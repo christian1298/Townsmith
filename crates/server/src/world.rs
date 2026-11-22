@@ -4,11 +4,12 @@
 //! static population counters, the treasury, and the road store. It applies
 //! decoded [`ClientCommand`]s and answers with one [`ServerMessage`].
 //!
-//! This is deliberately in-memory only and single-session. It has no
-//! persistence, authentication, interest management, rollback, terrain
-//! sampling, or wall-clock loop. Time advances only through `time_control`
-//! (`step`) or an explicit [`ServerWorld::advance_day`] call, so transcripts
-//! are deterministic.
+//! Persistence lives in [`crate::save`] and is opt-in: one world to one JSON
+//! file, with atomic writes and a single `.bak` rotation. The executor itself
+//! has no authentication, interest management, rollback, terrain sampling, or
+//! wall-clock loop. Time advances only through `time_control` (`step`) or an
+//! explicit [`ServerWorld::advance_day`] call, so transcripts are
+//! deterministic.
 
 use std::collections::VecDeque;
 use std::io;
@@ -155,9 +156,21 @@ impl ClientRole {
     pub fn required_role(tag: &str) -> Self {
         match tag {
             "hello" | "ping" | "disconnect" => Self::Viewer,
-            "set_tax" | "place_road" => Self::Mayor,
-            // `time_control` and any future/unknown tag.
+            "set_tax" | "place_road" | "time_control" => Self::Mayor,
+            // Any future/unknown tag.
             _ => Self::Admin,
+        }
+    }
+
+    /// Minimum role for a concrete command. `time_control` is Mayor for
+    /// pause/resume, but Admin for a one-day step.
+    #[must_use]
+    pub fn required_role_for(command: &ClientCommand) -> Self {
+        match command {
+            ClientCommand::TimeControl {
+                action: TimeAction::Step,
+            } => Self::Admin,
+            other => Self::required_role(other.tag()),
         }
     }
 
@@ -294,14 +307,16 @@ impl ServerWorld {
         Self::with_population(seed, SessionConfig::for_seed(seed).population)
     }
 
-    /// Create a session world with an explicit population and the viewer role.
+    /// Create a session world with an explicit population and the default
+    /// dev-session role (mayor). Use [`Self::with_population_and_role`] for
+    /// viewer/admin sessions.
     ///
     /// `employed` is 60% of the population and `buildings` is one per 25
     /// citizens (at least one), both derived deterministically. The treasury
     /// starts at [`STARTING_BALANCE`].
     #[must_use]
     pub fn with_population(seed: u64, population: u32) -> Self {
-        Self::with_population_and_role(seed, population, ClientRole::Viewer)
+        Self::with_population_and_role(seed, population, ClientRole::Mayor)
     }
 
     /// Create a session world with an explicit role and the seed population.
@@ -349,6 +364,39 @@ impl ServerWorld {
     pub fn commands(&self) -> u64 {
         self.commands
     }
+    /// Override the dev-session role. Not authentication.
+    pub fn set_role(&mut self, role: ClientRole) {
+        self.role = role;
+    }
+
+    /// Rebuild a world from an already validated [`crate::save::ServerSave`].
+    ///
+    /// The restored session is open and has not accepted a `hello`, so a
+    /// reconnecting client must handshake again. Saved tick, paused flag,
+    /// treasury, and roads resume unchanged; the checksum is recomputed from
+    /// the restored state.
+    pub(crate) fn restore(save: crate::save::ServerSave) -> Self {
+        let mut world = Self {
+            seed: save.seed,
+            tick: save.tick,
+            population: save.population,
+            employed: save.employed,
+            buildings: save.buildings,
+            economy: save.economy,
+            roads: save.roads,
+            paused: save.paused,
+            session_checksum: String::new(),
+            role: ClientRole::Mayor,
+            commands: 0,
+            rate: RateBucket::full(),
+            audit: VecDeque::with_capacity(AUDIT_CAPACITY),
+            hello: false,
+            closed: false,
+            session_id: session_id_for_seed(save.seed),
+        };
+        world.refresh_checksum();
+        world
+    }
 
     /// Deterministic session identifier.
     #[must_use]
@@ -394,9 +442,7 @@ impl ServerWorld {
     pub fn audit_checksum(&self) -> String {
         format!(
             "{:016x}",
-            self.audit
-                .iter()
-                .fold(FNV_OFFSET, |hash, entry| audit_entry_hash(hash, entry))
+            self.audit.iter().fold(FNV_OFFSET, audit_entry_hash)
         )
     }
 
@@ -491,7 +537,7 @@ impl ServerWorld {
             _ => {}
         }
 
-        let required = ClientRole::required_role(command.tag());
+        let required = ClientRole::required_role_for(command);
         if !self.role.allows(required) {
             return reject_with(
                 codes::FORBIDDEN,
@@ -734,10 +780,7 @@ fn sanitize_dt(dt_s: f64) -> f64 {
     }
 }
 
-fn reject_with(
-    code: &'static str,
-    message: impl Into<String>,
-) -> (ServerMessage, &'static str) {
+fn reject_with(code: &'static str, message: impl Into<String>) -> (ServerMessage, &'static str) {
     (Rejection::new(code, message).into_message(), code)
 }
 
@@ -885,7 +928,6 @@ fn serve_authority(listener: TcpListener) -> io::Result<AuthorityReport> {
         session_id: world.session_id().to_string(),
     })
 }
-
 
 fn run_authority_client(address: SocketAddr) -> io::Result<()> {
     let mut stream = TcpStream::connect_timeout(&address, SESSION_IO_TIMEOUT)?;
@@ -1087,7 +1129,11 @@ fn expect_forbidden(message: &ServerMessage) -> io::Result<()> {
 
 fn run_viewer_role_session(address: SocketAddr) -> io::Result<()> {
     let (mut stream, mut reference) = role_reference(address, ClientRole::Viewer)?;
-    expect_welcome(&exchange(&mut stream, &mut reference, &loopback_hello("role"))?)?;
+    expect_welcome(&exchange(
+        &mut stream,
+        &mut reference,
+        &loopback_hello("role"),
+    )?)?;
 
     for command in [
         ClientCommand::SetTax {
@@ -1122,7 +1168,11 @@ fn run_viewer_role_session(address: SocketAddr) -> io::Result<()> {
 
 fn run_mayor_role_session(address: SocketAddr) -> io::Result<()> {
     let (mut stream, mut reference) = role_reference(address, ClientRole::Mayor)?;
-    expect_welcome(&exchange(&mut stream, &mut reference, &loopback_hello("role"))?)?;
+    expect_welcome(&exchange(
+        &mut stream,
+        &mut reference,
+        &loopback_hello("role"),
+    )?)?;
 
     match exchange(
         &mut stream,
@@ -1171,7 +1221,11 @@ fn run_mayor_role_session(address: SocketAddr) -> io::Result<()> {
 
 fn run_admin_role_session(address: SocketAddr) -> io::Result<()> {
     let (mut stream, mut reference) = role_reference(address, ClientRole::Admin)?;
-    expect_welcome(&exchange(&mut stream, &mut reference, &loopback_hello("role"))?)?;
+    expect_welcome(&exchange(
+        &mut stream,
+        &mut reference,
+        &loopback_hello("role"),
+    )?)?;
 
     match exchange(
         &mut stream,
@@ -1188,11 +1242,7 @@ fn run_admin_role_session(address: SocketAddr) -> io::Result<()> {
     let limit = RATE_BURST_CREDITS * 4;
     let mut limited = false;
     for nonce in 0..limit {
-        match exchange(
-            &mut stream,
-            &mut reference,
-            &ClientCommand::Ping { nonce },
-        )? {
+        match exchange(&mut stream, &mut reference, &ClientCommand::Ping { nonce })? {
             ServerMessage::Pong { nonce: echoed } if echoed == nonce => {}
             ServerMessage::Reject { code, .. } if code == codes::RATE_LIMITED => {
                 limited = true;
@@ -1258,7 +1308,7 @@ mod tests {
     }
 
     fn world_with_hello() -> ServerWorld {
-        let mut world = ServerWorld::new(SEED);
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Admin);
         assert!(matches!(
             world.apply(&hello()),
             ServerMessage::Welcome { .. }
@@ -1624,7 +1674,7 @@ mod tests {
     #[test]
     fn snapshots_are_deterministic_across_worlds_and_ignore_rejections() {
         fn transcript() -> (Vec<ServerMessage>, ServerWorld) {
-            let mut world = ServerWorld::new(SEED);
+            let mut world = ServerWorld::with_role(SEED, ClientRole::Admin);
             let messages = vec![
                 world.apply(&hello()),
                 world.apply(&ClientCommand::SetTax {

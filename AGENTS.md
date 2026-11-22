@@ -311,7 +311,12 @@ cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
 cargo run --release -p townsmith-server -- --loopback-smoke
 # Prints SERVER_PROTOCOL and SERVER_AUTHORITY status lines; deterministic, no sleeps
 cargo test -p townsmith-server
+cargo run --release -p townsmith-server -- --loopback-smoke   # protocol + authority + roles goldens
 GODOT=/path/to/godot ./scripts/smoke_mp_client.sh
+
+# Server save/load smoke (atomic .tmp/.bak, deterministic checksum)
+cargo run --release -p townsmith-server -- --save-load-smoke
+cargo run --release -p townsmith-server -- --listen 0 --save /tmp/opencode/townsmith-world.json --once
 
 # 3-run core benchmark summary
 ./scripts/bench_core.sh

@@ -245,7 +245,7 @@ GODOT=/path/to/godot ./scripts/smoke_mp_client.sh
 # MP_CLIENT_SMOKE status=ok ... frames=12
 ```
 
-Limits: loopback only; no render integration, authentication, roles, interest filtering, delta compression, reconnect, or persistent server state. The client is a protocol/smoke harness, not the multiplayer UI.
+Limits: loopback only; no render integration, real authentication, remote roles, interest filtering, delta compression, reconnect, or persistent server state. The client is a protocol/smoke harness, not the multiplayer UI.
 
 ### Authoritative executor (v0.1)
 
@@ -292,6 +292,10 @@ Population, employment, and building counts are static for v0. `employed` is 60%
 **Road rules.** Endpoints must be integer cells inside ±1,000,000. Segments must be horizontal or vertical, 1–512 cells long, and are always 6 m wide in v0. The server has no terrain yet, so road validation samples a constant 40 m placeholder ground; water and slope checks are deferred. An exact duplicate (either direction) is `road.duplicate`. A collinear segment sharing two or more cells is `road.overlap`. Roads that share exactly one endpoint cell (T-junction) or cross perpendicularly are allowed. Costs, permissions, and lot/building rules are not implemented.
 
 **Determinism.** The snapshot checksum is a pure function of the listed state; it excludes the wall clock, seed, and paused flag. `advance_day` never sleeps. `dt_s` is clamped to `0..=DAY_SECONDS`; non-finite and negative values become zero. A paused `advance_day` returns the current ledger without changing the tick.
+
+**Roles, rate limits, audit (dev-only).** `--role viewer|mayor|admin` sets the session role; `--listen` defaults to **mayor**. Viewer may hello/ping/disconnect; mayor may set tax, place roads, and pause/resume; admin may also step time. Unknown command tags fail closed to admin. Each session has a deterministic token bucket (20 commands/s, burst 40) and a 256-entry audit ring (`tick`, role, command, code). `disconnect` bypasses the limiter. Neither role nor audit state is part of the world snapshot checksum. This is not authentication: the role is assigned by the server process for the local harness.
+
+`SERVER_ROLES status=ok sessions=3 role_checks=4 rate_limited=1 audit=65 checksum=b6ab299531341226` is the loopback golden (viewer forbidden, mayor accepted, admin step, rate-limited ping).
 
 **Limits.** In-memory only, one session, no persistence, authentication, roles/permissions, content-manifest enforcement, rate limiting, interest management, delta snapshots, rollback, terrain sampling, or cost/material checks. Direct mutation of public fields does not refresh `session_checksum`; call `checksum()` for live state.
 
@@ -361,6 +365,9 @@ Open-world multiplayer is mostly a **chunk streaming** problem, not an entity re
 These are planning targets. The Phase 0 spike and a network test must measure them.
 
 ## 8. Persistence and reconnect
+
+> [!info] Server save v0
+> `crates/server/src/save.rs` implements the first server-world save: a deterministic `ServerSave` v1 JSON containing seed, tick, population/employment/building counts, paused state, economy, and roads. `save_to` writes `<path>.tmp`, fsyncs, renames, syncs the parent directory on Unix, and rotates a valid primary to `<path>.bak`. `load_from` falls back to the backup when the primary is missing/corrupt and rejects when both are corrupt. `crates/server/src/listen.rs` saves on disconnect/EOF/reset/idle timeout and optionally autosaves every N ticks. CLI: `--listen PORT --save PATH --load PATH [--autosave-ticks N] [--once]` and `--save-load-smoke`. Limits: one world file, no journal, compression, remote storage, authentication, or reconnect tokens yet.
 
 - **Save format:** world seed + terrain/resource deltas + SQLite for world state + binary blueprint files (see [[03 - Voxel and Scale]] and [[12 - Technical Architecture]]).
 - **Autosave:** every 5–10 minutes, atomic (temp file → fsync → rename), with rotating backups.
