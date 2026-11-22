@@ -2,7 +2,7 @@
 title: Playtest Kit
 project: Townsmith
 status: active
-updated: 2026-11-22
+updated: 2026-11-23
 tags:
   - townsmith
   - playtest
@@ -350,7 +350,76 @@ Copy this section into the run record, or fill it in place. Keep the raw notes; 
 5. If a finding invalidates the tutorial order or wording, update [[65 - Tutorial]] in the same PR.
 6. Keep this file as the template; add each run as a dated section or a linked run note, not by overwriting the template.
 
-## 9. Limits
+## 9. Standalone capture form
+
+`godot/playtest_capture.tscn` is an observer-only form for the route in §2. It is a separate scene: it does **not** load the world scene, read game state, or call the Rust extension. Use it beside the running game window to time the segments, record the tester metadata and three issue rows, and export one structured JSON file.
+
+```bash
+# Build the extension only if godot/bin is empty (the form does not use it).
+GODOT=/home/chris/.local/bin/godot ./scripts/build_godot_ext.sh debug
+
+# Launch the form (windowed).
+GODOT=/home/chris/.local/bin/godot --path godot res://playtest_capture.tscn
+
+# Or write to a chosen path when exporting.
+GODOT=/home/chris/.local/bin/godot --path godot res://playtest_capture.tscn -- \
+	--output /path/to/q101_capture.json
+```
+
+The form does not start the game. Keep `./scripts/playtest_session.sh` (or `run_godot.sh`) in the other window for the actual route.
+
+### Using it
+
+- **Timer:** `F5` starts, pauses, and resumes; the reset button clears the timer only. Elapsed time is monotonic session time, not wall-clock.
+- **Stages:** tick a segment when the tester finishes it, or press `F6` to mark the current segment complete and advance. A tick records the elapsed time at that moment. Stages can be ticked out of order; the JSON keeps the canonical route order and each stage's `complete` / `completed_at_s`.
+- **Fields:** tester name/ID, prior experience, build commit, seed, hardware, display, and FPS notes. These are free text; nothing is auto-detected.
+- **Issues:** three rows with area, severity (`low`, `medium`, `high`), a one-line description, and a reproducible yes/no. A row with an empty description is ignored; high severity is accepted.
+- **Export:** `F7` or **Export JSON**; `F8` or **Copy summary** copies a plain-text summary to the clipboard (disabled headless).
+- **Default output:** `user://q101_playtest_<YYYYMMDDTHHMMSSZ>.json` (on Linux, under `~/.local/share/godot/app_userdata/Townsmith Phase 0/`). `--output` overrides it.
+
+### Export schema
+
+`schema` is `1`; `suite` is `q101_playtest_capture`.
+
+| Field | Meaning |
+|---|---|
+| `schema`, `suite`, `generated_by` | Format version and producer (`1`, `q101_playtest_capture`, `playtest_capture`). |
+| `status` | `ok` when the tester name is present and at least one stage is complete; otherwise `partial`. |
+| `captured_at` | UTC ISO 8601 wall-clock timestamp. This is the **only** wall-clock field in the payload. |
+| `smoke` | `true` only for the headless smoke. |
+| `engine_version` | Godot version string of the running engine. |
+| `route` | `id` (`q101`), title, source doc, `total_minutes` (30), `stages_total` (8). |
+| `tester` | `name`, `experience`, `build`, `seed`, `hardware`, `display`, `fps_notes` as entered. |
+| `timer` | `started`, `running`, `elapsed_s`, `route_minutes`. |
+| `stages_completed`, `stages_total` | Completion counts. |
+| `stages[]` | One entry per route stage: `index`, `id`, `label`, `target_start_min`, `target_end_min`, `complete`, `completed_at_s` (null when incomplete). |
+| `issues[]` | Only rows with a non-empty description: `row` (1–3), `area`, `severity`, `description`, `reproducible`. |
+| `notes` | Free observer notes. |
+| `validation` | `complete` (bool), `warnings[]` (`tester_name_missing`, `no_completed_stage`), and the policy text. |
+| `limits` | Short reminder that this is an observer aid, not an automated test. |
+
+### Partial-report policy
+
+An export never blocks on missing content. An empty tester name adds `tester_name_missing`; zero completed stages adds `no_completed_stage`. Both set `status` to `partial` and are visible in the UI and in `validation.warnings`, but the file is still written so an interrupted or partial session can be kept. Only I/O or schema failures fail the export.
+
+### Capture smoke
+
+```bash
+GODOT=/home/chris/.local/bin/godot ./scripts/smoke_playtest_capture.sh
+```
+
+The smoke runs headless with `--smoke --output <tmp>`, requires no display or input, checks the stage list, timer transitions, empty-row ignore / high-severity accept, the export schema, and the marker:
+
+```text
+PLAYTEST_CAPTURE status=ok stages=8 completed=8 issues=2 report=ok export=…
+```
+
+It then runs the scene a second time and compares the two payloads with `captured_at` removed. The deterministic core must match exactly.
+
+> [!warning] Observer tool only
+> This form does not automate the playtest, drive the game, capture keystrokes or game state, time frames, or decide severity. Use §5 telemetry when you need machine timestamps and state snapshots, and keep the human findings in the JSON/Markdown record. Recordings stay local; share only with consent.
+
+## 10. Limits
 
 - One 30-minute session cannot cover multiplayer, localization switching, or the standalone editor.
 - The route uses Wood-age starters only; later ages are out of scope.
