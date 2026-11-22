@@ -686,14 +686,38 @@ pub fn run_loopback_smoke() -> io::Result<LoopbackReport> {
 }
 
 fn serve_loopback(listener: TcpListener) -> io::Result<LoopbackReport> {
-    let (mut stream, _peer) = listener.accept()?;
+    let (stream, _peer) = listener.accept()?;
+    let (session, frames) = serve_stream(stream, LOOPBACK_SEED)?;
+
+    Ok(LoopbackReport {
+        frames,
+        checksum: session.checksum(),
+        session_id: session.session_id().to_string(),
+    })
+}
+
+/// Serve one accepted TCP connection until the peer closes or sends
+/// `disconnect`, and return the number of application frames exchanged.
+///
+/// A peer that connects and closes without sending a frame is a clean session
+/// close, not an error: port probes and cancelled clients rely on this.
+pub fn serve_connection(stream: TcpStream, seed: u64) -> io::Result<u64> {
+    serve_stream(stream, seed).map(|(_session, frames)| frames)
+}
+
+fn serve_stream(mut stream: TcpStream, seed: u64) -> io::Result<(Session, u64)> {
     configure_stream(&stream)?;
 
-    let mut session = Session::new(LOOPBACK_SEED);
+    let mut session = Session::new(seed);
     let mut frames = 0u64;
 
     loop {
-        let payload = read_frame(&mut stream).map_err(frame_to_io)?;
+        let payload = match read_frame(&mut stream) {
+            Ok(payload) => payload,
+            // EOF at the header or body boundary means the peer went away.
+            Err(FrameError::Truncated { .. }) | Err(FrameError::Io(_)) => break,
+            Err(error) => return Err(io::Error::other(error.to_string())),
+        };
         frames += 1;
 
         let mut closing = false;
@@ -715,11 +739,7 @@ fn serve_loopback(listener: TcpListener) -> io::Result<LoopbackReport> {
         }
     }
 
-    Ok(LoopbackReport {
-        frames,
-        checksum: session.checksum(),
-        session_id: session.session_id().to_string(),
-    })
+    Ok((session, frames))
 }
 
 fn run_loopback_client(address: SocketAddr) -> io::Result<()> {
@@ -1214,5 +1234,19 @@ mod tests {
 
         let second = run_loopback_smoke().expect("second loopback smoke");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn serve_connection_treats_an_empty_peer_close_as_clean() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _peer) = listener.accept().unwrap();
+            serve_connection(stream, LOOPBACK_SEED)
+        });
+
+        // A port probe that connects and immediately drops writes no frame.
+        drop(TcpStream::connect_timeout(&address, SESSION_IO_TIMEOUT).unwrap());
+        assert_eq!(server.join().unwrap().unwrap(), 0);
     }
 }
