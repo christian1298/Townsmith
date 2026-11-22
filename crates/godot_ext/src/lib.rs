@@ -32,6 +32,7 @@ use core_city::{
     summarize, summarize_district, summarize_heatmap, AdvisorInput, AdvisorReport, Age, AgeState,
     CitizenDeath, CitizenMotion, CitizenPosition, CityLayout, CityRuntime, CitySummary, CityTier,
     ConstructionPhase, ConstructionSite, ConstructionStore, ConstructionTimeScale, DistrictHeatmap,
+    DistrictPolicy, DistrictPolicyError, DistrictPolicyRequest, DistrictPolicyStore,
     DistrictSummary, Economy, Home, Household, IndustryKind, IndustryStore, InfrastructureCosts,
     LifecycleTick, Lot, LotError, LotRequest, LotStore, MaterializationBudget,
     MaterializationSelection, MaterializedCitizen, MotionLeg, NamedCitizens, NamedSave, Placement,
@@ -543,6 +544,7 @@ struct TownsmithCore {
     roads: Mutex<Option<RoadStore>>,
     lots: Mutex<Option<LotStore>>,
     settlements: Mutex<Option<SettlementStore>>,
+    policies: Mutex<Option<DistrictPolicyStore>>,
     population: Mutex<Option<CityRuntime>>,
     named: Mutex<Option<NamedCitizens>>,
     materialization: Mutex<Option<MaterializationSelection>>,
@@ -568,6 +570,7 @@ impl Default for TownsmithCore {
             roads: Mutex::new(None),
             lots: Mutex::new(None),
             settlements: Mutex::new(None),
+            policies: Mutex::new(None),
             population: Mutex::new(None),
             named: Mutex::new(None),
             materialization: Mutex::new(None),
@@ -2694,6 +2697,155 @@ impl TownsmithCore {
         };
         let payload = district_heatmap_payload(seed, &heatmap);
         district_heatmap_payload_to_dictionary(&payload)
+    }
+
+    /// Create one district policy in the in-memory registry.
+    ///
+    /// The registry is created lazily on the first policy for `seed`. It is
+    /// data only: no simulation, household, treasury, or economy code reads it,
+    /// and it is not part of the world-save envelope yet. The allowlist is a
+    /// `PackedStringArray` of namespaced blueprint ids. On failure the lazy
+    /// registry is removed again, so a rejected first create leaves no store.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn district_policy_create(
+        &self,
+        seed: i64,
+        name: GString,
+        center_x: f64,
+        center_z: f64,
+        radius_m: f64,
+        tax_multiplier: f64,
+        service_funding: f64,
+        construction_allowed: bool,
+        allowlist: PackedStringArray,
+    ) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        let request = district_policy_request(
+            name,
+            center_x,
+            center_z,
+            radius_m,
+            tax_multiplier,
+            service_funding,
+            construction_allowed,
+            &allowlist,
+        );
+        let mut guard = self
+            .policies
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match district_policy_create_in(&mut guard, seed, &request) {
+            Ok(policy) => district_policy_result(seed, &policy),
+            Err(error) => district_policy_error_result(&error),
+        }
+    }
+
+    /// Replace every mutable field of one district policy; the id is fixed.
+    ///
+    /// Data only: see [`Self::district_policy_create`]. The registry must
+    /// already be open for this seed.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn district_policy_update(
+        &self,
+        seed: i64,
+        id: i64,
+        name: GString,
+        center_x: f64,
+        center_z: f64,
+        radius_m: f64,
+        tax_multiplier: f64,
+        service_funding: f64,
+        construction_allowed: bool,
+        allowlist: PackedStringArray,
+    ) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        let Ok(id) = u64::try_from(id) else {
+            return placement_simple_error("not_found", "district policy id must be non-negative");
+        };
+        let request = district_policy_request(
+            name,
+            center_x,
+            center_z,
+            radius_m,
+            tax_multiplier,
+            service_funding,
+            construction_allowed,
+            &allowlist,
+        );
+        let mut guard = self
+            .policies
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match district_policy_update_in(guard.as_mut(), seed, id, &request) {
+            Ok(policy) => district_policy_result(seed, &policy),
+            Err(error) => district_policy_error_result(&error),
+        }
+    }
+
+    /// Remove one district policy by id.
+    ///
+    /// Data only: see [`Self::district_policy_create`]. A missing registry or
+    /// id returns a `not_found` error; a different registry seed returns
+    /// `seed_mismatch`.
+    #[func]
+    fn district_policy_remove(&self, seed: i64, id: i64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        let Ok(id) = u64::try_from(id) else {
+            return placement_simple_error("not_found", "district policy id must be non-negative");
+        };
+        let mut guard = self
+            .policies
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (count, checksum) = match district_policy_remove_in(guard.as_mut(), seed, id) {
+            Ok(result) => result,
+            Err(error) => return district_policy_error_result(&error),
+        };
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("seed", seed as i64);
+        result.set("id", id as i64);
+        result.set("count", count as i64);
+        result.set("checksum", &GString::from(&format!("{checksum:016x}")));
+        result
+    }
+
+    /// Return the district policy registry for one seed.
+    ///
+    /// A registry that has never been created reports `count: 0`, an empty
+    /// `policies` array, and a zero checksum. A registry from another seed is
+    /// a `seed_mismatch`. Data only: no simulation, economy, or UI consumer
+    /// reads these values yet.
+    #[func]
+    fn district_policies_state(&self, seed: i64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        let guard = self
+            .policies
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match district_policies_state_payload(guard.as_ref(), seed) {
+            Ok(Some(payload)) => district_policies_payload_to_dictionary(&payload),
+            Ok(None) => {
+                let mut result = VarDictionary::new();
+                result.set("ok", true);
+                result.set("seed", seed as i64);
+                result.set("count", 0);
+                result.set("policies", &Array::<VarDictionary>::new().to_variant());
+                result.set("checksum", &GString::from("0000000000000000"));
+                result
+            }
+            Err(error) => district_policy_error_result(&error),
+        }
     }
 
     /// Return household records and the move-in policy.
@@ -8979,6 +9131,207 @@ fn district_heatmap_payload_to_dictionary(payload: &DistrictHeatmapPayload) -> V
     result
 }
 
+/// One district policy payload, copied from the core registry.
+#[derive(Debug, Clone, PartialEq)]
+struct DistrictPolicyPayload {
+    seed: u64,
+    policy: DistrictPolicy,
+}
+
+fn district_policy_payload(seed: u64, policy: &DistrictPolicy) -> DistrictPolicyPayload {
+    DistrictPolicyPayload {
+        seed,
+        policy: policy.clone(),
+    }
+}
+
+fn district_policy_result(seed: u64, policy: &DistrictPolicy) -> VarDictionary {
+    district_policy_payload_to_dictionary(&district_policy_payload(seed, policy))
+}
+
+fn district_policy_payload_to_dictionary(payload: &DistrictPolicyPayload) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set("seed", payload.seed as i64);
+    result.set(
+        "policy",
+        &district_policy_to_dictionary(&payload.policy).to_variant(),
+    );
+    result
+}
+
+fn district_policy_to_dictionary(policy: &DistrictPolicy) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("id", policy.id as i64);
+    result.set("name", &GString::from(policy.name.as_str()));
+    result.set("center", &PackedFloat32Array::from(policy.center));
+    result.set("radius_m", f64::from(policy.radius_m));
+    result.set("tax_multiplier", f64::from(policy.tax_multiplier));
+    result.set("service_funding", f64::from(policy.service_funding));
+    result.set("construction_allowed", policy.construction_allowed);
+    let allowlist: Vec<GString> = policy
+        .blueprint_allowlist
+        .iter()
+        .map(|entry| GString::from(entry.as_str()))
+        .collect();
+    result.set(
+        "blueprint_allowlist",
+        &PackedStringArray::from(allowlist).to_variant(),
+    );
+    result
+}
+
+fn district_policy_error_result(error: &DistrictPolicyError) -> VarDictionary {
+    placement_simple_error(error.code(), error.to_string())
+}
+
+/// One copy of the full district policy registry.
+#[derive(Debug, Clone, PartialEq)]
+struct DistrictPoliciesPayload {
+    seed: u64,
+    count: usize,
+    policies: Vec<DistrictPolicy>,
+    checksum: u64,
+}
+
+fn district_policies_payload(store: &DistrictPolicyStore) -> DistrictPoliciesPayload {
+    DistrictPoliciesPayload {
+        seed: store.seed,
+        count: store.count(),
+        policies: store.list().cloned().collect(),
+        checksum: store.checksum(),
+    }
+}
+
+fn district_policies_payload_to_dictionary(payload: &DistrictPoliciesPayload) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set("seed", payload.seed as i64);
+    result.set("count", payload.count as i64);
+    let mut policies: Array<VarDictionary> = Array::new();
+    for policy in &payload.policies {
+        policies.push(&district_policy_to_dictionary(policy));
+    }
+    result.set("policies", &policies.to_variant());
+    result.set(
+        "checksum",
+        &GString::from(&format!("{:016x}", payload.checksum)),
+    );
+    result
+}
+
+/// Create one policy through the bridge-owned optional registry.
+///
+/// The registry is created lazily for `seed`. A rejected first create removes
+/// it again, so a bad request leaves no empty registry behind. A registry from
+/// another seed is rejected before it is touched.
+fn district_policy_create_in(
+    store: &mut Option<DistrictPolicyStore>,
+    seed: u64,
+    request: &DistrictPolicyRequest,
+) -> Result<DistrictPolicy, DistrictPolicyError> {
+    if let Some(existing) = store.as_ref() {
+        if existing.seed != seed {
+            return Err(DistrictPolicyError::SeedMismatch {
+                expected: seed,
+                found: existing.seed,
+            });
+        }
+    }
+    let created = store.is_none();
+    let result = store
+        .get_or_insert_with(|| DistrictPolicyStore::new(seed))
+        .create(request);
+    if result.is_err() && created {
+        *store = None;
+    }
+    result
+}
+
+/// Update one policy in an already-open registry.
+///
+/// A missing registry is reported as `not_found` for the requested id so the
+/// bridge keeps one error code for "no registry" and "no such policy".
+fn district_policy_update_in(
+    store: Option<&mut DistrictPolicyStore>,
+    seed: u64,
+    id: u64,
+    request: &DistrictPolicyRequest,
+) -> Result<DistrictPolicy, DistrictPolicyError> {
+    let Some(store) = store else {
+        return Err(DistrictPolicyError::NotFound { id });
+    };
+    if store.seed != seed {
+        return Err(DistrictPolicyError::SeedMismatch {
+            expected: seed,
+            found: store.seed,
+        });
+    }
+    store.update(id, request)
+}
+
+/// Remove one policy and return the remaining count and registry checksum.
+fn district_policy_remove_in(
+    store: Option<&mut DistrictPolicyStore>,
+    seed: u64,
+    id: u64,
+) -> Result<(usize, u64), DistrictPolicyError> {
+    let Some(store) = store else {
+        return Err(DistrictPolicyError::NotFound { id });
+    };
+    if store.seed != seed {
+        return Err(DistrictPolicyError::SeedMismatch {
+            expected: seed,
+            found: store.seed,
+        });
+    }
+    if !store.remove(id) {
+        return Err(DistrictPolicyError::NotFound { id });
+    }
+    Ok((store.count(), store.checksum()))
+}
+
+/// Copy the registry for a state call. `None` means no registry exists yet.
+fn district_policies_state_payload(
+    store: Option<&DistrictPolicyStore>,
+    seed: u64,
+) -> Result<Option<DistrictPoliciesPayload>, DistrictPolicyError> {
+    match store {
+        None => Ok(None),
+        Some(store) if store.seed == seed => Ok(Some(district_policies_payload(store))),
+        Some(store) => Err(DistrictPolicyError::SeedMismatch {
+            expected: seed,
+            found: store.seed,
+        }),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn district_policy_request(
+    name: GString,
+    center_x: f64,
+    center_z: f64,
+    radius_m: f64,
+    tax_multiplier: f64,
+    service_funding: f64,
+    construction_allowed: bool,
+    allowlist: &PackedStringArray,
+) -> DistrictPolicyRequest {
+    DistrictPolicyRequest {
+        name: name.to_string(),
+        center: [center_x as f32, center_z as f32],
+        radius_m: radius_m as f32,
+        tax_multiplier: tax_multiplier as f32,
+        service_funding: service_funding as f32,
+        construction_allowed,
+        blueprint_allowlist: allowlist
+            .as_slice()
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+    }
+}
+
 struct RoadGraphCache {
     seed: u64,
     roads_checksum: u64,
@@ -9935,6 +10288,186 @@ mod tests {
         assert!(payload.heatmap.cells.is_empty());
         assert_eq!(payload.heatmap.cols, 0);
         assert_eq!(payload.heatmap.rows, 0);
+    }
+
+    fn district_policy_request(name: &str) -> DistrictPolicyRequest {
+        DistrictPolicyRequest {
+            name: name.to_string(),
+            center: [100.0, 100.0],
+            radius_m: 64.0,
+            tax_multiplier: 1.0,
+            service_funding: 1.0,
+            construction_allowed: true,
+            blueprint_allowlist: std::collections::BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn district_policy_bridge_lazily_creates_and_copies_state() {
+        let mut registry: Option<DistrictPolicyStore> = None;
+        assert!(district_policies_state_payload(registry.as_ref(), 2026)
+            .expect("empty state")
+            .is_none());
+
+        let policy =
+            district_policy_create_in(&mut registry, 2026, &district_policy_request("Riverside"))
+                .expect("lazy create");
+        assert_eq!(policy.id, 1);
+        let store = registry.as_ref().expect("registry was created");
+        assert_eq!(store.count(), 1);
+        assert_eq!(store.seed, 2026);
+
+        let state = district_policies_state_payload(registry.as_ref(), 2026)
+            .expect("state")
+            .expect("registry exists");
+        assert_eq!(state.seed, 2026);
+        assert_eq!(state.count, 1);
+        assert_eq!(state.policies, vec![policy]);
+        assert_eq!(state.checksum, store.checksum());
+    }
+
+    #[test]
+    fn district_policy_bridge_rolls_back_a_failed_lazy_create() {
+        let mut registry: Option<DistrictPolicyStore> = None;
+        let mut invalid = district_policy_request("Riverside");
+        invalid.radius_m = 1.0;
+        assert_eq!(
+            district_policy_create_in(&mut registry, 2026, &invalid),
+            Err(DistrictPolicyError::InvalidRadius { radius_m: 1.0 })
+        );
+        assert!(registry.is_none(), "a failed first create left a registry");
+
+        let created =
+            district_policy_create_in(&mut registry, 2026, &district_policy_request("Riverside"))
+                .expect("create");
+        assert_eq!(
+            district_policy_create_in(&mut registry, 2026, &invalid),
+            Err(DistrictPolicyError::InvalidRadius { radius_m: 1.0 })
+        );
+        let store = registry.as_ref().expect("the open registry is kept");
+        assert_eq!(store.count(), 1);
+        assert_eq!(store.get(created.id), Some(&created));
+    }
+
+    #[test]
+    fn district_policy_bridge_rejects_a_foreign_seed_without_touching_the_store() {
+        let mut registry = Some(DistrictPolicyStore::new(2026));
+        assert_eq!(
+            district_policy_create_in(&mut registry, 2027, &district_policy_request("Riverside")),
+            Err(DistrictPolicyError::SeedMismatch {
+                expected: 2027,
+                found: 2026
+            })
+        );
+        let store = registry.as_ref().expect("registry is kept");
+        assert!(store.is_empty());
+        assert_eq!(store.seed, 2026);
+        assert_eq!(store.next_id, 1);
+    }
+
+    #[test]
+    fn district_policy_bridge_update_and_remove_use_the_open_store() {
+        let mut registry = Some(DistrictPolicyStore::new(2026));
+        let first =
+            district_policy_create_in(&mut registry, 2026, &district_policy_request("Riverside"))
+                .expect("first");
+        let second =
+            district_policy_create_in(&mut registry, 2026, &district_policy_request("Old Town"))
+                .expect("second");
+
+        let mut changed = district_policy_request("Harbour");
+        changed.tax_multiplier = 2.0;
+        changed.construction_allowed = false;
+        changed
+            .blueprint_allowlist
+            .insert("base:workshop".to_string());
+        let updated =
+            district_policy_update_in(registry.as_mut(), 2026, first.id, &changed).expect("update");
+        assert_eq!(updated.id, first.id);
+        assert_eq!(updated.name, "Harbour");
+        assert_eq!(updated.tax_multiplier, 2.0);
+        assert!(!updated.construction_allowed);
+        assert_eq!(
+            updated.blueprint_allowlist,
+            std::collections::BTreeSet::from(["base:workshop".to_string()])
+        );
+
+        let (count, checksum) =
+            district_policy_remove_in(registry.as_mut(), 2026, first.id).expect("remove");
+        let store = registry.as_ref().expect("registry");
+        assert_eq!(count, 1);
+        assert_eq!(checksum, store.checksum());
+        assert!(store.get(first.id).is_none());
+        assert_eq!(store.get(second.id), Some(&second));
+    }
+
+    #[test]
+    fn district_policy_bridge_update_remove_and_state_reject_foreign_or_missing_stores() {
+        let mut missing: Option<DistrictPolicyStore> = None;
+        let request = district_policy_request("Riverside");
+        assert_eq!(
+            district_policy_update_in(missing.as_mut(), 2026, 1, &request),
+            Err(DistrictPolicyError::NotFound { id: 1 })
+        );
+        assert_eq!(
+            district_policy_remove_in(missing.as_mut(), 2026, 1),
+            Err(DistrictPolicyError::NotFound { id: 1 })
+        );
+
+        let mut registry = Some(DistrictPolicyStore::new(2026));
+        let policy = district_policy_create_in(&mut registry, 2026, &request).expect("create");
+        assert_eq!(
+            district_policy_update_in(registry.as_mut(), 2027, policy.id, &request),
+            Err(DistrictPolicyError::SeedMismatch {
+                expected: 2027,
+                found: 2026
+            })
+        );
+        assert_eq!(
+            district_policy_remove_in(registry.as_mut(), 2027, policy.id),
+            Err(DistrictPolicyError::SeedMismatch {
+                expected: 2027,
+                found: 2026
+            })
+        );
+        assert_eq!(
+            district_policies_state_payload(registry.as_ref(), 2027),
+            Err(DistrictPolicyError::SeedMismatch {
+                expected: 2027,
+                found: 2026
+            })
+        );
+        // A rejected foreign-seed call leaves the record and counter alone.
+        let store = registry.as_ref().expect("registry");
+        assert_eq!(store.get(policy.id), Some(&policy));
+        assert_eq!(store.next_id, 2);
+    }
+
+    #[test]
+    fn district_policy_payloads_copy_records_and_checksum() {
+        let mut store = DistrictPolicyStore::new(2026);
+        let mut request = district_policy_request("Riverside");
+        request
+            .blueprint_allowlist
+            .insert("base:workshop".to_string());
+        let policy = store.create(&request).expect("create");
+
+        let payload = district_policy_payload(2026, &policy);
+        assert_eq!(payload.seed, 2026);
+        assert_eq!(payload.policy, policy);
+        assert_eq!(payload.policy.name, "Riverside");
+        assert_eq!(payload.policy.center, [100.0, 100.0]);
+        assert_eq!(payload.policy.radius_m, 64.0);
+        assert_eq!(
+            payload.policy.blueprint_allowlist,
+            std::collections::BTreeSet::from(["base:workshop".to_string()])
+        );
+
+        let state = district_policies_payload(&store);
+        assert_eq!(state.seed, 2026);
+        assert_eq!(state.count, 1);
+        assert_eq!(state.policies, vec![policy]);
+        assert_eq!(state.checksum, store.checksum());
     }
 
     #[test]
