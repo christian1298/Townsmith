@@ -174,6 +174,17 @@ The world-scene overlay splits routed citizens into near and far pools. Near kee
 
 Limits: no GPU instancing beyond MultiMesh, no per-agent visibility query, no route-line LOD, and no FPS claim. It is not the 2,000-active-agent render gate.
 
+## 7.2 Standalone 2,000-marker stress
+
+`godot/movement_stress.gd` is a synthetic MultiMesh marker harness: 2,000 deterministic agents from 400 homes x 5 residents and 200 workplaces, updated at 10 Hz for 120 simulated seconds (1,200 updates) in one pooled `MultiMeshInstance3D`. Headless three-run medians on the developer machine: median **0.38-0.40 ms**, p95 **0.44-0.53 ms**, max **0.66-1.19 ms**, checksum `d387ba8c`.
+
+```bash
+GODOT=/path/to/godot ./scripts/smoke_movement_stress.sh
+GODOT=/path/to/godot "${GODOT:-godot}" --headless --path godot res://movement_stress.tscn -- --agents 2000
+```
+
+This is a marker-update harness, not bridge/cohort evidence and not the 1M/RTX 3060 gate. The checksum hashes the emitted positions because headless Godot returns identity from `MultiMesh.get_instance_transform()`.
+
 ## 8. Related
 
 - [[07 - Simulation and AI]] — tiers, tick budgets, and the 2,000-agent target.

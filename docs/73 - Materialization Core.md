@@ -172,6 +172,8 @@ pub struct MaterializationDiff {
 - No save field: the selected set is derived on demand.
 - Selection is city-wide in N3; per-client interest filtering is later.
 
+- `godot/movement_stress.gd` is a standalone synthetic 2,000-marker MultiMesh harness (median ~0.38 ms/update); it is marker-update evidence, not bridge/cohort or the 1M gate.
+
 ## 9. World-scene overlay
 
 `F4` toggles a read-only overlay at the selected home/camera target. It calls `materialization_step` with the default 250 m inner / 350 m outer / 120 m detailed radii, pins the selected placement when there is one, and renders one blue marker per active citizen plus larger amber markers for detailed citizens. The overlay rebuilds on selection change or every 0.5 s while visible and frees its nodes when hidden. The stored selection survives refreshes, so the overlay follows the 80 m in / 120 m out hysteresis instead of reselecting from scratch. It does not persist or move agents.
