@@ -2,7 +2,7 @@
 title: Game Design
 project: Townsmith
 status: draft
-updated: 2026-11-19
+updated: 2026-11-23
 tags:
   - townsmith
   - design

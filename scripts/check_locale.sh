@@ -17,9 +17,9 @@
 #
 # Default success prints one line per table plus a summary:
 #   LOCALE_CHECK file=godot/editor_i18n.gd keys=111 min=111 status=ok
-#   LOCALE_CHECK file=godot/world_i18n.gd keys=217 min=217 status=ok
+#   LOCALE_CHECK file=godot/world_i18n.gd keys=226 min=226 status=ok
 #   LOCALE_CHECK file=godot/content_i18n.gd keys=34 min=34 status=ok
-#   LOCALE_CHECK editor=111 world=217 content=34 status=ok
+#   LOCALE_CHECK editor=111 world=226 content=34 status=ok
 #
 # Single-file success keeps the original contract:
 #   LOCALE_CHECK keys=111 status=ok
@@ -416,7 +416,7 @@ self_test() {
 	expect_fail world_too_few "$dir/world_too_few/world_i18n.gd" "$WORLD_MIN_KEYS" \
 		"minimum is $WORLD_MIN_KEYS"
 
-	# Content table: `DISPLAY` marker, independent 32-key floor.
+	# Content table: `DISPLAY` marker, independent 34-key floor.
 	content_valid="$dir/content/content_i18n.gd"
 	mkdir -p "$dir/content" "$dir/content_bad_placeholder" "$dir/content_too_few"
 	write_fixture "$content_valid" "$CONTENT_MIN_KEYS" DISPLAY

@@ -2,7 +2,7 @@
 title: Synthetic City Layout
 project: Townsmith
 status: active
-updated: 2026-11-19
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-0

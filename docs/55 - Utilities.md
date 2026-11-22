@@ -217,7 +217,7 @@ The city now stays healthy at full service and the 30-day run is financially rec
 - Utility site staffing is not modelled; installed capacity is always available while the building is complete.
 - One water and one power site per placement; no capacity upgrades.
 - No sewage, garbage, heating, communications, or pollution.
-- Utility site upkeep is now charged by the bridge; construction and maintenance models remain, construction cost, maintenance, failure, or repair.
+- Utility site upkeep is now charged by the bridge; construction cost, maintenance, failure, and repair models remain open.
 - Demand uses current residents and assigned workers; it does not model peak load or time of day.
 - Capacity is pooled across all sites, so one large site can mask a local coverage gap; the city-wide share is not a per-building guarantee.
 - The HUD recomputes coverage from all completed consumers and sites. A cached or incremental summary is needed before the 100k-building dashboard.
