@@ -192,6 +192,7 @@ const TABLES := {
 		"base.ui.dashboard.section.industry": "Industry",
 		"base.ui.dashboard.section.roads": "Roads",
 		"base.ui.dashboard.section.construction": "Construction",
+		"base.ui.dashboard.section.policies": "Policies",
 		"base.ui.dashboard.section.advisor": "Advisor",
 
 		# Dashboard body.
@@ -205,6 +206,13 @@ const TABLES := {
 		"base.ui.dashboard.body.district_focus_action_selection": "F6: focus the selected building",
 		"base.ui.dashboard.body.district_focus_action_camera": "F6: back to camera focus",
 		"base.ui.dashboard.body.district_unavailable": "District data unavailable.",
+		"base.ui.dashboard.body.policies_count": "Policies registered: {count}",
+		"base.ui.dashboard.body.policy": "{name} · tax ×{tax} · funding {funding}",
+		"base.ui.dashboard.body.policy_construction_allowed": "construction allowed",
+		"base.ui.dashboard.body.policy_construction_blocked": "construction blocked",
+		"base.ui.dashboard.body.policy_allowlist": "allowlist: {count}",
+		"base.ui.dashboard.body.policy_none": "No policy covers this point.",
+		"base.ui.dashboard.body.policies_unavailable": "Policy data unavailable.",
 		"base.ui.dashboard.body.citizens_near": "Citizens near: {active} active · {detailed} detailed",
 		"base.ui.dashboard.body.age_final": "{age} · final age",
 		"base.ui.dashboard.body.age_next": "{age} · next {next} at {threshold} ({progress}%)",
@@ -451,6 +459,7 @@ const TABLES := {
 		"base.ui.dashboard.section.industry": "Industrie",
 		"base.ui.dashboard.section.roads": "Straßen",
 		"base.ui.dashboard.section.construction": "Bau",
+		"base.ui.dashboard.section.policies": "Richtlinien",
 		"base.ui.dashboard.section.advisor": "Berater",
 
 		# Dashboard-Körper.
@@ -464,6 +473,13 @@ const TABLES := {
 		"base.ui.dashboard.body.district_focus_action_selection": "F6: ausgewähltes Gebäude fokussieren",
 		"base.ui.dashboard.body.district_focus_action_camera": "F6: zurück zum Kamera-Fokus",
 		"base.ui.dashboard.body.district_unavailable": "Stadtteildaten nicht verfügbar.",
+		"base.ui.dashboard.body.policies_count": "Registrierte Richtlinien: {count}",
+		"base.ui.dashboard.body.policy": "{name} · Steuer ×{tax} · Förderung {funding}",
+		"base.ui.dashboard.body.policy_construction_allowed": "Bau erlaubt",
+		"base.ui.dashboard.body.policy_construction_blocked": "Bau gesperrt",
+		"base.ui.dashboard.body.policy_allowlist": "Positivliste: {count}",
+		"base.ui.dashboard.body.policy_none": "Keine Richtlinie deckt diesen Punkt ab.",
+		"base.ui.dashboard.body.policies_unavailable": "Richtliniendaten nicht verfügbar.",
 		"base.ui.dashboard.body.citizens_near": "Bürger in der Nähe: {active} aktiv · {detailed} detailliert",
 		"base.ui.dashboard.body.age_final": "{age} · letztes Zeitalter",
 		"base.ui.dashboard.body.age_next": "{age} · als Nächstes {next} bei {threshold} ({progress} %)",

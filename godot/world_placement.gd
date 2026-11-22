@@ -2939,6 +2939,7 @@ func _update_dashboard() -> void:
 	var district: Dictionary = core.district_summary(
 		SEED, district_center.x, district_center.y, DISTRICT_RADIUS_M
 	)
+	var policy_state: Dictionary = core.district_policies_state(SEED)
 	var population := int(city.get("population", 0))
 	var happiness := "—"
 	var needs := "—"
@@ -3000,6 +3001,7 @@ func _update_dashboard() -> void:
 			"detailed": i18n.format_int(materialization_counts.y),
 		}) + "\n"
 	text += _district_section(district, district_focus)
+	text += _policies_section(policy_state)
 	var age_line := "—"
 	if bool(progression.get("ok", false)):
 		var next_age := str(progression.get("next_age", ""))
@@ -3178,6 +3180,68 @@ func _district_section(district: Dictionary, focus_selected := false) -> String:
 	if selected_id >= 0:
 		section += i18n.t(action_key) + "\n"
 	return section
+
+func _policies_section(state: Dictionary) -> String:
+	var section := "[b]%s[/b]\n" % i18n.t("base.ui.dashboard.section.policies")
+	if not bool(state.get("ok", false)):
+		section += i18n.t("base.ui.dashboard.body.policies_unavailable") + "\n"
+		return section
+	var policies_value = state.get("policies", [])
+	var policies: Array = policies_value if policies_value is Array else []
+	section += i18n.t("base.ui.dashboard.body.policies_count", {
+		"count": i18n.format_int(policies.size()),
+	}) + "\n"
+	var policy := _containing_policy(policies, _district_center_xz())
+	if policy.is_empty():
+		section += i18n.t("base.ui.dashboard.body.policy_none") + "\n"
+		return section
+	section += i18n.t("base.ui.dashboard.body.policy", {
+		"name": str(policy.get("name", "")),
+		"tax": i18n.format_float(float(policy.get("tax_multiplier", 0.0)), 2),
+		"funding": i18n.format_float(float(policy.get("service_funding", 0.0)), 2),
+	}) + "\n"
+	section += i18n.t(
+		"base.ui.dashboard.body.policy_construction_allowed" if bool(policy.get("construction_allowed", false)) else "base.ui.dashboard.body.policy_construction_blocked"
+	) + "\n"
+	var allowlist_count := _policy_allowlist_count(policy.get("blueprint_allowlist", null))
+	section += i18n.t("base.ui.dashboard.body.policy_allowlist", {
+		"count": i18n.format_int(allowlist_count) if allowlist_count > 0 else i18n.NOT_AVAILABLE,
+	}) + "\n"
+	return section
+
+## Smallest-id policy whose inclusive XZ circle contains `point`.
+func _containing_policy(policies: Array, point: Vector2) -> Dictionary:
+	var best: Dictionary = {}
+	for value in policies:
+		if not (value is Dictionary):
+			continue
+		var policy: Dictionary = value
+		var center := _policy_center(policy.get("center", null))
+		var radius := float(policy.get("radius_m", 0.0))
+		if not is_finite(center.x) or not is_finite(center.y):
+			continue
+		if not is_finite(radius) or radius < 0.0:
+			continue
+		if point.distance_to(center) > radius:
+			continue
+		var id := int(policy.get("id", 0))
+		if best.is_empty() or id < int(best.get("id", 0)):
+			best = policy
+	return best
+
+## Read an `[x, z]` centre from a plain or packed array; NAN when malformed.
+func _policy_center(value) -> Vector2:
+	if not (value is Array or value is PackedFloat32Array):
+		return Vector2(NAN, NAN)
+	if value.size() < 2:
+		return Vector2(NAN, NAN)
+	return Vector2(float(value[0]), float(value[1]))
+
+## Allowlist length for a plain or packed string array.
+func _policy_allowlist_count(value) -> int:
+	if value is Array or value is PackedStringArray:
+		return value.size()
+	return 0
 
 func _info_for_path(path: String) -> Dictionary:
 	if path == "":
@@ -3957,6 +4021,7 @@ func _run_scene_smoke() -> void:
 	var economy_ok := false
 	var dashboard_ok := false
 	var district_ui_ok := false
+	var policy_ui_ok := false
 	var district_select_ok := false
 	var heatmap_ui_ok := false
 	var heatmap_modes_ok := false
@@ -4732,6 +4797,122 @@ func _run_scene_smoke() -> void:
 					district_select_ok = district_select_ok and str(core.world_placement_checksum()) == district_world_checksum
 					district_select_ok = district_select_ok and str(core.population_checksum()) == district_population_checksum
 					district_select_ok = district_select_ok and str(core.construction_checksum()) == district_construction_checksum
+				# Policies: one read-only section driven by one
+				# `district_policies_state` call per dashboard rebuild. The
+				# bridge has no `policy_at`, so GDScript scans the inclusive
+				# XZ circle at the district centre and takes the smallest id.
+				var policy_probe: Vector2 = Vector2.ZERO
+				var plain_policies: Array = [
+					{"id": 2, "center": [64.0, 0.0], "radius_m": 64.0},
+					{"id": 1, "center": [10.0, 0.0], "radius_m": 50.0},
+				]
+				policy_ui_ok = int(_containing_policy(plain_policies, policy_probe).get("id", 0)) == 1
+				policy_ui_ok = policy_ui_ok and int(_containing_policy(plain_policies, Vector2(128.0, 0.0)).get("id", 0)) == 2
+				var packed_policies: Array = [
+					{"id": 3, "center": PackedFloat32Array([0.0, 0.0]), "radius_m": 16.0},
+				]
+				policy_ui_ok = policy_ui_ok and int(_containing_policy(packed_policies, Vector2(16.0, 0.0)).get("id", 0)) == 3
+				var invalid_policies: Array = [
+					{"id": 4, "center": [NAN, 0.0], "radius_m": 64.0},
+					{"id": 5, "center": [0.0, 0.0], "radius_m": INF},
+				]
+				policy_ui_ok = policy_ui_ok and _containing_policy(invalid_policies, policy_probe).is_empty()
+				policy_ui_ok = policy_ui_ok and _policies_section({"ok": false}).contains(i18n.t("base.ui.dashboard.body.policies_unavailable"))
+				policy_ui_ok = policy_ui_ok and not _policies_section({"ok": false}).contains("!base.ui.")
+				var policy_state: Dictionary = core.district_policies_state(SEED)
+				policy_ui_ok = policy_ui_ok and bool(policy_state.get("ok", false))
+				policy_ui_ok = policy_ui_ok and int(policy_state.get("count", -1)) == 0
+				policy_ui_ok = policy_ui_ok and str(policy_state.get("checksum", "")) == "0000000000000000"
+				_update_dashboard()
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.section.policies"))
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policies_count", {
+					"count": i18n.format_int(0),
+				}))
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policy_none"))
+				var policy_world_checksum := str(core.world_placement_checksum())
+				var policy_population_checksum := str(core.population_checksum())
+				var policy_construction_checksum := str(core.construction_checksum())
+				var policy_center: Vector2 = _district_center_xz()
+				var policy_created: Dictionary = core.district_policy_create(
+					SEED,
+					"Old Town",
+					policy_center.x,
+					policy_center.y,
+					64.0,
+					1.25,
+					1.1,
+					true,
+					PackedStringArray(["base:workshop"])
+				)
+				var created_policy: Dictionary = policy_created.get("policy", {})
+				var policy_id := int(created_policy.get("id", 0))
+				policy_ui_ok = policy_ui_ok and bool(policy_created.get("ok", false)) and policy_id > 0
+				_update_dashboard()
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policies_count", {
+					"count": i18n.format_int(1),
+				}))
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains("Old Town")
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policy", {
+					"name": "Old Town",
+					"tax": i18n.format_float(1.25, 2),
+					"funding": i18n.format_float(1.1, 2),
+				}))
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policy_construction_allowed"))
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policy_allowlist", {
+					"count": i18n.format_int(1),
+				}))
+				policy_ui_ok = policy_ui_ok and not dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policy_none"))
+				i18n.set_locale("de")
+				_update_dashboard()
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.section.policies"))
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policies_count", {
+					"count": i18n.format_int(1),
+				}))
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains("Old Town")
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policy", {
+					"name": "Old Town",
+					"tax": i18n.format_float(1.25, 2),
+					"funding": i18n.format_float(1.1, 2),
+				}))
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policy_construction_allowed"))
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policy_allowlist", {
+					"count": i18n.format_int(1),
+				}))
+				policy_ui_ok = policy_ui_ok and not dashboard_text.text.contains("!base.ui.")
+				i18n.set_locale("en")
+				var policy_updated: Dictionary = core.district_policy_update(
+					SEED,
+					policy_id,
+					"Old Town",
+					policy_center.x,
+					policy_center.y,
+					64.0,
+					1.25,
+					1.1,
+					false,
+					PackedStringArray(["base:workshop"])
+				)
+				policy_ui_ok = policy_ui_ok and bool(policy_updated.get("ok", false))
+				_update_dashboard()
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policy_construction_blocked"))
+				policy_ui_ok = policy_ui_ok and not dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policy_construction_allowed"))
+				i18n.set_locale("de")
+				_update_dashboard()
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policy_construction_blocked"))
+				policy_ui_ok = policy_ui_ok and not dashboard_text.text.contains("!base.ui.")
+				i18n.set_locale("en")
+				var policy_removed: Dictionary = core.district_policy_remove(SEED, policy_id)
+				policy_ui_ok = policy_ui_ok and bool(policy_removed.get("ok", false))
+				policy_ui_ok = policy_ui_ok and int(policy_removed.get("count", -1)) == 0
+				_update_dashboard()
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policies_count", {
+					"count": i18n.format_int(0),
+				}))
+				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policy_none"))
+				policy_ui_ok = policy_ui_ok and not dashboard_text.text.contains("Old Town")
+				policy_ui_ok = policy_ui_ok and str(core.world_placement_checksum()) == policy_world_checksum
+				policy_ui_ok = policy_ui_ok and str(core.population_checksum()) == policy_population_checksum
+				policy_ui_ok = policy_ui_ok and str(core.construction_checksum()) == policy_construction_checksum
 				_toggle_dashboard()
 				dashboard_ok = dashboard_ok and not dashboard_panel.visible
 				var heatmap_checksum := ""
@@ -5171,6 +5352,8 @@ func _run_scene_smoke() -> void:
 					status = "dashboard_failed"
 				elif not district_ui_ok:
 					status = "district_ui_failed"
+				elif not policy_ui_ok:
+					status = "policy_ui_failed"
 				elif not heatmap_ui_ok:
 					status = "heatmap_ui_failed"
 				elif not heatmap_modes_ok:
@@ -5275,7 +5458,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s district_select=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s district_select=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -5316,6 +5499,7 @@ func _run_scene_smoke() -> void:
 		"ok" if economy_ok else "failed",
 		"ok" if dashboard_ok else "failed",
 		"ok" if district_ui_ok else "failed",
+		"ok" if policy_ui_ok else "failed",
 		"ok" if district_select_ok else "failed",
 		"ok" if heatmap_ui_ok else "failed",
 		"ok" if heatmap_modes_ok else "failed",
