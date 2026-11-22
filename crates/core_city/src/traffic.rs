@@ -868,6 +868,21 @@ impl FlowFieldCache {
         self.capacity
     }
 
+    /// Grow the cache to hold at least `capacity` fields.
+    ///
+    /// Grow-only: a smaller request is ignored, so raising the bound never
+    /// evicts an entry and existing fields keep their FIFO positions. The
+    /// eviction rule itself is unchanged; once the new bound is reached the
+    /// oldest insertion is still the one dropped. A zero request leaves the
+    /// current bound (always at least one) untouched.
+    ///
+    /// The city loop calls this once per tick with the number of workplaces so
+    /// a late-game roster larger than the initial estimate does not churn
+    /// through the FIFO cap.
+    pub fn ensure_capacity(&mut self, capacity: usize) {
+        self.capacity = self.capacity.max(capacity.max(1));
+    }
+
     /// Lookup hits since creation.
     #[must_use]
     pub const fn hits(&self) -> u64 {
@@ -2088,6 +2103,42 @@ mod tests {
         assert!(cache.get(goals[0]).is_some());
         assert!(cache.get(goals[1]).is_none());
         assert!(cache.get(goals[2]).is_some());
+    }
+
+    #[test]
+    fn ensure_capacity_only_grows_and_never_evicts() {
+        let graph = RoadGraph::build(&[
+            road(1, [0, 0], [10, 0]),
+            road(2, [10, 0], [10, 10]),
+            road(3, [10, 10], [0, 10]),
+        ])
+        .expect("build");
+        let goals = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]];
+        let mut cache = FlowFieldCache::new(2);
+        assert!(cache.get_or_build(&graph, goals[0]).is_some());
+        assert!(cache.get_or_build(&graph, goals[1]).is_some());
+        assert_eq!(cache.capacity(), 2);
+
+        // Growing keeps both existing fields in place.
+        cache.ensure_capacity(8);
+        assert_eq!(cache.capacity(), 8);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get_for(&graph, goals[0]).is_some());
+        assert!(cache.get_for(&graph, goals[1]).is_some());
+
+        // A third goal now fits instead of evicting the oldest.
+        assert!(cache.get_or_build(&graph, goals[2]).is_some());
+        assert_eq!(cache.len(), 3);
+        assert!(cache.get(goals[0]).is_some());
+
+        // Shrinking is ignored, and zero leaves the bound at one or more.
+        cache.ensure_capacity(1);
+        assert_eq!(cache.capacity(), 8);
+        cache.ensure_capacity(0);
+        assert_eq!(cache.capacity(), 8);
+        let mut empty = FlowFieldCache::new(1);
+        empty.ensure_capacity(0);
+        assert_eq!(empty.capacity(), 1);
     }
 
     #[test]

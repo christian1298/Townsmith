@@ -13,8 +13,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::traffic::{
-    fnv1a_feed, travel_time_seconds, FlowField, RoadGraph, DEFAULT_TRAVEL_SPEED_MPS,
-    FNV_OFFSET_BASIS,
+    fnv1a_feed, travel_time_seconds, FlowField, FlowFieldCache, RoadGraph,
+    DEFAULT_TRAVEL_SPEED_MPS, FNV_OFFSET_BASIS,
 };
 
 /// Current household save format.
@@ -433,6 +433,10 @@ impl CityRuntime {
     /// When a graph is supplied, commute distances follow the road network;
     /// otherwise they are straight-line metres. Unreachable pairs fall back to
     /// straight-line distance so a disconnected network cannot strand jobs.
+    ///
+    /// This variant builds one flow field per workplace on every call. Use
+    /// [`Self::tick_with_supplies_and_roads_cached`] in a long-running loop to
+    /// reuse fields across ticks.
     #[allow(clippy::too_many_arguments)]
     pub fn tick_with_supplies_and_roads(
         &mut self,
@@ -443,6 +447,94 @@ impl CityRuntime {
         water_supply: f32,
         power_supply: f32,
         roads: Option<&RoadGraph>,
+    ) -> PopulationReport {
+        let owned: Vec<Option<FlowField>> = roads
+            .map(|graph| {
+                workplaces
+                    .iter()
+                    .map(|work| graph.flow_to(work.center))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let flows: Vec<Option<&FlowField>> = owned.iter().map(Option::as_ref).collect();
+        self.tick_with_flows(
+            dt_s,
+            homes,
+            workplaces,
+            food_supply,
+            water_supply,
+            power_supply,
+            roads,
+            &flows,
+        )
+    }
+
+    /// Advance with service shares, an optional road graph, and a reusable
+    /// flow-field cache.
+    ///
+    /// For each workplace this builds or refreshes one version-checked field
+    /// through [`FlowFieldCache::get_or_build`], then reads the fields back
+    /// with [`FlowFieldCache::get_for`]. The cache is grow-only for the call:
+    /// its capacity is raised to at least the workplace count so a full
+    /// per-workplace set never evicts itself mid-tick. A road-edit version
+    /// change rebuilds stale entries in place; a field that cannot be built
+    /// (no nearby node, non-finite goal, or an empty graph) falls back to
+    /// straight-line distance exactly like the uncached path.
+    ///
+    /// The resulting state and checksums are identical to
+    /// [`Self::tick_with_supplies_and_roads`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn tick_with_supplies_and_roads_cached(
+        &mut self,
+        dt_s: f64,
+        homes: &[Home],
+        workplaces: &[Workplace],
+        food_supply: f32,
+        water_supply: f32,
+        power_supply: f32,
+        roads: Option<&RoadGraph>,
+        cache: &mut FlowFieldCache,
+    ) -> PopulationReport {
+        let flows: Vec<Option<&FlowField>> = if let Some(graph) = roads {
+            cache.ensure_capacity(workplaces.len());
+            for work in workplaces {
+                let _ = cache.get_or_build(graph, work.center);
+            }
+            workplaces
+                .iter()
+                .map(|work| cache.get_for(graph, work.center))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.tick_with_flows(
+            dt_s,
+            homes,
+            workplaces,
+            food_supply,
+            water_supply,
+            power_supply,
+            roads,
+            &flows,
+        )
+    }
+
+    /// Shared tick body: move-in, job assignment, needs, and wages.
+    ///
+    /// `flows` is positional with `workplaces`; `None` entries use
+    /// straight-line distance. Both public tick variants differ only in how
+    /// they produce these fields.
+    #[allow(clippy::too_many_arguments)]
+    fn tick_with_flows(
+        &mut self,
+        dt_s: f64,
+        homes: &[Home],
+        workplaces: &[Workplace],
+        food_supply: f32,
+        water_supply: f32,
+        power_supply: f32,
+        roads: Option<&RoadGraph>,
+        flows: &[Option<&FlowField>],
     ) -> PopulationReport {
         self.sync_homes(homes);
         let food = normalize_supply(food_supply);
@@ -474,15 +566,7 @@ impl CityRuntime {
         }
         self.move_in_carry = (desired - target as f32).clamp(0.0, 0.999_999);
 
-        let flows = roads
-            .map(|graph| {
-                workplaces
-                    .iter()
-                    .map(|work| graph.flow_to(work.center))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let assignment = assign_jobs(&self.households, workplaces, roads, &flows);
+        let assignment = assign_jobs(&self.households, workplaces, roads, flows);
         self.staffing = assignment.staffing;
         let mut assigned = 0_usize;
         for (&id, household) in &mut self.households {
@@ -854,7 +938,7 @@ fn assign_jobs(
     households: &BTreeMap<u64, Household>,
     workplaces: &[Workplace],
     roads: Option<&RoadGraph>,
-    flows: &[Option<FlowField>],
+    flows: &[Option<&FlowField>],
 ) -> JobAssignment {
     let homes: Vec<JobHome> = households
         .iter()
@@ -1003,7 +1087,7 @@ fn grow_home(
     grid: &WorkplaceGrid,
     workplaces: &[Workplace],
     roads: Option<&RoadGraph>,
-    flows: &[Option<FlowField>],
+    flows: &[Option<&FlowField>],
 ) {
     if state.complete {
         return;
@@ -1080,7 +1164,7 @@ fn assign_with_grid(
     homes: &[JobHome],
     workplaces: &[Workplace],
     roads: Option<&RoadGraph>,
-    flows: &[Option<FlowField>],
+    flows: &[Option<&FlowField>],
 ) -> JobAssignment {
     #[cfg(test)]
     mark_job_path(true);
@@ -1167,7 +1251,7 @@ fn greedy_full(
     homes: &[JobHome],
     workplaces: &[Workplace],
     roads: Option<&RoadGraph>,
-    flows: &[Option<FlowField>],
+    flows: &[Option<&FlowField>],
 ) -> JobAssignment {
     #[cfg(test)]
     mark_job_path(false);
@@ -1197,7 +1281,7 @@ fn sort_job_pairs(pairs: &mut [JobPair]) {
 /// Commute distance for one home/workplace pair.
 fn job_distance(
     roads: Option<&RoadGraph>,
-    flows: &[Option<FlowField>],
+    flows: &[Option<&FlowField>],
     home: [f32; 2],
     work_index: usize,
     center: [f32; 2],
@@ -1433,7 +1517,7 @@ impl WorkplaceGrid {
         upper: f32,
         workplaces: &[Workplace],
         roads: Option<&RoadGraph>,
-        flows: &[Option<FlowField>],
+        flows: &[Option<&FlowField>],
         out: &mut Vec<(f32, u32)>,
     ) {
         if !upper.is_finite() || !home.iter().all(|value| value.is_finite()) {
@@ -1738,6 +1822,145 @@ mod tests {
             Some(&disconnected),
         );
         assert!((runtime.households[&1].commute_m - 20.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn cached_ticks_match_uncached_across_a_road_edit() {
+        fn road(id: u64, start: [i32; 2], end: [i32; 2]) -> crate::road::RoadSegment {
+            crate::road::RoadSegment {
+                id,
+                start,
+                end,
+                width_m: 8,
+            }
+        }
+        let homes = [
+            Home {
+                id: 1,
+                capacity: 2,
+                center: [0.0, 0.0],
+            },
+            Home {
+                id: 2,
+                capacity: 2,
+                center: [40.0, 0.0],
+            },
+        ];
+        let workplaces = [
+            Workplace {
+                id: 10,
+                slots: 2,
+                center: [20.0, 0.0],
+            },
+            Workplace {
+                id: 11,
+                slots: 2,
+                center: [20.0, 40.0],
+            },
+        ];
+        // Workplace 11 starts on a long detour; appending the direct connector
+        // changes its flow field and therefore the graph change version.
+        let mut graph = RoadGraph::build(&[
+            road(1, [0, 0], [40, 0]),
+            road(2, [40, 0], [40, 100]),
+            road(3, [40, 100], [20, 100]),
+            road(4, [20, 100], [20, 40]),
+        ])
+        .expect("graph");
+        let mut cached = CityRuntime::new(2026);
+        cached.set_move_in_per_second(2.0);
+        let mut uncached = CityRuntime::new(2026);
+        uncached.set_move_in_per_second(2.0);
+        let mut cache = FlowFieldCache::new(0);
+
+        for _ in 0..2 {
+            cached.tick_with_supplies_and_roads_cached(
+                1.0,
+                &homes,
+                &workplaces,
+                1.0,
+                1.0,
+                1.0,
+                Some(&graph),
+                &mut cache,
+            );
+            uncached.tick_with_supplies_and_roads(
+                1.0,
+                &homes,
+                &workplaces,
+                1.0,
+                1.0,
+                1.0,
+                Some(&graph),
+            );
+            assert_eq!(cached.checksum(), uncached.checksum());
+            assert_eq!(cached.population(), uncached.population());
+            assert_eq!(cached.workplace_checksum(), uncached.workplace_checksum());
+            assert_eq!(cached.staffing, uncached.staffing);
+            assert_eq!(cached.average_commute_m(), uncached.average_commute_m());
+        }
+        assert_eq!(cache.capacity(), workplaces.len());
+        assert_eq!(cache.len(), workplaces.len());
+        assert_eq!(cache.misses(), 2, "first tick builds both fields");
+        assert_eq!(cache.hits(), 2, "second tick reuses both fields");
+        assert_eq!(cache.rebuilds(), 0);
+
+        // A road append invalidates every stored version; the next cached tick
+        // must rebuild instead of serving stale detour distances.
+        assert!(graph
+            .add_segment(&road(5, [20, 0], [20, 40]))
+            .expect("append connector"));
+        assert!(cache.get_for(&graph, workplaces[1].center).is_none());
+        cached.tick_with_supplies_and_roads_cached(
+            1.0,
+            &homes,
+            &workplaces,
+            1.0,
+            1.0,
+            1.0,
+            Some(&graph),
+            &mut cache,
+        );
+        uncached.tick_with_supplies_and_roads(
+            1.0,
+            &homes,
+            &workplaces,
+            1.0,
+            1.0,
+            1.0,
+            Some(&graph),
+        );
+        assert_eq!(cached.checksum(), uncached.checksum());
+        assert_eq!(cached.staffing, uncached.staffing);
+        assert_eq!(cache.len(), workplaces.len());
+        assert_eq!(cache.hits(), 2);
+        assert_eq!(cache.misses(), 4);
+        assert_eq!(cache.rebuilds(), 2, "both fields rebuilt after the edit");
+        assert!(cache.get_for(&graph, workplaces[1].center).is_some());
+
+        // The refreshed entries are current: another tick only hits.
+        cached.tick_with_supplies_and_roads_cached(
+            1.0,
+            &homes,
+            &workplaces,
+            1.0,
+            1.0,
+            1.0,
+            Some(&graph),
+            &mut cache,
+        );
+        uncached.tick_with_supplies_and_roads(
+            1.0,
+            &homes,
+            &workplaces,
+            1.0,
+            1.0,
+            1.0,
+            Some(&graph),
+        );
+        assert_eq!(cached.checksum(), uncached.checksum());
+        assert_eq!(cache.hits(), 4);
+        assert_eq!(cache.rebuilds(), 2);
     }
 
     #[test]

@@ -10,8 +10,8 @@
 use std::collections::BTreeSet;
 
 use core_city::{
-    summarize, Age, CityRuntime, ConstructionStore, ConstructionTimeScale, Economy, Home,
-    IndustryKind, IndustryStore, Placement, PlacementPlan, PlacementRequest, PlacementStore,
+    summarize, Age, CityRuntime, ConstructionStore, ConstructionTimeScale, Economy, FlowFieldCache,
+    Home, IndustryKind, IndustryStore, Placement, PlacementPlan, PlacementRequest, PlacementStore,
     RoadGraph, RoadSegment, RoadStore, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore,
     Workplace, MAX_LOAN,
 };
@@ -409,6 +409,12 @@ fn simulate_with(
 
     let mut runtime = CityRuntime::new(seed);
     runtime.set_move_in_per_second(5.0);
+    // One flow field per job site at most: workshop workplaces plus the
+    // industry houses that carry job slots. The graph is built once above; the
+    // cache rebuilds a field only when a road edit changes its version.
+    let mut flow_cache = FlowFieldCache::new(
+        usize::try_from(workplaces_count).expect("workplaces fit usize") + industry_count,
+    );
     let mut economy = Economy::new(seed);
     let construction_cost = (houses + workplaces_count) as f64 * CONSTRUCTION_COST_PER_BUILDING;
     let loan_amount = (construction_cost - 50_000.0).clamp(50_000.0, MAX_LOAN);
@@ -507,7 +513,7 @@ fn simulate_with(
             runtime.population(),
             utilities.power_supply,
         );
-        runtime.tick_with_supplies_and_roads(
+        runtime.tick_with_supplies_and_roads_cached(
             step,
             &homes,
             &workplaces,
@@ -515,6 +521,7 @@ fn simulate_with(
             utilities.water_supply,
             utilities.power_supply,
             if skips_roads { None } else { Some(&traffic) },
+            &mut flow_cache,
         );
         let completed = construction
             .sites
