@@ -2,7 +2,7 @@
 title: Settlement Boundaries
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-2
@@ -137,8 +137,8 @@ It checks:
 
 ## 7. Tests
 
-- `core_city` settlement tests: 7; core_city total **170**.
-- Workspace: **651 tests + 2 doctests**.
+- `core_city` settlement tests: 7; core_city total **432**.
+- Workspace: **858 tests** (854 unit/integration + 4 doctests).
 - Godot headless: `WORLD_SCENE ... settlements=ok ... status=ok`.
 - `WORLD_PLACEMENT` still passes unchanged.
 

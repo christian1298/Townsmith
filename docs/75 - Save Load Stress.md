@@ -128,10 +128,18 @@ truncate the JSON, or clear an array field. Each case is wrapped in
 `catch_unwind`; every layer parser must return `Ok` or a stable error without
 panicking. This is a bounded envelope fuzz, not a schema-aware generator.
 
-## 6. Limits
+## 6. Atomic world save (PR #215)
+
+`world_save` writes a sibling `<path>.tmp`, fsyncs it, rotates a structurally valid previous save to `<path>.bak`, renames the temp file over the primary, and syncs the parent directory on Unix. `world_load` accepts the primary JSON object; when the primary is missing or invalid it falls back to `.bak` and reports the recovered checksum. If both are invalid it rejects.
+
+`crates/godot_ext/src/lib.rs` covers the path with `atomic_save_writes_and_reads_back`, `atomic_save_rotates_a_valid_previous_file`, `atomic_save_recovers_a_corrupt_primary_from_backup`, `atomic_save_rejects_two_corrupt_files`, and `atomic_save_rejects_a_missing_directory`.
+
+This keeps one backup generation and leaves store schemas and checksums unchanged. It does not add a journal, compression, multi-generation backups, or 1M bridge timing; those remain in [[68 - Metropolis Gate]] and §7 limits.
+
+## 7. Limits
 
 - Core stores only; it does not exercise the Godot `world_save`/`world_load` wrapper or `VarDictionary` payloads. Bridge atomic-write/`.bak` recovery is covered by `godot_ext` unit tests.
-- Terrain deltas are covered as a core encoded blob; the full world-save size limit is still absent.
+- Terrain deltas are covered as a core encoded blob. The Godot bridge enforces `MAX_WORLD_SAVE_BYTES` (64 MiB); the core harness does not exercise that envelope.
 - No multiplayer, mod, or migration matrix.
 - The combined JSON path can normalize f64 text; byte-stable checksums are asserted per store where possible.
 - Fixed seeded fixtures, not a mutation/fuzz corpus; the rejection suite covers representative corrupt inputs.
@@ -139,7 +147,7 @@ panicking. This is a bounded envelope fuzz, not a schema-aware generator.
 - Named identities cap at 4,096, so above 409 residents `named < population` is expected.
 - Timing is a single-machine measurement, not a gate.
 
-## 7. Next
+## 8. Next
 
 The full-world 1M save/load harness is `cargo run --release -p townsmith-bench --bin save_1m`; see [[68 - Metropolis Gate]] §7.4 for the measured 182.8 MB / 232.5 ms save / 694.7 ms load envelope. It includes all 13 core stores and terrain deltas; Godot envelope and compression overhead remain out; bridge atomic-write/`.bak` recovery is covered by unit tests.
 

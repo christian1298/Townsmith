@@ -342,7 +342,10 @@ The current `bench_godot.sh` builds a debug extension, forces GL Compatibility t
 | Traffic 32×32 | 0.44 ms build; 1.3 ms per 1k flow queries; 94 ms per 1k pair queries | 7950X, release | CPU microbenchmark | Flow fields are the right primitive; 32×32 is cheap | 100k–200k edges, incremental updates, or a 65k-node spatial index |
 | City layout Late | 5.13 ms generation; Godot debug build/upload 110–115 ms, 6.4 MB buffer | 7950X + RTX 4080 | CPU microbenchmark / one-time build | Deterministic 100k-box layout generation is fast | Per-frame rendering, voxel buildings, or LOD |
 | Voxel/terrain meshing | 3.4–3.8 ms checkerboard; 0.5 ms hut; 1.4–1.6 ms terrain; worldgen 131–141 ms | 7950X, release | CPU microbenchmark | Individual meshing/worldgen paths fit their budgets | Streaming under a 1M city, upload contention, or frame pacing |
-| Save/load | Core harness: **save 172–579 ms, load 515–521 ms**, 134.5 MB JSON, 365 MB peak RSS at 1M/250k | 7950X, release, tmpfs/NVMe | CPU + file microbenchmark | The three core stores round-trip far under the 30 s target | Full world save layers, Godot envelope, disk durability, VRAM, or the full 1M scene |
+| 1M core save/load | Save **232.5 ms**, load **694.7 ms**, 182.8 MB JSON, 499 MB peak RSS at 1M/250k | 7950X, release, tmpfs | CPU + file microbenchmark | All 13 core stores plus terrain round-trip far under the 30 s target | Godot `world_save`, compression, disk durability, VRAM, or the 3060 |
+| 100 km² streaming (data) | 525 chunks visited, 225 peak resident, ~281 MB peak mesh, 12.35 s, `4dfb48204244e377` | 7950X, release | CPU data harness | Bounded near/mid/far streaming and LOD meshing at the gate area | Renderer, frame pacing, buildings, GPU, or the 120 s gate route |
+| 250k voxel proxies (setup) | 250,000 instances, 310,920 quads, 12 MB buffer, 178–184 ms setup, `aab83a92` | 7950X, headless | CPU setup harness | Instance/LOD setup and memory shape at 250k | FPS, draw calls, GPU, streaming, or simulation |
+| Server v0 loopback | Protocol 8 frames `e2f15a193149bb86`; authority 6 commands `70e25aff45867b94`; save `70e25aff45867b94`; roles `b6ab299531341226` | Local loopback | Protocol/authority harness | Framing, deterministic command results, dev roles, atomic save path | 1M or multiplayer scale, auth, interest filtering, or the gate |
 
 ### 7.2 What is player-facing today
 
@@ -365,16 +368,16 @@ Local gap IDs only; they are not ADRs or questions.
 | ID | Gap | Blocks gate? | Owner |
 |---|---|---|---|
 | G-01 | No reference 8c/16t + RTX 3060 12 GB run exists | **Yes** | P |
-| G-02 | No fixed 1M save (1M citizens, 250k buildings, 10k cohorts) | **Yes** | S/T |
+| G-02 | No frozen Godot 1M gate fixture; `save_1m` builds a deterministic core envelope | **Yes** | S/T |
 | G-03 | No real voxel/LOD building renderer at city scale; boxes only | **Yes** | R |
 | G-04 | No full 1M loop: cohorts exist, but buildings, economy, agents, traffic, and pathfinding are not integrated at 1M | **Yes** | S |
 | G-05 | 2k agents lack pathfinding, needs, schedules, animation, and render integration | **Yes** | S/R |
-| G-06 | Traffic graph is capped at 10k roads / 20k nodes; linear nearest-node lookup; full rebuild | **Yes** | S |
-| G-07 | No 1M save/load timing, peak RSS, VRAM, or save-size measurement | **Yes** | S/P |
+| G-06 | Traffic graph is capped at 10k roads / 20k nodes; the bridge rebuilds its cached graph on every road edit (core appends are incremental) | **Yes** | S |
+| G-07 | No Godot 1M save/load, VRAM, or full-store timing; core `save_1m` is measured | **Yes** | S/P |
 | G-08 | Harness uses a debug extension, GL Compatibility, 3–5 s routes; no p99.9, GPU time, draw calls, triangles, memory, or sim fields | **Yes** | P |
-| G-09 | No player-facing Benchmark screen (scene select, rating, recommendations, export) | No for the raw gate; yes for the Phase 5 feature | U |
+| G-09 | Benchmark screen has report + live-run paths, but no frame-time/1% low graphs or gate manifest | No for the raw gate; yes for the Phase 5 feature | U |
 | G-10 | No committed 3060 gate baseline and no gate job on the self-hosted runner | **Yes** | P/T |
-| G-11 | Streaming is measured only on terrain; no building/chunk budget under a real city | **Yes** | R/S |
+| G-11 | Streaming data harness covers 100 km², but there is no rendered building/chunk budget under a real city | **Yes** | R/S |
 | G-12 | No thermal/cool-down/background-load protocol in the current 3-run script | No, but results are fragile without it | P |
 
 The biggest gap is not a number. It is that **the current evidence is the easy part of the problem**: one mesh reused 21 times, or boxes with no LOD. The gate lives in the part that does not exist yet — a real 1M city with 250k distinct building records, LOD/impostors, streaming, shadows, and simulation.
@@ -564,6 +567,18 @@ GODOT=/path/to/godot ./scripts/smoke_metropolis_voxel_gate.sh
 - **Dormant catch-up:** `cargo run --release -p townsmith-bench --bin dormant -- --smoke` leaves a 4-district, 2,000-citizen scene dormant for 365 days and compares `CohortSimulation::catch_up(0, 365)` against continuous 1-day ticking. Population, employment, happiness, and average need match with **0 delta**; the other three districts are unchanged; `catch_up_all(365)` is checksum-identical to continuous ticking. Report checksum **`c226fb69224b75ee`**, city checksum **`49783c6ec071ce73`**. The cap is **3,650 days**; zero days, over-cap requests, and unknown districts error. V0 covers cohort state only, with no persistence/snapshot, service drift, or world-region activation.
 
 Checksum **`f265539bcb8804fc`** (stable across runs). This is small-city validity evidence for D-017, not the 1M data-scale harness and not §8 gate evidence.
+
+### 7.10 Server protocol, authority, and persistence (not gate evidence)
+
+`cargo run --release -p townsmith-server -- --loopback-smoke` exercises the Phase 6 foundation:
+
+- **Protocol v0:** 4-byte big-endian length + UTF-8 JSON, 1 MiB cap, stable rejection codes; golden `SERVER_PROTOCOL status=ok frames=8 checksum=e2f15a193149bb86`.
+- **Authoritative executor:** `ServerWorld::apply` handles hello, ping, pause/resume/step, set_tax, place_road, and disconnect without sleeping; golden `SERVER_AUTHORITY status=ok commands=6 checksum=70e25aff45867b94`.
+- **Persistence:** `ServerSave` v1 with `<path>.tmp` → fsync → rename, parent-directory sync, and one-step `.bak` recovery; `--save-load-smoke` covers round-trip and corrupt-file behavior.
+- **Roles:** dev-only viewer/mayor/admin, a deterministic token bucket (20 commands/s, burst 40), and a 256-entry audit ring; golden `SERVER_ROLES status=ok sessions=3 role_checks=4 rate_limited=1 audit=65 checksum=b6ab299531341226`.
+- **Godot client:** `scripts/smoke_mp_client.sh` speaks the same framing over `StreamPeerTCP` and prints `MP_CLIENT ... frames=12`.
+
+This proves framing, deterministic command responses, dev role gating, and atomic single-world persistence. It does **not** measure 1M server ticks, network latency/loss, authentication, interest filtering, reconnect, delta snapshots, multiple sessions, or content-manifest enforcement, and it is not §8 gate evidence.
 
 ## 8. Pass/fail decision rules
 

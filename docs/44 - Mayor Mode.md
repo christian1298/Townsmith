@@ -2,7 +2,7 @@
 title: Mayor Mode
 project: Townsmith
 status: active
-updated: 2026-11-20
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-2
@@ -130,7 +130,7 @@ The smoke runs without a display; camera projection uses the headless viewport.
 - No settlement, lot, zoning, or service layers.
 - No camera collision or terrain fade.
 - Selection is local to the scene; no server authority or permissions yet.
-- The scene HUD is English-only developer UI; D-022 localization applies to the shipping HUD.
+- The shipping HUD is keyed EN/DE; developer-only overlays remain English.
 - There is no terrain occlusion test; a building behind a hill can be selected.
 
 ## 8. Next

@@ -2,7 +2,7 @@
 title: Headless City Loop
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-3
@@ -176,7 +176,7 @@ This is a scripted recovery, not a balanced default. The standard 8/4 policy los
 - `city_loop` bin: the early profile completes, fills, and reaches full service.
 - `city_loop` bin: the balance report has a stable shape and produces identical JSON on repeated runs.
 - `scripts/bench_city_loop.sh` compares the early/mid/late checksums with `benchmarks/baselines/phase3_city_loop.json`.
-- Workspace: **651 tests + 2 doctests (653 passed)**.
+- Workspace: **858 tests** (854 unit/integration + 4 doctests, all passing).
 
 ## 6b. Degraded matrix
 

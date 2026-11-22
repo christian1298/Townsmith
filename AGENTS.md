@@ -304,7 +304,7 @@ cargo run --release -p townsmith-bench --bin volume
 # Room detection / stats microbenchmark
 cargo run --release -p townsmith-bench --bin rooms
 
-# Headless server tick harness (no GPU, no socket yet)
+# Headless server tick harness (no GPU)
 cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
 
 # Protocol v0 + authoritative executor loopback smoke (length-prefixed JSON over TCP)
@@ -332,8 +332,9 @@ GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_strea
 CITY_TIER=late GODOT=/path/to/godot ./scripts/bench_godot.sh 1 5 benchmarks/routes/phase0_city_late.json
 GODOT=/path/to/godot ./scripts/smoke_city.sh
 
-# Player-facing benchmark report over existing Early/Mid/Late summaries.
-# Report only: it does not run scenes and is not the 1M gate.
+# Player-facing benchmark screen over existing Early/Mid/Late summaries.
+# Default is report-only; `--run` executes the three scenes sequentially.
+# Neither path is the 1M gate.
 GODOT=/path/to/godot ./scripts/smoke_bench_screen.sh
 GODOT=/path/to/godot ./scripts/smoke_bench_live.sh
 "${GODOT:-godot}" --path godot res://bench_screen.tscn -- --output benchmarks/results/bench_screen_report.json

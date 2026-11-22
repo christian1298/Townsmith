@@ -21,7 +21,7 @@ tags:
 In:
 
 - `core_city::economy::Economy` with balance, tax rates, upkeep, construction spending, loans, elapsed days, and bankruptcy.
-- Construction draw-down: a successful placement charges its blueprint material cost.
+- Construction draw-down: placement charges the Survey installment and each later phase boundary charges the rest (D-028).
 - Affordability and bankruptcy gates: no new placement when the city cannot pay, and no new borrowing when bankrupt.
 - Fixed-rate loans with daily interest and scheduled principal repayment.
 - Tax policy changes as the recovery lever; default, low, and high presets in the shell.
@@ -30,8 +30,7 @@ In:
 
 Out:
 
-- Construction payments spread across phases; the full material cost is charged when placement succeeds.
-- Refunds, cancel/rebuild accounting, or sale of buildings.
+- Construction is billed per phase; refunds, cancellation accounting, and asset sales remain out.
 - Bonds, grants, trade, subsidies, or a credit market.
 - Service funding by building type, district budgets, or settlement taxes.
 - Household rent, food cost, net income, or private spending.
@@ -87,11 +86,11 @@ Each loan's balance falls by its principal payment; interest is paid from the tr
 2. rejects a bankrupt city (`bankrupt`);
 3. rejects a placement the balance cannot cover (`insufficient_funds`);
 4. places the building and creates its construction site;
-5. opens the treasury if needed, charges the blueprint `material_cost`, and records it in `construction_spent`.
+5. opens the treasury if needed, charges the first installment (3% Survey) of the blueprint `material_cost`, and records it in `construction_spent`.
 
 A rejected placement does not open a treasury, so a failed first placement cannot pin the world to that seed. If the charge races with another spend, the placement and site are rolled back and the call returns `insufficient_funds`.
 
-The acceptance house costs **38,028.80**; placing it leaves **61,971.20** before operating costs.
+The acceptance house costs **38,028.80**; its first installment is **1,140.86**, so placing it leaves **98,859.14** before operating costs. Later phase boundaries charge the remaining installments (D-028).
 
 A removed building does not refund construction spending. Clearing all placements keeps the treasury and debt, because the city's money is independent of its buildings.
 
@@ -143,6 +142,14 @@ The city dips below zero but stays above the bankruptcy threshold, then returns 
 
 City checksum: `623f39c61b71b68a`. Economy checksum: `1c213cc40278a13b`.
 
+### 7.1 Campaign clock and live financing (2026-11-23)
+
+`cargo run --release -p townsmith-bench --bin city_loop -- --campaign-days --days 30` runs the mid scenario on the campaign clock: `construction_time_scale=campaign_days`, `campaign_seconds_per_day=60`, `construction_days=3.0`, city checksum `015eb7cee1357bf4`, construction checksum `69853300b1fa26fa`.
+
+`cargo run --release -p townsmith-bench --bin financing -- --live` consumes the same phase schedule and campaign clock. With the shipping 20/4 policy, a 250k loan book, and the 500k debt cap it reports checksum `acb418b780e0b076`; the Industrial scenario completes 8 buildings and goes bankrupt on day 74, and the Modern scenario on day 65. That is a financing-gap result, not a balance target.
+
+The infrastructure cost smoke (`infra_cost --smoke`, checksum `a920cf0c4eb9a4f1`) covers the utility/service operating tables; campaign build lead time is in [[77 - Infrastructure Costs]].
+
 ## 8. Bridge
 
 | Method | Purpose |
@@ -170,8 +177,8 @@ Old economy saves without `loans` load with no debt. Loan balances, rates, and p
 ## 10. HUD and controls
 
 ```text
-Treasury: 61971 balance · -21/day · tax 8/4
-Treasury: 111971 balance · -183/day · tax 8/4 · debt 50000
+Treasury: 98859 balance · -21/day · tax 8/4
+Treasury: 148859 balance · -183/day · tax 8/4 · debt 50000
 Treasury: 100 balance · +9/day · tax 100/8 · debt 50000
 BANKRUPT · -50000 balance · +0/day · tax 20/8 · debt 0
 ```
@@ -183,7 +190,7 @@ BANKRUPT · -50000 balance · +0/day · tax 20/8 · debt 0
 The world-scene smoke checks:
 
 - a rejected first placement leaves the treasury closed (no seed-poisoning side effect);
-- placement charged exactly the blueprint `material_cost` and debited the same amount;
+- placement charged exactly the 3% Survey installment and debited the same amount; later phase boundaries charge the rest;
 - the acceptance house starts negative at standard taxes;
 - borrowing 50,000 raises cash and debt by exactly the same amount;
 - high taxes turn daily net positive;
@@ -193,18 +200,18 @@ The world-scene smoke checks:
 ## 11. Tests
 
 - `core_city::economy`: 18 tests — starting balance, income/expenses, clamped rates, bankruptcy, construction affordability, loan cash/interest/repayment, payoff, bankruptcy borrowing block, payment underflow, debt limit, daily net, JSON/checksum, old-save debt default, invalid balance, infrastructure defaults/cost/legacy equivalence/roundtrip.
-- `godot_ext`: 49 tests, including economy JSON/loan roundtrip, old-save loans default, and invalid balance.
-- `core_city` total **340**; `core_structure` **19**; bridge **72**; workspace **651 tests + 2 doctests**; 30-day runner 7 tests.
+- `godot_ext`: 87 tests, including economy JSON/loan roundtrip, old-save loans default, and invalid balance.
+- `core_city` total **432**; `core_structure` **19**; bridge **87**; workspace **858 tests** (854 unit/integration + 4 doctests); 30-day runner 8 tests.
 - `city_loop` bin test asserts construction spending, debt, positive final balance, and no bankruptcy.
 - 30-day city-loop checksum: `623f39c61b71b68a`.
 
 
-> [!note] Phase billing (D-028, Proposed)
-> `ConstructionStore` carries a per-site `cost_total`/`cost_paid` schedule and a payment stall. Placement charges the 3% Survey installment, `construction_tick` charges each later phase boundary, and an unaffordable installment sets `stall_reason = "payment"` until the treasury can pay it. Legacy zero-cost sites remain prepaid. The `financing` projection still assumes fixed 50-building batches and is not yet replaced by the live schedule, because construction currently finishes in seconds while the economy advances in days (Q-102). [[10 - Decisions]] D-029 (Proposed) would put campaign construction on the same game-day clock and unblock that replacement after human sign-off and a measured financing run.
+> [!note] Phase billing and campaign clock (2026-11-23)
+> D-028's installment schedule is implemented: placement charges the 3% Survey installment, `construction_tick` charges each later phase boundary, and an unaffordable installment sets `stall_reason = "payment"` until the treasury can pay it. Legacy zero-cost sites remain prepaid. D-029's campaign clock is opt-in (`--campaign-days`, HUD F8), and `financing --live` consumes the phase schedule on that clock. Both ADRs remain **Proposed** pending balance sign-off and a measured campaign run; see [[10 - Decisions]].
 
 ## 12. Limits
 
-- Construction is charged in full at placement, not drawn down by phase.
+- Construction is billed in phase installments; the developer clock still completes sites in seconds, and the campaign clock remains opt-in.
 - No refunds, cancellation accounting, or asset sales.
 - Loan interest is simple and fixed; no default, restructuring, or market rates.
 - Bankruptcy only blocks new placements and loans; existing sites and services continue.

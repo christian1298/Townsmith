@@ -216,14 +216,20 @@ The flow-cache edit fixture reports base field `289dab005fcdfbac` (3 reachable n
 
 Congestion v0 routes each accepted flow with Dijkstra, charges undirected edges, and reports load-weighted factors. On the hub fixture (1,000 origins, 16 hubs, 1–3 trips) nothing overloads: average factor 1.040, peak 1.120, 6,753 edges touched. It is diagnostic only and does not feed job allocation or stored commute time. These are microbenchmarks on one machine, not the 1M/60 FPS gate.
 
+### 6.1 Movement cache and 2k marker stress (PRs #211, #217, #225)
+
+The bridge caches one built `CitizenMotion` by `(seed, world/construction/population/named/road checksums, center, radii)`. `movement_cache_state()` reports the entry plus cumulative `hits`, `misses`, `builds`, and `clears`; repeated 10 Hz overlay samples re-run only `positions_at`, and `movement_cache_clear()` drops the entry while keeping the counters.
+
+The world scene draws routed citizens through two pooled `MultiMeshInstance3D` nodes: near (≤120 m, one instance per routed citizen) and far (id-sorted stride sample capped at 500). The standalone `movement_stress` harness confirms the transform-write path at scale: 2,000 agents × 1,200 updates at 10 Hz, median **0.398 ms**, p95 **0.477 ms**, max 0.67 ms, checksum **`d387ba8c`**; the two-pass smoke marker is clean. This is marker-update evidence only, not bridge/cohort, GPU frame time, or the 1M gate.
+
 ## 7. Tests
 
 - `core_city::traffic`: 57 tests — graph construction, flow fields, route polylines, walking legs, invalid/disconnected pairs, deterministic turn tie-break, 9 nearest-node index-vs-linear equivalence cases, 10 incremental append/extend cases, 6 graph-version/flow-cache invalidation cases, and 10 congestion cases.
 - `core_city::route_cache`: 5 tests — hit/reuse, LRU eviction, disconnected/invalid pairs not cached, checksums, capacity bounds.
 - `core_city::population`: road commute and disconnected fallback.
-- `townsmith-bench`: 7 city-loop tests (small city and a multi-row commute) and 4 traffic-grid tests.
+- `townsmith-bench`: 8 city-loop tests (small city and a multi-row commute) and 4 traffic-grid tests.
 - World scene smoke: `traffic=ok`, graph stats, one car, movement, save/load rebuild.
-- Workspace on this branch: **703 tests + 2 doctests (705 passed)**; core_city **377**, bridge **72**.
+- Workspace on this branch: **858 tests** (854 unit/integration + 4 doctests, all passing); core_city **432**, bridge **87**.
 
 ## 8. Limits
 

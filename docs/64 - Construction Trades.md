@@ -2,7 +2,7 @@
 title: Construction Trades
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-4
@@ -129,9 +129,9 @@ Foundation · Mason 42%
 
 - `core_city::trades`: 4 tests — Wood roster, later-age specialists, aliases, clamping/validation.
 - `core_city::construction`: 3 new tests — roster cap and crew stall, JSON/legacy roundtrip, phase fallback.
-- `core_city`: **340 tests**.
-- `godot_ext`: **72 tests** (the scene smoke covers the bridge path).
-- Workspace: **651 tests + 2 doctests (653 passed)**.
+- `core_city`: **432 tests**.
+- `godot_ext`: **87 tests** (the scene smoke covers the bridge path).
+- Workspace: **858 tests** (854 unit/integration + 4 doctests, all passing).
 
 ## 8. Limits
 
