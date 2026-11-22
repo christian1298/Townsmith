@@ -325,13 +325,15 @@ fn run_listen_mode(port: &str) {
 
 fn print_interest(report: &townsmith_server::world::InterestReport) {
     println!(
-        "SERVER_INTEREST status=ok center={:.1},{:.1} radius={:.1} visible={} roads={} truncated={} tick={} checksum={}",
+        "SERVER_INTEREST status=ok center={:.1},{:.1} radius={:.1} visible={} roads={} truncated={} buildings={} buildings_truncated={} tick={} checksum={}",
         report.center[0],
         report.center[1],
         report.radius_m,
         report.visible_roads,
         report.view_roads,
         report.view_truncated,
+        report.view_buildings,
+        report.view_buildings_truncated,
         report.tick,
         report.checksum
     );
