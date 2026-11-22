@@ -39,7 +39,7 @@ Out:
 - Sidewalk and pedestrian graphs.
 - Per-agent pathfinding or visible citizens.
 - Road cost, upkeep, or maintenance.
-- Incremental graph updates; a road edit still rebuilds the whole graph, though the bridge reuses the derived graph until the road-store checksum changes.
+- Incremental graph updates in the core (`add_segment` / `extend_segments`); the bridge still rebuilds its cached graph after a road-store checksum change.
 
 ## 2. Graph model
 
@@ -57,6 +57,8 @@ pub struct FlowField {
     distances: BTreeMap<[i32; 2], u32>,
 }
 ```
+
+`RoadGraph::add_segment(&RoadSegment)` appends one validated segment to an existing graph: it splits existing edges at new endpoints/crossings, inserts the new nodes/edges in sorted order, and updates the nearest-node grid incrementally. `extend_segments(&[RoadSegment])` appends a batch and stops on the first error. The result is checksum-, node-, route-, and nearest-node-identical to a fresh `build` over the combined segment list. Removals and geometry changes still require a rebuild.
 
 `RoadGraph::build(&[RoadSegment])`:
 
@@ -189,6 +191,10 @@ Default 64 × 64 grid, 16 m spacing, 1,000 queries, 64 goal fields, four cache p
 | 1,000 pair queries | ~448 ms |
 | 1,000 nearest-node, indexed | ~0.35 ms |
 | 1,000 nearest-node, linear reference | ~4.90 ms |
+| 64 incremental appends | ~5.0 ms |
+| Fresh rebuild after those appends | ~5.5 ms |
+| One incremental append | ~0.14 ms |
+| One-append vs rebuild | **~40× faster** |
 | 1,000 flow-field queries | ~4.8 ms |
 | Single flow-field build | ~0.64 ms |
 | 64 goal builds, uncached | ~60 ms |
@@ -197,23 +203,23 @@ Default 64 × 64 grid, 16 m spacing, 1,000 queries, 64 goal fields, four cache p
 | Average pair distance | 672.4 m |
 | Average flow distance | 1,017.3 m |
 
-The pair-query path runs Dijkstra per call and snaps endpoints through the uniform-grid nearest-node index. The index is 14× faster than the exact linear reference on this fixture (0.35 ms vs 4.90 ms per 1,000 lookups) and returns bit-identical nodes/distances; `nearest_node_linear` is kept as the test and benchmark reference. Flow fields are much faster for batched origins. The `FlowFieldCache` is a bounded, deterministic FIFO keyed by exact goal; it is benchmark-only until the road graph has a change version, because a stale cached field after a road edit would be a correctness hazard. The grid checksum is `4ba17cb887e8d9c5`; the flow checksum is `bad91013922d1e27`.
+The pair-query path runs Dijkstra per call and snaps endpoints through the uniform-grid nearest-node index. The index is 14× faster than the exact linear reference on this fixture (0.35 ms vs 4.90 ms per 1,000 lookups) and returns bit-identical nodes/distances; `nearest_node_linear` is kept as the test and benchmark reference. Flow fields are much faster for batched origins. The `FlowFieldCache` is a bounded, deterministic FIFO keyed by exact goal; it is benchmark-only until the road graph has a change version, because a stale cached field after a road edit would be a correctness hazard. The grid checksum is `4ba17cb887e8d9c5`; the flow checksum is `bad91013922d1e27`. The 64-road append case is only ~1.09× faster than a rebuild because each append splits dozens of crossing edges; the single-edit case is the representative bridge path and is ~40× faster. Both append results match the fresh-build checksum `38fe2aec6a85da95` on the 192-road fixture.
 
 These are microbenchmarks on one machine, not the 1M/60 FPS gate.
 
 ## 7. Tests
 
-- `core_city::traffic`: 31 tests — graph construction, flow fields, route polylines, walking legs, invalid/disconnected pairs, deterministic turn tie-break, and 9 nearest-node index-vs-linear equivalence cases.
+- `core_city::traffic`: 41 tests — graph construction, flow fields, route polylines, walking legs, invalid/disconnected pairs, deterministic turn tie-break, 9 nearest-node index-vs-linear equivalence cases, and 10 incremental append/extend cases.
 - `core_city::route_cache`: 5 tests — hit/reuse, LRU eviction, disconnected/invalid pairs not cached, checksums, capacity bounds.
 - `core_city::population`: road commute and disconnected fallback.
 - `townsmith-bench`: 7 city-loop tests (small city and a multi-row commute) and 3 traffic-grid tests.
 - World scene smoke: `traffic=ok`, graph stats, one car, movement, save/load rebuild.
-- Workspace: **613 tests + 2 doctests (615 passed)**; core_city **316**, core_structure **19**, bridge **72**.
+- Workspace on this branch: **623 tests + 2 doctests (625 passed)**; core_city **326**, core_structure **19**, bridge **72**.
 
 ## 8. Limits
 
 - Graph build scans each segment's integer span; a 512 m segment is 512 lookups. The cap is 10,000 roads / 20,000 nodes.
-- Nearest-node lookup uses a deterministic 32 m uniform grid with an expanding-ring proof and a linear fallback for out-of-bounds or pathological queries. Graph rebuilds still rebuild the index; the bridge caches the derived graph by `(seed, road-store checksum)`, so repeated route/path calls reuse it until a road edit.
+- Nearest-node lookup uses a deterministic 32 m uniform grid with an expanding-ring proof and a linear fallback for out-of-bounds or pathological queries. Appends update that grid in place; a removal or geometry change still rebuilds the whole graph and index. The bridge caches the derived graph by `(seed, road-store checksum)`, so repeated route/path calls reuse it until a road edit.
 - Width, lanes, direction, and variable speed are ignored for routing. Travel time uses one flat 8 m/s speed and is display-only.
 - The bridge caches one `Arc<RoadGraph>` by `(seed, road-store checksum)`; a road edit rebuilds it once, then `traffic_state`, `route_preview`, and `citizen_movement` reuse it. There is no worker-thread time slicing.
 - Visual cars are decorative and not tied to actual commute flows.
@@ -222,6 +228,6 @@ These are microbenchmarks on one machine, not the 1M/60 FPS gate.
 
 ## 9. Next
 
-1. Add incremental graph updates now that the spatial index and bridge graph cache are in; a road edit still rebuilds the whole graph and index once.
+1. Wire the core append API into the bridge graph cache so road additions update the cached graph instead of rebuilding it; removals still rebuild. Add a change-versioned flow-field cache once that path is live.
 2. Feed actual commute flows into visual car density and variable-speed congestion.
 3. Consider time-based happiness once congestion exists; distance remains the allocation input.
