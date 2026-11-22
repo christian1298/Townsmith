@@ -506,6 +506,16 @@ GODOT=/path/to/godot ./scripts/smoke_metropolis_voxel_gate.sh
 > [!warning] Evidence limit
 > This is **26k reused low-poly proxies** with static bands by default and optional runtime switching, not 250k distinct voxel buildings. It has no streaming, shadows/GI/SSAO, simulation, save/load, or RTX 3060 reference run. It proves the voxel-proxy instance/LOD memory/hysteresis-free switch shape, and it can capture a frame budget; it does not close the M5 gate.
 
+### 7.8 Cohort vs individual validation
+
+`cargo run --release -p townsmith-bench --bin cohort_validate -- --smoke` checks the cohort abstraction on a small city:
+
+- **Aggregate vs individual:** 5 cohorts × 100 citizens vs 500 one-citizen cohorts, 365 days at 1-day steps, strict `jobs = 1.0`. Population and employment match exactly; happiness/need match to **3.58e-6**, and per-cohort state matches exactly (`per_cohort_max_delta = 0`). The residual is f32 population-weighted reduction order, not model drift.
+- **Structural:** the same comparison at `jobs = 0.9` diverges by 5% employment because `round(1 × 0.9) = 1` keeps every one-citizen reference cohort employed while 100-citizen cohorts converge to 90%. Needs still match to 3.58e-6. This is an integer-rounding boundary, not a cohort-count error.
+- **Coarse vs fine:** 1-day vs 1/24-day steps at `jobs = 0.9` diverge by 25 employed (5%) and 0.0025 happiness; needs match to 2.74e-6. Employment is **not step-invariant** because the 1/24-day employment delta rounds back to the current count. Dormant catch-up must use the same day-length step as continuous simulation, or employment will freeze.
+
+Checksum **`f265539bcb8804fc`** (stable across runs). This is small-city validity evidence for D-017, not the 1M data-scale harness and not §8 gate evidence.
+
 ## 8. Pass/fail decision rules
 
 ### 8.1 Validity first
