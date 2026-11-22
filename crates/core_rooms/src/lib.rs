@@ -36,15 +36,15 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use core_voxel::{MaterialId, VolumePos, VoxelVolume, AIR, VOXEL_SIZE_M};
 use serde::{Deserialize, Serialize};
 
-/// Height of one detection band in metres. Rooms are assumed to be one band
-/// tall for area/volume stats.
+/// Nominal height of one detection band in metres.
+///
+/// The final band is partial when the volume height is not a multiple of
+/// [`FLOOR_BAND_VOXELS`]; per-room volume uses the actual band height instead
+/// of this nominal value.
 pub const FLOOR_BAND_M: f32 = 3.0;
 
 /// Height of one detection band in 10 cm voxels.
 pub const FLOOR_BAND_VOXELS: u32 = 30;
-
-/// Number of voxels above the band floor used as the representative layer.
-pub const SAMPLE_HEIGHT_VOXELS: u32 = 15;
 
 /// Area of one 10 cm voxel in square metres.
 pub const VOXEL_AREA_M2: f32 = VOXEL_SIZE_M * VOXEL_SIZE_M;
@@ -151,7 +151,10 @@ pub struct RoomRecord {
     pub floor: u32,
     /// Floor area in square metres.
     pub area_m2: f32,
-    /// Room volume in cubic metres, `area_m2 * 3.0`.
+    /// Room volume in cubic metres: `area_m2` times the actual band height.
+    ///
+    /// The top band can be shorter than 3 m, so this is not always
+    /// `area_m2 * 3.0`.
     pub volume_m3: f32,
     /// Number of beds in the room.
     #[serde(default)]
@@ -244,7 +247,10 @@ pub fn detect_rooms(
     for floor in 0..band_count {
         let band_start = floor * FLOOR_BAND_VOXELS as usize;
         let band_end = (band_start + FLOOR_BAND_VOXELS as usize).min(height);
-        let sample_y = (band_start + SAMPLE_HEIGHT_VOXELS as usize).min(band_end - 1);
+        // Sample the middle of the band. The final band can be partial, so a
+        // fixed 1.5 m offset can land in a ceiling slab; the midpoint is the
+        // most representative layer available and is 1.5 m for a full band.
+        let sample_y = band_start + (band_end - band_start) / 2;
 
         let components = flood_band(volume, materials, width, depth, sample_y);
         let mut layout = BandLayout {
@@ -338,7 +344,7 @@ pub fn detect_rooms(
             room_type: room.room_type().to_string(),
             floor: room.floor,
             area_m2,
-            volume_m3: area_m2 * FLOOR_BAND_M,
+            volume_m3: area_m2 * (room.band_height_voxels as f32 * VOXEL_SIZE_M),
             beds: room.beds,
             desks: room.desks,
             doors: room.doors,

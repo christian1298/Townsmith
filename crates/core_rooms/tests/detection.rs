@@ -3,7 +3,7 @@
 use core_rooms::{
     detect_rooms, PropInput, PropKind, RoomMaterials, RoomRecord, RoomStats, VOXEL_AREA_M2,
 };
-use core_voxel::{MaterialId, VolumePos, VoxelVolume, AIR};
+use core_voxel::{MaterialId, VolumePos, VoxelVolume, AIR, VOXEL_SIZE_M};
 
 const FLOOR: MaterialId = 1;
 const WALL: MaterialId = 2;
@@ -39,6 +39,26 @@ fn enclosed_rect(x0: u32, x1: u32, z0: u32, z1: u32) -> VoxelVolume {
         .unwrap();
     volume
         .fill_box(pos(x0, 30, z0), pos(x1, 32, z1), CEILING)
+        .unwrap();
+    volume
+}
+
+/// A room in the partial top band (9.0–9.6 m) with a ceiling slab at
+/// 9.4–9.6 m. The band midpoint (9.3 m) is open; a fixed 1.5 m offset would
+/// sample the ceiling at 9.5 m and miss the room.
+fn partial_top_band_room() -> VoxelVolume {
+    let mut volume = VoxelVolume::default();
+    volume
+        .fill_box(pos(40, 90, 40), pos(80, 91, 80), FLOOR)
+        .unwrap();
+    volume
+        .fill_box(pos(40, 91, 40), pos(80, 94, 80), WALL)
+        .unwrap();
+    volume
+        .fill_box(pos(42, 91, 42), pos(78, 94, 78), AIR)
+        .unwrap();
+    volume
+        .fill_box(pos(40, 94, 40), pos(80, 96, 80), CEILING)
         .unwrap();
     volume
 }
@@ -117,7 +137,9 @@ fn enclosed_room_is_detected() {
 
     let expected_cells = 36.0 * 36.0;
     assert!((room.area_m2 - expected_cells * VOXEL_AREA_M2).abs() < 1e-3);
-    assert!((room.volume_m3 - room.area_m2 * 3.0).abs() < 1e-3);
+    let band_height_m = stats.room_bounds[0].band_height_voxels as f32 * VOXEL_SIZE_M;
+    assert!((band_height_m - 3.0).abs() < 1e-6);
+    assert!((room.volume_m3 - room.area_m2 * band_height_m).abs() < 1e-3);
     assert_eq!(stats.solid_voxels, u64::from(volume.solid_count()));
     let bounds = stats.room_bounds[0];
     assert_eq!(
@@ -170,6 +192,24 @@ fn two_floors_yield_two_rooms_with_correct_floor_indices() {
     assert_eq!(stats.room_bounds[1].floor, 1);
     assert_eq!(stats.room_bounds[0].min_x, 42);
     assert_eq!(stats.room_bounds[1].max_x, 77);
+}
+
+#[test]
+fn partial_top_band_room_under_a_ceiling_slab_is_detected() {
+    let volume = partial_top_band_room();
+    let stats = detect(&volume, &[]);
+    let room = only_room(&stats);
+
+    assert_eq!(room.floor, 3);
+    assert_eq!(stats.room_bounds[0].band_height_voxels, 6);
+    let band_height_m = 6.0 * VOXEL_SIZE_M;
+    assert!((room.area_m2 - 36.0 * 36.0 * VOXEL_AREA_M2).abs() < 1e-3);
+    assert!(
+        (room.volume_m3 - room.area_m2 * band_height_m).abs() < 1e-3,
+        "volume {} must use the 0.6 m partial band, not 3.0 m",
+        room.volume_m3
+    );
+    assert!((room.volume_m3 - 7.776).abs() < 1e-3);
 }
 
 #[test]
