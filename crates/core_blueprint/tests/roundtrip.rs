@@ -203,6 +203,38 @@ fn rejects_missing_entries_and_bad_zip() {
 }
 
 #[test]
+fn rejects_crafted_oversized_volume_header() {
+    let dir = temp_dir("oversized-volume");
+    let path = dir.join("bomb.tsbp");
+    let mut metadata = test_blueprint().metadata;
+    metadata.content_hash = "blake3:placeholder".to_string();
+    let json = serde_json::to_vec(&metadata).unwrap();
+
+    // Header claims 32³ chunks and zero records: 1.07 billion voxels of
+    // declared capacity from a 32-byte stream.
+    let mut voxels = Vec::new();
+    voxels.extend_from_slice(b"TSBV");
+    voxels.extend_from_slice(&1u16.to_le_bytes());
+    voxels.extend_from_slice(&32u16.to_le_bytes());
+    for _ in 0..3 {
+        voxels.extend_from_slice(&32u32.to_le_bytes());
+    }
+    voxels.extend_from_slice(&0u32.to_le_bytes());
+    voxels.extend_from_slice(&0u64.to_le_bytes());
+    assert_eq!(voxels.len(), 32);
+
+    write_zip(&path, &[("blueprint.json", &json), ("voxels.bin", &voxels)]);
+    match load_tsbp(&path) {
+        Err(BlueprintError::TooLarge { what, limit }) => {
+            assert_eq!(what, "declared volume");
+            assert_eq!(limit, core_blueprint::MAX_VOLUME_VOXELS);
+        }
+        other => panic!("expected a declared-volume rejection, got {other:?}"),
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn material_cost_roundtrips_and_zero_stays_omitted() {
     let dir = temp_dir("cost");
     let path = dir.join("cost.tsbp");
