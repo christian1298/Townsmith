@@ -2,7 +2,7 @@
 title: Room Detection
 project: Townsmith
 status: active
-updated: 2026-11-20
+updated: 2026-11-23
 tags:
   - townsmith
   - vertical-slice
@@ -19,8 +19,8 @@ tags:
 
 Detection is deliberately simple and deterministic:
 
-- 3 m floor bands (30 voxels at 10 cm).
-- 4-connected flood fill of air on one representative X/Z layer per band.
+- 3 m floor bands (30 voxels at 10 cm); the top band is partial when the volume height is not a multiple of 30.
+- 4-connected flood fill of air on one representative X/Z layer per band, sampled at the band midpoint (1.5 m for a full band, half the band height for a partial band).
 - Components touching the volume boundary are treated as exterior air.
 - Every remaining enclosed component is a room.
 - Door/window material voxels adjacent to the component are counted.
@@ -41,7 +41,7 @@ let (materials, solid_voxels) = core_rooms::count_materials(&volume);
 
 Outputs:
 
-- `rooms: Vec<RoomRecord>` with `id`, `type`, `floor`, `area_m2`, `volume_m3`, `beds`, `doors`, `windows`.
+- `rooms: Vec<RoomRecord>` with `id`, `type`, `floor`, `area_m2`, `volume_m3`, `beds`, `doors`, `windows`. `volume_m3` is `area_m2` times the actual band height, so the partial top band is shorter than 3 m.
 - `materials: BTreeMap<String, u64>` keyed `material:{id}`.
 - `resident_capacity`, `job_slots`, `class`.
 - `solid_voxels`.
@@ -87,10 +87,11 @@ Well inside the 50 ms target. Material cost is priced by the shell (`godot_ext`)
 
 ## 5. Tests
 
-`core_rooms` has 12 tests + 1 doctest:
+`core_rooms` has 13 tests + 1 doctest:
 
 - empty volume → no rooms;
 - one enclosed room with wall/floor/ceiling;
+- a room in the partial top band under a ceiling slab, with the actual partial-band volume;
 - two rooms with a partition and door, door/window counts;
 - two floors with correct floor indices;
 - exterior air rejected;
@@ -102,8 +103,8 @@ Well inside the 50 ms target. Material cost is priced by the shell (`godot_ext`)
 
 ## 6. Limitations
 
-- 2D per-band sampling, not a true 3D flood fill. The sample layer is fixed at 1.5 m above each band start; rooms with a raised floor (>1.5 m plinth) are missed.
-- The partial top band samples its highest voxel, which is often ceiling/roof; `volume_m3` still assumes a full 3 m band.
+- 2D per-band sampling, not a true 3D flood fill. The sample layer is fixed at the band midpoint (1.5 m above a full band start); rooms with a raised floor above the midpoint plinth are missed.
+- A room under a ceiling slab in the partial top band is found because the midpoint stays below the slab, but the band is still a 2D slice, not a volume check.
 - Door/window counts are adjacent material voxels at the sampled layer, not unique openings; a shared door is counted in both rooms.
 - `RoomMaterials.wall/floor/ceiling` are carried for future structural checks but not used by v0.
 - No vertical enclosure/roof check; a room open to the sky may still count if the sampled layer is enclosed.
