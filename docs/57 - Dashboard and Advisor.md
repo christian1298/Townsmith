@@ -124,6 +124,16 @@ average_commute_m, completed_buildings, construction_sites, checksum
 
 It validates a non-negative seed, finite centre, and radius in `0..=1,000,000 m`; rejects placement/population seed mismatches; and takes the world -> construction -> population locks in that order. Only completed sites contribute to the completed metrics; incomplete sites in the radius are counted separately. It is read-only, has no save field, and does not change the city-wide advisor. The dashboard calls it once per rebuild with the Mayor camera target and a **256 m** radius (`DISTRICT_RADIUS_M`), then renders the result in the District section.
 
+`TownsmithCore.district_heatmap(seed, center_x, center_z, radius_m, cell_m)` returns a dense row-major grid for the same query:
+
+```text
+ok, seed, cell_m, cols, rows, center, radius_m,
+cells:[{x,z,population,housing_capacity,jobs,employed,happiness,food,water,rest}],
+checksum
+```
+
+The grid is square (`cols == rows`), derived as `ceil(2 * radius_m / cell_m)`, bounded to **4,096 cells**; `cell_m` must be 4–256 m. Cell `x,z` is the cell centre in metres. Placements outside the circle are zeroed rather than omitted, so `cells.len() == cols * rows` always. Only completed sites contribute, households are attributed by home placement, and needs are resident-weighted per cell. Invalid arguments return `ok=false` (`invalid_seed`, `invalid_center`, `invalid_radius`, `invalid_cell_size`, `invalid_grid`, `seed_mismatch`). The call is read-only and adds no save field. **No UI reads it yet**; it exists for the future district heatmap overlay.
+
 ## 5. Dashboard
 
 `F1` toggles a right-side panel. It shows:
