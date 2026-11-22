@@ -21,6 +21,14 @@ RUNS="${RUNS:-1}"
 DURATION="${DURATION:-120}"
 WARMUP="${WARMUP:-15}"
 BUILDINGS="${BUILDINGS:-250000}"
+for name in RUNS DURATION; do
+	value="${!name}"
+	if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
+		echo "bench_metropolis_gate: $name must be a positive integer (got '$value')" >&2
+		exit 2
+	fi
+done
+
 ROUTE="${ROUTE:-$ROOT/benchmarks/routes/metropolis_gate_v1.json}"
 OUTPUT="${OUTPUT:-$ROOT/benchmarks/results/metropolis_gate.json}"
 SETUP_ONLY=0

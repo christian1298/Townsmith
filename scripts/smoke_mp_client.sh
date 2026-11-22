@@ -18,6 +18,8 @@ fi
 
 cargo build --manifest-path "$ROOT/Cargo.toml" -p townsmith-server >/dev/null
 
+# The bind-then-close probe below can race with the server bind, but the
+# subsequent readiness loop tolerates it; the port is not held open.
 if [[ -n "${MP_CLIENT_PORT:-}" ]]; then
 	PORT="$MP_CLIENT_PORT"
 else

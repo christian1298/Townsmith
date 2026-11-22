@@ -2,7 +2,7 @@
 title: Open Questions
 project: Townsmith
 status: active
-updated: 2026-11-22
+updated: 2026-11-23
 tags:
   - townsmith
   - questions
@@ -269,6 +269,10 @@ These must be answered before or during Phase 0. They change the architecture, t
 | **Q-057** | Mesh upload on the main thread or via `RenderingServer` from a worker? | Measure in the Phase 0 spike | High |
 | **Q-058** | Blueprint overrides: new version or per-instance diff? | New version for shared edits; per-instance diff for live tweaks | Normal |
 | **Q-102** | Should construction phases take game days rather than seconds? | Keep the developer slice at seconds; [[10 - Decisions]] D-029 proposes a mode-selected campaign clock (1 game day = 60 s, cottage 2–4 days, 30-day phase cap). Still open: human sign-off and a measured financing run with the live clock. | High |
+| **Q-103** | Persistence scope: persist every named identity, or only committed/selected ones? | Commit on select, story, or lifecycle; regenerate uncommitted from seed | High |
+| **Q-104** | Materialization policy: distance-only or selection/event priority, and the exact radii and hysteresis? | Selection > story > distance; 80 m in, 120 m out; 64 changes per tick | High |
+| **Q-105** | Death and replacement: does a named death reduce aggregate population, and at what rates? | Yes for named slots; off in default benchmarks; dedicated lifecycle profile | High |
+| **Q-106** | Household composition: singles, couples, or families in the first slice, and who owns the budget? | Household owns the budget; named members share it; no family tree | Normal |
 
 ## Art and content questions
 

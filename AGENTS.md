@@ -53,6 +53,9 @@ Read the docs that match your task. The index in `00 - Start Here` has a reading
 - Building progression: tent/shed → timber → stone → half-timber → brick → concrete → steel/glass; material-based max stories/height/span with composite construction (D-024, accepted; see `docs/17 - Materials and Structure.md`).
 - Basements/sub-ground floors: cellars and utility basements at launch, underground parking later; separate depth limits; no material minimum height (D-025, accepted).
 - Authoring: workshop/creative editor first; build-anywhere placement; permissioned live editing later (D-026, accepted).
+- Blueprint package: `.tsbp` v1 zip + JSON + RLE voxels + BLAKE3 hash (D-027, accepted).
+- Construction is billed in phase installments; unaffordable work stalls (D-028, proposed).
+- Construction uses a mode-selected clock; campaign builds take game days (D-029, proposed).
 
 ## Agent workflow
 
@@ -203,7 +206,7 @@ docs(adr): accept deterministic benchmark mode
 
 ## Build commands
 
-Phase 0 workspace: `crates/core_voxel`, `crates/bench`, `crates/godot_ext`. Requires Rust 1.94+ and Godot 4.7+.
+Workspace: `crates/core_voxel`, `crates/core_world`, `crates/core_sim`, `crates/core_city`, `crates/core_blueprint`, `crates/core_rooms`, `crates/core_structure`, `crates/godot_ext`, `crates/server`, `crates/bench`. Requires Rust 1.94+ and Godot 4.7+.
 
 ```bash
 # Fast inner loop

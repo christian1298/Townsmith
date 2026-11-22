@@ -53,4 +53,4 @@ if [[ "$FIRST_LINE" != "$SECOND_LINE" ]]; then
 	exit 1
 fi
 
-echo "MOVEMENT_STRESS_SMOKE status=ok $FIRST_LINE"
+echo "$FIRST_LINE"
