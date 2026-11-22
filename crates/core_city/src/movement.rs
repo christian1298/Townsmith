@@ -170,6 +170,28 @@ impl HouseholdRoute {
     }
 }
 
+/// Borrowed, read-only view of one household's shared home-work polyline.
+///
+/// Returned by [`CitizenMotion::routes`]. The underlying route stays private and
+/// immutable: a view cannot mutate the motion layer, and it borrows the points
+/// instead of cloning them. Point order is home first, then the road nodes,
+/// then the workplace, matching [`RoadGraph::route_points`].
+///
+/// [`RoadGraph::route_points`]: crate::traffic::RoadGraph::route_points
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HouseholdRouteView<'a> {
+    /// Home placement id.
+    pub placement_id: u64,
+    /// Chosen workplace id.
+    pub workplace_id: u64,
+    /// Polyline points in metres on the world `x/z` plane.
+    pub points: &'a [[f32; 2]],
+    /// Outbound polyline length in metres.
+    pub length_m: f32,
+    /// Round-trip duration: out and back, in seconds.
+    pub cycle_s: f64,
+}
+
 /// One resident's stable track on a household route.
 #[derive(Debug, Clone, PartialEq)]
 struct CitizenTrack {
@@ -365,6 +387,21 @@ impl CitizenMotion {
     #[must_use]
     pub fn route_count(&self) -> usize {
         self.routes.len()
+    }
+
+    /// Read-only views of every routed household, ordered by placement id.
+    ///
+    /// The iterator borrows each route's polyline, so drawing a debug overlay
+    /// does not clone the geometry. The internal route type is never exposed
+    /// mutably. A motion with no routed household yields an empty iterator.
+    pub fn routes(&self) -> impl Iterator<Item = HouseholdRouteView<'_>> + '_ {
+        self.routes.iter().map(|route| HouseholdRouteView {
+            placement_id: route.placement_id,
+            workplace_id: route.workplace_id,
+            points: &route.points,
+            length_m: route.length_m,
+            cycle_s: route.cycle_s,
+        })
     }
 
     /// Number of routed citizens with a position track.
@@ -605,6 +642,34 @@ mod tests {
                 .map(|citizen| citizen.id)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn routes_expose_read_only_polylines_home_to_work() {
+        let graph = straight_graph();
+        let motion = CitizenMotion::new(
+            &selection(vec![citizen(1, 0), citizen(2, 0)]),
+            &[workplace(90, 4, [40.0, 0.0])],
+            &graph,
+            4,
+        );
+
+        let routes: Vec<HouseholdRouteView<'_>> = motion.routes().collect();
+        assert_eq!(routes.len(), motion.route_count());
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].placement_id, 1);
+        assert_eq!(routes[1].placement_id, 2);
+        for view in &routes {
+            assert_eq!(view.workplace_id, 90);
+            assert!(view.points.len() >= 2);
+            assert_eq!(view.points.first().copied(), Some([0.0, 0.0]));
+            assert_eq!(view.points.last().copied(), Some([40.0, 0.0]));
+            assert!((view.length_m - 40.0).abs() < 0.001);
+            assert!(view.cycle_s >= MIN_MOVEMENT_CYCLE_S);
+        }
+
+        let empty = CitizenMotion::new(&MaterializationSelection::default(), &[], &graph, 4);
+        assert_eq!(empty.routes().count(), 0);
     }
 
     #[test]
