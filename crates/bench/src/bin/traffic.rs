@@ -51,6 +51,49 @@ fn main() {
     }
     let query_ms = query_start.elapsed().as_secs_f64() * 1_000.0;
 
+    // Nearest-node lookup: indexed grid vs the exact linear reference. The
+    // points mix exact nodes, cell centres, and half-cell offsets.
+    let mut near_seed = 0xa076_1d64_78bd_642f_u64;
+    let near_points: Vec<[f32; 2]> = (0..queries)
+        .map(|index| {
+            if index % 4 == 0 {
+                let node = (next_coord(&mut near_seed, extent) / SPACING_M as f32).round()
+                    * SPACING_M as f32;
+                [node, node]
+            } else {
+                [
+                    next_coord(&mut near_seed, extent) + 0.5,
+                    next_coord(&mut near_seed, extent) + 0.5,
+                ]
+            }
+        })
+        .collect();
+    // Warm the grid path before timing.
+    let _ = graph.nearest_node(near_points[0]);
+    let near_index_start = Instant::now();
+    let indexed: Vec<Option<(core_city::RoadNode, f32)>> = near_points
+        .iter()
+        .map(|&point| graph.nearest_node(point))
+        .collect();
+    let near_index_ms = near_index_start.elapsed().as_secs_f64() * 1_000.0;
+    let near_linear_start = Instant::now();
+    let linear: Vec<Option<(core_city::RoadNode, f32)>> = near_points
+        .iter()
+        .map(|&point| graph.nearest_node_linear(point))
+        .collect();
+    let near_linear_ms = near_linear_start.elapsed().as_secs_f64() * 1_000.0;
+    assert_eq!(
+        indexed, linear,
+        "nearest-node index changed a lookup result"
+    );
+    let mut near_hash = 0xcbf2_9ce4_8422_2325_u64;
+    for (node, distance) in indexed.iter().flatten() {
+        near_hash ^= (node[0] as i64 as u64) << 32 ^ (node[1] as i64 as u64);
+        near_hash ^= u64::from(distance.to_bits());
+        near_hash = near_hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let near_checksum = near_hash;
+
     let flow_start = Instant::now();
     let flow = graph
         .flow_to([extent as f32, extent as f32])
@@ -138,6 +181,11 @@ fn main() {
         "queries": queries,
         "reached": reached,
         "query_ms": query_ms,
+        "near_queries": queries,
+        "near_index_ms": near_index_ms,
+        "near_linear_ms": near_linear_ms,
+        "near_speedup": if near_index_ms > 0.0 { near_linear_ms / near_index_ms } else { 0.0 },
+        "near_checksum": format!("{near_checksum:016x}"),
         "average_query_m": if reached == 0 { 0.0 } else { total_m / reached as f64 },
         "flow_build_ms": flow_build_ms,
         "flow_reached": flow_reached,
