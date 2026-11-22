@@ -79,42 +79,67 @@ impl WorldChunkCoord {
     }
 
     /// The world-space origin of this chunk, in meters.
+    ///
+    /// Saturates at the `i64` limits instead of overflowing. A chunk whose
+    /// origin does not fit is not addressable by any [`TerrainPos`]; use
+    /// [`Self::checked_origin_m`] to detect that case.
     #[must_use]
     pub const fn origin_m(self) -> TerrainPos {
         TerrainPos {
-            x: self.x * WORLD_CHUNK_METERS,
-            z: self.z * WORLD_CHUNK_METERS,
+            x: self.x.saturating_mul(WORLD_CHUNK_METERS),
+            z: self.z.saturating_mul(WORLD_CHUNK_METERS),
+        }
+    }
+
+    /// The world-space origin of this chunk, or `None` when it does not fit in `i64`.
+    #[must_use]
+    pub const fn checked_origin_m(self) -> Option<TerrainPos> {
+        match (
+            self.x.checked_mul(WORLD_CHUNK_METERS),
+            self.z.checked_mul(WORLD_CHUNK_METERS),
+        ) {
+            (Some(x), Some(z)) => Some(TerrainPos { x, z }),
+            _ => None,
         }
     }
 
     /// Convert a world position to a local cell coordinate, if it belongs to this chunk.
+    ///
+    /// Uses floor division and remainder rather than subtracting a multiplied
+    /// origin, so it is exact at `i64::MIN`/`i64::MAX` and never overflows.
     #[must_use]
     pub const fn local_from_world(self, pos: TerrainPos) -> Option<(usize, usize)> {
-        let dx = pos.x - self.origin_m().x;
-        let dz = pos.z - self.origin_m().z;
-        if dx < 0 || dz < 0 || dx >= WORLD_CHUNK_METERS || dz >= WORLD_CHUNK_METERS {
+        if div_floor(pos.x, WORLD_CHUNK_METERS) != self.x
+            || div_floor(pos.z, WORLD_CHUNK_METERS) != self.z
+        {
             return None;
         }
-        Some((dx as usize, dz as usize))
+        Some((
+            rem_floor(pos.x, WORLD_CHUNK_METERS) as usize,
+            rem_floor(pos.z, WORLD_CHUNK_METERS) as usize,
+        ))
     }
 
     /// Chebyshev distance in chunks.
+    ///
+    /// Saturates at `i64::MAX` for coordinate pairs at opposite `i64` limits.
     #[must_use]
     pub const fn distance_chebyshev(self, other: Self) -> i64 {
-        let dx = if self.x > other.x {
-            self.x - other.x
+        let dx = if self.x >= other.x {
+            self.x.wrapping_sub(other.x) as u64
         } else {
-            other.x - self.x
+            other.x.wrapping_sub(self.x) as u64
         };
-        let dz = if self.z > other.z {
-            self.z - other.z
+        let dz = if self.z >= other.z {
+            self.z.wrapping_sub(other.z) as u64
         } else {
-            other.z - self.z
+            other.z.wrapping_sub(self.z) as u64
         };
-        if dx > dz {
-            dx
+        let distance = if dx > dz { dx } else { dz };
+        if distance > i64::MAX as u64 {
+            i64::MAX
         } else {
-            dz
+            distance as i64
         }
     }
 }
@@ -163,5 +188,45 @@ mod tests {
         let b = WorldChunkCoord::new(-3, 2);
         assert_eq!(a.distance_chebyshev(b), 3);
         assert_eq!(b.distance_chebyshev(a), 3);
+    }
+
+    #[test]
+    fn extreme_coordinates_do_not_overflow() {
+        let max = TerrainPos::new(i64::MAX, i64::MIN);
+        let max_chunk = WorldChunkCoord::from_terrain_pos(max);
+        assert_eq!(
+            max_chunk,
+            WorldChunkCoord::new(36_028_797_018_963_967, -36_028_797_018_963_968)
+        );
+        assert_eq!(
+            max_chunk.origin_m(),
+            TerrainPos::new(i64::MAX - 255, i64::MIN)
+        );
+        assert_eq!(max_chunk.local_from_world(max), Some((255, 0)));
+        assert_eq!(
+            max_chunk.local_from_world(TerrainPos::new(i64::MIN, i64::MAX)),
+            None
+        );
+
+        let saturated = WorldChunkCoord::new(i64::MAX, i64::MAX);
+        assert_eq!(saturated.origin_m(), TerrainPos::new(i64::MAX, i64::MAX));
+        assert_eq!(saturated.checked_origin_m(), None);
+        assert_eq!(saturated.local_from_world(max), None);
+
+        let min = TerrainPos::new(i64::MIN, i64::MIN);
+        let min_chunk = WorldChunkCoord::from_terrain_pos(min);
+        assert_eq!(
+            min_chunk,
+            WorldChunkCoord::new(i64::MIN / 256, i64::MIN / 256)
+        );
+        assert_eq!(min_chunk.origin_m(), min);
+        assert_eq!(min_chunk.checked_origin_m(), Some(min));
+        assert_eq!(min_chunk.local_from_world(min), Some((0, 0)));
+
+        assert_eq!(
+            WorldChunkCoord::new(i64::MIN, i64::MIN)
+                .distance_chebyshev(WorldChunkCoord::new(i64::MAX, i64::MAX)),
+            i64::MAX
+        );
     }
 }
