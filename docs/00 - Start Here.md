@@ -183,7 +183,7 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 ## Next actions
 
-1. Record the 30-minute slice playtest in [[66 - Playtest Kit]] (Q-101).
+1. Record the 30-minute slice playtest in [[66 - Playtest Kit]] (Q-101); use the standalone capture form in §9 to time stages and export the report.
 2. Utility and service per-phase payment, then reconnect and interest filtering for multiplayer.
 3. District policies and selectable settlement panels.
 4. Close the 1M render gate: real voxel/LOD city, 3060 baseline, fixed fixture, and Phase 5 evidence ([[68 - Metropolis Gate]]).

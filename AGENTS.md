@@ -342,6 +342,8 @@ GODOT=/path/to/godot ./scripts/smoke_city.sh
 # Neither path is the 1M gate.
 GODOT=/path/to/godot ./scripts/smoke_bench_screen.sh
 GODOT=/path/to/godot ./scripts/smoke_bench_live.sh
+GODOT=/path/to/godot ./scripts/smoke_playtest_capture.sh
+"${GODOT:-godot}" --path godot res://playtest_capture.tscn   # standalone Q-101 observer form
 "${GODOT:-godot}" --path godot res://bench_screen.tscn -- --output benchmarks/results/bench_screen_report.json
 # Headless MultiMesh setup harness for 10k/50k/250k boxes (not FPS evidence)
 GODOT=/path/to/godot ./scripts/smoke_metropolis_render.sh
