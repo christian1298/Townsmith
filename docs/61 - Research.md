@@ -61,7 +61,7 @@ pub struct ResearchStore {
 }
 ```
 
-`TechTree::validate` checks ids, finite positive costs, known prerequisites, and acyclic dependencies. `TechTree::from_json` accepts the same schema, so a future resource pack can replace the compiled tree without changing the pool or the bridge.
+`TechTree::validate` checks ids, finite positive costs, known prerequisites, and acyclic dependencies. `TechTree::from_json` accepts `nodes` as a map keyed by node id or as an array of nodes, and always serializes the canonical map form. Repeated node ids are rejected with `invalid_tech_tree` before the map is built; they are never silently collapsed. The same schema means a future resource pack can replace the compiled tree without changing the pool or the bridge.
 
 ### Generation
 
@@ -164,11 +164,11 @@ The scene smoke:
 
 ## 8. Tests
 
-- `core_city::research`: 14 tests — default tree and ages, starting pool, generation, unlock/spend, duplicate/unknown, age/prerequisite gates, insufficient points, availability flags, JSON/checksum, invalid state, prerequisite closure and spend consistency, invalid/cyclic trees, invalid costs.
+- `core_city::research`: 17 tests — default tree and ages, starting pool, generation, unlock/spend, duplicate/unknown, age/prerequisite gates, insufficient points, availability flags, JSON/checksum, duplicate node ids in map and array form, array input with canonical map output, invalid state, prerequisite closure and spend consistency, invalid/cyclic trees, invalid costs.
 - `core_city::progression`: 6 tests including age id aliases.
 - `core_structure`: 19 tests + 1 doctest, including minimum-age mapping.
 - `godot_ext`: 87 tests, including research JSON roundtrip/old save, unknown completed nodes, and structure age helpers.
-- Workspace: **909 tests** (905 unit/integration + 4 doctests, all passing).
+- Workspace: **946 tests** (941 unit/integration + 5 doctests, all passing).
 
 ## 9. Limits
 

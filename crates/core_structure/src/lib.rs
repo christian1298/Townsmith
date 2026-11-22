@@ -37,6 +37,13 @@ use serde::{Deserialize, Serialize};
 /// Height used to derive a story count from a volume height.
 pub const STORY_HEIGHT_M: f32 = 3.2;
 
+/// Maximum declared foundation depth in metres (D-025).
+///
+/// The v1 depth cap covers cellars, utility basements, and the initial
+/// underground-parking target. Deeper designs need engineering, dewatering,
+/// and retaining-wall rules that are not modeled yet.
+pub const MAX_FOUNDATION_DEPTH_M: f32 = 32.0;
+
 /// Structural metadata format version.
 ///
 /// This is a crate constant only; the format is versioned by the enclosing
@@ -307,10 +314,15 @@ impl StructureSpec {
 
     /// Derive a spec from a volume size in metres `[width, height, depth]`.
     ///
-    /// Stories are `ceil(height / 3.2)`, at least one. The span is left at
-    /// `0.0` (unspecified): a building footprint is not a beam span, and
-    /// inferring one would reject wide buildings with internal walls. The
-    /// span rule only applies when a blueprint declares a span explicitly.
+    /// Stories are `ceil(height / 3.2)`, at least one, clamped to the
+    /// system's [`StructuralSystem::max_stories`]. The clamp matters near a
+    /// system's height limit: `ceil(max_height / 3.2)` can exceed the story
+    /// limit, so an unclamped derivation would always fail validation even
+    /// though the height itself is legal. Heights above the system limit still
+    /// fail [`StructureError::HeightExceeded`]. The span is left at `0.0`
+    /// (unspecified): a building footprint is not a beam span, and inferring
+    /// one would reject wide buildings with internal walls. The span rule only
+    /// applies when a blueprint declares a span explicitly.
     ///
     /// # Errors
     ///
@@ -326,7 +338,8 @@ impl StructureSpec {
         {
             return Err(StructureError::InvalidBounds { bounds: bounds_m });
         }
-        let stories = (bounds_m[1] / STORY_HEIGHT_M).ceil().max(1.0) as u16;
+        let stories =
+            ((bounds_m[1] / STORY_HEIGHT_M).ceil().max(1.0) as u16).min(system.max_stories());
         Ok(Self::new(system, stories, bounds_m[1], 0.0))
     }
 
@@ -354,6 +367,12 @@ impl StructureSpec {
         if !self.foundation_depth_m.is_finite() || self.foundation_depth_m < 0.0 {
             return Err(StructureError::InvalidFoundation {
                 depth_m: self.foundation_depth_m,
+            });
+        }
+        if self.foundation_depth_m > MAX_FOUNDATION_DEPTH_M + LIMIT_TOLERANCE_M {
+            return Err(StructureError::FoundationTooDeep {
+                depth_m: self.foundation_depth_m,
+                limit_m: MAX_FOUNDATION_DEPTH_M,
             });
         }
         Ok(())
@@ -623,6 +642,13 @@ pub enum StructureError {
         /// Declared foundation depth in metres.
         actual_m: f32,
     },
+    /// The declared foundation depth exceeds the D-025 depth cap.
+    FoundationTooDeep {
+        /// Declared foundation depth in metres.
+        depth_m: f32,
+        /// Maximum declared foundation depth in metres.
+        limit_m: f32,
+    },
     /// The ground-floor system cannot carry the declared upper system.
     GroundTooWeak {
         /// Declared ground-floor system.
@@ -647,6 +673,7 @@ impl StructureError {
             Self::HeightExceeded { .. } => "structure_height",
             Self::SpanExceeded { .. } => "structure_span",
             Self::FoundationTooShallow { .. } => "structure_foundation",
+            Self::FoundationTooDeep { .. } => "structure_foundation_depth",
             Self::GroundTooWeak { .. } => "structure_ground",
         }
     }
@@ -709,6 +736,10 @@ impl fmt::Display for StructureError {
             } => write!(
                 formatter,
                 "a {required_m} m foundation is required; this blueprint declares {actual_m} m"
+            ),
+            Self::FoundationTooDeep { depth_m, limit_m } => write!(
+                formatter,
+                "foundations are capped at {limit_m} m; this blueprint declares {depth_m} m"
             ),
             Self::GroundTooWeak { ground, system } => write!(
                 formatter,
@@ -1014,6 +1045,37 @@ mod tests {
     }
 
     #[test]
+    fn foundation_depth_is_capped_at_the_d025_limit() {
+        let spec = StructureSpec::new(StructuralSystem::TimberFrame, 1, 3.0, 0.0);
+        spec.with_foundation_depth(MAX_FOUNDATION_DEPTH_M)
+            .validate()
+            .expect("32 m is the D-025 cap");
+        spec.with_foundation_depth(MAX_FOUNDATION_DEPTH_M + LIMIT_TOLERANCE_M)
+            .validate()
+            .expect("float tolerance at the cap");
+
+        let too_deep = spec.with_foundation_depth(32.1);
+        let error = too_deep.validate().expect_err("32.1 m exceeds the cap");
+        assert_eq!(
+            error,
+            StructureError::FoundationTooDeep {
+                depth_m: 32.1,
+                limit_m: MAX_FOUNDATION_DEPTH_M,
+            }
+        );
+        assert_eq!(error.code(), "structure_foundation_depth");
+        assert!(error.to_string().contains("capped at 32 m"));
+        assert_eq!(
+            spec.with_foundation_depth(f32::INFINITY)
+                .validate()
+                .expect_err("infinite depth"),
+            StructureError::InvalidFoundation {
+                depth_m: f32::INFINITY,
+            }
+        );
+    }
+
+    #[test]
     fn recommended_foundation_increases_with_stories() {
         assert_eq!(recommended_foundation_m(0), 0.0);
         assert_eq!(recommended_foundation_m(2), 0.0);
@@ -1070,6 +1132,84 @@ mod tests {
                 .expect_err("negative width"),
             StructureError::InvalidBounds {
                 bounds: [-1.0, 6.0, 6.0],
+            }
+        );
+    }
+
+    #[test]
+    fn derive_from_bounds_clamps_stories_at_each_height_limit() {
+        // Heights at the low end of each band derive exactly the story limit;
+        // heights at the material's maximum would derive one story too many
+        // (`ceil(max_height / 3.2)`), so they must be clamped.
+        let bands = [
+            (StructuralSystem::TimberFrame, 9.6, 11.0, 11.5, 3),
+            (StructuralSystem::LoadBearingStone, 9.6, 11.0, 11.5, 3),
+            (StructuralSystem::HalfTimber, 12.8, 14.5, 15.0, 4),
+            (StructuralSystem::LoadBearingBrick, 19.2, 20.0, 20.5, 6),
+            (StructuralSystem::ReinforcedConcrete, 96.0, 100.0, 100.5, 30),
+            (StructuralSystem::SteelFrame, 256.0, 260.0, 260.5, 80),
+            (StructuralSystem::CompositeCore, 384.0, 400.0, 400.5, 120),
+        ];
+
+        for (system, low_m, max_m, above_m, max_stories) in bands {
+            assert_eq!(system.max_stories(), max_stories, "{}", system.id());
+            for height_m in [low_m, max_m] {
+                let derived = StructureSpec::derive_from_bounds(system, [6.0, height_m, 6.0])
+                    .expect("valid bounds");
+                assert_eq!(
+                    derived.stories,
+                    max_stories,
+                    "{} at {height_m} m derived {} stories",
+                    system.id(),
+                    derived.stories
+                );
+                derived.validate().unwrap_or_else(|error| {
+                    panic!("{} at {height_m} m failed: {error}", system.id())
+                });
+            }
+
+            let derived = StructureSpec::derive_from_bounds(system, [6.0, above_m, 6.0])
+                .expect("valid bounds");
+            assert_eq!(derived.stories, max_stories);
+            let error = derived
+                .validate()
+                .expect_err("above the system height limit");
+            assert_eq!(
+                error,
+                StructureError::HeightExceeded {
+                    system,
+                    height_m: above_m,
+                    limit: max_m,
+                },
+                "{}",
+                system.id()
+            );
+            assert_eq!(error.code(), "structure_height");
+        }
+    }
+
+    #[test]
+    fn derive_from_bounds_timber_shed_four_metres_is_one_story() {
+        // ceil(4.0 / 3.2) = 2, but a shed is a single-story system.
+        let derived =
+            StructureSpec::derive_from_bounds(StructuralSystem::TimberShed, [4.0, 4.0, 4.0])
+                .expect("valid bounds");
+        assert_eq!(derived.stories, 1);
+        assert_eq!(derived.height_m, 4.0);
+        derived
+            .validate()
+            .expect("a 4 m shed is a legal one-story shed");
+
+        let too_tall =
+            StructureSpec::derive_from_bounds(StructuralSystem::TimberShed, [4.0, 6.4, 4.0])
+                .expect("valid bounds");
+        assert_eq!(too_tall.stories, 1);
+        assert_eq!(
+            too_tall.validate().expect_err("6.4 m exceeds a shed"),
+            StructureError::HeightExceeded {
+                system: StructuralSystem::TimberShed,
+                height_m: 6.4,
+                limit: 4.0,
             }
         );
     }
@@ -1202,6 +1342,13 @@ mod tests {
                     actual_m: 0.0,
                 },
                 "structure_foundation",
+            ),
+            (
+                StructureError::FoundationTooDeep {
+                    depth_m: 33.0,
+                    limit_m: MAX_FOUNDATION_DEPTH_M,
+                },
+                "structure_foundation_depth",
             ),
             (
                 StructureError::GroundTooWeak {

@@ -72,6 +72,9 @@ func _ready() -> void:
 	terrain_material = StandardMaterial3D.new()
 	terrain_material.vertex_color_use_as_albedo = true
 	terrain_material.roughness = 1.0
+	# Terrain quads now use Godot's clockwise front-face winding (matching the
+	# voxel mesher), but culling stays disabled until a display-backed smoke
+	# proves chunk seams and overlapping skirt planes render without holes.
 	terrain_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	water = WaterBody.new()
@@ -85,6 +88,12 @@ func bind_camera(camera_node: Camera3D) -> void:
 
 func chunk_count() -> int:
 	return chunks.size()
+
+## Cells along one chunk edge. A terrain edit on a border cell only remeshes
+## the neighbour when the caller knows the last local index, so callers derive
+## their edge test from this instead of copying `CHUNK_CELLS - 1`.
+func chunk_cell_count() -> int:
+	return CHUNK_CELLS
 
 ## Mark a loaded or queued chunk for remeshing after a terrain edit.
 func invalidate_chunk(coord: Vector2i) -> void:

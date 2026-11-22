@@ -1145,22 +1145,24 @@ impl TownsmithCore {
                     return placement_simple_error("construction_failed", error.to_string());
                 }
                 let first_installment = first_construction_payment(request.material_cost);
-                let charged = {
+                let marked_paid = {
                     let mut economy = self
                         .economy
                         .lock()
                         .unwrap_or_else(|error| error.into_inner());
                     let economy = economy.get_or_insert_with(|| Economy::new(seed));
-                    economy.try_charge_construction(first_installment)
-                };
-                let marked_paid = charged
-                    && self
+                    let mut construction = self
                         .construction
                         .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .site_mut(placement.id)
-                        .is_some_and(|site| site.mark_paid(first_installment).is_ok());
-                if !charged || !marked_paid {
+                        .unwrap_or_else(|error| error.into_inner());
+                    settle_first_installment(
+                        economy,
+                        &mut construction,
+                        placement.id,
+                        first_installment,
+                    )
+                };
+                if !marked_paid {
                     if let Some(store) = guard.as_mut() {
                         store.remove(placement.id);
                     }
@@ -7461,6 +7463,30 @@ fn first_construction_payment(material_cost: f64) -> f64 {
     (material_cost * ConstructionPhase::Survey.billing_weight() * 100.0).round() / 100.0
 }
 
+/// Charge the first construction installment and mark its site paid.
+///
+/// Returns `true` only when the treasury accepted the charge and the site
+/// accepted the payment. A failed charge moves nothing; a site that rejects
+/// the installment after the charge is refunded, so a rolled-back placement
+/// cannot keep the money without a site (F-015).
+fn settle_first_installment(
+    economy: &mut Economy,
+    construction: &mut ConstructionStore,
+    placement_id: u64,
+    amount: f64,
+) -> bool {
+    if !economy.try_charge_construction(amount) {
+        return false;
+    }
+    let marked_paid = construction
+        .site_mut(placement_id)
+        .is_some_and(|site| site.mark_paid(amount).is_ok());
+    if !marked_paid {
+        economy.refund_construction(amount);
+    }
+    marked_paid
+}
+
 /// Lead time assigned to a new utility or civic site under a construction clock.
 ///
 /// Developer mode keeps the legacy immediate behavior; campaign mode assigns
@@ -11390,6 +11416,31 @@ mod tests {
         assert!((first_construction_payment(12_345.67) - 370.37).abs() < 1e-9);
         assert!(first_construction_payment(f64::NAN).abs() < 1e-9);
         assert!(first_construction_payment(-5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn failed_mark_paid_refunds_the_first_installment_exactly() {
+        let mut economy = Economy::new(2026);
+        let balance = economy.balance;
+        let checksum = economy.checksum();
+        // The store has no site with id 1, so the charge succeeds but
+        // `mark_paid` cannot be applied; the helper must refund it.
+        let mut store = ConstructionStore::new(8, 1_000_000);
+        assert!(!settle_first_installment(&mut economy, &mut store, 1, 30.0));
+        assert_eq!(economy.balance, balance);
+        assert_eq!(economy.construction_spent, 0.0);
+        assert_eq!(economy.checksum(), checksum);
+        economy.validate().expect("restored treasury is valid");
+    }
+
+    #[test]
+    fn settled_first_installment_marks_the_site_paid_once() {
+        let mut economy = Economy::new(2026);
+        let mut store = priced_store();
+        assert!(settle_first_installment(&mut economy, &mut store, 1, 30.0));
+        assert!((store.payment_due(1)).abs() < 1e-9);
+        assert!((economy.balance - (STARTING_BALANCE - 30.0)).abs() < 1e-9);
+        assert!((economy.construction_spent - 30.0).abs() < 1e-9);
     }
 
     fn unique_save_path(name: &str) -> PathBuf {

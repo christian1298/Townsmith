@@ -22,7 +22,9 @@ pub use core_structure::{StructuralSystem, StructureError, StructureSpec, Struct
 pub use error::BlueprintError;
 pub use format::{decode_voxels, encode_voxels, DecodedVoxels};
 pub use hash::compute_hash;
-pub use limits::{MAX_CHUNKS, MAX_METADATA_BYTES, MAX_SOLID_VOXELS, MAX_VOXEL_STREAM_BYTES};
+pub use limits::{
+    MAX_CHUNKS, MAX_METADATA_BYTES, MAX_SOLID_VOXELS, MAX_VOLUME_VOXELS, MAX_VOXEL_STREAM_BYTES,
+};
 pub use metadata::{
     BlueprintMetadata, BlueprintStats, Dependencies, PropRecord, RoomRecord, FORMAT_VERSION,
 };

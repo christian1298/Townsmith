@@ -14,6 +14,13 @@ pub enum VoxelError {
     InvalidPaletteIndex { index: u16, palette_len: usize },
     /// A palette was empty.
     EmptyPalette,
+    /// A palette had more entries than one chunk can reference.
+    PaletteTooLarge {
+        /// Number of entries in the decoded palette.
+        entries: usize,
+        /// Maximum number of entries a chunk palette may contain.
+        max: usize,
+    },
     /// The first palette entry must be air.
     PaletteMustStartWithAir,
     /// A run had a zero length.
@@ -39,6 +46,9 @@ impl fmt::Display for VoxelError {
                 )
             }
             Self::EmptyPalette => write!(f, "palette must contain at least air"),
+            Self::PaletteTooLarge { entries, max } => {
+                write!(f, "palette has {entries} entries, maximum is {max}")
+            }
             Self::PaletteMustStartWithAir => write!(f, "palette entry 0 must be air"),
             Self::ZeroLengthRun => write!(f, "RLE run must not have zero length"),
         }

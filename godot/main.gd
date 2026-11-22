@@ -5,6 +5,13 @@ const SMOKE_CITY_TIER := 2
 const SMOKE_CITY_SEED := 2026
 const SMOKE_CITY_BUILDINGS := 100000
 const SMOKE_CITY_CHECKSUM := "2595171946372580485"
+## Deterministic streaming bound for `--smoke`: process frames awaited for the
+## first 3 x 3 chunk ring. Frame count, not wall time, decides the result.
+const SMOKE_CHUNK_FRAME_BUDGET := 12000
+## Liveness backstop only, never a passing criterion: a wedged worker thread
+## can stop frames from arriving, so this turns a hung smoke into a structured
+## failure. It stays under the `smoke_godot.sh` 60 s wrapper timeout.
+const SMOKE_LIVENESS_BACKSTOP_MS := 45000
 
 var streamer
 
@@ -257,8 +264,10 @@ func _run_world_placement_smoke(core) -> void:
 
 func _run_smoke() -> void:
 	var started := Time.get_ticks_msec()
-	var deadline := started + 15000
-	while streamer.chunk_count() < 9 and Time.get_ticks_msec() < deadline:
+	var deadline := started + SMOKE_LIVENESS_BACKSTOP_MS
+	var frames := 0
+	while streamer.chunk_count() < 9 and frames < SMOKE_CHUNK_FRAME_BUDGET and Time.get_ticks_msec() < deadline:
+		frames += 1
 		await get_tree().process_frame
 
 	var lods: Array[int] = streamer.loaded_lods()
@@ -292,7 +301,7 @@ func _run_smoke() -> void:
 
 	var status := "ok"
 	if streamer.chunk_count() < 9:
-		status = "timeout"
+		status = "stream_budget_exhausted" if frames >= SMOKE_CHUNK_FRAME_BUDGET else "liveness_timeout"
 	elif not lods.has(1) or not lods.has(2):
 		status = "missing_lods"
 	elif city_error != "":

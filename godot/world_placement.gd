@@ -25,6 +25,18 @@ const LOAN_AMOUNT := 50000.0
 # research summaries; traffic_state rebuilds the road graph. That is too much
 # work per HUD update, so the visible panel is refreshed on this cadence.
 const DASHBOARD_REFRESH_SECONDS := 0.5
+# A construction tick runs at 4 Hz and ends with a full HUD rebuild (blueprint,
+# selected placement/owner, advisor, city, economy, industry, utilities,
+# services, construction, traffic, progression, and research bridge queries).
+# Rebuilding that whole panel four times a second, on top of the input-driven
+# refreshes, dominated the tick cost, so the tick-driven refresh is throttled
+# through a dirty flag; direct input handlers still call `_update_hud()` now.
+const HUD_REFRESH_SECONDS := 0.5
+const CONSTRUCTION_STEP_SECONDS := 0.25
+# Maximum construction steps consumed by one frame. A stalled frame's backlog
+# is clamped to `CONSTRUCTION_STEP_SECONDS * CONSTRUCTION_MAX_STEPS` (2 s)
+# explicitly; the clamp is the only dropped-time path.
+const CONSTRUCTION_MAX_STEPS := 8
 # The dashboard's District section queries one circular district around the
 # Mayor camera target; this matches the 512 m aggregate district cell scale in
 # docs/07 and stays well inside the bridge's 0..=1,000,000 m radius guard.
@@ -180,6 +192,11 @@ var heatmap_peak := 0
 var heatmap_error := ""
 var industry_root: Node3D
 var industry_nodes: Dictionary = {}
+# Per-frame animation state for the industry spinners, rebuilt with the nodes
+# (F-070). Reading `base_y`/`spinner` back through `get_meta` and `get_child(0)`
+# every frame was per-node Dictionary churn for values that never change; the
+# cached list is the same data with direct references.
+var industry_animated: Array[Dictionary] = []
 var industry_kinds: Dictionary = {}
 var industry_time := 0.0
 var utility_root: Node3D
@@ -249,6 +266,8 @@ var mesh_cache: Dictionary = {}
 var placed_nodes: Dictionary = {}
 var construction_nodes: Dictionary = {}
 var construction_tick_accum := 0.0
+var hud_refresh_accum := 0.0
+var hud_dirty := false
 var first_click_guard := true
 
 var rotation_deg := 0
@@ -331,24 +350,33 @@ func _process(delta: float) -> void:
 	if lifecycle_clock_enabled:
 		_advance_lifecycle_clock(delta)
 	construction_tick_accum += delta
+	# A long frame stall must not silently vanish into `fmod`. Clamp the backlog
+	# to exactly what one frame can consume, then step it; the remainder of a
+	# pathological stall is dropped by this explicit clamp, not by truncation.
+	if construction_tick_accum > CONSTRUCTION_STEP_SECONDS * CONSTRUCTION_MAX_STEPS:
+		construction_tick_accum = CONSTRUCTION_STEP_SECONDS * CONSTRUCTION_MAX_STEPS
 	var steps := 0
-	while construction_tick_accum >= 0.25 and steps < 8:
-		_advance_construction(0.25)
-		construction_tick_accum -= 0.25
+	while construction_tick_accum >= CONSTRUCTION_STEP_SECONDS and steps < CONSTRUCTION_MAX_STEPS:
+		_advance_construction(CONSTRUCTION_STEP_SECONDS, true)
+		construction_tick_accum -= CONSTRUCTION_STEP_SECONDS
 		steps += 1
-	if construction_tick_accum >= 1.0:
-		construction_tick_accum = fmod(construction_tick_accum, 0.25)
+	hud_refresh_accum = minf(hud_refresh_accum + delta, HUD_REFRESH_SECONDS)
+	if hud_dirty and hud_refresh_accum >= HUD_REFRESH_SECONDS:
+		_update_hud()
 	industry_time += delta
-	for node in industry_nodes.values():
-		if is_instance_valid(node):
-			var base_y := float(node.get_meta("base_y", 0.0))
-			node.position.y = base_y + sin(industry_time * 2.0) * 0.15
-			var spinner = node.get_meta("spinner", null)
-			if spinner != null and is_instance_valid(spinner):
-				spinner.rotation.y += delta * 2.4
-				var worker = spinner.get_child(0) if spinner.get_child_count() > 0 else null
-				if worker != null and is_instance_valid(worker):
-					worker.position.y = 0.8 + absf(sin(industry_time * 3.0)) * 0.35
+	var industry_bob := sin(industry_time * 2.0) * 0.15
+	var worker_bob := 0.8 + absf(sin(industry_time * 3.0)) * 0.35
+	for entry in industry_animated:
+		var pivot: Node3D = entry.get("pivot")
+		if not is_instance_valid(pivot):
+			continue
+		pivot.position.y = float(entry.get("base_y", 0.0)) + industry_bob
+		var spinner: Node3D = entry.get("spinner")
+		if is_instance_valid(spinner):
+			spinner.rotation.y += delta * 2.4
+			var worker: Node3D = entry.get("worker")
+			if is_instance_valid(worker):
+				worker.position.y = worker_bob
 	utility_time += delta
 	for node in utility_nodes.values():
 		if is_instance_valid(node):
@@ -1078,7 +1106,10 @@ func _heatmap_ground_at(x: float, z: float) -> float:
 	var key := Vector2i(roundi(x), roundi(z))
 	if heatmap_ground.has(key):
 		return float(heatmap_ground[key])
-	# Cells move with the camera, so cap the cache; a terrain edit clears it.
+	# F-070: this dictionary is the heatmap's only per-cell allocation and it is
+	# already bounded: at most 2 * HEATMAP_MAX_CELLS rounded cell centres, each
+	# one Vector2i -> float entry, cleared wholesale when the terrain changes.
+	# The overlay itself is a single MultiMesh, so no per-frame node churn.
 	if heatmap_ground.size() >= HEATMAP_MAX_CELLS * 2:
 		heatmap_ground.clear()
 	var ground: float = core.world_height_at(SEED, x, z)
@@ -1708,6 +1739,7 @@ func _refresh_industry_visuals() -> void:
 		if is_instance_valid(node):
 			node.free()
 	industry_nodes.clear()
+	industry_animated.clear()
 	industry_kinds.clear()
 	if core == null:
 		return
@@ -1726,6 +1758,8 @@ func _refresh_industry_visuals() -> void:
 			base_y,
 			float(site.get("center_z", 0.0))
 		)
+		# The metas stay as the node-structure contract the scene smoke checks;
+		# the per-frame loop reads the `industry_animated` cache instead.
 		pivot.set_meta("base_y", base_y)
 		var mesh_instance := MeshInstance3D.new()
 		var box := BoxMesh.new()
@@ -1760,6 +1794,12 @@ func _refresh_industry_visuals() -> void:
 		pivot.add_child(label)
 		industry_root.add_child(pivot)
 		industry_nodes[id] = pivot
+		industry_animated.append({
+			"pivot": pivot,
+			"base_y": base_y,
+			"spinner": spinner,
+			"worker": worker,
+		})
 
 func _cycle_starter() -> void:
 	var catalog: Dictionary = core.starter_library(SEED)
@@ -2361,6 +2401,10 @@ func _tutorial_display(step: String, fallback: String) -> String:
 func _update_hud() -> void:
 	if hud == null:
 		return
+	# Any rebuild satisfies a pending tick-driven refresh, so the dirty flag and
+	# its cadence window restart here regardless of the caller.
+	hud_dirty = false
+	hud_refresh_accum = 0.0
 	var blueprint_name := _starter_display(str(blueprint_info.get("id", "")), str(blueprint_info.get("name", "none")))
 	var rooms := int(blueprint_info.get("rooms", 0))
 	var capacity := int(blueprint_info.get("resident_capacity", 0))
@@ -3205,7 +3249,8 @@ func _return_to_mayor() -> bool:
 	streamer.bind_camera(mayor_camera)
 	ghost.visible = true
 	selection_box.visible = selected_id >= 0
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	if DisplayServer.get_name() != "headless":
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_set_modal("", false)
 	_refresh_preview(true)
 	return true
@@ -3241,14 +3286,19 @@ func _edit_target(delta: int) -> bool:
 	return true
 
 func _touched_chunks(chunk: Vector2i, local_x: int, local_z: int) -> Array[Vector2i]:
+	# The far edge comes from the streamer, never a literal 255: a copied
+	# CHUNK_CELLS would silently stop invalidating the neighbour chunk (and
+	# leave a stale border) if the chunk resolution ever changed.
+	var cells: int = streamer.chunk_cell_count() if streamer != null else 1
+	var last := maxi(cells, 1) - 1
 	var touched: Array[Vector2i] = [chunk]
 	if local_x == 0:
 		touched.append(chunk + Vector2i(-1, 0))
-	elif local_x == 255:
+	elif local_x >= last:
 		touched.append(chunk + Vector2i(1, 0))
 	if local_z == 0:
 		touched.append(chunk + Vector2i(0, -1))
-	elif local_z == 255:
+	elif local_z >= last:
 		touched.append(chunk + Vector2i(0, 1))
 	return touched
 
@@ -3578,7 +3628,7 @@ func _tick_named_lifecycle(days: float) -> Dictionary:
 	return result
 
 
-func _advance_construction(seconds: float) -> Dictionary:
+func _advance_construction(seconds: float, defer_hud := false) -> Dictionary:
 	if seconds <= 0.0:
 		return {}
 	core.construction_set_trades(SEED)
@@ -3592,7 +3642,13 @@ func _advance_construction(seconds: float) -> Dictionary:
 	core.research_tick(SEED, seconds)
 	core.economy_tick(SEED, seconds)
 	_refresh_construction_visuals()
-	_update_hud()
+	# The `_process` loop runs up to eight ticks per frame and marks the HUD
+	# dirty instead of rebuilding it per tick; every other caller (input, smoke,
+	# save/load) still wants the panel updated immediately.
+	if defer_hud:
+		hud_dirty = true
+	else:
+		_update_hud()
 	return report
 
 
@@ -3754,6 +3810,7 @@ func _run_scene_smoke() -> void:
 	var water_ok := false
 	var rotation_ok := false
 	var edit_ok := false
+	var chunk_cells_ok := false
 	var place_ok := false
 	var road_ok := false
 	var traffic_ok := false
@@ -3897,6 +3954,17 @@ func _run_scene_smoke() -> void:
 	edit_ok = _edit_target(1) and core.terrain_delta_count() == 1 and absf(core.world_height_at(SEED, FIXTURE_X, FIXTURE_Z) - 42.0) < 0.001 and streamer.dirty_count() > 0
 	var border_touched := _touched_chunks(Vector2i(0, 0), 0, 255)
 	edit_ok = edit_ok and border_touched.size() == 3 and border_touched.has(Vector2i(-1, 0)) and border_touched.has(Vector2i(0, 1))
+	# The border test must follow the streamer's cell count, not a copied 255.
+	var chunk_cells: int = streamer.chunk_cell_count()
+	var last_cell := chunk_cells - 1
+	var far_corner := _touched_chunks(Vector2i(0, 0), last_cell, last_cell)
+	chunk_cells_ok = chunk_cells == 256
+	chunk_cells_ok = chunk_cells_ok and far_corner.size() == 3
+	chunk_cells_ok = chunk_cells_ok and far_corner.has(Vector2i(1, 0))
+	chunk_cells_ok = chunk_cells_ok and far_corner.has(Vector2i(0, 1))
+	chunk_cells_ok = chunk_cells_ok and _touched_chunks(Vector2i(0, 0), 1, 1).size() == 1
+	if not chunk_cells_ok and status == "ok":
+		status = "chunk_cells_failed"
 	# A chunk that is still on its first build must also be invalidated by load.
 	streamer.in_flight[9999] = {"coord": Vector2i(1, 1), "step": 1, "generation": 0}
 	streamer.invalidate_all()
@@ -4923,12 +4991,13 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s heatmap_ui=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s heatmap_ui=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
 		"ok" if rotation_ok else "failed",
 		"ok" if edit_ok else "failed",
+		"ok" if chunk_cells_ok else "failed",
 		"ok" if place_ok else "failed",
 		"ok" if road_ok else "failed",
 		"ok" if lot_ok else "failed",
