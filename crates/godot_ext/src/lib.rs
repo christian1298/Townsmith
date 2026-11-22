@@ -5938,10 +5938,7 @@ impl TownsmithCore {
                 research.as_ref().map_or(0, ResearchStore::checksum)
             )),
         );
-        result.set(
-            "district_policies",
-            policy_count as i64,
-        );
+        result.set("district_policies", policy_count as i64);
         result.set(
             "district_policy_checksum",
             &GString::from(&format!("{policy_checksum:016x}")),
@@ -9597,11 +9594,22 @@ fn research_from_world_json(json: &str) -> Result<Option<ResearchStore>, (&'stat
 }
 
 /// Add the optional `policies` object to one already-parsed world save.
+///
+/// The envelope must be a JSON object. Checking it before assignment keeps a
+/// non-object document from panicking at the indexing operation and reports
+/// `invalid_json`; a serialization failure is `save_failed`.
 fn attach_policies(
     mut value: serde_json::Value,
     store: &DistrictPolicyStore,
-) -> Result<serde_json::Value, serde_json::Error> {
-    value["policies"] = serde_json::to_value(store)?;
+) -> Result<serde_json::Value, (&'static str, String)> {
+    if !value.is_object() {
+        return Err((
+            "invalid_json",
+            "the world save is not a JSON object".to_string(),
+        ));
+    }
+    value["policies"] =
+        serde_json::to_value(store).map_err(|error| ("save_failed", error.to_string()))?;
     Ok(value)
 }
 
@@ -9633,22 +9641,28 @@ fn attach_optional_policies(
         .map_err(|error| ("invalid_policies", error.to_string()))?;
     let value: serde_json::Value = serde_json::from_str(&json)
         .map_err(|error| ("save_failed", format!("invalid save JSON: {error}")))?;
-    let value = attach_policies(value, policies)
-        .map_err(|error| ("save_failed", error.to_string()))?;
+    let value = attach_policies(value, policies)?;
     serde_json::to_string_pretty(&value).map_err(|error| ("save_failed", error.to_string()))
 }
 
 /// Read the optional `policies` object from a world save.
 ///
 /// Old saves have no object and load with the registry closed. A malformed
-/// object, an invalid registry, or a registry for another world seed is
-/// rejected so a failed load never installs a partial store.
+/// document, a non-object envelope, a malformed object, an invalid registry,
+/// or a registry for another world seed is rejected so a failed load never
+/// installs a partial store.
 fn policies_from_world_json(
     json: &str,
     expected_seed: u64,
 ) -> Result<Option<DistrictPolicyStore>, (&'static str, String)> {
     let value: serde_json::Value =
         serde_json::from_str(json).map_err(|error| ("invalid_json", error.to_string()))?;
+    if !value.is_object() {
+        return Err((
+            "invalid_json",
+            "the world save is not a JSON object".to_string(),
+        ));
+    }
     let Some(raw) = value.get("policies") else {
         return Ok(None);
     };
@@ -10597,6 +10611,171 @@ mod tests {
         assert_eq!(state.count, 1);
         assert_eq!(state.policies, vec![policy]);
         assert_eq!(state.checksum, store.checksum());
+    }
+
+    #[test]
+    fn district_policy_world_save_round_trips_the_registry() {
+        let mut store = DistrictPolicyStore::new(2026);
+        let first = store
+            .create(&district_policy_request("Riverside"))
+            .expect("first");
+        let mut changed = district_policy_request("Old Town");
+        changed.construction_allowed = false;
+        changed
+            .blueprint_allowlist
+            .insert("base:workshop".to_string());
+        let second = store.create(&changed).expect("second");
+        let base = "{\n  \"format_version\": 1,\n  \"seed\": 2026,\n  \"next_id\": 1,\n  \"placements\": []\n}\n";
+
+        let json = attach_optional_policies(base.to_string(), Some(&store), 2026).expect("attach");
+        assert_ne!(json.as_bytes(), base.as_bytes());
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("save JSON");
+        assert_eq!(parsed["seed"], 2026);
+        assert_eq!(parsed["next_id"], 1);
+        assert_eq!(parsed["policies"]["seed"], 2026);
+        assert_eq!(
+            parsed["policies"]["policies"]
+                .as_object()
+                .map(|map| map.len()),
+            Some(2)
+        );
+
+        let loaded = policies_from_world_json(&json, 2026)
+            .expect("load")
+            .expect("registry");
+        assert_eq!(loaded, store);
+        assert_eq!(loaded.get(first.id), Some(&first));
+        assert_eq!(loaded.get(second.id), Some(&second));
+        assert_eq!(loaded.checksum(), store.checksum());
+        assert_eq!(loaded.next_id, 3);
+    }
+
+    #[test]
+    fn district_policy_world_load_accepts_an_old_save_without_policies() {
+        let base = "{\n  \"format_version\": 1,\n  \"seed\": 2026,\n  \"next_id\": 1,\n  \"placements\": []\n}\n";
+        assert_eq!(policies_from_world_json(base, 2026), Ok(None));
+    }
+
+    #[test]
+    fn district_policy_world_save_keeps_json_byte_identical_without_a_registry() {
+        let base = "{\n  \"format_version\": 1,\n  \"seed\": 2026,\n  \"next_id\": 1,\n  \"placements\": []\n}\n";
+        let saved = attach_optional_policies(base.to_string(), None, 2026).expect("save");
+        assert_eq!(saved.as_bytes(), base.as_bytes());
+        assert!(!saved.contains("policies"));
+    }
+
+    #[test]
+    fn district_policy_world_save_and_load_reject_a_foreign_seed() {
+        let mut store = DistrictPolicyStore::new(2026);
+        store
+            .create(&district_policy_request("Riverside"))
+            .expect("create");
+        let base = "{\n  \"seed\": 2026,\n  \"placements\": []\n}\n";
+        let attached =
+            attach_optional_policies(base.to_string(), Some(&store), 2026).expect("attach");
+        assert_eq!(
+            policies_from_world_json(&attached, 2026),
+            Ok(Some(store.clone()))
+        );
+
+        let (code, message) = attach_optional_policies(base.to_string(), Some(&store), 2027)
+            .expect_err("foreign save");
+        assert_eq!(code, "seed_mismatch");
+        assert!(message.contains("2026"), "{message}");
+
+        let (code, message) = policies_from_world_json(&attached, 2027).expect_err("foreign load");
+        assert_eq!(code, "seed_mismatch");
+        assert!(message.contains("2027"), "{message}");
+    }
+
+    #[test]
+    fn district_policy_world_save_and_load_reject_malformed_json() {
+        let mut store = DistrictPolicyStore::new(2026);
+        store
+            .create(&district_policy_request("Riverside"))
+            .expect("create");
+
+        let (code, _) = attach_optional_policies("{\"seed\":".to_string(), Some(&store), 2026)
+            .expect_err("malformed save");
+        assert_eq!(code, "save_failed");
+        let (code, _) = attach_optional_policies("[]".to_string(), Some(&store), 2026)
+            .expect_err("non-object save");
+        assert_eq!(code, "invalid_json");
+
+        let (code, _) = policies_from_world_json("{\"seed\":", 2026).expect_err("malformed load");
+        assert_eq!(code, "invalid_json");
+        let (code, _) = policies_from_world_json("[]", 2026).expect_err("non-object load");
+        assert_eq!(code, "invalid_json");
+        let (code, _) =
+            policies_from_world_json("{\"policies\": 7}", 2026).expect_err("scalar policies");
+        assert_eq!(code, "invalid_policies");
+        let (code, _) =
+            policies_from_world_json("{\"policies\": null}", 2026).expect_err("null policies");
+        assert_eq!(code, "invalid_policies");
+    }
+
+    #[test]
+    fn district_policy_world_save_and_load_reject_an_invalid_registry() {
+        let mut store = DistrictPolicyStore::new(2026);
+        store
+            .create(&district_policy_request("Riverside"))
+            .expect("create");
+        store.format_version = 99;
+        let (code, message) =
+            attach_optional_policies("{\"seed\": 2026}".to_string(), Some(&store), 2026)
+                .expect_err("invalid save");
+        assert_eq!(code, "invalid_policies");
+        assert!(message.contains("99"), "{message}");
+        let registry = serde_json::to_value(&store).expect("invalid store JSON");
+        let envelope = serde_json::json!({ "seed": 2026, "policies": registry }).to_string();
+        let (code, message) = policies_from_world_json(&envelope, 2026).expect_err("invalid load");
+        assert_eq!(code, "invalid_policies");
+        assert!(message.contains("99"), "{message}");
+
+        let mut bad_counter = DistrictPolicyStore::new(2026);
+        bad_counter.next_id = 0;
+        let registry = serde_json::to_value(&bad_counter).expect("bad counter JSON");
+        let envelope = serde_json::json!({ "seed": 2026, "policies": registry }).to_string();
+        let (code, message) =
+            policies_from_world_json(&envelope, 2026).expect_err("bad counter load");
+        assert_eq!(code, "invalid_policies");
+        assert!(message.contains("next_id"), "{message}");
+    }
+
+    #[test]
+    fn district_policy_summary_reports_a_stable_empty_checksum() {
+        assert_eq!(policy_summary(None), (0, 0));
+        let first = DistrictPolicyStore::new(2026);
+        let second = DistrictPolicyStore::new(2026);
+        assert!(first.is_empty());
+        assert_eq!(first.checksum(), second.checksum());
+        assert_eq!(policy_summary(Some(&first)), (0, first.checksum()));
+        assert_eq!(first.checksum(), DistrictPolicyStore::new(2026).checksum());
+    }
+
+    #[test]
+    fn district_policy_world_load_replaces_or_clears_the_live_registry() {
+        let mut previous = DistrictPolicyStore::new(2026);
+        previous
+            .create(&district_policy_request("Riverside"))
+            .expect("previous");
+        let mut live = Some(previous);
+        assert_eq!(live.as_ref().map(DistrictPolicyStore::count), Some(1));
+
+        let mut saved = DistrictPolicyStore::new(2026);
+        let replacement = saved
+            .create(&district_policy_request("Old Town"))
+            .expect("replacement");
+        let json = attach_optional_policies("{\"seed\": 2026}".to_string(), Some(&saved), 2026)
+            .expect("attach");
+        live = policies_from_world_json(&json, 2026).expect("load");
+        let installed = live.as_ref().expect("installed registry");
+        assert_eq!(installed, &saved);
+        assert_eq!(installed.count(), 1);
+        assert_eq!(installed.get(replacement.id), Some(&replacement));
+
+        live = policies_from_world_json("{\"seed\": 2026}", 2026).expect("old load");
+        assert!(live.is_none(), "an old save did not clear the registry");
     }
 
     #[test]

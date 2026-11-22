@@ -31,8 +31,8 @@ tags:
 | `world_placement_checksum()` | `String` | Stable 64-bit checksum, hex |
 | `world_clear_placements()` | `bool` | Clear placements; keep the seed |
 | `world_remove_placement(id)` | `bool` | Remove one placement |
-| `world_save(path)` | `Dictionary` | Write world JSON atomically: sibling `.tmp` + `sync_all` + rename, rotating a valid previous save to `.bak`; returns counts, checksums, `bytes`, `backup_rotated` |
-| `world_load(path, expected_seed)` | `Dictionary` | Read JSON for one seed, verify structure, packages, construction, roads, lots, settlements, and deltas, replace the stores |
+| `world_save(path)` | `Dictionary` | Write world JSON atomically: sibling `.tmp` + `sync_all` + rename, rotating a valid previous save to `.bak`; returns counts, checksums, `bytes`, `backup_rotated`; adds an optional `policies` object when a district registry is open |
+| `world_load(path, expected_seed)` | `Dictionary` | Read JSON for one seed, verify structure, packages, construction, roads, lots, settlements, deltas, and optional policies, replace the stores |
 | `world_height_at(seed, x, z)` | `float` | One terrain sample for the preview; `-1.0` on invalid input |
 | `city_summary()` | `Dictionary` | Derived population, housing, jobs, employment, happiness; see [[49 - Phase 3 Slice Plan]] |
 
@@ -104,7 +104,7 @@ The sampler uses `WorldGenerator::height_at` on the 1 m grid, not the currently 
 }
 ```
 
-2B adds an optional `terrain_deltas` (hex `TSDL`) + `terrain_checksum` pair when edits exist; 2D adds a `construction` object when sites exist; 2E adds optional `roads`, `lots`, and `settlements` objects. Phase 3 adds optional `population`, `economy`, `industry`, and `utilities` objects; each is validated and replaced atomically with the rest of the world. At the file layer, `world_save` writes a sibling temp file, syncs it, rotates a structurally valid previous save to `<path>.bak`, then renames the temp over the primary. `world_load` falls back to `.bak` when the primary is missing or invalid JSON, and returns `recovered_from_backup`, `backup`, and `backup_checksum`; store/schema validation failures still reject rather than silently falling back. `world_save` also commits the sanitized household clone back to the live store after a durable write, so stale staffing cannot survive until reload. `lot_validate` rejects a foreign-seed lot store exactly like `lot_add`. See [[43 - Terrain Edits]], [[45 - Construction Sites]], [[46 - Road Network]], [[47 - Lots and Zoning]], and [[48 - Settlement Boundaries]].
+2B adds an optional `terrain_deltas` (hex `TSDL`) + `terrain_checksum` pair when edits exist; 2D adds a `construction` object when sites exist; 2E adds optional `roads`, `lots`, and `settlements` objects. Phase 3 adds optional `population`, `economy`, `industry`, and `utilities` objects, and an optional `policies` registry object when a district-policy registry is open; each is validated and replaced atomically with the rest of the world. A world without a registry omits `policies` entirely, so its JSON and checksums are byte-identical to a pre-policy save. At the file layer, `world_save` writes a sibling temp file, syncs it, rotates a structurally valid previous save to `<path>.bak`, then renames the temp over the primary. `world_load` falls back to `.bak` when the primary is missing or invalid JSON, and returns `recovered_from_backup`, `backup`, and `backup_checksum`; store/schema validation failures still reject rather than silently falling back. `world_save` also commits the sanitized household clone and the validated registry clone back to their live stores only after a durable write, so stale staffing cannot survive until reload and a failed save changes no live store. `lot_validate` rejects a foreign-seed lot store exactly like `lot_add`. The registry envelope is additive: its `policies` payload carries the policy record fields, and the world result adds `district_policies` and `district_policy_checksum` while keeping the existing keys. See [[43 - Terrain Edits]], [[45 - Construction Sites]], [[46 - Road Network]], [[47 - Lots and Zoning]], and [[48 - Settlement Boundaries]].
 
 `world_load` rejects:
 
@@ -114,9 +114,12 @@ The sampler uses `WorldGenerator::height_at` on the 1 m grid, not the currently 
 - records whose footprint does not match bounds + rotation, or whose foundation, height, centre, or cost is inconsistent;
 - a missing package, an invalid/relative package path, a package whose content hash differs from the placement record, or a package whose id/name/bounds/capacity/jobs do not match the record;
 - a load whose seed differs from `expected_seed` (and from the active store);
-- a `terrain_deltas` blob with a missing, malformed, or mismatched `terrain_checksum`.
+- a `terrain_deltas` blob with a missing, malformed, or mismatched `terrain_checksum`;
+- a `policies` object that is malformed, fails registry validation, or belongs to another seed.
 
-The current placement store and deltas are only replaced after the whole file, the delta checksum, and every package have passed. A failed load leaves both untouched.
+The optional district-policy envelope is validated before any store is replaced. `world_load` reports `invalid_json` for a non-object or malformed document, `invalid_policies` when the `policies` member does not deserialize or fails `DistrictPolicyStore::validate` (version, `next_id`, record ids, every field), and `seed_mismatch` when the registry seed differs from `expected_seed`. A save without `policies` loads with the registry closed, clearing any open one. Positions in the envelope follow the registry limits: at most 4,096 policies, ids `1..=i64::MAX - 1`, radius 16–4,096 m, tax multiplier 0.25–4.0, service funding 0–2.0, names 1–64 trimmed characters, and at most 256 namespaced allowlist ids. `world_save` rejects a foreign-seed or invalid registry as `seed_mismatch` / `invalid_policies` and reports any serialization failure as `save_failed`.
+
+The current placement store, deltas, and policy registry are only replaced after the whole file, the delta checksum, and every package have passed. A failed load leaves all of them untouched.
 
 ## 4. Smoke
 
