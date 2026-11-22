@@ -246,6 +246,9 @@ cargo run --release -p townsmith-bench --bin city_loop
 ./scripts/compare_bench.py --self-test
 
 # 20,000-resident Industrial-age operating balance
+# Phase-driven live financing model (Industrial/Modern)
+cargo run --release -p townsmith-bench --bin financing -- --live
+
 ./scripts/bench_industrial.sh
 
 # Road graph and flow-field microbenchmark

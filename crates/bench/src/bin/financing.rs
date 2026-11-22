@@ -28,10 +28,11 @@
 //! identical and the headline invariants hold.
 
 use core_city::{
-    DEFAULT_BUSINESS_TAX_PER_JOB_PER_DAY, DEFAULT_LOAN_RATE_PER_DAY,
-    DEFAULT_SERVICE_UPKEEP_PER_SITE_PER_DAY, DEFAULT_UPKEEP_PER_BUILDING_PER_DAY,
-    DEFAULT_UTILITY_UPKEEP_PER_SITE_PER_DAY, MAX_TOTAL_DEBT, STARTING_BALANCE,
-    WAGE_PER_WORKER_PER_DAY,
+    ConstructionStore, ConstructionTimeScale, Economy, InfrastructureCosts, BANKRUPTCY_THRESHOLD,
+    CAMPAIGN_DEFAULT_SECONDS_PER_GAME_DAY, DAY_SECONDS, DEFAULT_BUSINESS_TAX_PER_JOB_PER_DAY,
+    DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, DEFAULT_SERVICE_UPKEEP_PER_SITE_PER_DAY,
+    DEFAULT_UPKEEP_PER_BUILDING_PER_DAY, DEFAULT_UTILITY_UPKEEP_PER_SITE_PER_DAY, MAX_LOAN,
+    MAX_TICK_SECONDS, MAX_TOTAL_DEBT, STARTING_BALANCE, WAGE_PER_WORKER_PER_DAY,
 };
 
 /// The runner's recovery tax policy. Fixed for the whole projection.
@@ -54,6 +55,20 @@ const MAX_SIM_DAYS: u64 = 73_050;
 
 const DAYS_PER_YEAR: f64 = 365.25;
 const DAYS_PER_MONTH: f64 = DAYS_PER_YEAR / 12.0;
+
+/// Live model: a four-slot crew, matching the developer default. Structure and
+/// utilities need all four slots, so the live build is effectively serial.
+const LIVE_CREW_CAPACITY: u16 = 4;
+/// Live model: every tenement, factory, and office carries 10,000 material
+/// litres, the same reference used by the Industrial and Modern probes.
+const LIVE_SOLID_VOXELS: u64 = 10_000;
+/// `ConstructionStore::tick` clamps at 3,600 simulated seconds, so one game
+/// day has to be fed in hourly steps.
+const LIVE_HOURS_PER_DAY: u64 = 24;
+/// Timeline sampling interval.
+const LIVE_TIMELINE_DAYS: u64 = 30;
+/// Live model seed. The projection has no seed, so this only affects loan ids.
+const LIVE_SEED: u64 = 2026;
 
 /// Tenement cost from `base:tenement` in the starter catalog.
 const TENEMENT_COST: f64 = 60_000.0;
@@ -167,12 +182,35 @@ impl Scenario {
         }
         batches
     }
+    /// Per-building sequence for the live model. Homes and workplaces are
+    /// interleaved proportionally with a Bresenham-style split, so every
+    /// partial city keeps the final housing/jobs ratio.
+    fn live_order(&self) -> Vec<LiveBuilding> {
+        let total = self.buildings();
+        let mut order = Vec::with_capacity(total as usize);
+        for slot in 0..total {
+            let homes_before = slot * self.homes / total;
+            let homes_after = (slot + 1) * self.homes / total;
+            if homes_after > homes_before {
+                order.push(LiveBuilding::Home);
+            } else {
+                order.push(LiveBuilding::Workplace);
+            }
+        }
+        order
+    }
 }
 
 struct Batch {
     homes: u64,
     workplaces: u64,
     cost: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveBuilding {
+    Home,
+    Workplace,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -193,6 +231,14 @@ fn main() {
     let smoke = std::env::args().any(|arg| arg == "--smoke");
     if smoke {
         run_smoke();
+        return;
+    }
+    let live = std::env::args().any(|arg| arg == "--live");
+    if live {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&live_report()).expect("pretty json")
+        );
         return;
     }
     println!(
@@ -428,6 +474,429 @@ fn run_plan(scenario: &Scenario, batches: &[Batch], capped: bool) -> Plan {
     }
 }
 
+// --- Live phased construction (D-029 campaign clock) -----------------------
+
+/// One settled construction day's payment result.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct LiveSettlement {
+    paid_total: f64,
+    paid_sites: u32,
+    stalled_sites: u32,
+    borrowed: f64,
+}
+
+/// Outcome of one live scenario.
+#[derive(Debug, Clone, PartialEq)]
+struct LiveResult {
+    final_day: u64,
+    completion_day: Option<u64>,
+    peak_debt: f64,
+    peak_debt_day: u64,
+    max_financing_required: f64,
+    total_interest: f64,
+    insolvent_days: u64,
+    bankrupt_day: Option<u64>,
+    final_balance: f64,
+    final_debt: f64,
+    loan_count: usize,
+    completed: u64,
+    completed_homes: u64,
+    completed_workplaces: u64,
+    status: &'static str,
+    timeline: Vec<serde_json::Value>,
+}
+
+/// Charge every due installment in ascending placement-id order.
+///
+/// This mirrors the bridge `settle_construction_payments`: an unpaid
+/// installment stalls the site at its next phase boundary and stays due for a
+/// later retry. The live model has to borrow before charging when cash is
+/// short, because `try_charge_construction` refuses to overdraw.
+fn settle_live_construction(
+    store: &mut ConstructionStore,
+    economy: &mut Economy,
+) -> LiveSettlement {
+    let mut report = LiveSettlement::default();
+    let ids: Vec<u64> = store.sites.keys().copied().collect();
+    for id in ids {
+        let due = store.payment_due(id);
+        if due <= 0.0 {
+            continue;
+        }
+        while economy.balance < due {
+            match economy.take_loan(MAX_LOAN, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS) {
+                Ok(()) => report.borrowed += MAX_LOAN,
+                Err(_) => break,
+            }
+        }
+        if economy.try_charge_construction(due) {
+            if let Some(site) = store.site_mut(id) {
+                if site.mark_paid(due).is_ok() {
+                    site.resume_payment();
+                    report.paid_total += due;
+                    report.paid_sites += 1;
+                }
+            }
+        } else if let Some(site) = store.site_mut(id) {
+            site.stall_for_payment();
+            report.stalled_sites += 1;
+        }
+    }
+    report
+}
+
+fn add_next_live_site(
+    store: &mut ConstructionStore,
+    scenario: &Scenario,
+    order: &[LiveBuilding],
+    next_building: &mut usize,
+    next_placement_id: &mut u64,
+) {
+    if *next_building >= order.len() {
+        return;
+    }
+    let cost = match order[*next_building] {
+        LiveBuilding::Home => scenario.home_cost,
+        LiveBuilding::Workplace => scenario.workplace_cost,
+    };
+    let id = *next_placement_id;
+    store
+        .add_priced_site(id, LIVE_SOLID_VOXELS, cost)
+        .expect("placement ids are unique and sequential");
+    *next_building += 1;
+    *next_placement_id += 1;
+}
+
+fn ensure_live_site(
+    store: &mut ConstructionStore,
+    scenario: &Scenario,
+    order: &[LiveBuilding],
+    next_building: &mut usize,
+    next_placement_id: &mut u64,
+) {
+    if store.site_count() == 0 {
+        add_next_live_site(store, scenario, order, next_building, next_placement_id);
+    }
+}
+
+/// Drop finished sites once their final installment is paid.
+///
+/// A completed site can still owe the last 3% inspection installment; the
+/// bridge keeps charging it, so the live model keeps the site (and its debt)
+/// until the treasury clears it.
+fn remove_paid_complete_sites(store: &mut ConstructionStore) {
+    let ids: Vec<u64> = store
+        .sites
+        .values()
+        .filter(|site| site.is_complete() && site.payment_due() <= 1e-9)
+        .map(|site| site.placement_id)
+        .collect();
+    for id in ids {
+        store.remove_site(id);
+    }
+}
+
+fn run_live_plan(scenario: &Scenario) -> LiveResult {
+    let order = scenario.live_order();
+    let total_buildings = u64::try_from(order.len()).expect("building count fits u64");
+    let mut store = ConstructionStore::new(
+        LIVE_CREW_CAPACITY,
+        total_buildings.saturating_mul(LIVE_SOLID_VOXELS),
+    );
+    store
+        .set_time_scale(ConstructionTimeScale::campaign_default())
+        .expect("campaign default pacing is valid");
+    let mut economy = Economy::new(LIVE_SEED);
+    economy.set_taxes(
+        TAX_PER_RESIDENT_PER_DAY,
+        DEFAULT_BUSINESS_TAX_PER_JOB_PER_DAY,
+    );
+
+    let mut next_building = 0_usize;
+    let mut next_placement_id = 1_u64;
+    let mut completed = 0_u64;
+    let mut completed_homes = 0_u64;
+    let mut completed_workplaces = 0_u64;
+    let mut completion_day = None;
+    let mut bankrupt_day = None;
+    let mut peak_debt = 0.0_f64;
+    let mut peak_debt_day = 0_u64;
+    let mut max_financing_required = 0.0_f64;
+    let mut total_interest = 0.0_f64;
+    let mut insolvent_days = 0_u64;
+    let mut timeline = Vec::new();
+    let mut final_day = 0_u64;
+    let mut status = "year_cap";
+
+    // Starting cash plus operating net minus paid installments. Loan proceeds
+    // and debt service are excluded: this is the working-capital line the
+    // build needed, not the capped loan book.
+    let mut shadow_balance = STARTING_BALANCE;
+
+    for day in 0..=MAX_SIM_DAYS {
+        final_day = day;
+        let mut paid_today = 0.0_f64;
+        let mut insolvent_today = false;
+
+        ensure_live_site(
+            &mut store,
+            scenario,
+            &order,
+            &mut next_building,
+            &mut next_placement_id,
+        );
+        let opening = settle_live_construction(&mut store, &mut economy);
+        paid_today += opening.paid_total;
+        if store.total_payment_due() > 1e-9 {
+            insolvent_today = true;
+        }
+        if economy.debt() > peak_debt {
+            peak_debt = economy.debt();
+            peak_debt_day = day;
+        }
+
+        for _hour in 0..LIVE_HOURS_PER_DAY {
+            let tick = store.tick(MAX_TICK_SECONDS);
+            for id in tick.completed {
+                let index = usize::try_from(id - 1).expect("placement id fits usize");
+                match order[index] {
+                    LiveBuilding::Home => completed_homes += 1,
+                    LiveBuilding::Workplace => completed_workplaces += 1,
+                }
+                completed += 1;
+                if completed == total_buildings {
+                    completion_day = Some(day);
+                }
+            }
+
+            let settlement = settle_live_construction(&mut store, &mut economy);
+            paid_today += settlement.paid_total;
+            if store.total_payment_due() > 1e-9 {
+                insolvent_today = true;
+            }
+            if economy.debt() > peak_debt {
+                peak_debt = economy.debt();
+                peak_debt_day = day;
+            }
+
+            remove_paid_complete_sites(&mut store);
+            ensure_live_site(
+                &mut store,
+                scenario,
+                &order,
+                &mut next_building,
+                &mut next_placement_id,
+            );
+            let resumed = settle_live_construction(&mut store, &mut economy);
+            paid_today += resumed.paid_total;
+            if store.total_payment_due() > 1e-9 {
+                insolvent_today = true;
+            }
+            if economy.debt() > peak_debt {
+                peak_debt = economy.debt();
+                peak_debt_day = day;
+            }
+        }
+
+        let population = completed_homes * scenario.home_capacity;
+        let jobs = completed_workplaces * scenario.workplace_capacity;
+        let employed = population.min(jobs);
+        let fraction = if total_buildings == 0 {
+            0.0
+        } else {
+            completed as f64 / total_buildings as f64
+        };
+        let costs = InfrastructureCosts::new(
+            scenario.utility_sites as f64 * DEFAULT_UTILITY_UPKEEP_PER_SITE_PER_DAY * fraction,
+            scenario.service_sites as f64 * DEFAULT_SERVICE_UPKEEP_PER_SITE_PER_DAY * fraction,
+        )
+        .expect("phased infrastructure upkeep is finite and non-negative");
+        let tick = economy.tick_with_infrastructure_costs(
+            DAY_SECONDS,
+            population,
+            employed,
+            completed,
+            costs,
+        );
+        total_interest += tick.loan_interest;
+
+        let operating_net =
+            tick.income - (tick.expenses - tick.loan_interest - tick.loan_principal);
+        shadow_balance += operating_net - paid_today;
+        let financing_now = store.total_payment_due() - shadow_balance;
+        if financing_now > max_financing_required {
+            max_financing_required = financing_now;
+        }
+
+        if insolvent_today {
+            insolvent_days += 1;
+        }
+        if tick.bankrupt {
+            bankrupt_day = Some(day);
+        }
+
+        if day % LIVE_TIMELINE_DAYS == 0 || day == MAX_SIM_DAYS {
+            timeline.push(live_timeline_sample(
+                day,
+                completed,
+                completed_homes,
+                completed_workplaces,
+                population,
+                jobs,
+                employed,
+                economy.balance,
+                economy.debt(),
+                insolvent_days,
+            ));
+        }
+
+        if completed == total_buildings && store.site_count() == 0 {
+            status = "complete";
+            break;
+        }
+        if tick.bankrupt {
+            status = "bankrupt";
+            break;
+        }
+    }
+
+    let last_sample_day = timeline
+        .last()
+        .and_then(|sample| sample["day"].as_u64())
+        .unwrap_or(0);
+    if last_sample_day != final_day {
+        timeline.push(live_timeline_sample(
+            final_day,
+            completed,
+            completed_homes,
+            completed_workplaces,
+            completed_homes * scenario.home_capacity,
+            completed_workplaces * scenario.workplace_capacity,
+            (completed_homes * scenario.home_capacity)
+                .min(completed_workplaces * scenario.workplace_capacity),
+            economy.balance,
+            economy.debt(),
+            insolvent_days,
+        ));
+    }
+
+    LiveResult {
+        final_day,
+        completion_day,
+        peak_debt,
+        peak_debt_day,
+        max_financing_required,
+        total_interest,
+        insolvent_days,
+        bankrupt_day,
+        final_balance: economy.balance,
+        final_debt: economy.debt(),
+        loan_count: economy.loans.len(),
+        completed,
+        completed_homes,
+        completed_workplaces,
+        status,
+        timeline,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn live_timeline_sample(
+    day: u64,
+    completed: u64,
+    homes: u64,
+    workplaces: u64,
+    population: u64,
+    jobs: u64,
+    employed: u64,
+    balance: f64,
+    debt: f64,
+    insolvent_days: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "day": day,
+        "completed": completed,
+        "homes": homes,
+        "workplaces": workplaces,
+        "population": population,
+        "jobs": jobs,
+        "employed": employed,
+        "balance": balance,
+        "debt": debt,
+        "insolvent_days": insolvent_days,
+    })
+}
+
+fn live_report() -> serde_json::Value {
+    let scenarios = [Scenario::industrial(), Scenario::modern()]
+        .into_iter()
+        .map(|scenario| live_scenario_json(&scenario))
+        .collect::<Vec<_>>();
+    let mut result = serde_json::json!({
+        "scene": "live_phased_financing",
+        "model": "live_phased_construction",
+        "campaign_seconds_per_game_day": CAMPAIGN_DEFAULT_SECONDS_PER_GAME_DAY,
+        "hours_per_game_day": LIVE_HOURS_PER_DAY,
+        "crew_capacity": LIVE_CREW_CAPACITY,
+        "solid_voxels_per_building": LIVE_SOLID_VOXELS,
+        "tax_per_resident_per_day": TAX_PER_RESIDENT_PER_DAY,
+        "business_tax_per_job_per_day": DEFAULT_BUSINESS_TAX_PER_JOB_PER_DAY,
+        "starting_balance": STARTING_BALANCE,
+        "max_loan": MAX_LOAN,
+        "max_total_debt": MAX_TOTAL_DEBT,
+        "loan_rate_per_day": DEFAULT_LOAN_RATE_PER_DAY,
+        "loan_term_days": DEFAULT_LOAN_TERM_DAYS,
+        "bankruptcy_threshold": BANKRUPTCY_THRESHOLD,
+        "max_sim_days": MAX_SIM_DAYS,
+        "timeline_interval_days": LIVE_TIMELINE_DAYS,
+        "assumptions": [
+            "one building is placed at a time in a proportional home/workplace order; placement charges its Survey installment immediately",
+            "campaign clock: 60 real seconds per game day, fed to construction as 24 hourly 3,600-second ticks",
+            "four-slot crew; Structure and Utilities need all four slots, so the build is effectively serial",
+            "fixed 20/4 tax policy, full occupancy of completed housing and workplaces, and no inflation",
+            "no service or utility construction cost; their operating upkeep is phased in with completed buildings",
+            "loans use the shipping 250,000 principal, 0.05%/day rate, 365-day term, eight-loan book, and 500,000 total-debt cap",
+            "max_financing_required is peak (unpaid installments due minus shadow cash); shadow cash is the 100,000 starting balance plus operating net minus installments paid, excluding loan proceeds and debt service",
+            "an installment that cannot be paid after borrowing stalls the site and counts an insolvent day; the run stops at bankruptcy, completion, or the 200-year cap"
+        ],
+        "scenarios": scenarios,
+    });
+    let checksum = checksum_json(&result);
+    result["checksum"] = serde_json::Value::String(format!("{checksum:016x}"));
+    result
+}
+
+fn live_scenario_json(scenario: &Scenario) -> serde_json::Value {
+    let result = run_live_plan(scenario);
+    serde_json::json!({
+        "scenario": scenario.name,
+        "buildings": scenario.buildings(),
+        "homes": scenario.homes,
+        "workplaces": scenario.workplaces,
+        "population_target": scenario.population_target(),
+        "jobs": scenario.jobs(),
+        "notional_construction_cost": scenario.notional_cost(),
+        "final_day": result.final_day,
+        "completion_day": result.completion_day,
+        "completion_years": result.completion_day.map(|days| days as f64 / DAYS_PER_YEAR),
+        "peak_debt": result.peak_debt,
+        "peak_debt_day": result.peak_debt_day,
+        "max_financing_required": result.max_financing_required,
+        "total_interest": result.total_interest,
+        "insolvent_days": result.insolvent_days,
+        "bankrupt_day": result.bankrupt_day,
+        "final_balance": result.final_balance,
+        "final_debt": result.final_debt,
+        "loan_count": result.loan_count,
+        "completed": result.completed,
+        "completed_homes": result.completed_homes,
+        "completed_workplaces": result.completed_workplaces,
+        "buildings_remaining": scenario.buildings() - result.completed,
+        "status": result.status,
+        "timeline": result.timeline,
+    })
+}
+
 fn run_smoke() {
     let first = report();
     let second = report();
@@ -447,15 +916,33 @@ fn run_smoke() {
         && modern["hypothetical_uncapped_plan"]["peak_debt"]
             .as_f64()
             .is_some_and(|debt| debt > MAX_TOTAL_DEBT);
-    let status = if deterministic && invariants {
+
+    let live_first = live_report();
+    let live_second = live_report();
+    let live_deterministic = live_first == live_second;
+    let live_checksum = live_first["checksum"].as_str().unwrap_or("missing");
+    let live_invariants = live_first["model"] == "live_phased_construction"
+        && live_first["scenarios"]
+            .as_array()
+            .is_some_and(|scenarios| scenarios.len() == 2)
+        && live_first["scenarios"].as_array().is_some_and(|scenarios| {
+            scenarios.iter().all(|scenario| {
+                scenario["timeline"]
+                    .as_array()
+                    .is_some_and(|timeline| !timeline.is_empty())
+                    && scenario["final_day"].as_u64().is_some()
+            })
+        });
+
+    let status = if deterministic && invariants && live_deterministic && live_invariants {
         "ok"
     } else {
         "fail"
     };
     println!(
-        "financing: deterministic={deterministic} invariants={invariants} checksum={checksum} status={status}"
+        "financing: deterministic={deterministic} invariants={invariants} checksum={checksum} live_deterministic={live_deterministic} live_invariants={live_invariants} live_checksum={live_checksum} status={status}"
     );
-    if !deterministic || !invariants {
+    if !deterministic || !invariants || !live_deterministic || !live_invariants {
         std::process::exit(1);
     }
 }
@@ -472,6 +959,7 @@ fn checksum_json(value: &serde_json::Value) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core_city::ConstructionPhase;
 
     #[test]
     fn projection_is_deterministic() {
@@ -564,5 +1052,52 @@ mod tests {
             assert_eq!(workplaces, scenario.workplaces);
             assert!((cost - scenario.notional_cost()).abs() < 0.001);
         }
+    }
+
+    #[test]
+    fn live_settlement_stalls_without_debt_headroom_and_resumes() {
+        let mut store = ConstructionStore::new(LIVE_CREW_CAPACITY, 1_000_000);
+        store
+            .add_priced_site(1, LIVE_SOLID_VOXELS, 10_000.0)
+            .expect("priced site");
+        let mut economy = Economy::new(LIVE_SEED);
+        economy
+            .take_loan(MAX_LOAN, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS)
+            .expect("first loan");
+        economy
+            .take_loan(MAX_LOAN, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS)
+            .expect("second loan");
+        economy.balance = 0.0;
+
+        let stalled = settle_live_construction(&mut store, &mut economy);
+        assert_eq!(stalled.paid_sites, 0);
+        assert_eq!(stalled.stalled_sites, 1);
+        assert_eq!(stalled.borrowed, 0.0);
+        assert!(store.sites[&1].payment_stalled);
+        assert!((store.payment_due(1) - 300.0).abs() < 1e-9);
+
+        economy.balance = 1_000.0;
+        let resumed = settle_live_construction(&mut store, &mut economy);
+        assert_eq!(resumed.paid_sites, 1);
+        assert!(!store.sites[&1].payment_stalled);
+        assert!(store.payment_due(1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn live_one_game_day_is_twenty_four_hourly_ticks() {
+        let mut store = ConstructionStore::new(LIVE_CREW_CAPACITY, LIVE_SOLID_VOXELS);
+        store
+            .set_time_scale(ConstructionTimeScale::campaign_default())
+            .expect("campaign clock");
+        store
+            .add_priced_site(1, LIVE_SOLID_VOXELS, 60_000.0)
+            .expect("priced site");
+        for _ in 0..LIVE_HOURS_PER_DAY {
+            store.tick(MAX_TICK_SECONDS);
+        }
+        let site = store.site(1).expect("site");
+        assert_eq!(site.phase, ConstructionPhase::Structure);
+        assert!((site.phase_progress - 0.380_952_4).abs() < 1e-3);
+        assert!((site.elapsed_s - 86_400.0).abs() < 0.01);
     }
 }
