@@ -28,7 +28,7 @@ tags:
 | Advisor titles | Rust `core_city::advisor` | 22 code titles | 0 | `world_i18n.gd` | titles and parameterized details keyed by code |
 | Tutorial titles and hints | Rust payload read by `world_placement.gd` | 0 | 0 | n/a | none |
 | Starter, industry, service, tax names | Rust payload + `kind.capitalize()` | 0 | 0 | n/a | none |
-| Content display names (table only) | `godot/content_i18n.gd` | 32 | 32 | complete | static gate; not wired to scene |
+| Content display names | `godot/content_i18n.gd` | 34 | 34 | complete | static gate; HUD/panel/modal/3D labels wired; `content_ui=ok` |
 | Player-visible error modals | GDScript literals + `error_code` | 0 | 0 | n/a | none |
 
 Facts about the current table:
@@ -137,7 +137,7 @@ These are content names, so the durable fix is a content registry with `name_key
 
 ### 2.7 Content display-name table (not wired)
 
-`godot/content_i18n.gd` adds a data-only EN/DE lookup for the Phase 2 content names: 20 starter buildings, 3 industry kinds, 4 civic service kinds, and 5 tutorial step IDs, for **32 keys per locale** with full parity. It exposes `display(key, locale)`, plus `starters(locale)`, `industries(locale)`, `services(locale)`, and `tutorials(locale)` flatteners keyed by stable content ID/kind.
+`godot/content_i18n.gd` adds a data-only EN/DE lookup for the Phase 2 content names: 20 starter buildings, 2 utility kinds, 3 industry kinds, 4 civic service kinds, and 5 tutorial step IDs, for **34 keys per locale** with full parity. It exposes `display(key, locale)`, plus `starters(locale)`, `industries(locale)`, `services(locale)`, and `tutorials(locale)` flatteners keyed by stable content ID/kind.
 
 - Key layout is `base.content.starter.<slug>` (the `base:` prefix is stripped), `base.content.industry.<kind>`, `base.content.service.<kind>`, and `base.content.tutorial.<step>`.
 - Missing keys fall back to English, then to the raw key; unsupported locales resolve to English. Values are display names only, with no placeholders or sentences.
@@ -285,16 +285,16 @@ Acceptance checks:
 
 ### Static gate
 
-`scripts/check_locale.sh` parses the `TABLES` const in `godot/editor_i18n.gd` and `godot/world_i18n.gd`, plus the `DISPLAY` const in `godot/content_i18n.gd`, and checks key parity, per-file key floors, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. The floors ratchet independently: editor `111`, world `143` (currently 210 keys), content `32`. Default mode prints one line per table plus a summary:
+`scripts/check_locale.sh` parses the `TABLES` const in `godot/editor_i18n.gd` and `godot/world_i18n.gd`, plus the `DISPLAY` const in `godot/content_i18n.gd`, and checks key parity, per-file key floors, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. The floors ratchet independently: editor `111`, world `143` (currently 210 keys), content `34`. Default mode prints one line per table plus a summary:
 
 ```text
 LOCALE_CHECK file=godot/editor_i18n.gd keys=111 min=111 status=ok
 LOCALE_CHECK file=godot/world_i18n.gd keys=143 min=143 status=ok
-LOCALE_CHECK file=godot/content_i18n.gd keys=32 min=32 status=ok
-LOCALE_CHECK editor=111 world=210 content=32 status=ok
+LOCALE_CHECK file=godot/content_i18n.gd keys=34 min=34 status=ok
+LOCALE_CHECK editor=111 world=211 content=34 status=ok
 ```
 
-Single-file mode (`scripts/check_locale.sh [FILE]`) keeps the original `LOCALE_CHECK keys=N status=ok` marker and derives the floor from the file name (`world_i18n.gd` gets 143, `content_i18n.gd` gets 32, anything else 96). `--self-test` covers twelve cases: the six editor cases (valid, missing DE key, extra DE key, empty value, placeholder mismatch, too few keys), a world-style fixture pass, a too-few world table, a world EN/DE placeholder mismatch, and the same three checks for the `DISPLAY` content table. The gate runs in `scripts/check.sh` and the Rust CI job before the Godot locale smoke.
+Single-file mode (`scripts/check_locale.sh [FILE]`) keeps the original `LOCALE_CHECK keys=N status=ok` marker and derives the floor from the file name (`world_i18n.gd` gets 143, `content_i18n.gd` gets 34, anything else 96). `--self-test` covers twelve cases: the six editor cases (valid, missing DE key, extra DE key, empty value, placeholder mismatch, too few keys), a world-style fixture pass, a too-few world table, a world EN/DE placeholder mismatch, and the same three checks for the `DISPLAY` content table. The gate runs in `scripts/check.sh` and the Rust CI job before the Godot locale smoke.
 
 `scripts/smoke_locale.sh` parses the last `LOCALE_SMOKE` line and requires:
 
@@ -302,7 +302,7 @@ Single-file mode (`scripts/check_locale.sh [FILE]`) keeps the original `LOCALE_C
 if [[ -z "$KEYS" || "$KEYS" -lt 111 || "$STATUS" != "ok" ]]; then
 ```
 
-The exact `96` was a hand-edited constant in the runtime smoke. The static gate now enforces independent floors (`EDITOR_MIN_KEYS=111`, `WORLD_MIN_KEYS=143`, `CONTENT_MIN_KEYS=32`) plus EN/DE parity, empty values, and placeholder parity for all three tables; `smoke_locale.sh` accepts editor `keys >= 111`. Adding keys is no longer a red build.
+The exact `96` was a hand-edited constant in the runtime smoke. The static gate now enforces independent floors (`EDITOR_MIN_KEYS=111`, `WORLD_MIN_KEYS=143`, `CONTENT_MIN_KEYS=34`) plus EN/DE parity, empty values, and placeholder parity for all three tables; `smoke_locale.sh` accepts editor `keys >= 111`. Adding keys is no longer a red build.
 
 ### Proposed contract
 

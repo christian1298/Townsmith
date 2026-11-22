@@ -1219,7 +1219,7 @@ func _refresh_industry_visuals() -> void:
 		pivot.add_child(spinner)
 		pivot.set_meta("spinner", spinner)
 		var label := Label3D.new()
-		label.text = kind.capitalize()
+		label.text = _content_display("base.content.industry.%s" % kind, kind.capitalize())
 		label.font_size = 40
 		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		label.position.y = 3.9
@@ -1264,7 +1264,7 @@ func _cycle_starter() -> void:
 	_refresh_preview(true)
 	_set_modal(
 		i18n.t("base.ui.modal.starter_selected", {
-			"name": str(result.get("name", selected_id)),
+			"name": _starter_display(str(result.get("id", selected_id)), str(result.get("name", selected_id))),
 			"index": starter_index + 1,
 			"total": starter_ids.size(),
 		}),
@@ -1304,7 +1304,7 @@ func _cycle_industry() -> void:
 				true
 			)
 			return
-		_set_modal(i18n.t("base.ui.modal.industry_selected", {"kind": next}), false)
+		_set_modal(i18n.t("base.ui.modal.industry_selected", {"kind": _content_display("base.content.industry.%s" % next, next)}), false)
 	_refresh_industry_visuals()
 	_update_hud()
 
@@ -1395,7 +1395,7 @@ func _refresh_service_visuals() -> void:
 		column.material_override = column_material
 		pivot.add_child(column)
 		var label := Label3D.new()
-		label.text = kind.capitalize()
+		label.text = _content_display("base.content.service.%s" % kind, kind.capitalize())
 		label.font_size = 34
 		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		label.position.y = 3.1
@@ -1438,7 +1438,7 @@ func _cycle_service() -> void:
 				true
 			)
 			return
-		_set_modal(i18n.t("base.ui.modal.service_selected", {"kind": next}), false)
+		_set_modal(i18n.t("base.ui.modal.service_selected", {"kind": _content_display("base.content.service.%s" % next, next)}), false)
 	_refresh_service_visuals()
 	_update_hud()
 
@@ -1500,7 +1500,7 @@ func _refresh_utility_visuals() -> void:
 		pipe.material_override = pipe_material
 		pivot.add_child(pipe)
 		var label := Label3D.new()
-		label.text = kind.capitalize()
+		label.text = _utility_display(kind)
 		label.font_size = 36
 		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		label.position.y = 3.2
@@ -1815,10 +1815,20 @@ func _starter_display(id: String, fallback: String) -> String:
 	return fallback if localized == key else localized
 
 
+func _utility_display(kind: String) -> String:
+	return _content_display("base.content.utility.%s" % kind, kind)
+
+
+func _tutorial_display(step: String, fallback: String) -> String:
+	if step == "":
+		return fallback
+	return _content_display("base.content.tutorial.%s" % step, fallback)
+
+
 func _update_hud() -> void:
 	if hud == null:
 		return
-	var blueprint_name := str(blueprint_info.get("name", "none"))
+	var blueprint_name := _starter_display(str(blueprint_info.get("id", "")), str(blueprint_info.get("name", "none")))
 	var rooms := int(blueprint_info.get("rooms", 0))
 	var capacity := int(blueprint_info.get("resident_capacity", 0))
 	var structure: Dictionary = blueprint_info.get("structure", {})
@@ -1853,7 +1863,7 @@ func _update_hud() -> void:
 			]
 		selected_line = i18n.t("base.ui.hud.selected", {
 			"id": selected_id,
-			"name": str(selected.get("name", "?")),
+			"name": _starter_display(str(selected.get("blueprint_id", "")), str(selected.get("name", "?"))),
 			"rooms": i18n.format_int(int(selected_info.get("rooms", 0))),
 			"capacity": i18n.format_int(int(selected.get("resident_capacity", 0))),
 			"jobs": i18n.format_int(int(selected.get("job_slots", 0))),
@@ -1874,8 +1884,11 @@ func _update_hud() -> void:
 			})
 		var utility_kinds_here: Array = utility_kinds.get(selected_id, [])
 		if utility_kinds_here.size() > 0:
+			var utility_names: Array[String] = []
+			for utility_kind in utility_kinds_here:
+				utility_names.append(_utility_display(str(utility_kind)))
 			selected_line += i18n.t("base.ui.hud.selected_utility", {
-				"kinds": ", ".join(utility_kinds_here),
+				"kinds": ", ".join(utility_names),
 			})
 		var service_kind := str(service_kinds.get(selected_id, ""))
 		if service_kind != "":
@@ -1959,7 +1972,7 @@ func _update_hud() -> void:
 			tutorial_text = i18n.t("base.ui.hud.tutorial_next", {
 				"completed": i18n.format_int(int(tutorial.get("completed", 0))),
 				"total": i18n.format_int(int(tutorial.get("total", 0))),
-				"title": str(tutorial.get("current_title", "?")),
+				"title": _tutorial_display(str(tutorial.get("current", "")), str(tutorial.get("current_title", "?"))),
 			})
 	var economy: Dictionary = core.economy_state()
 	var treasury_text := "—"
@@ -2189,7 +2202,7 @@ func _update_citizen_panel() -> void:
 		citizen_text.text = "\n".join(lines)
 		return
 	lines.append("")
-	lines.append("[b]#%d  %s[/b]" % [selected_id, str(selected.get("name", "?"))])
+	lines.append("[b]#%d  %s[/b]" % [selected_id, _starter_display(str(selected.get("blueprint_id", "")), str(selected.get("name", "?")))])
 	lines.append(i18n.t("base.ui.citizen.follow_hint"))
 	if follow_active:
 		lines.append(i18n.t("base.ui.citizen.following", {"id": selected_id}))
@@ -2350,7 +2363,7 @@ func _update_dashboard() -> void:
 			tutorial_line = i18n.t("base.ui.dashboard.body.tutorial_next", {
 				"completed": i18n.format_int(int(tutorial.get("completed", 0))),
 				"total": i18n.format_int(int(tutorial.get("total", 0))),
-				"title": str(tutorial.get("current_title", "?")),
+				"title": _tutorial_display(str(tutorial.get("current", "")), str(tutorial.get("current_title", "?"))),
 			})
 	text += "[b]%s[/b]\n%s\n" % [i18n.t("base.ui.dashboard.section.tutorial"), tutorial_line]
 	text += "[b]%s[/b]\n%s\n" % [
@@ -3118,6 +3131,7 @@ func _run_scene_smoke() -> void:
 	var citizen_rows_ok := false
 	var citizen_i18n_ok := false
 	var content_i18n_ok := false
+	var content_ui_ok := false
 	var materialization_ok := false
 	var materialization_step_ok := false
 	var materialization_fade_ok := false
@@ -3500,6 +3514,16 @@ func _run_scene_smoke() -> void:
 				citizen_rows_ok = citizen_text.text.contains("age ") and (citizen_text.text.contains("employed") or citizen_text.text.contains("unemployed"))
 				content_i18n_ok = ContentI18n.display("base.content.service.school", "en") == "School"
 				content_i18n_ok = content_i18n_ok and ContentI18n.display("base.content.service.school", "de") == "Schule"
+				var saved_content_locale: String = i18n.locale()
+				i18n.set_locale("de")
+				content_ui_ok = _starter_display("base:cottage", "Cottage") == "Kate"
+				content_ui_ok = content_ui_ok and _utility_display("water") == "Wasser"
+				content_ui_ok = content_ui_ok and _tutorial_display("house", "House") == "Haus"
+				i18n.set_locale("en")
+				content_ui_ok = content_ui_ok and _starter_display("base:cottage", "Cottage") == "Cottage"
+				content_ui_ok = content_ui_ok and _utility_display("water") == "Water"
+				content_ui_ok = content_ui_ok and _tutorial_display("house", "House") == "House"
+				i18n.set_locale(saved_content_locale)
 				_close_citizen_panel()
 				citizens_ok = citizens_ok and not citizen_panel.visible
 				# The same card must render in German and English.
@@ -4027,7 +4051,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -4050,6 +4074,7 @@ func _run_scene_smoke() -> void:
 		"ok" if citizens_ok else "failed",
 		"ok" if citizen_rows_ok else "failed",
 		"ok" if content_i18n_ok else "failed",
+		"ok" if content_ui_ok else "failed",
 		"ok" if follow_ok else "failed",
 		"ok" if citizen_i18n_ok else "failed",
 		"ok" if materialization_ok else "failed",
