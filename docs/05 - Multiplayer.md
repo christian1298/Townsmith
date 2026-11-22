@@ -445,3 +445,9 @@ Multiplayer + modding is a trust problem. The server is the authority.
 - **Q-032:** Steam networking (lobbies, server browser) or direct IP first? Default: direct IP + invite codes first, Steam later.
 
 See [[09 - Open Questions]] and [[10 - Decisions]].
+
+### Time-control vote v0
+
+`core`/server state machine: `TimeVote` implements D-021's 60-second window, simple majority of the online roster at vote start, minimum two online, one vote per player, initiator auto-yes, 300-tick failed/cancelled cooldown and 120-tick success cooldown. Passing `pause`/`resume` applies the effect once through `ServerWorld`; tie/expiry fails, losing quorum cancels. `time_vote` is a protocol command and returns `TimeVoteStatus` (state, counts, window, cooldown, paused, checksum).
+
+Limits: the multi-connection vote loopback/smoke is deferred because the v0 world still assumes one hello session; the pure state machine and single-world command path are tested (18 vote tests). No persistence of vote state, proxies, weighted votes, or UI. Q-078 tuning remains open.
