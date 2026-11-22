@@ -13,7 +13,7 @@ tags:
 # 70 — Named Persistence
 
 > [!info] What this note is
-> N4 persistence for the derived named-citizen layer. It saves identity records plus `age_days`; the core lifecycle tick ages and removes citizens at 100 years, and the bridge exposes persisted age. Household death application and the scene lifecycle hook remain.
+> N4 persistence for the derived named-citizen layer. It saves identity records plus `age_days`; the core lifecycle tick ages and removes citizens at 100 years, and the bridge exposes both persisted age and an explicit `named_lifecycle_tick`. Household death application and the scene lifecycle hook remain.
 
 ## 1. Scope
 
@@ -84,12 +84,12 @@ A missing object creates an empty pool for the loaded world; `named_citizens_sta
 ## 5. Tests
 
 - core: JSON roundtrip, bad version/id, old/absent behavior, sync-after-load orphan drop, empty save, age initialization, aging, death at 100 years, old-save zero-age seeding, age cap.
-- bridge: `named_citizens` roundtrip/old save, seed mismatch, unsupported version; `named_citizens_for` returns persisted `age_days`/`age_years`; state reports average/oldest age.
+- bridge: `named_citizens` roundtrip/old save, seed mismatch, unsupported version; `named_citizens_for` returns persisted `age_days`/`age_years`; state reports average/oldest age; `named_lifecycle_tick` ages/reaps the pool and returns counts/metrics/checksum.
 - The scene smoke still requires `named=ok` and `citizens=ok`.
 
 ## 6. Limits
 
-- No scene lifecycle hook yet; deaths do not reduce household residents.
+- No scene lifecycle hook yet; `named_lifecycle_tick` changes the named pool only, and deaths do not reduce household residents.
 - Records are identities plus `age_days`; no births, migration, jobs, or events.
 - A crafted save can contain any valid name/id set; server provenance is a networking task.
 - The pool cap is 4,096; orphaned records are dropped on load.

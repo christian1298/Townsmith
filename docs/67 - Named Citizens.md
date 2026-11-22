@@ -98,7 +98,7 @@ citizen_id   = first 63 bits of citizen_seed, with collision probe
 - `age_days` is persisted; the display is derived.
 
 > [!note] Current bridge state
-> N4 persists `age_days`; `named_citizens_for` now returns the persisted `age_days` and `age_years = age_days / 365`. The core `tick_lifecycle` ages and removes citizens at 100 years; applying deaths to households and the scene lifecycle hook remains.
+> N4 persists `age_days`; `named_citizens_for` returns the persisted `age_days` and `age_years = age_days / 365`. The core `tick_lifecycle` and bridge `named_lifecycle_tick` age and remove citizens at 100 years; applying deaths to households and the scene lifecycle hook remains.
 
 ## 4. Home, work, and service assignment
 
@@ -376,7 +376,7 @@ The existing world JSON `population` object gets an optional sibling `named_citi
 | **N1 — Identity layer (derived)** | Deterministic ids, names, household slot sync, read-only bridge | **Done** — PR #98; 500-resident city produces stable names; `cargo test -p core_city named`; no save or checksum change; 4k identities generate in < 100 ms under the debug test guard |
 | **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | **Done — PR #108/#126/#135; follow camera, EN/DE card, age/employment rows, and content display names** |
 | **N3 — Materialization** | Active pool, hysteresis, route cache, fade, active cap | **Partial — selection core, bridge, F4 overlay, hysteresis/pinning, change budget, and marker fades done ([[73 - Materialization Core]]); routes/agents remain** |
-| **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | **Partial — PR #145/#150; persistence #103, core `age_days`/`tick_lifecycle`, and read-only bridge age exposure landed; household death application/scene hook next** |
+| **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | **Partial — PR #145/#150 plus lifecycle bridge tick; persistence #103, core `age_days`/`tick_lifecycle`, persisted age, and `named_lifecycle_tick` landed; household death application/scene hook next** |
 | **N5 — Cohort bridge (later)** | Sample from cohorts, district stories, 1M identity store | 1M cohort benchmark unchanged; materialization near camera; no per-citizen tick |
 
 ### N1 checks
