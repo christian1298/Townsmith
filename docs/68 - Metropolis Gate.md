@@ -839,7 +839,7 @@ No single person may both produce and sign off the gate result. With two people,
 - C1 and C2 have three valid runs each on the reference rig.
 - The gate report is signed and includes medians, worst runs, thresholds, verdict, and bottleneck.
 - The 3060 baseline is committed; the CI gate fails on the regression thresholds in §6.4.
-- The player-facing Benchmark screen has a **report + sequential live-run path**: it reads existing Early/Mid/Late summaries, shows 1% lows, hitches, rating, recommended settings, and exports JSON. **Still open:** frame-time graphs and 1% low graphs. The scaffold is not a gate result.
+- The player-facing Benchmark screen has a **report + sequential live-run path**: it reads existing Early/Mid/Late summaries, shows 1% lows, hitches, rating, recommended settings, a per-scene frame-time graph (16.7/33.3 ms reference lines, p95/p99 markers) and exports JSON including `frame_graph` per scene. Graph data is labelled `summary` when the summary carries raw frame arrays, `aggregated` when it only carries p50/p95/p99/max (deterministic curve, not raw samples), and `fixture` for the embedded fallbacks; `--run` refreshes the graphs after each live scene. **Still open:** raw per-frame arrays in the committed summaries, and 1% low graphs. The scaffold is not a gate result.
 - Save/load, memory, streaming, and simulation numbers are in the same report as the frame numbers.
 - Any conditional pass or failure has an ADR with the measured ceiling and the next action.
 - [[08 - Roadmap]] Phase 5 and [[15 - Benchmarks]] point at the result; this note is updated with the measured outcome.

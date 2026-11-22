@@ -300,8 +300,8 @@ The results screen can show a small table:
 
 This is the player-facing version of the benchmark: a clear expectation for the early, mid, and late game.
 
-> [!info] Phase 0 report-only scaffold (2026-11-22)
-> `godot/bench_screen.tscn` now implements the **report/rating/export** part against existing Early/Mid/Late summaries: three scene cards, median FPS, 1% low, hitches, sample count, an overall worst-scene rating, recommended resolution scale plus shadow/LOD presets, and `--output` JSON export. Still open: live scene selection and run, and the 1% low/frame-time graphs. The scaffold is not the gate and does not replace a target-machine run.
+> [!info] Report-only scaffold now draws frame-time graphs (2026-11-23)
+> `godot/bench_screen.tscn` implements the **report/rating/export** part against existing Early/Mid/Late summaries: three scene cards, median FPS, 1% low, hitches, sample count, a frame-time graph per card, an overall worst-scene rating, recommended resolution scale plus shadow/LOD presets, and `--output` JSON export. Each graph draws a ms axis with 16.7/33.3 ms reference lines and p95/p99 markers. Raw per-run frame arrays are used and labelled `summary` when a summary carries them (`frametimes_ms`, `frame_times_ms`, `frames_ms`, or `samples_ms`); the committed summaries keep only medians, so their cards draw a deterministic curve from p50/p95/p99/max labelled `aggregated`, and missing summaries use the embedded fixtures labelled `fixture`. `--run` refreshes the graphs after each live scene, and the export adds `frame_graph: {source, samples, p50_ms, p95_ms, p99_ms, max_ms, axis, reference_ms}` per scene. Still open: player-chosen scene/route/preset, 1% low and 0.1% low graphs, and writing raw per-frame arrays in the normal summary. The scaffold is not the gate and does not replace a target-machine run.
 
 ## 8. Developer and CI mode
 
