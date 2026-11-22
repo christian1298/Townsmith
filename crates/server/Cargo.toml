@@ -15,6 +15,7 @@ name = "townsmith-server"
 path = "src/main.rs"
 
 [dependencies]
+core_city.workspace = true
 core_sim.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use core_sim::{Cohort, CohortSimulation};
 use townsmith_server::protocol::{run_loopback_smoke, serve_connection, LOOPBACK_SEED};
+use townsmith_server::world::run_authority_loopback;
 
 fn arg_value(name: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
@@ -69,6 +70,18 @@ fn main() {
             }
             Err(error) => {
                 eprintln!("SERVER_PROTOCOL status=error error={error}");
+                std::process::exit(1);
+            }
+        }
+        match run_authority_loopback() {
+            Ok(report) => {
+                println!(
+                    "SERVER_AUTHORITY status=ok commands={} checksum={}",
+                    report.commands, report.checksum
+                );
+            }
+            Err(error) => {
+                eprintln!("SERVER_AUTHORITY status=error error={error}");
                 std::process::exit(1);
             }
         }

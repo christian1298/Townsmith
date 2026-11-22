@@ -193,7 +193,7 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. It is **tr
 |---|---|
 | `hello` | `protocol_version`, `content_hash`, `player_name` |
 | `ping` | `nonce` |
-| `time_control` | `action`: `pause`, `resume`, `speed_1x`, `speed_2x`, `speed_4x` |
+| `time_control` | `action`: `pause`, `resume`, `step`, `speed_1x`, `speed_2x`, `speed_4x` |
 | `set_tax` | `resident_rate`, `business_rate` (percent, 0–100) |
 | `place_road` | `start: [x, y]`, `end: [x, y]` |
 | `disconnect` | — |
@@ -246,6 +246,64 @@ GODOT=/path/to/godot ./scripts/smoke_mp_client.sh
 ```
 
 Limits: loopback only; no render integration, authentication, roles, interest filtering, delta compression, reconnect, or persistent server state. The client is a protocol/smoke harness, not the multiplayer UI.
+
+### Authoritative executor (v0.1)
+
+The first stateful executor lives in `crates/server/src/world.rs` and is exported as `townsmith_server::world`. It replaces the transport-only `Session` accounting for the new smoke path, while `protocol::Session` remains the framing/validation reference.
+
+**State**
+
+```rust
+ServerWorld {
+    seed, tick, population, employed, buildings,
+    economy: Economy, roads: RoadStore,
+    paused, session_checksum,
+}
+```
+
+Population, employment, and building counts are static for v0. `employed` is 60% of the population and `buildings` is one per 25 citizens (at least one), derived deterministically from the seed-derived population. The treasury starts at `Economy::STARTING_BALANCE` (100,000).
+
+**API**
+
+| Method | Behavior |
+|---|---|
+| `ServerWorld::new(seed)` | Fresh single-session world; deterministic session id |
+| `apply(&ClientCommand) -> ServerMessage` | Validate and apply one command; exactly one response |
+| `snapshot() -> ServerMessage` | Current `tick`, `population`, `balance`, `checksum` |
+| `advance_day(dt_s) -> EconomyTick` | Run one economy tick, capped at `DAY_SECONDS`, then increment `tick` |
+| `tick(dt_s)` | Alias for `advance_day` |
+| `checksum() -> String` | 16-hex FNV-1a over tick, population, balance, road store checksum, economy checksum |
+
+**Command behavior**
+
+| Command | Accepted effect | Rejection codes |
+|---|---|---|
+| `hello` | One per session; returns `welcome` | `protocol.version_mismatch`, `player_name.*`, `content_hash.invalid`, `hello.duplicate`, `session.closed` |
+| `ping` | Echoes the nonce | `not_hello` before hello |
+| `time_control` pause/resume | Freezes/unfreezes `advance_day`; returns a snapshot; does not advance the tick | `not_hello` |
+| `time_control` step | Advances exactly one game day and one tick, even while paused | `not_hello` |
+| `time_control` speed | Rejected; v0 has no real-time loop | `time.invalid_action` |
+| `set_tax` | Validates 0–100 and writes the treasury per-day rates; increments tick | `tax.rate_out_of_range`, `not_hello` |
+| `place_road` | Adds a 6 m wide, axis-aligned segment; increments tick | `road.empty`, `road.not_axis_aligned`, `road.out_of_bounds`, `road.too_long` (>512 cells), `road.duplicate`, `road.overlap`, `road.store_full`, `road.id_exhausted` |
+| `disconnect` | Closes the session; returns `goodbye` | `session.closed` |
+
+`hello` and `disconnect` are accepted before `hello`; every other command is rejected with `not_hello`. Rejections never mutate state.
+
+**Road rules.** Endpoints must be integer cells inside ±1,000,000. Segments must be horizontal or vertical, 1–512 cells long, and are always 6 m wide in v0. The server has no terrain yet, so road validation samples a constant 40 m placeholder ground; water and slope checks are deferred. An exact duplicate (either direction) is `road.duplicate`. A collinear segment sharing two or more cells is `road.overlap`. Roads that share exactly one endpoint cell (T-junction) or cross perpendicularly are allowed. Costs, permissions, and lot/building rules are not implemented.
+
+**Determinism.** The snapshot checksum is a pure function of the listed state; it excludes the wall clock, seed, and paused flag. `advance_day` never sleeps. `dt_s` is clamped to `0..=DAY_SECONDS`; non-finite and negative values become zero. A paused `advance_day` returns the current ledger without changing the tick.
+
+**Limits.** In-memory only, one session, no persistence, authentication, roles/permissions, content-manifest enforcement, rate limiting, interest management, delta snapshots, rollback, terrain sampling, or cost/material checks. Direct mutation of public fields does not refresh `session_checksum`; call `checksum()` for live state.
+
+**Loopback smoke**
+
+```bash
+cargo run --release -p townsmith-server -- --loopback-smoke
+# SERVER_PROTOCOL status=ok frames=8 checksum=e2f15a193149bb86
+# SERVER_AUTHORITY status=ok commands=6 checksum=70e25aff45867b94
+```
+
+The authority path binds `127.0.0.1:0` and runs `hello → welcome`, `set_tax → snapshot`, `place_road → snapshot`, `ping → pong`, `resume → snapshot`, `disconnect → goodbye`. The client replays the same commands on a local reference world and requires byte-for-byte identical responses; it also asserts the exact tick (1, 2), balance (100,000), and seed-derived population. Socket timeouts replace sleeps.
 
 ## 6. Voxel editing and blueprint sync
 

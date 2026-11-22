@@ -115,7 +115,7 @@ seed + generator version
 | `core_save` | SQLite schema, snapshots, migrations, journal | `SaveDb`, `Snapshot`, `Migration` |
 | `core_net` | Protocol, commands, snapshots, validation hooks | `NetCommand`, `Snapshot`, `Manifest`, `TimeCommand` |
 | `godot_ext` | GDExtension bindings, buffer conversion | `TownsmithCore`, `Node` wrappers |
-| `server` | Headless server binary + protocol v0 framing/validation | `Session`, `ClientCommand`, `ServerMessage` |
+| `server` | Headless server binary + protocol v0 framing/validation + first authoritative executor | `Session`, `ServerWorld`, `ClientCommand`, `ServerMessage` |
 | `bench` | Fixed-scene benchmark runner, camera routes, frame metrics, JSON/compare | `BenchScene`, `CameraRoute`, `FrameStats` |
 | `tools` | CLI: validate mods, inspect blueprints, run sims | `validate`, `inspect`, `bench` |
 
@@ -309,6 +309,7 @@ save_001/
 - **Transport:** Godot ENet for v1 co-op; a Rust QUIC/`quinn` transport is a later option.
 - **Messages:** `Hello`, `Manifest`, `Command`, `CommandRejected`, `Snapshot`, `Event`, `Chat`, `Ping`.
 - **Protocol v0 (foundation):** `crates/server/src/protocol.rs` implements length-prefixed JSON over TCP, the first command/snapshot set, stable validation codes, a deterministic loopback smoke (`townsmith-server --loopback-smoke`), and `--listen PORT` for the Godot `mp_client` smoke. It is transport-only and does not replace the production transport decision (Q-055).
+- **Authoritative executor v0 (foundation):** `crates/server/src/world.rs` (`townsmith_server::world::ServerWorld`) owns in-memory session state: seed, tick, static population/employed/buildings, `Economy`, `RoadStore`, paused flag, and a session checksum. `apply(&ClientCommand) -> ServerMessage` handles hello, ping, pause/resume/step, set_tax, place_road, and disconnect; commands before hello are rejected with `not_hello`; speed actions are rejected with `time.invalid_action`. `advance_day(dt_s)` runs one economy tick capped at `DAY_SECONDS` and increments the tick without sleeping. `snapshot()` returns tick, population, balance, and a 16-hex FNV-1a checksum over tick/population/balance/road checksum/economy checksum; it is independent of the wall clock. Roads are axis-aligned, 1–512 cells, fixed 6 m wide, with stable `road.*` duplicate/overlap codes and a constant 40 m placeholder ground. The `--loopback-smoke` run also executes hello → set_tax → place_road → ping → resume → disconnect and prints `SERVER_AUTHORITY status=ok commands=6 checksum=<hex>`. **Limits:** one in-memory session; no persistence, authentication/roles, content-manifest enforcement, rate limiting, interest management, delta snapshots, rollback, terrain sampling, or cost checks. The production transport decision (Q-055) is unchanged.
 - **Validation:** every command is checked on the server (permission, content, cost, space, version).
 - **Snapshots:** per-client AOI, delta-compressed, prioritized.
 - **Backpressure:** bounded queues; drop/aggregate distant dynamic entities.
@@ -423,6 +424,7 @@ GODOT=/path/to/godot ./scripts/smoke_godot.sh
 cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
 cargo run --release -p townsmith-bench --bin cohort
+cargo test -p townsmith-server
 cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
 cargo run --release -p townsmith-server -- --loopback-smoke
 ./scripts/bench_core.sh
