@@ -1265,6 +1265,7 @@ Construction currently finishes in 8–120 real seconds (`total_seconds_for`), w
 - Keep the existing seconds-based scale as the **developer/vertical-slice default**. It is fast for tests, smoke runs, and iteration.
 - Add a mode/config-selected **campaign clock**. The recommended default is **1 game day = 60 real seconds** at 1×.
 - Campaign phase durations are authored in game days, not wall seconds. Targets: a cottage takes **2–4 game days** total; a mid-rise takes roughly **15–40 days**; a high-rise structure/envelope phase takes **10–30 days**, with a **30-day cap per phase**. Exact numbers are content/balance data.
+- Implementation v0: `ConstructionTimeScale` in the core, bridge `set_construction_time_scale`/`construction_time_scale_state`, and `city_loop --campaign-days`. The HUD toggle and live financing run remain open; status stays Proposed.
 - Construction advances on the **same authoritative simulated game clock** as population, needs, production, and economy. Pause stops it (D-021); multiplayer speed/time control affects it; no wall-clock or per-client timers.
 - Advancement is fixed-step and deterministic. The bridge converts real frame delta to game seconds once, then feeds construction the same clock as the city tick.
 - Fast-forward speeds (1×/2×/4×) and a developer debug multiplier are allowed; they scale the clock, not the phase data.

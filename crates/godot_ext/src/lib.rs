@@ -31,17 +31,17 @@ use core_city::{
     advise, diff_selection, evaluate_tutorial, heatmap_grid, normalize_rotation, starter,
     summarize, summarize_district, summarize_heatmap, AdvisorInput, AdvisorReport, Age, AgeState,
     CitizenDeath, CitizenMotion, CitizenPosition, CityLayout, CityRuntime, CitySummary, CityTier,
-    ConstructionPhase, ConstructionSite, ConstructionStore, DistrictHeatmap, DistrictSummary,
-    Economy, Home, Household, IndustryKind, IndustryStore, InfrastructureCosts, LifecycleTick, Lot,
-    LotError, LotRequest, LotStore, MaterializationBudget, MaterializationSelection,
-    MaterializedCitizen, MotionLeg, NamedCitizens, NamedSave, Placement, PlacementError,
-    PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph, RoadRequest,
-    RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore,
-    ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree, Trade,
-    TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace,
-    Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY,
-    MAX_HEATMAP_CELLS, MAX_HEATMAP_CELL_M, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M,
-    MIN_HEATMAP_CELL_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    ConstructionPhase, ConstructionSite, ConstructionStore, ConstructionTimeScale, DistrictHeatmap,
+    DistrictSummary, Economy, Home, Household, IndustryKind, IndustryStore, InfrastructureCosts,
+    LifecycleTick, Lot, LotError, LotRequest, LotStore, MaterializationBudget,
+    MaterializationSelection, MaterializedCitizen, MotionLeg, NamedCitizens, NamedSave, Placement,
+    PlacementError, PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph,
+    RoadRequest, RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind, ServiceReport,
+    ServiceStore, ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore,
+    TechTree, Trade, TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport,
+    UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS,
+    DEFAULT_ROUTE_CACHE_CAPACITY, MAX_HEATMAP_CELLS, MAX_HEATMAP_CELL_M, MAX_LOANS, MAX_TOTAL_DEBT,
+    MAX_WORLD_COORD_M, MIN_HEATMAP_CELL_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -2316,6 +2316,11 @@ impl TownsmithCore {
         }
         result.set("trades", &trades.to_variant());
         result.set("materials_stock", store.materials_stock as i64);
+        result.set("time_scale", &GString::from(store.time_scale().name()));
+        result.set(
+            "seconds_per_game_day",
+            store.time_scale().seconds_per_game_day().unwrap_or(0.0),
+        );
         result.set(
             "checksum",
             &GString::from(&format!("{:016x}", store.checksum())),
@@ -5054,6 +5059,44 @@ impl TownsmithCore {
         true
     }
 
+    /// Select the construction clock.
+    ///
+    /// `mode` is `developer` (the fast default, rate ignored) or `campaign`
+    /// (phase targets in game days, rate in 10..=3600 real seconds per game
+    /// day). Returns `{ ok, mode, seconds_per_game_day, checksum }`; mode is
+    /// the canonical `ConstructionTimeScale::name()` and the checksum covers
+    /// only the clock state, not the sites.
+    #[func]
+    fn set_construction_time_scale(
+        &self,
+        mode: String,
+        seconds_per_game_day: f64,
+    ) -> VarDictionary {
+        let scale = match parse_construction_time_scale(&mode, seconds_per_game_day) {
+            Ok(scale) => scale,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        let mut store = self
+            .construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Err(error) = store.set_time_scale(scale) {
+            return placement_simple_error("invalid_time_scale", error.to_string());
+        }
+        construction_time_scale_dictionary(store.time_scale())
+    }
+
+    /// Current construction clock state.
+    #[func]
+    fn construction_time_scale_state(&self) -> VarDictionary {
+        let scale = self
+            .construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .time_scale();
+        construction_time_scale_dictionary(scale)
+    }
+
     /// Stable construction checksum.
     #[func]
     fn construction_checksum(&self) -> GString {
@@ -7226,6 +7269,61 @@ fn first_construction_payment(material_cost: f64) -> f64 {
         return 0.0;
     }
     (material_cost * ConstructionPhase::Survey.billing_weight() * 100.0).round() / 100.0
+}
+
+/// Parse the bridge construction-clock mode.
+///
+/// `developer` restores the fast default and ignores the rate. `campaign`
+/// requires a finite `seconds_per_game_day` in the core-supported
+/// 10..=3600 range.
+fn parse_construction_time_scale(
+    mode: &str,
+    seconds_per_game_day: f64,
+) -> Result<ConstructionTimeScale, (&'static str, &'static str)> {
+    match mode.trim() {
+        "developer" => Ok(ConstructionTimeScale::DeveloperSeconds),
+        "campaign" => ConstructionTimeScale::campaign(seconds_per_game_day).map_err(|_| {
+            (
+                "invalid_time_scale",
+                "campaign seconds per game day must be finite and within 10..=3600",
+            )
+        }),
+        _ => Err((
+            "invalid_time_scale_mode",
+            "construction time scale mode must be developer or campaign",
+        )),
+    }
+}
+
+/// Stable FNV-1a checksum of the clock state (mode plus campaign rate bits).
+fn construction_time_scale_checksum(scale: ConstructionTimeScale) -> u64 {
+    let mut payload = String::from(scale.name());
+    if let Some(seconds_per_game_day) = scale.seconds_per_game_day() {
+        payload.push(':');
+        payload.push_str(&format!("{:016x}", seconds_per_game_day.to_bits()));
+    }
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in payload.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Bridge payload for the construction clock state.
+fn construction_time_scale_dictionary(scale: ConstructionTimeScale) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set("mode", &GString::from(scale.name()));
+    result.set(
+        "seconds_per_game_day",
+        scale.seconds_per_game_day().unwrap_or(0.0),
+    );
+    result.set(
+        "checksum",
+        &GString::from(&format!("{:016x}", construction_time_scale_checksum(scale))),
+    );
+    result
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -9551,6 +9649,77 @@ mod tests {
         store.format_version = 99;
         let json = attach_construction("{}", &store).expect("attach");
         assert!(construction_from_world_json(&json).is_err());
+    }
+
+    #[test]
+    fn construction_time_scale_parsing_validates_modes_and_rates() {
+        assert_eq!(
+            parse_construction_time_scale("developer", f64::NAN).expect("developer"),
+            ConstructionTimeScale::DeveloperSeconds
+        );
+        assert_eq!(
+            parse_construction_time_scale(" campaign ", 60.0).expect("campaign"),
+            ConstructionTimeScale::campaign(60.0).expect("scale")
+        );
+        assert!(parse_construction_time_scale("campaign", 9.99).is_err());
+        assert!(parse_construction_time_scale("campaign", 3600.1).is_err());
+        assert!(parse_construction_time_scale("campaign", f64::NAN).is_err());
+        assert!(parse_construction_time_scale("campaign", f64::INFINITY).is_err());
+        for mode in [
+            "",
+            "Developer",
+            "campaign_days",
+            "developer_seconds",
+            "fast",
+        ] {
+            assert_eq!(
+                parse_construction_time_scale(mode, 60.0)
+                    .expect_err("mode")
+                    .0,
+                "invalid_time_scale_mode"
+            );
+        }
+        assert_eq!(
+            parse_construction_time_scale("campaign", 0.0)
+                .expect_err("rate")
+                .0,
+            "invalid_time_scale"
+        );
+    }
+
+    #[test]
+    fn construction_time_scale_checksum_tracks_mode_and_rate() {
+        let developer = ConstructionTimeScale::DeveloperSeconds;
+        let campaign = ConstructionTimeScale::campaign(60.0).expect("scale");
+        let slower = ConstructionTimeScale::campaign(120.0).expect("scale");
+        assert_eq!(
+            construction_time_scale_checksum(developer),
+            construction_time_scale_checksum(ConstructionTimeScale::default())
+        );
+        assert_ne!(
+            construction_time_scale_checksum(developer),
+            construction_time_scale_checksum(campaign)
+        );
+        assert_ne!(
+            construction_time_scale_checksum(campaign),
+            construction_time_scale_checksum(slower)
+        );
+    }
+
+    #[test]
+    fn campaign_time_scale_round_trips_through_world_save() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store.add_site(7, 64_224).expect("site");
+        store.tick(10.0);
+        store
+            .set_time_scale(ConstructionTimeScale::campaign(60.0).expect("scale"))
+            .expect("set scale");
+        let json = attach_construction("{}", &store).expect("attach");
+        let decoded = construction_from_world_json(&json)
+            .expect("parse")
+            .expect("construction field");
+        assert_eq!(decoded.time_scale(), store.time_scale());
+        assert_eq!(decoded.checksum(), store.checksum());
     }
 
     #[test]
