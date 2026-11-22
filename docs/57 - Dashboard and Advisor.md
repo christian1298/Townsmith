@@ -23,21 +23,22 @@ In:
 - a `city_advisor` bridge call that gathers one city snapshot and returns ranked advice;
 - a pure `core_city::advisor` module with stable message codes, severity, title, detail, and named params;
 - rules for food, water, power, jobs, vacancies, happiness, commute, roads, construction, debt, and bankruptcy;
-- a `City Dashboard` overlay with population, district, work, wellbeing, services, treasury, industry, roads, and construction sections;
+- a `City Dashboard` overlay with population, district, policies, work, wellbeing, services, treasury, industry, roads, and construction sections;
 - a District section that queries `district_summary` around the Mayor camera target or the selected building with a 256 m radius once per dashboard rebuild;
+- a read-only Policies section that calls `district_policies_state` once per dashboard rebuild and reports the registered policy count plus the smallest-id policy whose inclusive XZ circle contains the same camera/selection centre;
 - an `F6` District focus toggle: camera focus by default, selection focus when a building is selected, with the selected placement's centre as the query centre and an F6 return action;
 - an `F7` district heatmap overlay that queries `district_heatmap` at 512 m / 32 m around the same focus, renders up to 1,024 pooled cells, and shows a localized status/legend line; `Shift+F7` cycles Population, Jobs, and Happiness with metric-aware colours and peak values;
 - `F1` toggles the dashboard; `Esc` closes it; entering Architect Mode closes it;
-- a world-scene smoke that checks the advisor warning, dashboard text, district values and labels, the camera/selection focus toggle, localized advisor titles, and the heatmap grid/instance/teardown contract;
-- markers `dashboard=ok`, `district_ui=ok`, `district_select=ok`, `heatmap_ui=ok`, and `heatmap_modes=ok`, enforced by `scripts/smoke_world_scene.sh`.
+- a world-scene smoke that checks the advisor warning, dashboard text, district values and labels, the camera/selection focus toggle, policy count/name/tax/funding/allowlist rendering, localized advisor titles, and the heatmap grid/instance/teardown contract;
+- markers `dashboard=ok`, `district_ui=ok`, `policy_ui=ok`, `district_select=ok`, `heatmap_ui=ok`, and `heatmap_modes=ok`, enforced by `scripts/smoke_world_scene.sh`.
 
 Out:
 
-- player-facing standalone district or per-settlement panels (the dashboard has one city-level District section with camera/selection focus; the developer-only policy editor in §4.2 is a separate scene, not a dashboard panel);
+- player-facing standalone district or per-settlement panels (the dashboard has one city-level District section with camera/selection focus and one read-only Policies section; the developer-only policy editor in §4.2 is a separate scene, not a dashboard panel);
 - clickable advice that selects or centres a building;
 - acknowledged, dismissed, or persisted notifications;
 - charts, history, trend lines, or time-series;
-- a new dashboard panel or window; the focus controls live inside the existing District section (four strings were added to the 234-key world table); developer-only debug text stays English;
+- a new dashboard panel or window; the focus controls live inside the existing District section, and the read-only Policies section adds eight localized strings (the world table is now 242 keys); developer-only debug text stays English;
 - automated pause, advisor actions, or policy changes;
 - per-citizen or per-household advice.
 
@@ -138,7 +139,7 @@ The grid is square (`cols == rows`), derived as `ceil(2 * radius_m / cell_m)`, b
 
 ### 4.1 District policy registry (data only)
 
-`core_city::policy` provides a `DistrictPolicyStore`; the bridge exposes CRUD over one optional in-memory registry. **This is a data contract only.** The standalone developer scene in §4.2 is the only GDScript consumer of these methods. No dashboard, advisor, economy, treasury, or simulation code reads a policy, and saving or loading one applies no tax, funding, construction, or allowlist effect. The registry is persisted: `world_save` writes it as an optional `policies` object and `world_load` restores it, while a world without a registry omits the object and keeps its previous JSON and checksums. The dashboard does not show or edit policies.
+`core_city::policy` provides a `DistrictPolicyStore`; the bridge exposes CRUD over one optional in-memory registry. **This remains a data contract, not a player-facing system.** The §4.2 developer scene and the dashboard's read-only Policies section are the only GDScript consumers of these methods. The dashboard calls `district_policies_state` once per rebuild, renders the containing policy, and never creates, updates, or removes one. Any dashboard, advisor, economy, treasury, or simulation code that reads a policy applies no tax, funding, construction, or allowlist effect. The registry is persisted: `world_save` writes it as an optional `policies` object and `world_load` restores it, while a world without a registry omits the object and keeps its previous JSON and checksums.
 
 ```text
 TownsmithCore.district_policy_create(seed, name, center_x, center_z, radius_m,
@@ -171,7 +172,7 @@ Validated bounds:
 | `name` | 1–64 trimmed characters, no control characters |
 | `blueprint_allowlist` | ≤256 namespaced ids, `^[a-z0-9_]+:[a-z0-9_./-]+$` |
 
-Invalid input returns the core error code as `code` (for example `invalid_radius`, `invalid_tax_multiplier`, `invalid_name`, `invalid_allowlist_entry`, `too_many_allowlist_entries`, `full`, `id_exhausted`). The FNV-1a `checksum` covers the format version, seed, next id, and every policy field; it is a deterministic bridge value, not the world-save checksum. The core store validates v1 JSON on load (version, seed, `next_id`, map-key/record-id agreement, and every field) and rejects a registry loaded for a different world seed. Overlapping circles are allowed; `policy_at` returns the smallest containing id. Overlap priority beyond smallest-id and the actual tax/funding/construction/allowlist effects remain open design work. `core_city::policy_effect` adds pure `effective_policy` / `effect_at` helpers (smallest-id, clamped bases, unrounded rates, empty allowlist = unrestricted), but no dashboard, advisor, treasury, economy, or simulation code calls them; the bridge only serializes the registry.
+Invalid input returns the core error code as `code` (for example `invalid_radius`, `invalid_tax_multiplier`, `invalid_name`, `invalid_allowlist_entry`, `too_many_allowlist_entries`, `full`, `id_exhausted`). The FNV-1a `checksum` covers the format version, seed, next id, and every policy field; it is a deterministic bridge value, not the world-save checksum. The core store validates v1 JSON on load (version, seed, `next_id`, map-key/record-id agreement, and every field) and rejects a registry loaded for a different world seed. Overlapping circles are allowed; `policy_at` returns the smallest containing id. The bridge does not expose a containment call, so the dashboard scans the state array in GDScript: it treats the circle as inclusive, skips non-finite centres and radii, and picks the smallest id when several policies contain the district centre. Overlap priority beyond smallest-id and the actual tax/funding/construction/allowlist effects remain open design work. `core_city::policy_effect` adds pure `effective_policy` / `effect_at` helpers (smallest-id, clamped bases, unrounded rates, empty allowlist = unrestricted), but no dashboard, bridge, economy, simulation, or save path calls them.
 
 Persistence: `world_save` appends the registry as `"policies": { format_version, seed, next_id, policies }` only when a registry is open, after validating it and its seed. A save without the object is byte-identical to a pre-policy save, and `world_load` then closes the registry (clearing any loaded one). `world_load` rejects a malformed or non-object document with `invalid_json`, a malformed or invalid `policies` member with `invalid_policies`, and a registry whose seed differs from `expected_seed` with `seed_mismatch`; `world_save` reports a foreign seed as `seed_mismatch`, an invalid registry as `invalid_policies`, and a serialization failure as `save_failed`. The world result adds `district_policies` (count) and `district_policy_checksum`, keeping every existing key; both read `0` / `0000000000000000` when no registry is open. The registry is committed to the live slot only after the save file is durable, and only after a complete load has passed every other validation.
 
@@ -230,6 +231,8 @@ District     2 residents · 2 housing (0 vacant)
              2 jobs · 2 employed
              happiness 100% · food 100% · water 100% · rest 100% · commute 0 m
              Within 256 m of the camera target · completed buildings only
+Policies     0 registered
+             No policy covers this point.
 Jobs         2 (2 employed, 0 unemployed)
 Happiness    100% · commute 0 m
 Needs        food 100% · water 100% · rest 100%
@@ -246,6 +249,8 @@ Advisor
 The District section is local, not city-wide: by default it uses the Mayor camera target as the centre (`_district_center_xz`) and the fixed `DISTRICT_RADIUS_M` of 256 m. With a building selected, `F6` switches the section to **Selection focus**: the centre becomes that placement's `center` XZ, a localized `District focus: selected building` lineage line is added, the radius hint names the selected building, and `F6: back to camera focus` is shown. A second `F6` returns to camera focus. `F6` with nothing selected does not switch focus; it only shows the existing localized select-a-building hint. Clearing the selection (a right-click miss, load, or clear placements) resets the focus to the camera, and a missing or malformed placement also falls back to the camera instead of querying a stale centre. `Esc` is deliberately unchanged: it keeps its existing precedence (stop follow, close the citizen panel, close the dashboard, cancel lot/road mode, clear the modal) and never toggles District focus. It shows resident count, housing capacity and vacancies, jobs and employed residents, population-weighted happiness and food/water/rest needs, and average commute. Counts use `WorldI18n.format_int`; percentages and metres use `format_float`. An empty district renders `—` for happiness and needs instead of a misleading `0%`. When `district_summary` returns `ok=false` (invalid radius, seed mismatch, or a missing store) the section shows the localized `base.ui.dashboard.body.district_unavailable` line plus the focus action when a building is selected; the UI does not log or retry, so a bad query cannot spam the error stream on every 2 Hz refresh.
 
 Colors: critical red, warning amber, info green. `Esc` closes the panel before other modes; entering Architect Mode closes it. While the panel is visible, `_process` drives a refresh accumulator and rebuilds the panel at most every `0.5` s (2 Hz); opening still refreshes immediately, and closing resets the accumulator so a reopen is never stale. This keeps a world HUD update from triggering the full snapshot plus advisor while the panel is visible. A closed dashboard adds no snapshot cost. The advisor is still computed on demand by `city_advisor` on each refresh and is not cached, so dashboard advice can trail the HUD by up to about `0.5` s.
+
+The **Policies** section is read-only and follows the same centre as the District query (`_district_center_xz`: camera target by default, selected placement under `F6`). `_update_dashboard` calls `district_policies_state(SEED)` exactly once per rebuild and passes the state to `_policies_section`. With no registry the bridge reports `ok=true`, `count=0`, and checksum `0000000000000000`; the section renders the localized count and the no-policy line. When `ok=false` (for example a seed mismatch) it renders the localized `base.ui.dashboard.body.policies_unavailable` line and does not log or retry. Otherwise it scans the returned array for the smallest-id policy whose **inclusive** XZ circle contains the centre (the bridge has no containment call; non-finite centres and radii are skipped), then shows the name, tax multiplier, service funding, construction allowed/blocked, and allowlist count (`—` when the allowlist is empty). The district context stays 256 m for population and jobs; policy containment uses each policy's own radius, so a policy entirely inside that district can be shown or omitted independently of the district counts. All eight policy strings are keyed in EN/DE; policy names, ids, and allowlist entries stay verbatim. Editing, overlap priority beyond smallest-id, and applying policy values to simulation, tax, funding, construction, or blueprint placement remain out of scope.
 
 ### 5.1 District heatmap overlay (`F7`)
 
@@ -287,7 +292,7 @@ Colors: critical red, warning amber, info green. `Esc` closes the panel before o
 Final marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok trades=ok render=ok structure=ok age=ok research=ok starter=ok named=ok occupancy=ok industry=ok utilities=ok services=ok economy=ok dashboard=ok district_ui=ok district_select=ok heatmap_ui=ok heatmap_modes=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok trades=ok render=ok structure=ok age=ok research=ok starter=ok named=ok occupancy=ok industry=ok utilities=ok services=ok economy=ok dashboard=ok district_ui=ok policy_ui=ok district_select=ok heatmap_ui=ok heatmap_modes=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 `smoke_policy_editor.sh` is a separate smoke for the standalone §4.2 scene; it does not run the world scene. It requires the bridge CRUD walkthrough (invalid create, create two, list, update, reject an invalid radius, remove both, reject a missing id), deterministic `POLICY_EDITOR*` lines across two runs, and these markers:
