@@ -25,6 +25,10 @@ const LOAN_AMOUNT := 50000.0
 # research summaries; traffic_state rebuilds the road graph. That is too much
 # work per HUD update, so the visible panel is refreshed on this cadence.
 const DASHBOARD_REFRESH_SECONDS := 0.5
+# The dashboard's District section queries one circular district around the
+# Mayor camera target; this matches the 512 m aggregate district cell scale in
+# docs/07 and stays well inside the bridge's 0..=1,000,000 m radius guard.
+const DISTRICT_RADIUS_M := 256.0
 # Materialization is a derived, read-only selection around the Mayor focus or
 # selected building. Rebuild on toggle/selection change and at the same 0.5 s
 # cadence as the dashboard so a panning camera follows without per-frame nodes.
@@ -2444,6 +2448,10 @@ func _update_dashboard() -> void:
 	var progression: Dictionary = core.progression_state(SEED)
 	var research: Dictionary = core.research_state(SEED)
 	var advice: Dictionary = core.city_advisor(SEED)
+	var district_center: Vector2 = _district_center_xz()
+	var district: Dictionary = core.district_summary(
+		SEED, district_center.x, district_center.y, DISTRICT_RADIUS_M
+	)
 	var population := int(city.get("population", 0))
 	var happiness := "—"
 	var needs := "—"
@@ -2504,6 +2512,7 @@ func _update_dashboard() -> void:
 			"active": i18n.format_int(materialization_counts.x),
 			"detailed": i18n.format_int(materialization_counts.y),
 		}) + "\n"
+	text += _district_section(district)
 	var age_line := "—"
 	if bool(progression.get("ok", false)):
 		var next_age := str(progression.get("next_age", ""))
@@ -2611,6 +2620,44 @@ func _update_dashboard() -> void:
 				detail,
 			]
 	dashboard_text.text = text
+
+func _district_center_xz() -> Vector2:
+	if mayor_camera != null:
+		return Vector2(mayor_camera.target.x, mayor_camera.target.z)
+	return Vector2(target_x, target_z)
+
+func _district_section(district: Dictionary) -> String:
+	var section := "[b]%s[/b]\n" % i18n.t("base.ui.dashboard.section.district")
+	if not bool(district.get("ok", false)):
+		return section + i18n.t("base.ui.dashboard.body.district_unavailable") + "\n"
+	var population := int(district.get("population", 0))
+	var happiness: String = i18n.NOT_AVAILABLE
+	var needs: String = i18n.NOT_AVAILABLE
+	if population > 0:
+		happiness = i18n.format_float(float(district.get("happiness", 0.0)) * 100.0, 0) + "%"
+		needs = i18n.t("base.ui.dashboard.body.needs_values", {
+			"food": i18n.format_float(float(district.get("food", 0.0)) * 100.0, 0),
+			"water": i18n.format_float(float(district.get("water", 0.0)) * 100.0, 0),
+			"rest": i18n.format_float(float(district.get("rest", 0.0)) * 100.0, 0),
+		})
+	section += i18n.t("base.ui.dashboard.body.district", {
+		"residents": i18n.format_int(population),
+		"housing": i18n.format_int(int(district.get("housing_capacity", 0))),
+		"vacant": i18n.format_int(int(district.get("vacancies", 0))),
+	}) + "\n"
+	section += i18n.t("base.ui.dashboard.body.district_jobs", {
+		"jobs": i18n.format_int(int(district.get("jobs", 0))),
+		"employed": i18n.format_int(int(district.get("employed", 0))),
+	}) + "\n"
+	section += i18n.t("base.ui.dashboard.body.district_needs", {
+		"happiness": happiness,
+		"needs": needs,
+		"commute": i18n.format_float(float(district.get("average_commute_m", 0.0)), 0),
+	}) + "\n"
+	section += i18n.t("base.ui.dashboard.body.district_hint", {
+		"radius": i18n.format_float(DISTRICT_RADIUS_M, 0),
+	}) + "\n"
+	return section
 
 func _info_for_path(path: String) -> Dictionary:
 	if path == "":
@@ -3329,6 +3376,7 @@ func _run_scene_smoke() -> void:
 	var starter_ok := false
 	var economy_ok := false
 	var dashboard_ok := false
+	var district_ui_ok := false
 	var advisor_i18n_ok := false
 	var advisor_detail_i18n_ok := false
 	var hud_i18n_ok := false
@@ -3993,6 +4041,36 @@ func _run_scene_smoke() -> void:
 				dashboard_ok = dashboard_ok and dashboard_text != null
 				dashboard_ok = dashboard_ok and dashboard_text.text.contains("Advisor")
 				dashboard_ok = dashboard_ok and dashboard_text.text.contains("deficit")
+				var district_world_checksum := str(core.world_placement_checksum())
+				var district_population_checksum := str(core.population_checksum())
+				var district_construction_checksum := str(core.construction_checksum())
+				var district_center: Vector2 = _district_center_xz()
+				var district: Dictionary = core.district_summary(
+					SEED, district_center.x, district_center.y, DISTRICT_RADIUS_M
+				)
+				district_ui_ok = bool(district.get("ok", false))
+				district_ui_ok = district_ui_ok and absf(float(district.get("radius_m", -1.0)) - DISTRICT_RADIUS_M) < 0.001
+				district_ui_ok = district_ui_ok and int(district.get("population", -1)) == 2
+				district_ui_ok = district_ui_ok and int(district.get("jobs", -1)) == 2
+				for district_field in ["population", "housing_capacity", "vacancies", "jobs", "employed", "unemployed", "happiness", "food", "water", "rest", "average_commute_m"]:
+					var district_value := float(district.get(district_field, -1.0))
+					district_ui_ok = district_ui_ok and is_finite(district_value) and district_value >= 0.0
+				district_ui_ok = district_ui_ok and dashboard_text.text.contains("District")
+				district_ui_ok = district_ui_ok and dashboard_text.text.contains("Within 256 m of the camera target")
+				district_ui_ok = district_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.district", {
+					"residents": i18n.format_int(int(district.get("population", 0))),
+					"housing": i18n.format_int(int(district.get("housing_capacity", 0))),
+					"vacant": i18n.format_int(int(district.get("vacancies", 0))),
+				}))
+				district_ui_ok = district_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.district_jobs", {
+					"jobs": i18n.format_int(int(district.get("jobs", 0))),
+					"employed": i18n.format_int(int(district.get("employed", 0))),
+				}))
+				district_ui_ok = district_ui_ok and _district_section({}).contains(i18n.t("base.ui.dashboard.body.district_unavailable"))
+				district_ui_ok = district_ui_ok and not _district_section({}).contains("!base.ui.")
+				district_ui_ok = district_ui_ok and str(core.world_placement_checksum()) == district_world_checksum
+				district_ui_ok = district_ui_ok and str(core.population_checksum()) == district_population_checksum
+				district_ui_ok = district_ui_ok and str(core.construction_checksum()) == district_construction_checksum
 				_toggle_dashboard()
 				dashboard_ok = dashboard_ok and not dashboard_panel.visible
 				i18n.set_locale("de")
@@ -4003,6 +4081,10 @@ func _run_scene_smoke() -> void:
 				dashboard_body_i18n_ok = dashboard_body_i18n_ok and dashboard_text.text.contains("Arbeitsplätze")
 				dashboard_body_i18n_ok = dashboard_body_i18n_ok and dashboard_text.text.contains("Zufriedenheit")
 				dashboard_body_i18n_ok = dashboard_body_i18n_ok and not dashboard_text.text.contains("!base.ui.")
+				district_ui_ok = district_ui_ok and dashboard_text.text.contains("Stadtteil")
+				district_ui_ok = district_ui_ok and dashboard_text.text.contains("Im Umkreis von 256 m")
+				district_ui_ok = district_ui_ok and _district_section({}).contains(i18n.t("base.ui.dashboard.body.district_unavailable"))
+				district_ui_ok = district_ui_ok and not _district_section({}).contains("!base.ui.")
 				advisor_i18n_ok = dashboard_text.text.contains("Haushaltsdefizit")
 				advisor_i18n_ok = advisor_i18n_ok and i18n.advisor_title("city.unknown", "Fallback") == "Fallback"
 				advisor_detail_i18n_ok = i18n.advisor_detail("city.budget_deficit", "Fallback", {"net": "-1"}).contains("verliert")
@@ -4026,6 +4108,8 @@ func _run_scene_smoke() -> void:
 				dashboard_body_i18n_ok = dashboard_body_i18n_ok and dashboard_text.text.contains("jobs filled")
 				dashboard_body_i18n_ok = dashboard_body_i18n_ok and dashboard_text.text.contains("happiness")
 				dashboard_body_i18n_ok = dashboard_body_i18n_ok and not dashboard_text.text.contains("!base.ui.")
+				district_ui_ok = district_ui_ok and dashboard_text.text.contains("District")
+				district_ui_ok = district_ui_ok and dashboard_text.text.contains("Within 256 m of the camera target")
 				advisor_i18n_ok = advisor_i18n_ok and dashboard_text.text.contains("The city is running a deficit")
 				hud_body_i18n_ok = hud_body_i18n_ok and hud.text.contains("Mayor Mode")
 				hud_body_i18n_ok = hud_body_i18n_ok and status_label.text.contains("Placements:")
@@ -4225,6 +4309,8 @@ func _run_scene_smoke() -> void:
 					status = "tutorial_failed"
 				elif not dashboard_ok:
 					status = "dashboard_failed"
+				elif not district_ui_ok:
+					status = "district_ui_failed"
 			if not load_ok:
 				status = "load_failed"
 
@@ -4288,7 +4374,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -4326,6 +4412,7 @@ func _run_scene_smoke() -> void:
 		"ok" if service_ok else "failed",
 		"ok" if economy_ok else "failed",
 		"ok" if dashboard_ok else "failed",
+		"ok" if district_ui_ok else "failed",
 		"ok" if hud_i18n_ok else "failed",
 		"ok" if hud_body_i18n_ok else "failed",
 		"ok" if hud_status_i18n_ok else "failed",

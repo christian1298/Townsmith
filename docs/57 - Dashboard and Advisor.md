@@ -2,7 +2,7 @@
 title: Dashboard and Advisor
 project: Townsmith
 status: active
-updated: 2026-11-22
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-3
@@ -23,14 +23,15 @@ In:
 - a `city_advisor` bridge call that gathers one city snapshot and returns ranked advice;
 - a pure `core_city::advisor` module with stable message codes, severity, title, detail, and named params;
 - rules for food, water, power, jobs, vacancies, happiness, commute, roads, construction, debt, and bankruptcy;
-- a `City Dashboard` overlay with population, work, wellbeing, services, treasury, industry, roads, and construction sections;
+- a `City Dashboard` overlay with population, district, work, wellbeing, services, treasury, industry, roads, and construction sections;
+- a District section that queries `district_summary` around the Mayor camera target with a 256 m radius once per dashboard rebuild;
 - `F1` toggles the dashboard; `Esc` closes it; entering Architect Mode closes it;
-- a world-scene smoke that checks the advisor warning, dashboard text, and localized advisor titles;
-- marker `dashboard=ok`, enforced by `scripts/smoke_world_scene.sh`.
+- a world-scene smoke that checks the advisor warning, dashboard text, district values and labels, and localized advisor titles;
+- markers `dashboard=ok` and `district_ui=ok`, enforced by `scripts/smoke_world_scene.sh`.
 
 Out:
 
-- district or per-settlement panels;
+- standalone district or per-settlement panels (the dashboard has one city-level District section);
 - clickable advice that selects or centres a building;
 - acknowledged, dismissed, or persisted notifications;
 - charts, history, trend lines, or time-series;
@@ -121,7 +122,7 @@ households, jobs, employed, unemployed, happiness, food, water, rest,
 average_commute_m, completed_buildings, construction_sites, checksum
 ```
 
-It validates a non-negative seed, finite centre, and radius in `0..=1,000,000 m`; rejects placement/population seed mismatches; and takes the world -> construction -> population locks in that order. Only completed sites contribute to the completed metrics; incomplete sites in the radius are counted separately. It is read-only, has no save field, and does not change the city-wide advisor. The dashboard does not call it yet.
+It validates a non-negative seed, finite centre, and radius in `0..=1,000,000 m`; rejects placement/population seed mismatches; and takes the world -> construction -> population locks in that order. Only completed sites contribute to the completed metrics; incomplete sites in the radius are counted separately. It is read-only, has no save field, and does not change the city-wide advisor. The dashboard calls it once per rebuild with the Mayor camera target and a **256 m** radius (`DISTRICT_RADIUS_M`), then renders the result in the District section.
 
 ## 5. Dashboard
 
@@ -129,6 +130,10 @@ It validates a non-negative seed, finite centre, and radius in `0..=1,000,000 m`
 
 ```text
 Population   2 residents / 2 housing (0 vacant)
+District     2 residents · 2 housing (0 vacant)
+             2 jobs · 2 employed
+             happiness 100% · food 100% · water 100% · rest 100% · commute 0 m
+             Within 256 m of the camera target · completed buildings only
 Jobs         2 (2 employed, 0 unemployed)
 Happiness    100% · commute 0 m
 Needs        food 100% · water 100% · rest 100%
@@ -142,6 +147,8 @@ Advisor
 ▲ The city is running a deficit — Raise taxes, borrow deliberately, or wait...
 ```
 
+The District section is local, not city-wide: it uses the Mayor camera target as the centre (`_district_center_xz`) and the fixed `DISTRICT_RADIUS_M` of 256 m. It shows resident count, housing capacity and vacancies, jobs and employed residents, population-weighted happiness and food/water/rest needs, and average commute. Counts use `WorldI18n.format_int`; percentages and metres use `format_float`. An empty district renders `—` for happiness and needs instead of a misleading `0%`. When `district_summary` returns `ok=false` (invalid radius, seed mismatch, or a missing store) the section shows the localized `base.ui.dashboard.body.district_unavailable` line; the UI does not log or retry, so a bad query cannot spam the error stream on every 2 Hz refresh.
+
 Colors: critical red, warning amber, info green. `Esc` closes the panel before other modes; entering Architect Mode closes it. While the panel is visible, `_process` drives a refresh accumulator and rebuilds the panel at most every `0.5` s (2 Hz); opening still refreshes immediately, and closing resets the accumulator so a reopen is never stale. This keeps a world HUD update from triggering the full snapshot plus advisor while the panel is visible. A closed dashboard adds no snapshot cost. The advisor is still computed on demand by `city_advisor` on each refresh and is not cached, so dashboard advice can trail the HUD by up to about `0.5` s.
 
 ## 6. Smoke
@@ -152,12 +159,15 @@ Colors: critical red, warning amber, info green. `Esc` closes the panel before o
 - after house completion and standard taxes, it reports at least one warning and `city.budget_deficit`;
 - the report is not marked healthy while the deficit exists;
 - the dashboard panel starts hidden, opens with `F1`/`_toggle_dashboard`, contains `Advisor` and `deficit`, then closes;
-- marker includes `dashboard=ok`; the script requires it.
+- `district_summary` around the fixture house at a 256 m radius reports `ok`, population 2, jobs 2, a matching `radius_m`, and finite/non-negative values;
+- the District section renders in EN (`District`, `Within 256 m of the camera target`) and DE (`Stadtteil`, `Im Umkreis von 256 m`), contains the fixture population/jobs values, and falls back to the localized unavailable line;
+- world, population, and construction checksums are unchanged by the district query;
+- markers include `dashboard=ok` and `district_ui=ok`; the script requires both.
 
 Final marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok trades=ok render=ok structure=ok age=ok research=ok starter=ok named=ok occupancy=ok industry=ok utilities=ok services=ok economy=ok dashboard=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok trades=ok render=ok structure=ok age=ok research=ok starter=ok named=ok occupancy=ok industry=ok utilities=ok services=ok economy=ok dashboard=ok district_ui=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 ## 7. Tests
@@ -170,7 +180,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 
 ## 8. Limits
 
-- City-level only; no district, settlement, or building drill-down.
+- Advisor advice is city-wide; the dashboard District section is read-only and camera-centred (256 m), not a selectable settlement/district panel. No building drill-down from advice.
 - Thresholds are fixed; no difficulty, policy, or player preference.
 - Advice is not persisted, acknowledged, or suppressed.
 - No click-to-select, camera focus, or one-click policy action.
@@ -186,4 +196,4 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 2. Make advice clickable to select the relevant building or district.
 3. Add persisted acknowledgement and a notification history.
 4. Finish number formatting, remaining content names, and error-code display.
-5. Add district/settlement panels once per-settlement budgets exist.
+5. Add selectable district/settlement panels with per-settlement budgets, policies, and heatmaps; the current District section is a camera-centred preview.
