@@ -72,6 +72,9 @@ func _ready() -> void:
 	terrain_material = StandardMaterial3D.new()
 	terrain_material.vertex_color_use_as_albedo = true
 	terrain_material.roughness = 1.0
+	# Terrain quads now use Godot's clockwise front-face winding (matching the
+	# voxel mesher), but culling stays disabled until a display-backed smoke
+	# proves chunk seams and overlapping skirt planes render without holes.
 	terrain_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	water = WaterBody.new()
