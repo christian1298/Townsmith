@@ -2635,17 +2635,32 @@ impl TownsmithCore {
                 "days must be finite and within 0..=36500",
             );
         }
+        let mut population = self
+            .population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(runtime) = population.as_mut() else {
+            return placement_simple_error("no_population", "no household runtime is open");
+        };
+        if runtime.seed != seed {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the household runtime belongs to a different seed",
+            );
+        }
         let mut named = self.named.lock().unwrap_or_else(|error| error.into_inner());
         if named.as_ref().is_some_and(|named| named.seed != seed) {
             *named = None;
         }
         let pool = named.get_or_insert_with(|| NamedCitizens::new(seed));
-        let outcome = tick_named_lifecycle(pool, days);
+        let outcome = tick_named_lifecycle(pool, runtime, days);
         let mut result = VarDictionary::new();
         result.set("ok", true);
         result.set("seed", seed as i64);
         result.set("aged", outcome.tick.aged as i64);
         result.set("died", outcome.tick.died as i64);
+        result.set("applied_deaths", outcome.applied_deaths as i64);
+        result.set("population", outcome.population as i64);
         result.set("count", outcome.count as i64);
         result.set("average_age_days", i64::from(outcome.average_age_days));
         result.set("oldest_age_days", i64::from(outcome.oldest_age_days));
@@ -7427,16 +7442,26 @@ fn named_pool_for_save(
 
 struct NamedLifecycleOutcome {
     tick: LifecycleTick,
+    applied_deaths: u32,
+    population: u64,
     count: usize,
     average_age_days: u32,
     oldest_age_days: u32,
     checksum: u64,
 }
 
-fn tick_named_lifecycle(pool: &mut NamedCitizens, days: f64) -> NamedLifecycleOutcome {
-    let tick = pool.tick_lifecycle(days);
+fn tick_named_lifecycle(
+    pool: &mut NamedCitizens,
+    runtime: &mut CityRuntime,
+    days: f64,
+) -> NamedLifecycleOutcome {
+    let outcome = pool.tick_lifecycle_with_deaths(days);
+    let applied_deaths = runtime.apply_deaths(&outcome.deaths);
+    pool.sync(&runtime.households);
     NamedLifecycleOutcome {
-        tick,
+        tick: outcome.tick,
+        applied_deaths,
+        population: runtime.population(),
         count: pool.len(),
         average_age_days: pool.average_age_days(),
         oldest_age_days: pool.oldest_age_days().unwrap_or(0),
@@ -9164,7 +9189,7 @@ mod tests {
                     placement_id: 1,
                     slot,
                     name: core_city::name_for(id),
-                    age_days: if slot == 0 {
+                    age_days: if slot == 1 {
                         core_city::MAX_AGE_DAYS - 5
                     } else {
                         40 * 365
@@ -9173,9 +9198,14 @@ mod tests {
             );
         }
         let before = pool.checksum();
-        let outcome = tick_named_lifecycle(&mut pool, 10.0);
+        let mut runtime = CityRuntime::new(2026);
+        runtime.sync(&[(1, 2)]);
+        runtime.tick(10.0, 2, &[(1, 2)]);
+        let outcome = tick_named_lifecycle(&mut pool, &mut runtime, 10.0);
         assert_eq!(outcome.tick.aged, 2);
         assert_eq!(outcome.tick.died, 1);
+        assert_eq!(outcome.applied_deaths, 1);
+        assert_eq!(outcome.population, 1);
         assert_eq!(outcome.count, 1);
         assert_eq!(outcome.average_age_days, 40 * 365 + 10);
         assert_eq!(outcome.oldest_age_days, 40 * 365 + 10);

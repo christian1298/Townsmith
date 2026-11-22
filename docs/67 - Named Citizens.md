@@ -378,7 +378,7 @@ The existing world JSON `population` object gets an optional sibling `named_citi
 | **N1 — Identity layer (derived)** | Deterministic ids, names, household slot sync, read-only bridge | **Done** — PR #98; 500-resident city produces stable names; `cargo test -p core_city named`; no save or checksum change; 4k identities generate in < 100 ms under the debug test guard |
 | **N2 — Selection and card** | Pick/select, detail card, follow camera, household panel | **Done — PR #108/#126/#135; follow camera, EN/DE card, age/employment rows, and content display names** |
 | **N3 — Materialization** | Active pool, hysteresis, route cache, fade, active cap | **Partial — selection core, bridge, F4 overlay, hysteresis/pinning, change budget, and marker fades done ([[73 - Materialization Core]]); routes/agents remain** |
-| **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | **Partial — PR #145/#150 plus lifecycle bridge tick; persistence #103, core `age_days`/`tick_lifecycle`, persisted age, `named_lifecycle_tick`, and core household death application landed; bridge death wiring, scene hook, and re-baseline next** |
+| **N4 — Persistence and lifecycle** | Optional save field, committed identities, aging/death, re-baseline | **Partial — PR #145/#150 plus bridge death wiring; persistence #103, core `age_days`/`tick_lifecycle`, persisted age, `named_lifecycle_tick`, and household death application landed; scene hook and re-baseline next** |
 | **N5 — Cohort bridge (later)** | Sample from cohorts, district stories, 1M identity store | 1M cohort benchmark unchanged; materialization near camera; no per-citizen tick |
 
 ### N1 checks
@@ -469,7 +469,7 @@ The bridge now exposes persisted age: `named_citizens_for` returns `age_days` an
 
 Core death application landed as `CityRuntime::apply_deaths(&[(u64, u32)])`. It is a pure household operation: sorted/deduped internally, unknown homes and out-of-range slots ignored, `residents` reduced per valid death, `workers` clamped, `capacity` unchanged, return value the number applied. Named identities and the save format are not touched.
 
-Still open: the bridge/scene lifecycle hook must collect removed `(placement_id, slot)` identities (today `LifecycleTick` only reports a count), feed them into `apply_deaths` in the same tick, emit `CitizenDied`, and re-baseline a lifecycle-on baseline intentionally (the default profiles stay lifecycle-off).
+The bridge now collects removed `(placement_id, slot)` identities from `tick_lifecycle_with_deaths`, feeds them into `apply_deaths` in the same tick, re-syncs the named pool, and reports `applied_deaths` and population. Still open: the scene hook, `CitizenDied` events, and an intentional lifecycle-on baseline (default profiles remain lifecycle-off).
 
 ### N4 checks
 
