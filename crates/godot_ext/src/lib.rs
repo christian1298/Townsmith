@@ -30,16 +30,16 @@ use core_city::named::{age_years_from_days, slot_is_employed, MAX_AGE_DAYS};
 use core_city::{
     advise, diff_selection, evaluate_tutorial, normalize_rotation, starter, summarize,
     AdvisorInput, AdvisorReport, Age, AgeState, CitizenMotion, CitizenPosition, CityLayout,
-    CityRuntime, CitySummary, CityTier, ConstructionSite, ConstructionStore, Economy, Home,
-    Household, IndustryKind, IndustryStore, InfrastructureCosts, LifecycleTick, Lot, LotError,
-    LotRequest, LotStore, MaterializationBudget, MaterializationSelection, MaterializedCitizen,
-    MotionLeg, NamedCitizens, NamedSave, Placement, PlacementError, PlacementRequest,
-    PlacementStore, ResearchStore, RoadError, RoadGraph, RoadRequest, RoadSegment, RoadStore,
-    RouteCache, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore, ServiceTier, Settlement,
-    SettlementError, SettlementRequest, SettlementStore, TechTree, Trade, TradePool, TutorialInput,
-    UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
-    DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY, MAX_LOANS,
-    MAX_TOTAL_DEBT, MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    CityRuntime, CitySummary, CityTier, ConstructionPhase, ConstructionSite, ConstructionStore,
+    Economy, Home, Household, IndustryKind, IndustryStore, InfrastructureCosts, LifecycleTick, Lot,
+    LotError, LotRequest, LotStore, MaterializationBudget, MaterializationSelection,
+    MaterializedCitizen, MotionLeg, NamedCitizens, NamedSave, Placement, PlacementError,
+    PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph, RoadRequest,
+    RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore,
+    ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree, Trade,
+    TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace,
+    Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY,
+    MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -1071,6 +1071,7 @@ impl TownsmithCore {
                     "the treasury belongs to a different seed",
                 );
             }
+            let first_installment = first_construction_payment(request.material_cost);
             if let Some(economy) = economy.as_ref() {
                 if economy.bankrupt {
                     return placement_simple_error(
@@ -1078,21 +1079,21 @@ impl TownsmithCore {
                         "the city is bankrupt and cannot start new construction",
                     );
                 }
-                if !economy.can_afford(request.material_cost) {
+                if !economy.can_afford(first_installment) {
                     return placement_simple_error(
                         "insufficient_funds",
                         format!(
-                            "construction needs {:.0} but the treasury has {:.0}",
-                            request.material_cost, economy.balance
+                            "the first construction installment needs {:.0} but the treasury has {:.0}",
+                            first_installment, economy.balance
                         ),
                     );
                 }
-            } else if request.material_cost > STARTING_BALANCE {
+            } else if first_installment > STARTING_BALANCE {
                 return placement_simple_error(
                     "insufficient_funds",
                     format!(
-                        "construction needs {:.0} but a new treasury has {:.0}",
-                        request.material_cost, STARTING_BALANCE
+                        "the first construction installment needs {:.0} but a new treasury has {:.0}",
+                        first_installment, STARTING_BALANCE
                     ),
                 );
             }
@@ -1118,7 +1119,7 @@ impl TownsmithCore {
                     .construction
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
-                    .add_site(placement.id, request.solid_voxels)
+                    .add_priced_site(placement.id, request.solid_voxels, request.material_cost)
                     .map(|_| ());
                 if let Err(error) = construction_result {
                     if let Some(store) = guard.as_mut() {
@@ -1129,15 +1130,23 @@ impl TownsmithCore {
                     }
                     return placement_simple_error("construction_failed", error.to_string());
                 }
+                let first_installment = first_construction_payment(request.material_cost);
                 let charged = {
                     let mut economy = self
                         .economy
                         .lock()
                         .unwrap_or_else(|error| error.into_inner());
                     let economy = economy.get_or_insert_with(|| Economy::new(seed));
-                    economy.try_charge_construction(request.material_cost)
+                    economy.try_charge_construction(first_installment)
                 };
-                if !charged {
+                let marked_paid = charged
+                    && self
+                        .construction
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .site_mut(placement.id)
+                        .is_some_and(|site| site.mark_paid(first_installment).is_ok());
+                if !charged || !marked_paid {
                     if let Some(store) = guard.as_mut() {
                         store.remove(placement.id);
                     }
@@ -2136,6 +2145,13 @@ impl TownsmithCore {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let report = store.tick(delta_seconds);
+        let payments = {
+            let mut economy = self
+                .economy
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            settle_construction_payments(&mut store, economy.as_mut())
+        };
         let mut completed: Array<i64> = Array::new();
         for id in &report.completed {
             completed.push(*id as i64);
@@ -2150,6 +2166,9 @@ impl TownsmithCore {
         result.set("phase_changed", &phase_changed.to_variant());
         result.set("active", report.active as i64);
         result.set("stalled", report.stalled as i64);
+        result.set("paid_total", payments.paid_total);
+        result.set("paid_sites", i64::from(payments.paid_sites));
+        result.set("payment_stalled", i64::from(payments.payment_stalled));
         result.set(
             "checksum",
             &GString::from(&format!("{:016x}", store.checksum())),
@@ -2205,6 +2224,15 @@ impl TownsmithCore {
         result.set("active", active as i64);
         result.set("stalled", stalled as i64);
         result.set("complete", (store.site_count() - active) as i64);
+        result.set("payment_due", store.total_payment_due());
+        result.set(
+            "payment_stalled",
+            store
+                .sites
+                .values()
+                .filter(|site| !site.is_complete() && site.payment_stalled)
+                .count() as i64,
+        );
         result.set("crew_capacity", i64::from(store.crew_capacity));
         result.set("effective_crew", i64::from(store.effective_crew_capacity()));
         let mut trades: Array<VarDictionary> = Array::new();
@@ -6854,6 +6882,56 @@ fn placement_to_dictionary(placement: &Placement) -> VarDictionary {
     result
 }
 
+/// First construction installment (Survey) for a placement price.
+fn first_construction_payment(material_cost: f64) -> f64 {
+    if !material_cost.is_finite() || material_cost <= 0.0 {
+        return 0.0;
+    }
+    (material_cost * ConstructionPhase::Survey.billing_weight() * 100.0).round() / 100.0
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct PaymentReport {
+    paid_total: f64,
+    paid_sites: u32,
+    payment_stalled: u32,
+}
+
+/// Charge every due installment in ascending placement-id order.
+///
+/// The store keeps the schedule; the treasury is charged here. A failed
+/// charge stalls the site at the next phase boundary and leaves it due for a
+/// later retry. A missing treasury pays nothing and stalls nothing.
+fn settle_construction_payments(
+    store: &mut ConstructionStore,
+    mut economy: Option<&mut Economy>,
+) -> PaymentReport {
+    let mut report = PaymentReport::default();
+    let ids: Vec<u64> = store.sites.keys().copied().collect();
+    for id in ids {
+        let due = store.payment_due(id);
+        if due <= 0.0 {
+            continue;
+        }
+        let Some(economy) = economy.as_deref_mut() else {
+            continue;
+        };
+        if economy.try_charge_construction(due) {
+            if let Some(site) = store.site_mut(id) {
+                if site.mark_paid(due).is_ok() {
+                    site.resume_payment();
+                    report.paid_total += due;
+                    report.paid_sites += 1;
+                }
+            }
+        } else if let Some(site) = store.site_mut(id) {
+            site.stall_for_payment();
+            report.payment_stalled += 1;
+        }
+    }
+    report
+}
+
 fn construction_site_to_dictionary(site: &ConstructionSite, trade: Option<Trade>) -> VarDictionary {
     let mut result = VarDictionary::new();
     result.set("id", site.placement_id as i64);
@@ -6867,6 +6945,10 @@ fn construction_site_to_dictionary(site: &ConstructionSite, trade: Option<Trade>
     result.set("materials_delivered", site.materials_delivered as i64);
     result.set("crew_required", i64::from(site.crew_required));
     result.set("crew_assigned", i64::from(site.crew_assigned));
+    result.set("cost_total", site.cost_total);
+    result.set("cost_paid", site.cost_paid);
+    result.set("payment_due", site.payment_due());
+    result.set("payment_stalled", site.payment_stalled);
     if let Some(trade) = trade {
         result.set("trade", &GString::from(trade.as_str()));
         result.set("trade_name", &GString::from(trade.name()));
@@ -9775,6 +9857,88 @@ mod tests {
         assert!(second.cached);
         assert_eq!(second.hits, 1);
         assert_eq!(first.checksum, second.checksum);
+    }
+
+    fn priced_store() -> ConstructionStore {
+        let mut store = ConstructionStore::new(8, 1_000_000);
+        store
+            .add_priced_site(1, 1_000, 1_000.0)
+            .expect("priced site");
+        store
+    }
+
+    #[test]
+    fn settle_payments_pays_the_first_installment_once() {
+        let mut store = priced_store();
+        let mut economy = Economy::new(2026);
+        let first = settle_construction_payments(&mut store, Some(&mut economy));
+        assert_eq!(first.paid_sites, 1);
+        assert!((first.paid_total - 30.0).abs() < 1e-9);
+        assert!((store.payment_due(1)).abs() < 1e-9);
+        assert!(!store.sites[&1].payment_stalled);
+        let second = settle_construction_payments(&mut store, Some(&mut economy));
+        assert_eq!(second.paid_sites, 0);
+        assert!(second.paid_total.abs() < 1e-9);
+        assert!((economy.construction_spent - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn settle_payments_stalls_when_unaffordable_and_resumes() {
+        let mut store = priced_store();
+        let mut economy = Economy::new(2026);
+        economy.balance = 0.0;
+        let report = settle_construction_payments(&mut store, Some(&mut economy));
+        assert_eq!(report.payment_stalled, 1);
+        assert!(store.sites[&1].payment_stalled);
+        assert!((store.payment_due(1) - 30.0).abs() < 1e-9);
+        economy.balance = 100.0;
+        let resumed = settle_construction_payments(&mut store, Some(&mut economy));
+        assert_eq!(resumed.paid_sites, 1);
+        assert!(!store.sites[&1].payment_stalled);
+        assert!((store.payment_due(1)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn settle_payments_without_treasury_pays_and_stalls_nothing() {
+        let mut store = priced_store();
+        let report = settle_construction_payments(&mut store, None);
+        assert_eq!(report.paid_sites, 0);
+        assert_eq!(report.payment_stalled, 0);
+        assert!(!store.sites[&1].payment_stalled);
+        assert!((store.payment_due(1) - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn settle_payments_orders_by_placement_id() {
+        let mut store = ConstructionStore::new(8, 1_000_000);
+        store.add_priced_site(2, 1_000, 1_000.0).expect("site 2");
+        store.add_priced_site(1, 1_000, 1_000.0).expect("site 1");
+        let mut economy = Economy::new(2026);
+        economy.balance = 30.0;
+        let report = settle_construction_payments(&mut store, Some(&mut economy));
+        assert_eq!(report.paid_sites, 1);
+        assert_eq!(report.payment_stalled, 1);
+        assert!((store.payment_due(1)).abs() < 1e-9);
+        assert!((store.payment_due(2) - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zero_cost_legacy_sites_are_untouched() {
+        let mut store = ConstructionStore::new(8, 1_000_000);
+        store.add_site(1, 1_000).expect("legacy site");
+        let mut economy = Economy::new(2026);
+        let report = settle_construction_payments(&mut store, Some(&mut economy));
+        assert_eq!(report.paid_sites, 0);
+        assert_eq!(report.payment_stalled, 0);
+        assert!(store.sites[&1].payment_due().abs() < 1e-9);
+    }
+
+    #[test]
+    fn first_installment_is_three_percent_rounded_to_cents() {
+        assert!((first_construction_payment(1_000.0) - 30.0).abs() < 1e-9);
+        assert!((first_construction_payment(12_345.67) - 370.37).abs() < 1e-9);
+        assert!(first_construction_payment(f64::NAN).abs() < 1e-9);
+        assert!(first_construction_payment(-5.0).abs() < 1e-9);
     }
 
     #[test]

@@ -199,8 +199,8 @@ The world-scene smoke checks:
 - 30-day city-loop checksum: `623f39c61b71b68a`.
 
 
-> [!note] Phase billing core (D-028)
-> `ConstructionStore` now carries a per-site `cost_total`/`cost_paid` schedule and a payment stall. The bridge still prepays the full price in this slice, so gameplay and checksums are unchanged. The next step is to charge the schedule at placement and phase boundaries.
+> [!note] Phase billing (D-028, Proposed)
+> `ConstructionStore` carries a per-site `cost_total`/`cost_paid` schedule and a payment stall. Placement charges the 3% Survey installment, `construction_tick` charges each later phase boundary, and an unaffordable installment sets `stall_reason = "payment"` until the treasury can pay it. Legacy zero-cost sites remain prepaid. The `financing` projection still assumes fixed 50-building batches and is not yet replaced by the live schedule.
 
 ## 12. Limits
 
