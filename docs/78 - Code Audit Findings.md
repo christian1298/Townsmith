@@ -47,8 +47,10 @@ tags:
 |---|---|
 | F-003 | The v0 world assumes one `hello` per process; a multi-connection vote loopback needs a multi-session model, not a test-only patch. The pure vote state machine has 18 tests. |
 
-> [!info] Post-audit tooling
-> The Q-101 observer form (`godot/playtest_capture.tscn`, PR #259) and the 1M gate-result evaluator (`scripts/check_metropolis_gate.py`, PR #258) landed after this audit. They are workflow tools, not additional audit fixes; F-003 remains the only deferred finding.
+> [!info] Post-audit tooling and product slices
+> The post-audit slices #257–#269 landed after this audit: #257 `F6` district selection focus, #258 1M gate-result evaluator (`scripts/check_metropolis_gate.py`), #259 Q-101 capture form, #260 district policy registry/bridge, #261 benchmark-screen frame-time graphs, #262 server `InterestView` road list, #263 F7 heatmap metric modes, #265 data-only `DistrictPolicyEffect`, #266 Godot interest preview, #267 Q-101 capture summarizer, #268 standalone policy editor, and #269 MP reconnect (`--reconnect`, server `--sessions N`). They are workflow and product capabilities, not additional audit fixes. **F-003 remains the only deferred finding.**
+>
+> Open slices are **not** fixed by this batch and must not be marked done here: policy save composition, the policy panel, the 1M cohort gate, and the benchmark reference gate card. This note does not change the status of any F-xxx finding.
 
 ## How to use this document
 
