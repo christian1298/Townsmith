@@ -3144,6 +3144,10 @@ impl TownsmithCore {
     ///
     /// A missing road store returns `no_roads`. The call is read-only: it does
     /// not mutate the named pool, population, roads, or save state.
+    ///
+    /// The payload also contains `route_polylines`, one entry per routed
+    /// household in placement-id order, with its home/workplace ids, points,
+    /// outbound length, and round-trip cycle. It is display data only.
     #[func]
     fn citizen_movement(
         &self,
@@ -8087,7 +8091,22 @@ struct MovementPayload {
     routes: usize,
     citizens: usize,
     positions: Vec<CitizenPosition>,
+    /// One polyline per household route, ordered by placement id.
+    route_polylines: Vec<RoutePolylinePayload>,
     checksum: u64,
+}
+
+/// One household route polyline in a movement payload.
+///
+/// This is display data copied from the read-only core view; the checksum stays
+/// the motion checksum, so it covers exactly these routes and citizen tracks.
+#[derive(Debug, Clone, PartialEq)]
+struct RoutePolylinePayload {
+    placement_id: u64,
+    workplace_id: u64,
+    points: Vec<[f32; 2]>,
+    length_m: f32,
+    cycle_s: f64,
 }
 
 /// Build the movement layer for the same inputs as [`materialization_payload`].
@@ -8175,6 +8194,16 @@ fn movement_payload_from_motion(
         routes: motion.route_count(),
         citizens: motion.citizen_count(),
         positions: motion.positions_at(time_s),
+        route_polylines: motion
+            .routes()
+            .map(|route| RoutePolylinePayload {
+                placement_id: route.placement_id,
+                workplace_id: route.workplace_id,
+                points: route.points.to_vec(),
+                length_m: route.length_m,
+                cycle_s: route.cycle_s,
+            })
+            .collect(),
         checksum: motion.checksum(),
     }
 }
@@ -8199,6 +8228,22 @@ fn movement_payload_to_dictionary(payload: &MovementPayload) -> VarDictionary {
         positions.push(&item);
     }
     result.set("positions", &positions.to_variant());
+    let mut route_polylines: Array<VarDictionary> = Array::new();
+    for route in &payload.route_polylines {
+        let mut item = VarDictionary::new();
+        item.set("placement_id", route.placement_id as i64);
+        item.set("workplace_id", route.workplace_id as i64);
+        let points: Vec<Vector2> = route
+            .points
+            .iter()
+            .map(|point| Vector2::new(point[0], point[1]))
+            .collect();
+        item.set("points", &PackedVector2Array::from(points));
+        item.set("length_m", f64::from(route.length_m));
+        item.set("cycle_s", route.cycle_s);
+        route_polylines.push(&item);
+    }
+    result.set("route_polylines", &route_polylines.to_variant());
     result.set(
         "checksum",
         &GString::from(&format!("{:016x}", payload.checksum)),
@@ -9956,6 +10001,56 @@ mod tests {
             .positions
             .iter()
             .any(|position| position.route_progress > 0.0));
+    }
+
+    #[test]
+    fn movement_payload_exposes_route_polylines_in_home_to_work_order() {
+        let (runtime, named, centers, workplaces, graph) = movement_fixture();
+        let payload = movement_payload(
+            2026,
+            Some(&named),
+            &runtime.households,
+            &centers,
+            &workplaces,
+            &graph,
+            [10.0, 0.0],
+            50.0,
+            50.0,
+            0.0,
+        )
+        .expect("payload");
+        assert_eq!(payload.route_polylines.len(), 1);
+        let route = &payload.route_polylines[0];
+        assert_eq!(route.placement_id, 1);
+        assert_eq!(route.workplace_id, 2);
+        assert_eq!(route.points.first().copied(), Some([10.0, 0.0]));
+        assert_eq!(route.points.last().copied(), Some([90.0, 0.0]));
+        let expected_length: f32 = route
+            .points
+            .windows(2)
+            .map(|pair| {
+                let dx = pair[1][0] - pair[0][0];
+                let dz = pair[1][1] - pair[0][1];
+                (dx * dx + dz * dz).sqrt()
+            })
+            .sum();
+        assert!((route.length_m - expected_length).abs() < 0.01);
+        assert!(route.cycle_s > 0.0);
+        let later = movement_payload(
+            2026,
+            Some(&named),
+            &runtime.households,
+            &centers,
+            &workplaces,
+            &graph,
+            [10.0, 0.0],
+            50.0,
+            50.0,
+            20.0,
+        )
+        .expect("later payload");
+        assert_eq!(later.route_polylines, payload.route_polylines);
+        assert_eq!(later.checksum, payload.checksum);
     }
 
     #[test]

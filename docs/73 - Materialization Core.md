@@ -166,7 +166,7 @@ pub struct MaterializationDiff {
 - The scene rebuilds markers from `active`/`detailed`; it does not yet apply `changed` incrementally.
 - One pinned id is supported; the full selection/story priority list and dwell time are later.
 - `core_city::movement` uses the bounded route cache: one route per household, shared by its residents, with deterministic phase offsets. Workplace choice is nearest reachable by road distance; households with no reachable workplace get no route.
-- The world scene draws fading home markers plus one pooled `MultiMesh` of small moving citizen markers for the routed active set; it does not draw route polylines yet.
+- The world scene draws fading home markers, one pooled `MultiMesh` of small moving citizen markers for the routed active set, and one merged line mesh for the household route polylines (`movement_scene=ok`, `movement_pool=ok`, `movement_routes=ok`).
 - Fade materials are per-node duplicates; a 2k-active route needs shared materials or a pooling strategy.
 - Removed markers free after a bounded fade deadline; the node map is keyed by citizen id.
 - No save field: the selected set is derived on demand.
@@ -227,7 +227,7 @@ not a CI gate.
 
 ## 11. Next
 
-1. ~~Add a bounded home-work route cache and per-citizen movement.~~ Core, bridge payload (`citizen_movement`), movement cache, and the live marker drive landed; route polylines remain open.
-2. ~~Replace per-citizen movement markers with one pooled `MultiMesh`.~~ One `MultiMeshInstance3D` now holds every routed citizen marker (`movement_scene=ok`, `movement_pool=ok`); the 2k-active/200-detailed render route and pooled materialized agents beyond the debug movement markers remain open.
+1. ~~Add a bounded home-work route cache and per-citizen movement.~~ Core, bridge payload (`citizen_movement`), movement cache, live marker drive, and the read-only `route_polylines` field with the merged F4 line overlay landed (`movement_routes=ok`).
+2. ~~Replace per-citizen movement markers with one pooled `MultiMesh`.~~ One `MultiMeshInstance3D` now holds every routed citizen marker (`movement_scene=ok`, `movement_pool=ok`); the 2k-active/200-detailed render route and pooled production agents beyond the debug overlay remain open.
 3. Add crowd LOD and fade pooling to avoid per-node material duplicates.
 4. Add per-client interest filtering.
