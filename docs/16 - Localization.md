@@ -2,7 +2,7 @@
 title: Localization
 project: Townsmith
 status: proposed
-updated: 2026-11-22
+updated: 2026-11-23
 tags:
   - townsmith
   - localization

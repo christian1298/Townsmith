@@ -2,7 +2,7 @@
 title: Localization Audit
 project: Townsmith
 status: active
-updated: 2026-11-22
+updated: 2026-11-23
 tags:
   - townsmith
   - localization

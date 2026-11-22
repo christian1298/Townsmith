@@ -167,6 +167,7 @@ const TABLES := {
 		"base.ui.dashboard.title": "City Dashboard",
 		"base.ui.dashboard.close_hint": "F1 or Esc to close",
 		"base.ui.dashboard.section.population": "Population",
+		"base.ui.dashboard.section.district": "District",
 		"base.ui.dashboard.section.age": "Age",
 		"base.ui.dashboard.section.research": "Research",
 		"base.ui.dashboard.section.tutorial": "Tutorial",
@@ -182,6 +183,11 @@ const TABLES := {
 
 		# Dashboard body.
 		"base.ui.dashboard.body.population": "{residents} residents · {occupied} / {housing} housing · {vacant} vacant",
+		"base.ui.dashboard.body.district": "{residents} residents · {housing} housing ({vacant} vacant)",
+		"base.ui.dashboard.body.district_jobs": "{jobs} jobs · {employed} employed",
+		"base.ui.dashboard.body.district_needs": "happiness {happiness} · {needs} · commute {commute} m",
+		"base.ui.dashboard.body.district_hint": "Within {radius} m of the camera target · completed buildings only",
+		"base.ui.dashboard.body.district_unavailable": "District data unavailable.",
 		"base.ui.dashboard.body.citizens_near": "Citizens near: {active} active · {detailed} detailed",
 		"base.ui.dashboard.body.age_final": "{age} · final age",
 		"base.ui.dashboard.body.age_next": "{age} · next {next} at {threshold} ({progress}%)",
@@ -403,6 +409,7 @@ const TABLES := {
 		"base.ui.dashboard.title": "Stadt-Dashboard",
 		"base.ui.dashboard.close_hint": "F1 oder Esc zum Schließen",
 		"base.ui.dashboard.section.population": "Bevölkerung",
+		"base.ui.dashboard.section.district": "Stadtteil",
 		"base.ui.dashboard.section.age": "Zeitalter",
 		"base.ui.dashboard.section.research": "Forschung",
 		"base.ui.dashboard.section.tutorial": "Tutorial",
@@ -418,6 +425,11 @@ const TABLES := {
 
 		# Dashboard-Körper.
 		"base.ui.dashboard.body.population": "{residents} Bewohner · {occupied} / {housing} Wohnraum · {vacant} frei",
+		"base.ui.dashboard.body.district": "{residents} Bewohner · {housing} Wohnungen ({vacant} frei)",
+		"base.ui.dashboard.body.district_jobs": "{jobs} Arbeitsplätze · {employed} beschäftigt",
+		"base.ui.dashboard.body.district_needs": "Zufriedenheit {happiness} · {needs} · Arbeitsweg {commute} m",
+		"base.ui.dashboard.body.district_hint": "Im Umkreis von {radius} m um das Kameraziel · nur fertige Gebäude",
+		"base.ui.dashboard.body.district_unavailable": "Stadtteildaten nicht verfügbar.",
 		"base.ui.dashboard.body.citizens_near": "Bürger in der Nähe: {active} aktiv · {detailed} detailliert",
 		"base.ui.dashboard.body.age_final": "{age} · letztes Zeitalter",
 		"base.ui.dashboard.body.age_next": "{age} · als Nächstes {next} bei {threshold} ({progress} %)",
