@@ -405,6 +405,10 @@ Measured on the developer machine (Ryzen 9 7950X, Linux, release build, three ru
 > [!warning] What it does not prove
 > This is not the gate. It has no renderer, GPU, LOD, streaming, shadows, voxel meshes, pathfinding, schedules, needs, traffic, economy, save/load, or peak-memory measurement. It does not close G-02, G-04, G-05, G-07, or G-08, and it is not §8 gate evidence. It only proves the 1M cohort/agent/building data loop fits the CPU budget at this scale.
 
+#### 1M operating ledger (not gate evidence)
+
+`cargo run --release -p townsmith-bench --bin metropolis_balance -- --smoke` runs a separate ledger-only probe: a fixed 1,000,000 population, 400,000 jobs, and 250,000 buildings through the real `Economy` at three tax policies for 30 daily ticks. It has no cohorts, households, agents, buildings, pathfinding, render, service quality, construction, or save/load, so it is not gate evidence and does not close G-04. Results are in [[74 - Modern Balance#2.2 Metropolis 1M operating ledger]].
+
 #### Placement-record scale
 
 `cargo run --release -p townsmith-bench --bin placements -- --placements 250000 --timing` builds full `Placement` records through the indexed placement path and round-trips the store. On the developer machine:
