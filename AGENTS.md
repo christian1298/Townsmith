@@ -255,6 +255,9 @@ cargo run --release -p townsmith-bench --bin infra_cost -- --smoke
 # 1M data-scale harness (not the render gate)
 cargo run --release -p townsmith-bench --bin metropolis -- --smoke
 
+# 250k placement-record scale harness
+cargo run --release -p townsmith-bench --bin placements -- --smoke
+
 # 150,000-resident Modern-age balance probe
 cargo run --release -p townsmith-bench --bin modern -- --smoke
 

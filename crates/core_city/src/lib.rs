@@ -101,8 +101,9 @@ pub use named::{
 };
 pub use placement::{
     footprint_for, normalize_rotation, validate_placement, Placement, PlacementError,
-    PlacementPlan, PlacementRequest, PlacementStore, MAX_BUILDING_HEIGHT_M, MAX_FOOTPRINT_M,
-    MAX_SLOPE_M, MAX_WORLD_COORD_M, PLACEMENT_GAP_M, WATER_LEVEL_M, WORLD_SAVE_FORMAT_VERSION,
+    PlacementIndex, PlacementPlan, PlacementRequest, PlacementStore, MAX_BUILDING_HEIGHT_M,
+    MAX_FOOTPRINT_M, MAX_SLOPE_M, MAX_WORLD_COORD_M, PLACEMENT_GAP_M, PLACEMENT_INDEX_CELL_M,
+    WATER_LEVEL_M, WORLD_SAVE_FORMAT_VERSION,
 };
 pub use population::{
     CityRuntime, Home, Household, PopulationError, PopulationReport, Workplace,

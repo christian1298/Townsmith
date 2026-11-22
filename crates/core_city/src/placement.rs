@@ -5,7 +5,7 @@
 //! terrain. This module is engine-agnostic and deliberately does not depend on
 //! `core_world`; callers pass a terrain-height sampler.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use core_structure::{StructureError, StructureSpec};
@@ -31,6 +31,12 @@ pub const MAX_BUILDING_HEIGHT_M: f32 = 512.0;
 
 /// Largest absolute world coordinate accepted by the placement rules.
 pub const MAX_WORLD_COORD_M: f32 = 1_000_000.0;
+
+/// Edge length of one [`PlacementIndex`] cell, in metres.
+///
+/// The cell is larger than [`MAX_FOOTPRINT_M`] plus [`PLACEMENT_GAP_M`], so a
+/// query only inspects a handful of neighbouring cells when testing overlap.
+pub const PLACEMENT_INDEX_CELL_M: f32 = 64.0;
 
 /// One request to place a blueprint in the world.
 #[derive(Debug, Clone, PartialEq)]
@@ -378,6 +384,29 @@ pub fn validate_placement(
     existing: &[Placement],
     height_at: impl Fn(i64, i64) -> u16,
 ) -> Result<PlacementPlan, PlacementError> {
+    let plan = validate_geometry(request, height_at)?;
+
+    for placement in existing {
+        if footprints_overlap(
+            request.center_x,
+            request.center_z,
+            plan.footprint_m,
+            placement,
+        ) {
+            return Err(PlacementError::Overlap {
+                other_id: placement.id,
+            });
+        }
+    }
+
+    Ok(plan)
+}
+
+/// Validate request fields, rotation, and terrain, but not overlap.
+fn validate_geometry(
+    request: &PlacementRequest,
+    height_at: impl Fn(i64, i64) -> u16,
+) -> Result<PlacementPlan, PlacementError> {
     validate_request(request)?;
     let rotation_deg = normalize_rotation(i64::from(request.rotation_deg))?;
     let footprint_m = footprint_for(request.bounds_m, rotation_deg);
@@ -390,14 +419,6 @@ pub fn validate_placement(
             max: max_height,
             limit: MAX_SLOPE_M,
         });
-    }
-
-    for placement in existing {
-        if footprints_overlap(request.center_x, request.center_z, footprint_m, placement) {
-            return Err(PlacementError::Overlap {
-                other_id: placement.id,
-            });
-        }
     }
 
     Ok(PlacementPlan {
@@ -525,6 +546,192 @@ fn footprints_overlap(
         && b_min_z < a_max_z + PLACEMENT_GAP_M
 }
 
+/// One placement footprint in the index grid.
+#[derive(Debug, Clone, Copy)]
+struct IndexEntry {
+    sequence: u64,
+    id: u64,
+    min_x: f32,
+    max_x: f32,
+    min_z: f32,
+    max_z: f32,
+}
+
+/// Derived in-memory grid index over placement footprints.
+///
+/// The index is not part of the save format. [`PlacementStore::rebuild_index`]
+/// recreates it from the placement list, for example after a load. Every
+/// placement is registered in each [`PLACEMENT_INDEX_CELL_M`] cell its
+/// footprint expanded by [`PLACEMENT_GAP_M`] touches, so an overlap test only
+/// inspects nearby cells instead of scanning the whole store.
+///
+/// The index stores its own copy of each footprint's axis-aligned bounds. That
+/// keeps candidate queries independent of `PlacementStore` lookups and makes
+/// `place_indexed` O(nearby placements) instead of O(n) for 250k-record cities.
+#[derive(Debug, Clone, Default)]
+pub struct PlacementIndex {
+    cells: HashMap<(i64, i64), Vec<IndexEntry>>,
+    cells_by_id: HashMap<u64, Vec<(i64, i64)>>,
+    next_sequence: u64,
+}
+
+impl PlacementIndex {
+    /// Create an empty index.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of indexed placements.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.cells_by_id.len()
+    }
+
+    /// Whether the index holds no placements.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cells_by_id.is_empty()
+    }
+
+    /// Add a placement, replacing an older entry with the same id.
+    pub fn insert(&mut self, placement: &Placement) {
+        // Re-inserting an id should update its geometry, not duplicate it.
+        self.remove(placement.id);
+
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        let entry = IndexEntry {
+            sequence,
+            id: placement.id,
+            min_x: placement.center[0] - placement.footprint_m[0] * 0.5,
+            max_x: placement.center[0] + placement.footprint_m[0] * 0.5,
+            min_z: placement.center[2] - placement.footprint_m[1] * 0.5,
+            max_z: placement.center[2] + placement.footprint_m[1] * 0.5,
+        };
+
+        let (min_x, max_x, min_z, max_z) = expanded_bounds(
+            placement.center[0],
+            placement.center[2],
+            placement.footprint_m,
+        );
+        let mut touched = Vec::new();
+        for cell_z in cell_coord(min_z)..=cell_coord(max_z) {
+            for cell_x in cell_coord(min_x)..=cell_coord(max_x) {
+                let cell = (cell_x, cell_z);
+                self.cells.entry(cell).or_default().push(entry);
+                touched.push(cell);
+            }
+        }
+        self.cells_by_id.insert(placement.id, touched);
+    }
+
+    /// Remove a placement by id. Returns `false` if the id is not indexed.
+    pub fn remove(&mut self, id: u64) -> bool {
+        let Some(cells) = self.cells_by_id.remove(&id) else {
+            return false;
+        };
+        for cell in cells {
+            let empty = if let Some(entries) = self.cells.get_mut(&cell) {
+                entries.retain(|entry| entry.id != id);
+                entries.is_empty()
+            } else {
+                false
+            };
+            if empty {
+                self.cells.remove(&cell);
+            }
+        }
+        true
+    }
+
+    /// Candidate placement ids near a footprint, in insertion order.
+    ///
+    /// The result is a superset of every placement that could overlap the
+    /// requested footprint. Callers still run the exact overlap predicate, but
+    /// only against these ids instead of the whole store.
+    #[must_use]
+    pub fn candidates(&self, center_x: f32, center_z: f32, footprint_m: [f32; 2]) -> Vec<u64> {
+        let mut seen = HashSet::new();
+        let mut found = Vec::new();
+        self.for_each_candidate(center_x, center_z, footprint_m, |entry| {
+            if seen.insert(entry.id) {
+                found.push((entry.sequence, entry.id));
+            }
+        });
+        found.sort_unstable_by_key(|(sequence, _)| *sequence);
+        found.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// First overlapping placement in store order, if any.
+    ///
+    /// This returns the same id as a linear scan of the store's placements:
+    /// the candidate with the lowest insertion sequence that satisfies the
+    /// exact [`footprints_overlap`] predicate.
+    #[must_use]
+    pub fn first_overlap(
+        &self,
+        center_x: f32,
+        center_z: f32,
+        footprint_m: [f32; 2],
+    ) -> Option<u64> {
+        let mut first: Option<(u64, u64)> = None;
+        self.for_each_candidate(center_x, center_z, footprint_m, |entry| {
+            if overlaps_bounds(center_x, center_z, footprint_m, entry)
+                && first.is_none_or(|(sequence, _)| entry.sequence < sequence)
+            {
+                first = Some((entry.sequence, entry.id));
+            }
+        });
+        first.map(|(_, id)| id)
+    }
+
+    fn for_each_candidate(
+        &self,
+        center_x: f32,
+        center_z: f32,
+        footprint_m: [f32; 2],
+        mut visit: impl FnMut(&IndexEntry),
+    ) {
+        let (min_x, max_x, min_z, max_z) = expanded_bounds(center_x, center_z, footprint_m);
+        for cell_z in cell_coord(min_z)..=cell_coord(max_z) {
+            for cell_x in cell_coord(min_x)..=cell_coord(max_x) {
+                if let Some(entries) = self.cells.get(&(cell_x, cell_z)) {
+                    for entry in entries {
+                        visit(entry);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn cell_coord(value: f32) -> i64 {
+    (value / PLACEMENT_INDEX_CELL_M).floor() as i64
+}
+
+/// Footprint bounds expanded by the configured gap on every side.
+fn expanded_bounds(center_x: f32, center_z: f32, footprint_m: [f32; 2]) -> (f32, f32, f32, f32) {
+    (
+        center_x - footprint_m[0] * 0.5 - PLACEMENT_GAP_M,
+        center_x + footprint_m[0] * 0.5 + PLACEMENT_GAP_M,
+        center_z - footprint_m[1] * 0.5 - PLACEMENT_GAP_M,
+        center_z + footprint_m[1] * 0.5 + PLACEMENT_GAP_M,
+    )
+}
+
+fn overlaps_bounds(center_x: f32, center_z: f32, footprint: [f32; 2], other: &IndexEntry) -> bool {
+    let a_min_x = center_x - footprint[0] * 0.5;
+    let a_max_x = center_x + footprint[0] * 0.5;
+    let a_min_z = center_z - footprint[1] * 0.5;
+    let a_max_z = center_z + footprint[1] * 0.5;
+
+    a_min_x < other.max_x + PLACEMENT_GAP_M
+        && other.min_x < a_max_x + PLACEMENT_GAP_M
+        && a_min_z < other.max_z + PLACEMENT_GAP_M
+        && other.min_z < a_max_z + PLACEMENT_GAP_M
+}
+
 /// Placements plus the world seed and id counter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlacementStore {
@@ -559,6 +766,27 @@ impl PlacementStore {
         validate_placement(request, &self.placements, height_at)
     }
 
+    /// Validate a request against the indexed neighbours only.
+    ///
+    /// `index` must describe the current `placements`; use
+    /// [`Self::rebuild_index`] after loading or mutating the store by hand.
+    /// Results are identical to [`Self::validate`], including which overlapping
+    /// id is reported when several placements overlap.
+    pub fn validate_indexed(
+        &self,
+        index: &PlacementIndex,
+        request: &PlacementRequest,
+        height_at: impl Fn(i64, i64) -> u16,
+    ) -> Result<PlacementPlan, PlacementError> {
+        let plan = validate_geometry(request, height_at)?;
+        if let Some(other_id) =
+            index.first_overlap(request.center_x, request.center_z, plan.footprint_m)
+        {
+            return Err(PlacementError::Overlap { other_id });
+        }
+        Ok(plan)
+    }
+
     /// Validate and append a placement.
     pub fn place(
         &mut self,
@@ -573,11 +801,52 @@ impl PlacementStore {
         Ok(placement)
     }
 
+    /// Validate and append a placement, keeping the grid index in sync.
+    ///
+    /// The index must describe the current `placements` before the call. The
+    /// result is identical to [`Self::place`].
+    pub fn place_indexed(
+        &mut self,
+        index: &mut PlacementIndex,
+        request: &PlacementRequest,
+        height_at: impl Fn(i64, i64) -> u16,
+    ) -> Result<Placement, PlacementError> {
+        let plan = self.validate_indexed(index, request, height_at)?;
+        let id = self.next_id;
+        self.next_id = id.checked_add(1).ok_or(PlacementError::IdExhausted)?;
+        let placement = Placement::from_request(id, request, plan);
+        index.insert(&placement);
+        self.placements.push(placement.clone());
+        Ok(placement)
+    }
+
     /// Remove one placement by id.
     pub fn remove(&mut self, id: u64) -> bool {
         let before = self.placements.len();
         self.placements.retain(|placement| placement.id != id);
         self.placements.len() != before
+    }
+
+    /// Remove one placement and its index entry.
+    pub fn remove_indexed(&mut self, index: &mut PlacementIndex, id: u64) -> bool {
+        let removed = self.remove(id);
+        if removed {
+            index.remove(id);
+        }
+        removed
+    }
+
+    /// Build an index that mirrors the current placements.
+    ///
+    /// Call this after [`Self::from_json`] or after mutating
+    /// [`Self::placements`] directly, before using the indexed operations.
+    #[must_use]
+    pub fn rebuild_index(&self) -> PlacementIndex {
+        let mut index = PlacementIndex::new();
+        for placement in &self.placements {
+            index.insert(placement);
+        }
+        index
     }
 
     /// Remove every placement and reset the id counter.
@@ -1087,5 +1356,253 @@ mod tests {
         store.clear();
         assert!(store.placements.is_empty());
         assert_eq!(store.next_id, 1);
+    }
+
+    fn grid_store(count: u64) -> PlacementStore {
+        let mut store = PlacementStore::new(7);
+        for index in 0..count {
+            let x = 64.0 + (index % 13) as f32 * 14.0;
+            let z = -32.0 + (index / 13) as f32 * 12.0;
+            store.place(&request(x, z), flat).expect("grid placement");
+        }
+        store
+    }
+
+    fn linear_overlaps(
+        store: &PlacementStore,
+        center_x: f32,
+        center_z: f32,
+        footprint: [f32; 2],
+    ) -> Vec<u64> {
+        store
+            .placements
+            .iter()
+            .filter(|placement| footprints_overlap(center_x, center_z, footprint, placement))
+            .map(|placement| placement.id)
+            .collect()
+    }
+
+    fn store_positions(store: &PlacementStore) -> HashMap<u64, usize> {
+        store
+            .placements
+            .iter()
+            .enumerate()
+            .map(|(position, placement)| (placement.id, position))
+            .collect()
+    }
+
+    #[test]
+    fn index_candidates_cover_every_linear_overlap_and_preserve_order() {
+        let store = grid_store(13 * 12);
+        let index = store.rebuild_index();
+        assert_eq!(index.len(), store.placements.len());
+        let positions = store_positions(&store);
+
+        let mut x = 20.0;
+        while x < 300.0 {
+            let mut z = -50.0;
+            while z < 160.0 {
+                for footprint in [[8.0, 6.0], [6.0, 8.0], [48.0, 48.0]] {
+                    let expected = linear_overlaps(&store, x, z, footprint);
+                    let candidates = index.candidates(x, z, footprint);
+                    for id in &expected {
+                        assert!(
+                            candidates.contains(id),
+                            "candidate set missed overlapping id {id} at ({x}, {z})"
+                        );
+                    }
+                    assert_eq!(
+                        index.first_overlap(x, z, footprint),
+                        expected.first().copied(),
+                        "first overlap differs from the linear scan at ({x}, {z})"
+                    );
+
+                    let candidate_positions: Vec<usize> =
+                        candidates.iter().map(|id| positions[id]).collect();
+                    let sorted = {
+                        let mut sorted = candidate_positions.clone();
+                        sorted.sort_unstable();
+                        sorted
+                    };
+                    assert_eq!(
+                        candidate_positions, sorted,
+                        "candidate order is not placement order"
+                    );
+                }
+                z += 1.7;
+            }
+            x += 2.3;
+        }
+    }
+
+    #[test]
+    fn index_handles_cell_edges_negative_coordinates_and_the_exact_gap() {
+        let mut index = PlacementIndex::new();
+        let first = existing(1, 64.0, 0.0);
+        index.insert(&first);
+
+        // The first footprint spans x=60..68 and crosses the x=64 cell edge.
+        assert_eq!(index.candidates(72.4, 0.0, [8.0, 6.0]), vec![1]);
+        assert_eq!(index.first_overlap(72.4, 0.0, [8.0, 6.0]), Some(1));
+        // A second centre at 72.5 starts exactly at the 0.5 m gap.
+        assert_eq!(index.first_overlap(72.5, 0.0, [8.0, 6.0]), None);
+        assert_eq!(index.candidates(72.5, 0.0, [8.0, 6.0]), vec![1]);
+
+        // The same geometry on the negative side of a cell edge.
+        let negative = existing(2, -64.0, -64.0);
+        index.insert(&negative);
+        assert_eq!(index.first_overlap(-55.6, -64.0, [8.0, 6.0]), Some(2));
+        assert_eq!(index.first_overlap(-55.5, -64.0, [8.0, 6.0]), None);
+
+        // Cell query at an exact boundary still sees a footprint that only
+        // touches it at one edge.
+        let edge = existing(3, 128.0, 128.0);
+        index.insert(&edge);
+        assert!(index.candidates(128.0, 128.0, [8.0, 6.0]).contains(&3));
+        assert!(index.candidates(133.0, 128.0, [8.0, 6.0]).contains(&3));
+    }
+
+    #[test]
+    fn index_remove_and_reinsert_update_candidates() {
+        let mut index = PlacementIndex::new();
+        index.insert(&existing(1, 128.0, 128.0));
+        index.insert(&existing(2, 200.0, 200.0));
+        assert_eq!(index.len(), 2);
+        assert!(index.remove(1));
+        assert!(!index.remove(1));
+        assert!(index.candidates(128.0, 128.0, [8.0, 6.0]).is_empty());
+        assert_eq!(index.candidates(200.0, 200.0, [8.0, 6.0]), vec![2]);
+
+        // Replacing an id moves the entry instead of duplicating it.
+        index.insert(&existing(2, 128.0, 128.0));
+        assert_eq!(index.len(), 1);
+        assert_eq!(
+            index.candidates(200.0, 200.0, [8.0, 6.0]),
+            Vec::<u64>::new()
+        );
+        assert_eq!(index.candidates(128.0, 128.0, [8.0, 6.0]), vec![2]);
+    }
+
+    #[test]
+    fn indexed_validation_matches_linear_validation_for_every_input_class() {
+        let store = grid_store(30);
+        let index = store.rebuild_index();
+        let first = &store.placements[0];
+        let first_x = first.center[0];
+        let first_z = first.center[2];
+
+        let mut overlapping = request(first_x + 1.0, first_z);
+        let cases = [
+            request(first_x + 1.0, first_z),
+            request(first_x + 8.5, first_z),
+            request(first_x + 8.51, first_z),
+            request(-2_000.0, -2_000.0),
+            request(1_000_001.0, 0.0),
+        ];
+        overlapping.rotation_deg = 45;
+        let mut invalid_bounds = request(first_x, first_z);
+        invalid_bounds.bounds_m = [0.0, 6.0, 6.0];
+
+        for case in cases.iter().chain([&overlapping, &invalid_bounds]) {
+            assert_eq!(
+                store.validate(case, flat),
+                store.validate_indexed(&index, case, flat),
+                "decision differs for {case:?}"
+            );
+        }
+
+        let wet = request(first_x + 1.0, first_z);
+        assert_eq!(
+            store.validate(&wet, |_, _| WATER_LEVEL_M),
+            store.validate_indexed(&index, &wet, |_, _| WATER_LEVEL_M)
+        );
+
+        let steep = request(first_x + 1.0, first_z);
+        let slope = |x: i64, _z: i64| if x % 2 == 0 { 32 } else { 35 };
+        assert_eq!(
+            store.validate(&steep, slope),
+            store.validate_indexed(&index, &steep, slope)
+        );
+    }
+
+    #[test]
+    fn indexed_placement_matches_linear_ids_results_and_checksums() {
+        let mut linear = PlacementStore::new(2026);
+        let mut indexed = PlacementStore::new(2026);
+        let mut index = PlacementIndex::new();
+
+        for step in 0..240 {
+            let x = -96.0 + (step % 17) as f32 * 8.0;
+            let z = -64.0 + (step / 17) as f32 * 7.0;
+            let mut case = request(x, z);
+            case.rotation_deg = if step % 5 == 0 { 90 } else { 0 };
+
+            let left = linear.place(&case, flat);
+            let right = indexed.place_indexed(&mut index, &case, flat);
+            assert_eq!(left, right, "placement {step} differs");
+        }
+
+        assert_eq!(linear.placements, indexed.placements);
+        assert_eq!(linear.next_id, indexed.next_id);
+        assert_eq!(linear.checksum(), indexed.checksum());
+        assert_eq!(index.len(), indexed.placements.len());
+
+        // Remove through both paths, then place into the freed space again.
+        let removed = linear
+            .placements
+            .iter()
+            .find(|placement| placement.id == 3)
+            .cloned()
+            .expect("id 3 exists");
+        assert!(linear.remove(3));
+        assert!(indexed.remove_indexed(&mut index, 3));
+        let reopened = request(removed.center[0], removed.center[2]);
+        let left = linear.place(&reopened, flat).expect("reopened space");
+        let right = indexed
+            .place_indexed(&mut index, &reopened, flat)
+            .expect("reopened space");
+        assert_eq!(left, right);
+        assert_eq!(linear.placements, indexed.placements);
+        assert_eq!(linear.checksum(), indexed.checksum());
+    }
+
+    #[test]
+    fn rebuilt_index_matches_an_incrementally_built_index_after_load() {
+        let mut original = PlacementStore::new(2026);
+        let mut original_index = PlacementIndex::new();
+        for step in 0..60 {
+            let x = 64.0 + (step % 10) as f32 * 14.0;
+            let z = 64.0 + (step / 10) as f32 * 12.0;
+            original
+                .place_indexed(&mut original_index, &request(x, z), flat)
+                .expect("original placement");
+        }
+
+        let json = original.to_json_pretty().expect("json");
+        let mut loaded = PlacementStore::from_json(&json).expect("load");
+        let mut rebuilt = loaded.rebuild_index();
+        assert_eq!(rebuilt.len(), original_index.len());
+
+        let mut linear = loaded.clone();
+        for step in 0..20 {
+            let x = 64.0 + (step % 5) as f32 * 8.0;
+            let z = 200.0 + (step / 5) as f32 * 7.0;
+            let case = request(x, z);
+            assert_eq!(
+                linear.place(&case, flat),
+                loaded.place_indexed(&mut rebuilt, &case, flat)
+            );
+        }
+        assert_eq!(linear, loaded);
+        assert_eq!(linear.checksum(), loaded.checksum());
+
+        let reopened = request(
+            linear.placements[0].center[0],
+            linear.placements[0].center[2],
+        );
+        assert!(matches!(
+            loaded.validate_indexed(&rebuilt, &reopened, flat),
+            Err(PlacementError::Overlap { other_id: 1 })
+        ));
     }
 }

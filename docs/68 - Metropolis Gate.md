@@ -402,6 +402,21 @@ Measured on the developer machine (Ryzen 9 7950X, Linux, release build, three ru
 > [!warning] What it does not prove
 > This is not the gate. It has no renderer, GPU, LOD, streaming, shadows, voxel meshes, pathfinding, schedules, needs, traffic, economy, save/load, or peak-memory measurement. It does not close G-02, G-04, G-05, G-07, or G-08, and it is not §8 gate evidence. It only proves the 1M cohort/agent/building data loop fits the CPU budget at this scale.
 
+#### Placement-record scale
+
+`cargo run --release -p townsmith-bench --bin placements -- --placements 250000 --timing` builds full `Placement` records through the indexed placement path and round-trips the store. On the developer machine:
+
+| Metric | 25k smoke | 250k records |
+|---|---:|---:|
+| Build | 10.6 ms | **99.0 ms** |
+| Per placement | 0.42 µs | **0.40 µs** |
+| Serialize | 11.1 ms | **98.9 ms** |
+| Parse | 12.7 ms | **117.7 ms** |
+| JSON bytes | 9.8 MB | **98.7 MB** |
+| Checksum | `c39839fdabbc1939` | `599dca66809e4223` |
+
+This validates the overlap-index path and the record envelope at the Phase 5 building count. It is not a 250k render, save/load, or memory measurement; construction, households, and meshes are absent.
+
 ### 7.5 CPU setup harness
 
 `godot/metropolis_render.gd` is a headless `SceneTree` harness for the Metropolis render scale. It builds **10k / 50k / 250k** box instances on a 10 m grid (4 m box), one `MultiMeshInstance3D` per tier, and reports setup time, buffer bytes, static-memory delta, and a deterministic layout checksum as one JSON line per tier plus a `METROPOLIS_RENDER` summary line.
