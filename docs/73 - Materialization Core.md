@@ -2,7 +2,7 @@
 title: Materialization Core
 project: Townsmith
 status: active
-updated: 2026-11-22
+updated: 2026-11-23
 tags:
   - townsmith
   - named-citizens
@@ -100,7 +100,7 @@ The call is read-only: it does not mutate the live named pool, population, save 
 
 `route_preview`/`route_cache_state` expose the road polyline and bounded LRU described in [[56 - Traffic]]. `core_city::movement` attaches one cached route per household to the selection and returns deterministic per-citizen positions.
 
-`citizen_movement(seed, center_x, center_z, active_radius_m, detailed_radius_m, time_s)` builds the same selection, one `CitizenMotion`, and returns `{ok, seed, center:[x,z], time_s, routes, citizens, positions:[{id, placement_id, slot, position:[x,z], leg, route_progress}], checksum}`. `time_s` is finite and bounded to `0..=1,000,000` s. Unrouted or disconnected households are omitted, not an error; a missing road store returns `no_roads`. The call is read-only and does not alter jobs, needs, save state, or named checksums. It caches the built `CitizenMotion` by `(seed, world/construction/population/named/road checksums, center, radii)`, so repeated animation samples only re-run `positions_at`; `movement_cache_state()` reports it and `movement_cache_clear()` drops it. `traffic_state`, `route_preview`, and `citizen_movement` share a bridge-owned `Arc<RoadGraph>` validated by `(seed, road-store checksum)`; `road_graph_cache_state()` reports it and `road_graph_cache_clear()` drops it. The world scene now calls it at 10 Hz while the F4 overlay is visible, draws every routed citizen through one pooled `MultiMesh`, and reports `movement_scene=ok`; in this scene fixture the only completed workplace is coincident with the home, so the smoke asserts routes/positions/cache wiring rather than displacement.
+`citizen_movement(seed, center_x, center_z, active_radius_m, detailed_radius_m, time_s)` builds the same selection, one `CitizenMotion`, and returns `{ok, seed, center:[x,z], time_s, routes, citizens, positions:[{id, placement_id, slot, position:[x,z], leg, route_progress}], checksum}`. `time_s` is finite and bounded to `0..=1,000,000` s. Unrouted or disconnected households are omitted, not an error; a missing road store returns `no_roads`. The call is read-only and does not alter jobs, needs, save state, or named checksums. It caches the built `CitizenMotion` by `(seed, world/construction/population/named/road checksums, center, radii)`, so repeated animation samples only re-run `positions_at`; `movement_cache_state()` reports the entry plus cumulative `hits`, `misses`, `builds`, and `clears`, and `movement_cache_clear()` drops the entry while keeping those counters. `traffic_state`, `route_preview`, and `citizen_movement` share a bridge-owned `Arc<RoadGraph>` validated by `(seed, road-store checksum)`; `road_graph_cache_state()` reports it and `road_graph_cache_clear()` drops it. The world scene now calls it at 10 Hz while the F4 overlay is visible, draws every routed citizen through one pooled `MultiMesh`, and reports `movement_scene=ok`; in this scene fixture the only completed workplace is coincident with the home, so the smoke asserts routes/positions/cache wiring rather than displacement.
 
 ### Stateful bridge scheduler
 
