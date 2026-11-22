@@ -608,13 +608,21 @@ impl TownsmithCore {
     /// Godot main thread because it creates Variants and packed arrays.
     #[func]
     fn build_city_layout(&self, tier: i64, seed: i64) -> VarDictionary {
+        let seed = match city_layout_seed(seed) {
+            Ok(seed) => seed,
+            Err(message) => {
+                let mut result = VarDictionary::new();
+                result.set("error", &GString::from(message).to_variant());
+                return result;
+            }
+        };
         let Some(tier) = city_tier_from_code(tier) else {
             let mut result = VarDictionary::new();
             let message = format!("invalid_city_tier: {tier}");
             result.set("error", &GString::from(&message).to_variant());
             return result;
         };
-        match CityLayout::generate(tier, seed as u64) {
+        match CityLayout::generate(tier, seed) {
             Ok(layout) => city_layout_to_dictionary(&layout),
             Err(error) => {
                 let message = error.to_string();
@@ -1706,6 +1714,12 @@ impl TownsmithCore {
         let empty_roads = RoadStore::new(seed);
         let road_store = roads.as_ref().unwrap_or(&empty_roads);
         let lots = self.lots.lock().unwrap_or_else(|error| error.into_inner());
+        if !lot_store_seed_matches(lots.as_ref(), seed) {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the lot store belongs to a different seed",
+            );
+        }
         let lot_store = lots
             .as_ref()
             .cloned()
@@ -2704,10 +2718,6 @@ impl TownsmithCore {
                     "average_commute_time_s",
                     f64::from(runtime.average_commute_time_s()),
                 );
-                result.set(
-                    "average_commute_time_s",
-                    f64::from(runtime.average_commute_time_s()),
-                );
                 result.set("daily_wages", runtime.daily_wages());
                 let mut households: Array<VarDictionary> = Array::new();
                 for (&id, household) in &runtime.households {
@@ -2740,6 +2750,9 @@ impl TownsmithCore {
                 result.set("vacancies", 0);
                 result.set("workers", 0);
                 result.set("happiness", 0.0);
+                result.set("average_commute_m", 0.0);
+                result.set("average_commute_time_s", 0.0);
+                result.set("daily_wages", 0.0);
                 result.set("households", &Array::<VarDictionary>::new().to_variant());
                 result.set("checksum", &GString::from("0000000000000000"));
             }
@@ -3590,6 +3603,17 @@ impl TownsmithCore {
                 result.set("service_sites", 0);
                 result.set("utility_upkeep", 0.0);
                 result.set("service_upkeep", 0.0);
+                result.set("tax_per_resident_per_day", 0.0);
+                result.set("business_tax_per_job_per_day", 0.0);
+                result.set("upkeep_per_building_per_day", 0.0);
+                result.set("construction_spent", 0.0);
+                result.set("days_elapsed", 0.0);
+                result.set("debt", 0.0);
+                result.set("loan_count", 0);
+                result.set("loan_interest_per_day", 0.0);
+                result.set("loan_payment_per_day", 0.0);
+                result.set("can_borrow", false);
+                result.set("daily_net", 0.0);
                 result.set("checksum", &GString::from("0000000000000000"));
             }
         }
@@ -3752,9 +3776,6 @@ impl TownsmithCore {
         let Ok(seed) = u64::try_from(seed) else {
             return placement_simple_error("invalid_seed", "world seed must be non-negative");
         };
-        if seed > i64::MAX as u64 {
-            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
-        }
         {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             if let Some(store) = world.as_ref() {
@@ -4378,9 +4399,6 @@ impl TownsmithCore {
         let Ok(seed) = u64::try_from(seed) else {
             return placement_simple_error("invalid_seed", "world seed must be non-negative");
         };
-        if seed > i64::MAX as u64 {
-            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
-        }
         let Ok(placement_id) = u64::try_from(placement_id) else {
             return placement_simple_error(
                 "invalid_placement",
@@ -4669,9 +4687,6 @@ impl TownsmithCore {
         let Ok(seed) = u64::try_from(seed) else {
             return placement_simple_error("invalid_seed", "world seed must be non-negative");
         };
-        if seed > i64::MAX as u64 {
-            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
-        }
         {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             if let Some(store) = world.as_ref() {
@@ -4746,9 +4761,6 @@ impl TownsmithCore {
         let Ok(seed) = u64::try_from(seed) else {
             return placement_simple_error("invalid_seed", "world seed must be non-negative");
         };
-        if seed > i64::MAX as u64 {
-            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
-        }
         {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             if let Some(store) = world.as_ref() {
@@ -4788,9 +4800,6 @@ impl TownsmithCore {
         let Ok(seed) = u64::try_from(seed) else {
             return placement_simple_error("invalid_seed", "world seed must be non-negative");
         };
-        if seed > i64::MAX as u64 {
-            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
-        }
         if !seconds.is_finite() || !(0.0..=core_city::MAX_RESEARCH_TICK_SECONDS).contains(&seconds)
         {
             return placement_simple_error("invalid_delta", "research delta is outside 0..=86400");
@@ -4833,9 +4842,6 @@ impl TownsmithCore {
         let Ok(seed) = u64::try_from(seed) else {
             return placement_simple_error("invalid_seed", "world seed must be non-negative");
         };
-        if seed > i64::MAX as u64 {
-            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
-        }
         let node = node.to_string();
         {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
@@ -4906,9 +4912,6 @@ impl TownsmithCore {
         let Ok(seed) = u64::try_from(seed) else {
             return placement_simple_error("invalid_seed", "world seed must be non-negative");
         };
-        if seed > i64::MAX as u64 {
-            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
-        }
         {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             if let Some(store) = world.as_ref() {
@@ -4953,9 +4956,6 @@ impl TownsmithCore {
         let Ok(seed) = u64::try_from(seed) else {
             return placement_simple_error("invalid_seed", "world seed must be non-negative");
         };
-        if seed > i64::MAX as u64 {
-            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
-        }
         if let Some(error) = self.world_seed_error(seed) {
             return error;
         }
@@ -4997,9 +4997,6 @@ impl TownsmithCore {
         let Ok(seed) = u64::try_from(seed) else {
             return placement_simple_error("invalid_seed", "world seed must be non-negative");
         };
-        if seed > i64::MAX as u64 {
-            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
-        }
         if let Some(error) = self.world_seed_error(seed) {
             return error;
         }
@@ -5084,9 +5081,6 @@ impl TownsmithCore {
         let Ok(seed) = u64::try_from(seed) else {
             return placement_simple_error("invalid_seed", "world seed must be non-negative");
         };
-        if seed > i64::MAX as u64 {
-            return placement_simple_error("invalid_seed", "world seed is above i64::MAX");
-        }
         {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             if let Some(store) = world.as_ref() {
@@ -5633,6 +5627,18 @@ impl TownsmithCore {
             let mut guard = self.named.lock().unwrap_or_else(|error| error.into_inner());
             if guard.as_ref().is_none_or(|live| live.seed == named.seed) {
                 *guard = Some(named.clone());
+            }
+        }
+        if let Some(population) = population.as_ref() {
+            let mut guard = self
+                .population
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if guard
+                .as_ref()
+                .is_none_or(|live| live.seed == population.seed)
+            {
+                *guard = Some(population.clone());
             }
         }
         let mut result = VarDictionary::new();
@@ -6596,7 +6602,8 @@ impl TownsmithCore {
     /// acceptance numbers cannot drift between them. This always installs the
     /// default 5 × 3 × 5 chunk volume (16 m × 9.6 m × 16 m).
     ///
-    /// Returns `false` when no editor volume exists.
+    /// Installs the default acceptance volume even when no editor volume is
+    /// open, replacing any current one.
     ///
     /// **Main thread only.**
     #[func]
@@ -6605,37 +6612,7 @@ impl TownsmithCore {
             .editor
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if guard.is_none() {
-            return false;
-        }
-        let mut state = EditorState::new(room_demo::acceptance_house());
-        let dims = state.volume.config().voxels();
-        state.props = room_demo::acceptance_props()
-            .into_iter()
-            .filter_map(|prop| {
-                let cell = [
-                    (prop.position[0] / VOXEL_SIZE_M).floor(),
-                    (prop.position[1] / VOXEL_SIZE_M).floor(),
-                    (prop.position[2] / VOXEL_SIZE_M).floor(),
-                ];
-                if cell.iter().any(|value| *value < 0.0) {
-                    return None;
-                }
-                let cell = [cell[0] as u32, cell[1] as u32, cell[2] as u32];
-                if cell[0] as usize >= dims[0]
-                    || cell[1] as usize >= dims[1]
-                    || cell[2] as usize >= dims[2]
-                {
-                    return None;
-                }
-                Some(EditorProp {
-                    kind: prop.kind,
-                    cell,
-                    rotation: 0.0,
-                })
-            })
-            .collect();
-        *guard = Some(state);
+        *guard = Some(acceptance_house_editor_state());
         true
     }
 
@@ -7277,6 +7254,50 @@ fn settlement_to_dictionary(settlement: &Settlement) -> VarDictionary {
     result
 }
 
+fn road_width_valid(width: i64) -> bool {
+    (i64::from(core_city::MIN_ROAD_WIDTH_M)..=i64::from(core_city::MAX_ROAD_WIDTH_M))
+        .contains(&width)
+}
+
+fn city_layout_seed(raw: i64) -> Result<u64, &'static str> {
+    u64::try_from(raw).map_err(|_| "invalid_seed")
+}
+
+fn lot_store_seed_matches(store: Option<&LotStore>, seed: u64) -> bool {
+    store.is_none_or(|store| store.seed == seed)
+}
+
+fn acceptance_house_editor_state() -> EditorState {
+    let mut state = EditorState::new(room_demo::acceptance_house());
+    let dims = state.volume.config().voxels();
+    state.props = room_demo::acceptance_props()
+        .into_iter()
+        .filter_map(|prop| {
+            let cell = [
+                (prop.position[0] / VOXEL_SIZE_M).floor(),
+                (prop.position[1] / VOXEL_SIZE_M).floor(),
+                (prop.position[2] / VOXEL_SIZE_M).floor(),
+            ];
+            if cell.iter().any(|value| *value < 0.0) {
+                return None;
+            }
+            let cell = [cell[0] as u32, cell[1] as u32, cell[2] as u32];
+            if cell[0] as usize >= dims[0]
+                || cell[1] as usize >= dims[1]
+                || cell[2] as usize >= dims[2]
+            {
+                return None;
+            }
+            Some(EditorProp {
+                kind: prop.kind,
+                cell,
+                rotation: 0.0,
+            })
+        })
+        .collect();
+    state
+}
+
 fn road_request_from_args(
     x1: i64,
     z1: i64,
@@ -7308,10 +7329,20 @@ fn road_request_from_args(
             "road end Z is out of range",
         ));
     };
+    if !road_width_valid(width) {
+        return Err(placement_simple_error(
+            "invalid_width",
+            format!(
+                "road width must be {}..={} m",
+                core_city::MIN_ROAD_WIDTH_M,
+                core_city::MAX_ROAD_WIDTH_M
+            ),
+        ));
+    }
     let Ok(width) = u8::try_from(width) else {
         return Err(placement_simple_error(
             "invalid_width",
-            "road width must be 2..=24 m",
+            "road width is out of range",
         ));
     };
     Ok(RoadRequest {
@@ -9956,6 +9987,37 @@ mod tests {
         assert!(
             blueprint_path_from_arg(&std::env::temp_dir().join("house").to_string_lossy()).is_err()
         );
+    }
+
+    #[test]
+    fn city_layout_rejects_negative_seed_but_accepts_zero() {
+        assert_eq!(city_layout_seed(-1), Err("invalid_seed"));
+        assert_eq!(city_layout_seed(0), Ok(0));
+        assert_eq!(city_layout_seed(7), Ok(7));
+    }
+
+    #[test]
+    fn lot_validate_rejects_a_foreign_seed_store() {
+        let store = LotStore::new(2026);
+        assert!(lot_store_seed_matches(Some(&store), 2026));
+        assert!(!lot_store_seed_matches(Some(&store), 2027));
+        assert!(lot_store_seed_matches(None, 2027));
+    }
+
+    #[test]
+    fn acceptance_house_installs_the_default_volume_and_props() {
+        let state = acceptance_house_editor_state();
+        assert_eq!(state.volume.config().voxels(), [160, 96, 160]);
+        assert!(!state.props.is_empty());
+    }
+
+    #[test]
+    fn road_width_uses_the_core_range() {
+        assert!(!road_width_valid(1));
+        assert!(road_width_valid(2));
+        assert!(road_width_valid(24));
+        assert!(!road_width_valid(25));
+        assert!(!road_width_valid(-1));
     }
 
     #[test]

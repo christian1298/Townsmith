@@ -40,7 +40,7 @@ Terrain-edit methods (`terrain_edit_height`, `terrain_delta_count`, `terrain_del
 
 Construction methods (`construction_tick`, `construction_sites`, `construction_summary`, `construction_set_crew`, `construction_add_materials`, `construction_checksum`, `construction_clear`) are documented in [[45 - Construction Sites]]. A successful placement creates a site in the same transaction.
 
-Road methods (`road_validate`, `road_add`, `roads`, `road_count`, `road_checksum`, `road_clear`, `road_remove`) are documented in [[46 - Road Network]]; `traffic_state(seed)` exposes the derived graph in [[56 - Traffic]]. The world save carries an optional `roads` object; old saves load with the road store closed.
+Road methods (`road_validate`, `road_add`, `roads`, `road_count`, `road_checksum`, `road_clear`, `road_remove`) validate width through the shared core 2–24 m range and are documented in [[46 - Road Network]]; `traffic_state(seed)` exposes the derived graph in [[56 - Traffic]]. The world save carries an optional `roads` object; old saves load with the road store closed.
 
 Lot methods (`lot_validate`, `lot_add`, `lots`, `lot_count`, `lot_checksum`, `lot_clear`, `lot_remove`) are documented in [[47 - Lots and Zoning]]. The world save carries an optional `lots` object; old saves load with the lot store closed.
 
@@ -102,7 +102,7 @@ The sampler uses `WorldGenerator::height_at` on the 1 m grid, not the currently 
 }
 ```
 
-2B adds an optional `terrain_deltas` (hex `TSDL`) + `terrain_checksum` pair when edits exist; 2D adds a `construction` object when sites exist; 2E adds optional `roads`, `lots`, and `settlements` objects. Phase 3 adds optional `population`, `economy`, `industry`, and `utilities` objects; each is validated and replaced atomically with the rest of the world. At the file layer, `world_save` writes a sibling temp file, syncs it, rotates a structurally valid previous save to `<path>.bak`, then renames the temp over the primary. `world_load` falls back to `.bak` when the primary is missing or invalid JSON, and returns `recovered_from_backup`, `backup`, and `backup_checksum`; store/schema validation failures still reject rather than silently falling back. See [[43 - Terrain Edits]], [[45 - Construction Sites]], [[46 - Road Network]], [[47 - Lots and Zoning]], and [[48 - Settlement Boundaries]].
+2B adds an optional `terrain_deltas` (hex `TSDL`) + `terrain_checksum` pair when edits exist; 2D adds a `construction` object when sites exist; 2E adds optional `roads`, `lots`, and `settlements` objects. Phase 3 adds optional `population`, `economy`, `industry`, and `utilities` objects; each is validated and replaced atomically with the rest of the world. At the file layer, `world_save` writes a sibling temp file, syncs it, rotates a structurally valid previous save to `<path>.bak`, then renames the temp over the primary. `world_load` falls back to `.bak` when the primary is missing or invalid JSON, and returns `recovered_from_backup`, `backup`, and `backup_checksum`; store/schema validation failures still reject rather than silently falling back. `world_save` also commits the sanitized household clone back to the live store after a durable write, so stale staffing cannot survive until reload. `lot_validate` rejects a foreign-seed lot store exactly like `lot_add`. See [[43 - Terrain Edits]], [[45 - Construction Sites]], [[46 - Road Network]], [[47 - Lots and Zoning]], and [[48 - Settlement Boundaries]].
 
 `world_load` rejects:
 
