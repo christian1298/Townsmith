@@ -6,10 +6,14 @@
 //!
 //! Persistence lives in [`crate::save`] and is opt-in: one world to one JSON
 //! file, with atomic writes and a single `.bak` rotation. The executor itself
-//! has no authentication, interest management, rollback, terrain sampling, or
-//! wall-clock loop. Time advances only through `time_control` (`step`) or an
-//! explicit [`ServerWorld::advance_day`] call, so transcripts are
-//! deterministic.
+//! has no authentication, rollback, terrain sampling, or wall-clock loop. Time
+//! advances only through `time_control` (`step`) or an explicit
+//! [`ServerWorld::advance_day`] call, so transcripts are deterministic.
+//!
+//! Interest filtering v0 is a **per-session viewport**: [`ClientCommand::SetInterest`]
+//! stores a centre and radius that only narrow the aggregate numbers in
+//! [`ServerMessage::Snapshot`]. It never mutates the simulation, never advances
+//! the tick, and is excluded from [`ServerWorld::checksum`].
 
 use std::collections::{BTreeSet, VecDeque};
 use std::io;
@@ -21,9 +25,9 @@ use core_city::road::{RoadError, RoadRequest, RoadStore};
 
 use crate::protocol::{
     configure_stream, decode_client_command, frame_to_io, read_frame, read_json_frame,
-    session_id_for_seed, validate_hello, validate_road, validate_tax_rates, write_json_frame,
-    ClientCommand, FrameError, Rejection, ServerMessage, SessionConfig, TimeAction, LOOPBACK_SEED,
-    PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
+    session_id_for_seed, validate_hello, validate_interest, validate_road, validate_tax_rates,
+    write_json_frame, ClientCommand, FrameError, Rejection, ServerMessage, SessionConfig,
+    TimeAction, DEFAULT_INTEREST_RADIUS_M, LOOPBACK_SEED, PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
 };
 
 /// Fixed road width for v0 placement commands.
@@ -43,6 +47,12 @@ pub const AUTHORITY_COMMANDS: u64 = 6;
 
 /// Application frames exchanged in both directions by the authority loopback.
 pub const AUTHORITY_FRAMES: u64 = 12;
+
+/// Client commands exchanged by the interest loopback.
+pub const INTEREST_COMMANDS: u64 = 8;
+
+/// Application frames exchanged in both directions by the interest loopback.
+pub const INTEREST_FRAMES: u64 = 16;
 
 /// Sessions exercised by the role/rate-limit loopback (viewer, mayor, admin).
 pub const ROLES_SESSIONS: u64 = 3;
@@ -141,7 +151,7 @@ fn fnv_update(mut hash: u64, bytes: &[u8]) -> u64 {
 /// **not** authentication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum ClientRole {
-    /// Read-only: `hello`, `ping`, and `disconnect`.
+    /// Read-only: `hello`, `ping`, `disconnect`, and its own `set_interest`.
     #[default]
     Viewer,
     /// Viewer plus economy and placement commands (`set_tax`, `place_road`).
@@ -179,7 +189,9 @@ impl ClientRole {
     #[must_use]
     pub fn required_role(tag: &str) -> Self {
         match tag {
-            "hello" | "resume" | "ping" | "disconnect" | "time_vote" => Self::Viewer,
+            "hello" | "resume" | "ping" | "disconnect" | "time_vote" | "set_interest" => {
+                Self::Viewer
+            }
             "set_tax" | "place_road" => Self::Mayor,
             // Time control is admin-only in D-021; unknown tags fail closed.
             "time_control" => Self::Admin,
@@ -341,6 +353,12 @@ pub struct ServerWorld {
     pub economy: Economy,
     /// Road network.
     pub roads: RoadStore,
+    /// Per-session interest viewport centre `[x, z]` in metres.
+    ///
+    /// View state only: excluded from [`Self::checksum`] and not saved.
+    interest_center: [f32; 2],
+    /// Per-session interest radius in metres (view state only).
+    interest_radius_m: f32,
     /// Whether `advance_day` is frozen.
     pub paused: bool,
     /// Deterministic time-control vote state (D-021).
@@ -405,6 +423,8 @@ impl ServerWorld {
             buildings,
             economy: Economy::new(seed),
             roads: RoadStore::new(seed),
+            interest_center: [0.0, 0.0],
+            interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
             paused: false,
             vote: crate::vote::TimeVote::default(),
             online: BTreeSet::new(),
@@ -459,6 +479,8 @@ impl ServerWorld {
             buildings: save.buildings,
             economy: save.economy,
             roads: save.roads,
+            interest_center: [0.0, 0.0],
+            interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
             paused: save.paused,
             vote: crate::vote::TimeVote::default(),
             online: BTreeSet::new(),
@@ -606,8 +628,47 @@ impl ServerWorld {
         self.economy.balance.round() as i64
     }
 
+    /// Interest viewport centre `[x, z]` in metres (view state only).
+    #[must_use]
+    pub fn interest_center(&self) -> [f32; 2] {
+        self.interest_center
+    }
+
+    /// Interest viewport radius in metres (view state only).
+    #[must_use]
+    pub fn interest_radius_m(&self) -> f32 {
+        self.interest_radius_m
+    }
+
+    /// Roads whose midpoint is inside the interest circle.
+    ///
+    /// The circle is inclusive (`distance <= radius`). Roads are counted, not
+    /// streamed: v0 has no per-entity payload. The count depends only on the
+    /// authoritative road store and the session viewport, so it is
+    /// deterministic and independent of iteration order.
+    #[must_use]
+    pub fn visible_roads(&self) -> u32 {
+        let radius = f64::from(self.interest_radius_m);
+        let radius_squared = radius * radius;
+        let count = self
+            .roads
+            .roads
+            .iter()
+            .filter(|road| {
+                let center = road.center();
+                let dx = f64::from(center[0]) - f64::from(self.interest_center[0]);
+                let dz = f64::from(center[1]) - f64::from(self.interest_center[1]);
+                dx * dx + dz * dz <= radius_squared
+            })
+            .count();
+        u32::try_from(count).unwrap_or(u32::MAX)
+    }
+
     /// Stable FNV-1a checksum over tick, population, balance, road checksum,
     /// and economy checksum. No wall clock or seed is mixed in.
+    ///
+    /// The interest viewport is deliberately excluded: it is per-session view
+    /// state, so a client changing its camera must not move the world golden.
     #[must_use]
     pub fn checksum(&self) -> String {
         let mut hash = fnv_update(FNV_OFFSET, &self.tick.to_le_bytes());
@@ -619,6 +680,9 @@ impl ServerWorld {
     }
 
     /// Current authoritative snapshot.
+    ///
+    /// Interest fields describe this session's viewport; they are not part of
+    /// the checksum and do not imply that entity or terrain streaming exists.
     #[must_use]
     pub fn snapshot(&self) -> ServerMessage {
         ServerMessage::Snapshot {
@@ -626,6 +690,9 @@ impl ServerWorld {
             population: self.population,
             balance: self.balance_units(),
             checksum: self.checksum(),
+            interest_center: self.interest_center,
+            interest_radius_m: self.interest_radius_m,
+            visible_roads: self.visible_roads(),
         }
     }
 
@@ -807,6 +874,11 @@ impl ServerWorld {
                 accepted(self.snapshot())
             }
             ClientCommand::PlaceRoad { start, end } => self.apply_place_road(*start, *end),
+            ClientCommand::SetInterest {
+                center_x,
+                center_z,
+                radius_m,
+            } => self.apply_set_interest(*center_x, *center_z, *radius_m),
             ClientCommand::TimeVote { action, time } => self.apply_time_vote(*action, *time),
         }
     }
@@ -1003,6 +1075,25 @@ impl ServerWorld {
             }
             Err(error) => reject_road_error(error),
         }
+    }
+
+    /// Update this session's interest viewport and answer with a snapshot.
+    ///
+    /// This is view-only: it does not change the tick, treasury, roads, or
+    /// checksum, and it is never persisted. `set_interest` still consumes a
+    /// rate credit and is audited like every other command.
+    fn apply_set_interest(
+        &mut self,
+        center_x: f64,
+        center_z: f64,
+        radius_m: f64,
+    ) -> (ServerMessage, &'static str) {
+        if let Err(rejection) = validate_interest(center_x, center_z, radius_m) {
+            return from_rejection(rejection);
+        }
+        self.interest_center = [center_x as f32, center_z as f32];
+        self.interest_radius_m = radius_m as f32;
+        accepted(self.snapshot())
     }
 
     /// Reject an exact duplicate or a collinear overlap of more than one cell.
@@ -1322,6 +1413,7 @@ fn run_authority_client(address: SocketAddr) -> io::Result<()> {
             population,
             balance,
             checksum,
+            ..
         } if tick == 1
             && population == expected_population
             && balance == STARTING_BALANCE as i64
@@ -1340,6 +1432,7 @@ fn run_authority_client(address: SocketAddr) -> io::Result<()> {
             population,
             balance,
             checksum,
+            ..
         } if tick == 2
             && population == expected_population
             && balance == STARTING_BALANCE as i64
@@ -1370,6 +1463,167 @@ fn run_authority_client(address: SocketAddr) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+/// Result of one deterministic interest loopback run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InterestReport {
+    /// Client commands accepted or rejected by the executor.
+    pub commands: u64,
+    /// Application frames exchanged in both directions.
+    pub frames: u64,
+    /// Final interest centre `[x, z]` in metres.
+    pub center: [f32; 2],
+    /// Final interest radius in metres.
+    pub radius_m: f32,
+    /// Roads whose midpoint was inside the final interest circle.
+    pub visible_roads: u32,
+    /// Final authoritative tick (interest commands do not advance it).
+    pub tick: u64,
+    /// Final world checksum.
+    pub checksum: String,
+}
+
+/// Run one deterministic interest exchange over TCP loopback.
+///
+/// Two roads are placed, one inside the final viewport and one far outside.
+/// `set_interest` is then narrowed, moved, and restored; every response is
+/// compared against a local reference world, including `visible_roads` and the
+/// unchanged tick and checksum. Both sides use bounded socket timeouts; the
+/// harness never sleeps.
+pub fn run_interest_loopback() -> io::Result<InterestReport> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let address = listener.local_addr()?;
+
+    let server = thread::spawn(move || serve_interest(listener));
+    let client_result = run_interest_client(address);
+    let server_result = server
+        .join()
+        .map_err(|_| io::Error::other("interest loopback server thread panicked"))?;
+
+    client_result?;
+    server_result
+}
+
+fn serve_interest(listener: TcpListener) -> io::Result<InterestReport> {
+    let (stream, _peer) = listener.accept()?;
+    // Roads need the mayor role; set_interest itself is open to viewers too.
+    let (world, frames, stats) = serve_world_session(
+        stream,
+        ServerWorld::with_role(LOOPBACK_SEED, ClientRole::Mayor),
+    )?;
+
+    Ok(InterestReport {
+        commands: stats.commands,
+        frames,
+        center: world.interest_center(),
+        radius_m: world.interest_radius_m(),
+        visible_roads: world.visible_roads(),
+        tick: world.tick,
+        checksum: world.checksum(),
+    })
+}
+
+fn run_interest_client(address: SocketAddr) -> io::Result<()> {
+    let mut stream = TcpStream::connect_timeout(&address, SESSION_IO_TIMEOUT)?;
+    configure_stream(&stream)?;
+
+    let mut reference = ServerWorld::with_role(LOOPBACK_SEED, ClientRole::Mayor);
+    expect_welcome(&exchange(
+        &mut stream,
+        &mut reference,
+        &loopback_hello("interest"),
+    )?)?;
+
+    for (expected_tick, expected_visible, road) in
+        [(1, 1, ([0, 0], [8, 0])), (2, 2, ([100, 100], [108, 100]))]
+    {
+        match exchange(
+            &mut stream,
+            &mut reference,
+            &ClientCommand::PlaceRoad {
+                start: road.0,
+                end: road.1,
+            },
+        )? {
+            ServerMessage::Snapshot {
+                tick,
+                visible_roads,
+                ..
+            } if tick == expected_tick && visible_roads == expected_visible => {}
+            other => return Err(unexpected("interest place_road snapshot", &other)),
+        }
+    }
+    let checksum = reference.checksum();
+
+    let full_view = ClientCommand::SetInterest {
+        center_x: 0.0,
+        center_z: 0.0,
+        radius_m: 2_048.0,
+    };
+    match exchange(&mut stream, &mut reference, &full_view)? {
+        ServerMessage::Snapshot {
+            tick: 2,
+            checksum: observed,
+            interest_center,
+            interest_radius_m,
+            visible_roads: 2,
+            ..
+        } if observed == checksum
+            && interest_center == [0.0, 0.0]
+            && (interest_radius_m - 2_048.0).abs() < f32::EPSILON => {}
+        other => return Err(unexpected("full interest snapshot", &other)),
+    }
+
+    let near_origin = ClientCommand::SetInterest {
+        center_x: 0.0,
+        center_z: 0.0,
+        radius_m: 16.0,
+    };
+    match exchange(&mut stream, &mut reference, &near_origin)? {
+        ServerMessage::Snapshot {
+            tick: 2,
+            checksum: observed,
+            interest_radius_m: 16.0,
+            visible_roads: 1,
+            ..
+        } if observed == checksum => {}
+        other => return Err(unexpected("origin interest snapshot", &other)),
+    }
+
+    let near_far_road = ClientCommand::SetInterest {
+        center_x: 100.0,
+        center_z: 100.0,
+        radius_m: 16.0,
+    };
+    match exchange(&mut stream, &mut reference, &near_far_road)? {
+        ServerMessage::Snapshot {
+            tick: 2,
+            interest_center: [100.0, 100.0],
+            visible_roads: 1,
+            ..
+        } => {}
+        other => return Err(unexpected("far interest snapshot", &other)),
+    }
+
+    // Restore the small origin viewport so the reported line shows filtering.
+    match exchange(&mut stream, &mut reference, &near_origin)? {
+        ServerMessage::Snapshot {
+            tick: 2,
+            checksum: observed,
+            interest_center,
+            interest_radius_m: 16.0,
+            visible_roads: 1,
+            ..
+        } if observed == checksum && interest_center == [0.0, 0.0] => {}
+        other => return Err(unexpected("restored interest snapshot", &other)),
+    }
+
+    expect_goodbye(&exchange(
+        &mut stream,
+        &mut reference,
+        &ClientCommand::Disconnect,
+    )?)
 }
 
 /// Result of one deterministic role/rate-limit loopback run.
@@ -1800,7 +2054,7 @@ mod tests {
     };
     use core_city::population::WAGE_PER_WORKER_PER_DAY;
 
-    use crate::protocol::{codes as protocol_codes, decode_client_command};
+    use crate::protocol::{codes as protocol_codes, decode_client_command, MAX_INTEREST_RADIUS_M};
 
     const SEED: u64 = LOOPBACK_SEED;
 
@@ -1835,9 +2089,232 @@ mod tests {
                 population,
                 balance,
                 checksum,
+                ..
             } => (*tick, *population, *balance, checksum.clone()),
             other => panic!("expected snapshot, got {other:?}"),
         }
+    }
+
+    fn set_interest(center_x: f64, center_z: f64, radius_m: f64) -> ClientCommand {
+        ClientCommand::SetInterest {
+            center_x,
+            center_z,
+            radius_m,
+        }
+    }
+
+    #[test]
+    fn new_worlds_start_with_the_full_default_viewport() {
+        let world = ServerWorld::new(SEED);
+        assert_eq!(world.interest_center(), [0.0, 0.0]);
+        assert_eq!(world.interest_radius_m(), DEFAULT_INTEREST_RADIUS_M as f32);
+        assert_eq!(world.visible_roads(), 0);
+
+        match world.snapshot() {
+            ServerMessage::Snapshot {
+                interest_center,
+                interest_radius_m,
+                visible_roads: 0,
+                ..
+            } => {
+                assert_eq!(interest_center, [0.0, 0.0]);
+                assert_eq!(interest_radius_m, DEFAULT_INTEREST_RADIUS_M as f32);
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_interest_updates_the_viewport_without_advancing_the_tick() {
+        let mut world = world_with_hello();
+        world.apply(&ClientCommand::PlaceRoad {
+            start: [0, 0],
+            end: [8, 0],
+        });
+        let tick = world.tick;
+        let checksum = world.checksum();
+
+        match world.apply(&set_interest(4.0, 0.0, 1.0)) {
+            ServerMessage::Snapshot {
+                tick: observed_tick,
+                checksum: observed_checksum,
+                interest_center,
+                interest_radius_m,
+                visible_roads,
+                ..
+            } => {
+                assert_eq!(observed_tick, tick);
+                assert_eq!(observed_checksum, checksum);
+                assert_eq!(interest_center, [4.0, 0.0]);
+                assert_eq!(interest_radius_m, 1.0);
+                assert_eq!(visible_roads, 1);
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        assert_eq!(world.tick, tick, "set_interest is view-only");
+        assert_eq!(world.interest_center(), [4.0, 0.0]);
+        assert_eq!(world.interest_radius_m(), 1.0);
+    }
+
+    #[test]
+    fn invalid_interest_is_rejected_without_mutation() {
+        let mut world = world_with_hello();
+        let before = world.checksum();
+
+        for (command, code) in [
+            (
+                set_interest(f64::NAN, 0.0, 10.0),
+                protocol_codes::INTEREST_INVALID_CENTER,
+            ),
+            (
+                set_interest(0.0, f64::NEG_INFINITY, 10.0),
+                protocol_codes::INTEREST_INVALID_CENTER,
+            ),
+            (
+                set_interest(0.0, 0.0, -1.0),
+                protocol_codes::INTEREST_RADIUS_OUT_OF_RANGE,
+            ),
+            (
+                set_interest(0.0, 0.0, MAX_INTEREST_RADIUS_M + 0.1),
+                protocol_codes::INTEREST_RADIUS_OUT_OF_RANGE,
+            ),
+            (
+                set_interest(0.0, 0.0, f64::INFINITY),
+                protocol_codes::INTEREST_RADIUS_OUT_OF_RANGE,
+            ),
+        ] {
+            expect_reject(&world.apply(&command), code);
+        }
+
+        assert_eq!(world.tick, 0);
+        assert_eq!(world.interest_center(), [0.0, 0.0]);
+        assert_eq!(world.interest_radius_m(), DEFAULT_INTEREST_RADIUS_M as f32);
+        assert_eq!(world.checksum(), before);
+    }
+
+    #[test]
+    fn interest_is_excluded_from_the_world_checksum() {
+        let mut world = world_with_hello();
+        world.apply(&ClientCommand::PlaceRoad {
+            start: [0, 0],
+            end: [8, 0],
+        });
+        let before = world.checksum();
+
+        world.apply(&set_interest(100.0, 100.0, 8.0));
+        assert_eq!(world.checksum(), before);
+        assert_eq!(world.session_checksum, before);
+
+        world.apply(&set_interest(4.0, 0.0, 2_048.0));
+        assert_eq!(world.checksum(), before);
+    }
+
+    #[test]
+    fn viewer_role_may_set_its_own_interest() {
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Viewer);
+        assert!(matches!(
+            world.apply(&hello()),
+            ServerMessage::Welcome { .. }
+        ));
+        assert_eq!(
+            ClientRole::required_role_for(&set_interest(0.0, 0.0, 32.0)),
+            ClientRole::Viewer
+        );
+
+        match world.apply(&set_interest(6.0, -2.0, 32.0)) {
+            ServerMessage::Snapshot {
+                interest_center,
+                interest_radius_m,
+                ..
+            } => {
+                assert_eq!(interest_center, [6.0, -2.0]);
+                assert_eq!(interest_radius_m, 32.0);
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+
+        let audit = world.audit_state();
+        let last = audit.last().expect("audit entry");
+        assert_eq!(last.tag, "set_interest");
+        assert_eq!(last.role, ClientRole::Viewer);
+        assert!(last.accepted());
+    }
+
+    #[test]
+    fn visible_roads_use_an_inclusive_midpoint_distance() {
+        let mut world = world_with_hello();
+        for (start, end) in [
+            ([-3, -2], [3, -2]), // centre (0,-2): inside
+            ([8, 0], [12, 0]),   // centre (10,0): exactly on the r=10 boundary
+            ([11, 1], [13, 1]),  // centre (12,1): outside
+        ] {
+            assert!(matches!(
+                world.apply(&ClientCommand::PlaceRoad { start, end }),
+                ServerMessage::Snapshot { .. }
+            ));
+        }
+        assert_eq!(world.visible_roads(), 3, "default radius sees every road");
+
+        world.apply(&set_interest(0.0, 0.0, 10.0));
+        assert_eq!(world.visible_roads(), 2, "inside plus boundary");
+
+        world.apply(&set_interest(0.0, 0.0, 9.9));
+        assert_eq!(world.visible_roads(), 1, "boundary is exclusive at 9.9 m");
+
+        world.apply(&set_interest(10.0, 0.0, 0.0));
+        assert_eq!(
+            world.visible_roads(),
+            1,
+            "a zero radius still includes a road whose midpoint is the centre"
+        );
+
+        world.apply(&set_interest(100.0, 100.0, 10.0));
+        assert_eq!(world.visible_roads(), 0);
+    }
+
+    #[test]
+    fn set_interest_consumes_a_rate_credit() {
+        let mut world = world_with_hello();
+        world.rate.milli_credits = 0;
+        expect_reject(
+            &world.apply(&set_interest(0.0, 0.0, 16.0)),
+            codes::RATE_LIMITED,
+        );
+        assert_eq!(world.interest_radius_m(), DEFAULT_INTEREST_RADIUS_M as f32);
+    }
+
+    #[test]
+    fn interest_loopback_is_deterministic() {
+        let first = run_interest_loopback().expect("interest loopback");
+        assert_eq!(first.commands, INTEREST_COMMANDS);
+        assert_eq!(first.frames, INTEREST_FRAMES);
+        assert_eq!(first.center, [0.0, 0.0]);
+        assert_eq!(first.radius_m, 16.0);
+        assert_eq!(first.visible_roads, 1);
+        assert_eq!(first.tick, 2);
+        assert_eq!(first.checksum.len(), 16);
+        assert!(first.checksum.bytes().all(|byte| byte.is_ascii_hexdigit()));
+
+        let second = run_interest_loopback().expect("second interest loopback");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn interest_loopback_snapshot_keeps_the_default_checksum_pin() {
+        let report = run_interest_loopback().expect("interest loopback");
+        let mut replay = ServerWorld::new(SEED);
+        replay.apply(&hello());
+        replay.apply(&ClientCommand::PlaceRoad {
+            start: [0, 0],
+            end: [8, 0],
+        });
+        replay.apply(&ClientCommand::PlaceRoad {
+            start: [100, 100],
+            end: [108, 100],
+        });
+        replay.apply(&set_interest(0.0, 0.0, 16.0));
+        assert_eq!(report.checksum, replay.checksum());
+        assert_eq!(report.tick, replay.tick);
     }
 
     #[test]
@@ -1970,6 +2447,9 @@ mod tests {
                 population,
                 balance,
                 checksum,
+                interest_center: [0.0, 0.0],
+                interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
+                visible_roads: 0,
             }
         );
     }
@@ -2425,6 +2905,10 @@ mod tests {
     #[test]
     fn role_matrix_matches_d021() {
         assert_eq!(ClientRole::required_role("time_vote"), ClientRole::Viewer);
+        assert_eq!(
+            ClientRole::required_role("set_interest"),
+            ClientRole::Viewer
+        );
         assert_eq!(
             ClientRole::required_role_for(&ClientCommand::TimeVote {
                 action: crate::protocol::VoteAction::Call,
