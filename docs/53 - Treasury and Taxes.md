@@ -2,7 +2,7 @@
 title: Treasury, Loans, and Construction
 project: Townsmith
 status: active
-updated: 2026-11-22
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-3
@@ -219,3 +219,5 @@ The world-scene smoke checks:
 2. 3.9: runner matrix and committed baselines.
 3. Service funding and per-building upkeep once service buildings exist.
 4. Balance the default tax/wage rates against the 30-day and 1M-scale runners.
+
+> Construction v0 now has an opt-in `ConstructionTimeScale::CampaignDays` (default 1 game day = 60 real seconds) using the D-029 duration curve; `DeveloperSeconds` remains the default and old saves load unchanged. The bridge/HUD opt-in and live financing replacement are still open.

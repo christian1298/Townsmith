@@ -1212,7 +1212,7 @@ Room detection/stats PR (fills metadata), thumbnail PR, and the first compressed
 
 ## D-028 — Construction is billed in phase installments; unaffordable work stalls
 
-**Status:** Proposed · **Date:** 2026-11-22 · **Affects:** [[53 - Treasury and Taxes]], [[77 - Infrastructure Costs]], [[02 - Game Design]]
+**Status:** Proposed — core clock implemented behind an opt-in flag; campaign balance and live-financing run still need sign-off. · **Date:** 2026-11-22 · **Affects:** [[53 - Treasury and Taxes]], [[77 - Infrastructure Costs]], [[02 - Game Design]]
 
 ### Context
 
@@ -1270,6 +1270,7 @@ Construction currently finishes in 8–120 real seconds (`total_seconds_for`), w
 - Fast-forward speeds (1×/2×/4×) and a developer debug multiplier are allowed; they scale the clock, not the phase data.
 - The HUD shows a phase ETA in game days, not a raw second count. Existing saves store phase progress as a fraction, so loading them under either scale is safe; a later migration may store absolute game-time deadlines.
 - The `financing` projection is replaced only after a campaign-scale run exists; until then it stays explicitly labeled as a projection.
+- Implementation v0 adds `ConstructionTimeScale::{DeveloperSeconds, CampaignDays}`; the default remains developer seconds, campaign mode is opt-in, and old saves without the field load as the developer clock.
 
 ### Consequences
 
