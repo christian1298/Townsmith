@@ -18,7 +18,7 @@ pub use active::{
 };
 pub use cohort::{Cohort, Need, NEED_COUNT};
 pub use district::DistrictServices;
-pub use sim::{CohortSimulation, SimError};
+pub use sim::{CatchUpReport, CatchUpState, CohortSimulation, SimError, MAX_CATCH_UP_DAYS};
 pub use summary::{
     DistrictCohortSummary, NeedBands, NEED_CONTENT_THRESHOLD, NEED_CRITICAL_THRESHOLD,
 };

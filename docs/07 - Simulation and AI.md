@@ -286,6 +286,21 @@ These are targets. The Phase 0 spike must measure them.
 - Catch-up is deterministic and bounded: if the player is away for a year, the region advances in coarse time steps, not 31M ticks.
 - The UI shows an "away summary" when returning: population change, construction, harvests, problems.
 
+#### Cohort catch-up v0
+
+`core_sim` implements the first slice in `CohortSimulation`:
+
+```rust
+sim.catch_up(district, days)?;   // one district
+sim.catch_up_all(days)?;         // every district, convenience form
+```
+
+- **Whole-day steps.** Catch-up calls each cohort with `dt = 1.0` day, `days` times. Fractional-day steps are forbidden here: the integer employment step rounds back to the current count at small `dt`, so employment freezes (`cohort_validate` measured the divergence). A whole-day catch-up is arithmetic-identical to continuous `tick(1.0)`, so a one-year absence reproduces the continuously ticked state exactly.
+- **Cap.** `days` must be `1..=MAX_CATCH_UP_DAYS` (`3_650`, ten game years). Zero days and over-cap requests return `SimError`; there is no silent clamp and no multi-call chaining in v0. Unknown districts are rejected.
+- **Scope.** Only cohorts assigned to the district advance. Other districts and `DistrictServices` are untouched, so a dormant district cannot pull services or population from its neighbours.
+- **Report.** `CatchUpReport` carries the district, requested days, whole-day `steps` (`0` for an empty district), cohort count, population/employed/average-happiness/average-need before and after, and an FNV-1a `checksum` over the final district state. `catch_up_all` returns one report per district. `dormant -- --smoke` compares one year of catch-up against continuous daily ticking.
+- **Limits.** V0 is cohort state only. It does **not** persist or snapshot dormant state, age households, migrate citizens, drift per-district services, advance construction/buildings/wildlife/pollution, or integrate with world region activation. Those remain design work in §3 and [[68 - Metropolis Gate]] §7.8.
+
 ## 4. Citizens and households
 
 ### Households
@@ -802,7 +817,7 @@ Each placed building instance has:
 - **1M benchmark:** 1M cohorts, 250k buildings, 2k active agents; measure tick time and memory on target hardware.
 - **Scenario tests:** "500 citizens, 50 buildings, wood age; assert no starvation and budget within range."
 - **Cohort validation:** `cohort_validate` compares 5×100 cohorts against 500 one-citizen cohorts and 1-day against 1/24-day steps. Strict aggregate/individual state matches exactly; needs match to 3.6e-6. Employment is not step-invariant at fractional job rates, so dormant catch-up must use the continuous day step. See [[68 - Metropolis Gate]] §7.8.
-- **Dormant catch-up tests:** leave a region for a year; compare catch-up against continuous simulation.
+- **Dormant catch-up:** `dormant -- --smoke` leaves a 4-district, 2,000-citizen scene for 365 days. `catch_up(0, 365)` matches continuous `tick(1.0)` with **0 population/employment/happiness/need delta**, other districts unchanged, and `catch_up_all(365)` checksum-identical to continuous ticking. Report checksum `c226fb69224b75ee`, city checksum `49783c6ec071ce73`. This validates the whole-day rule and district isolation, not persistence or world-region activation. See [[68 - Metropolis Gate]] §7.8.
 - **Primary-industry tests:** forest regrowth, crop yields, wildlife population under hunting pressure.
 - **Golden saves:** load a known save, tick N times, compare key metrics with tolerances.
 - **Balance dashboards:** population, happiness, budget, pollution, traffic, housing, jobs, resources over time.
