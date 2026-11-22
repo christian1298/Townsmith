@@ -354,7 +354,7 @@ The current `bench_godot.sh` builds a debug extension, forces GL Compatibility t
 | 1M core save/load | Save **232.5 ms**, load **694.7 ms**, 182.8 MB JSON, 499 MB peak RSS at 1M/250k | 7950X, release, tmpfs | CPU + file microbenchmark | All 13 core stores plus terrain round-trip far under the 30 s target | Godot `world_save`, compression, disk durability, VRAM, or the 3060 |
 | 100 km² streaming (data) | 525 chunks visited, 225 peak resident, ~281 MB peak mesh, 12.35 s, `4dfb48204244e377` | 7950X, release | CPU data harness | Bounded near/mid/far streaming and LOD meshing at the gate area | Renderer, frame pacing, buildings, GPU, or the 120 s gate route |
 | 250k voxel proxies (setup) | 250,000 instances, 310,920 quads, 12 MB buffer, 178–184 ms setup, `aab83a92` | 7950X, headless | CPU setup harness | Instance/LOD setup and memory shape at 250k | FPS, draw calls, GPU, streaming, or simulation |
-| Server v0 loopback | Protocol 8 frames `e2f15a193149bb86`; authority 6 commands `70e25aff45867b94`; save `70e25aff45867b94`; roles `b6ab299531341226` | Local loopback | Protocol/authority harness | Framing, deterministic command results, dev roles, atomic save path | 1M or multiplayer scale, auth, interest filtering, or the gate |
+| Server v0 loopback | Protocol 8 frames `e2f15a193149bb86`; authority 6 commands `70e25aff45867b94`; save `70e25aff45867b94`; roles `b6ab299531341226` | Local loopback | Protocol/authority harness | Framing, deterministic command results, dev roles, atomic save path | 1M or multiplayer scale, auth, AOI entity streaming, or the gate |
 
 ### 7.2 What is player-facing today
 
@@ -585,9 +585,9 @@ Checksum **`a00cc463d7cb9e72`** (stable across runs; moved from `f265539bcb8804f
 - **Authoritative executor:** `ServerWorld::apply` handles hello, ping, pause/resume/step, set_tax, place_road, and disconnect without sleeping; golden `SERVER_AUTHORITY status=ok commands=6 checksum=70e25aff45867b94`.
 - **Persistence:** `ServerSave` v1 with `<path>.tmp` → fsync → rename, parent-directory sync, and one-step `.bak` recovery; `--save-load-smoke` covers round-trip and corrupt-file behavior.
 - **Roles:** dev-only viewer/mayor/admin, a deterministic token bucket (20 commands/s, burst 40), and a 256-entry audit ring; golden `SERVER_ROLES status=ok sessions=3 role_checks=4 rate_limited=1 audit=65 checksum=b6ab299531341226`.
-- **Godot client:** `scripts/smoke_mp_client.sh` speaks the same framing over `StreamPeerTCP` and prints `MP_CLIENT ... frames=12`.
+- **Godot client:** `scripts/smoke_mp_client.sh` speaks the same framing over `StreamPeerTCP` and prints `MP_CLIENT ... interest=ok roads=1 truncated=false ... frames=15`.
 
-This proves framing, deterministic command responses, dev role gating, and atomic single-world persistence. It does **not** measure 1M server ticks, network latency/loss, authentication, interest filtering, reconnect, delta snapshots, multiple sessions, or content-manifest enforcement, and it is not §8 gate evidence.
+This proves framing, deterministic command responses, dev role gating, atomic single-world persistence, and the bounded 64-road interest view. It does **not** measure 1M server ticks, network latency/loss, authentication, AOI entity streaming, reconnect, delta snapshots, multiple sessions, or content-manifest enforcement, and it is not §8 gate evidence.
 
 ## 8. Pass/fail decision rules
 
