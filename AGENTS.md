@@ -388,6 +388,10 @@ GODOT=/path/to/godot ./scripts/smoke_blueprint.sh
 "${GODOT:-godot}" --path godot res://policy_editor.tscn
 GODOT=/path/to/godot ./scripts/smoke_policy_editor.sh
 
+# Standalone read-only district overview (developer scene; not the dashboard)
+"${GODOT:-godot}" --path godot res://district_panel.tscn
+GODOT=/path/to/godot ./scripts/smoke_district_panel.sh
+
 # Standalone 3D interest-view preview (debug harness; no server, no gate)
 "${GODOT:-godot}" --path godot res://interest_preview.tscn
 "${GODOT:-godot}" --path godot res://interest_preview.tscn -- --input path/to/interest_view.json

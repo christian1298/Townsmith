@@ -144,7 +144,7 @@ It checks:
 
 ## 8. Limits
 
-- No districts, policies, taxes, services, land value, or budgets.
+- No districts, policies, taxes, services, land value, or budgets. The developer-only read-only overview in [[57 - Dashboard and Advisor]] §4.3 lists settlements and samples one fixed 256 m district around each centre; it adds no district simulation, editing, or save fields.
 - No hard permission checks; `owner` is descriptive.
 - Overlapping settlements are allowed; nearest-centre ownership is provisional.
 - No settlement merge, rename, or owner transfer.

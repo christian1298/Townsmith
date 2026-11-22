@@ -34,7 +34,7 @@ In:
 
 Out:
 
-- player-facing standalone district or per-settlement panels (the dashboard has one city-level District section with camera/selection focus and one read-only Policies section; the developer-only policy editor in §4.2 is a separate scene, not a dashboard panel);
+- player-facing standalone district or per-settlement panels (the dashboard has one city-level District section with camera/selection focus and one read-only Policies section; the developer-only policy editor in §4.2 and read-only district overview in §4.3 are separate scenes, not dashboard panels);
 - clickable advice that selects or centres a building;
 - acknowledged, dismissed, or persisted notifications;
 - charts, history, trend lines, or time-series;
@@ -221,6 +221,52 @@ POLICY_EDITOR_SMOKE OK status=ok policies=0 checksum=8cc529a07d1c924f
 
 The final checksum is the empty-registry checksum after the walkthrough (seed plus the next id), not the world-save checksum. The script requires the exact `POLICY_EDITOR status=ok policies=0 checksum=[0-9a-f]{16}` contract.
 
+### 4.3 Standalone district overview (developer scene)
+
+`godot/district_panel.tscn` (with `godot/district_panel.gd`) is a developer-only, **read-only** `Control` scene over the settlement and district data. It owns one `TownsmithCore` instance and only reads `settlements`, `district_summary` (fixed 256 m radius around each settlement centre), and `district_policies_state`. It runs outside the world scene and the dashboard and is not reachable from either. It cannot found, edit, or remove a settlement, create/update/remove a policy, save, or load; `--fixture` and `--smoke` populate the in-memory bridge through `settlement_found`/`district_policy_create` before the page settles into display, and the page's own controls never mutate the bridge.
+
+- **Settlement list.** One row per settlement in ascending id from `settlements()`, showing id, name, owner, centre, and radius. Selecting a row (or `Previous`/`Next` in id order, wrapping) loads its overview. The panel defaults to the lowest id and never creates a store just by reading: an untouched session reports `open:false`, zero rows, and the empty text.
+- **Overview.** The 256 m `district_summary` around the settlement centre (`DISTRICT_RADIUS_M`) shows population, housing capacity/vacancies/households, jobs/employed/unemployed, happiness, food/water/rest, average commute, and completed buildings/construction sites. It is derived state, never applied.
+- **Containing policy.** It scans `district_policies_state` for the smallest-id policy whose inclusive circle contains the settlement centre (the bridge has no containment call), matching `DistrictPolicyStore::policy_at`. Settlement 2 in the fixture sits outside both fixture circles and reports `No containing policy`.
+- **States.** A failed read is displayed in the footer and summary with the bridge code instead of a `push_error` or a retry. A foreign seed is the same read-only `seed_mismatch` path for both the district and the policy state, and the next refresh recovers. Empty and unavailable states never abort the scene.
+- **Digest.** The toolbar prints `Seed … · N settlements · selected … · policy … · checksum …`. The 8-hex panel digest is presentation-only FNV-1a over the seed, settlement checksum, selected id, district checksum, and containing policy id; it never enters saves, networking, or simulation.
+- **Numbers and strings.** Display numbers use `WorldI18n.format_int`/`format_float`; developer labels and console text stay English. Settlement names, owners, bridge error codes, and policy ids stay verbatim.
+
+Run:
+
+```bash
+"${GODOT:-godot}" --path godot res://district_panel.tscn
+"${GODOT:-godot}" --path godot res://district_panel.tscn -- --fixture
+```
+
+Headless smoke:
+
+```bash
+GODOT=/path/to/godot ./scripts/smoke_district_panel.sh
+```
+
+The script builds the debug extension, imports once with a single retry, runs `--smoke` twice, requires the same `DISTRICT_PANEL*` lines and panel checksum from both runs, then runs `--empty` and requires its marker. The walkthrough:
+
+1. A fresh session starts with the settlement layer closed, zero rows, no selection, no district query, and the empty label visible.
+2. A blank settlement name returns `empty_name` and leaves no store behind.
+3. It founds `Smoke Alpha` (id 1, radius 512 m at 0,0) and `Smoke Beta` (id 2, radius 256 m at 1,024,0), then creates `Smoke Core` (300 m) and `Smoke Outer` (400 m) around the origin, both containing settlement 1's centre.
+4. Selecting id 1 returns an `ok` 256 m district with population 0, a 16-hex district checksum, and containing policy id 1 (smallest id, not id 2).
+5. Selecting id 2 still returns an `ok` district but no containing policy, because it is 1,024 m from both circles.
+6. `Next`/`Previous` step and wrap in id order.
+7. A foreign seed makes both the district and the policy state unavailable (`seed_mismatch`) without a `push_error`; restoring the seed and refreshing recovers id 1's district and policy.
+8. Repeated refreshes keep the panel digest and both bridge checksums stable.
+
+Markers (seed 2026, current deterministic walkthrough):
+
+```text
+DISTRICT_PANEL_STATE seed=2026 settlements=2 policies=2 selected=1 centre=(0,0) district=8df352d4f9fa3add policy=1 reject=empty_name unavailable=seed_mismatch
+DISTRICT_PANEL status=ok settlements=2 selected=1 population=0 policy=1 checksum=fe2c5d32
+DISTRICT_PANEL status=ok settlements=0 selected=none population=0 policy=none checksum=c85a90eb
+DISTRICT_PANEL_SMOKE OK status=ok settlements=2 selected=1 population=0 policy=1 checksum=fe2c5d32
+```
+
+The panel digest is not the settlement, district, or policy checksum; the district checksum is the derived `district_summary` value and the empty marker is the zero-data digest. The script requires `settlements=2 selected=1 population=0 policy=1` for `--smoke` and `settlements=0 selected=none population=0 policy=none` for `--empty`, each with an 8-hex checksum.
+
 ## 5. Dashboard
 
 `F1` toggles a right-side panel. It shows:
@@ -304,6 +350,16 @@ POLICY_EDITOR status=ok policies=0 checksum=8cc529a07d1c924f
 POLICY_EDITOR_SMOKE OK status=ok policies=0 checksum=8cc529a07d1c924f
 ```
 
+`smoke_district_panel.sh` is a separate smoke for the standalone §4.3 scene; it does not run the world scene or the policy editor. It builds the debug extension, imports once with a single retry, runs `--smoke` twice, requires every `DISTRICT_PANEL*` line and the panel checksum to match between the two runs, then runs `--empty` and requires the empty-session marker. It checks the closed settlement layer, the blank-name rejection, the two-settlement/two-policy fixture, the 256 m district summary, the smallest-id containing policy, selection stepping and wrapping, the read-only `seed_mismatch` unavailable state and recovery, and stable repeated refreshes. Markers:
+
+```text
+DISTRICT_PANEL status=ok settlements=2 selected=1 population=0 policy=1 checksum=fe2c5d32
+DISTRICT_PANEL status=ok settlements=0 selected=none population=0 policy=none checksum=c85a90eb
+DISTRICT_PANEL_SMOKE OK status=ok settlements=2 selected=1 population=0 policy=1 checksum=fe2c5d32
+```
+
+The script requires `settlements=2 selected=1 population=0 policy=1` for `--smoke` and `settlements=0 selected=none population=0 policy=none` for `--empty`, each with an 8-hex checksum.
+
 ## 7. Tests
 
 - `core_city::advisor`: 9 tests — healthy, service shortages, missing stores, budget/debt, bankruptcy ordering, vacancies/unemployment, disconnected roads/long commutes, empty city, cap/determinism.
@@ -317,6 +373,7 @@ POLICY_EDITOR_SMOKE OK status=ok policies=0 checksum=8cc529a07d1c924f
 - Advisor advice is city-wide; the dashboard District section is read-only and camera- or selection-centred (256 m), not a selectable settlement/district panel. It follows the selected building but does not persist the focus choice or follow a moving citizen. No building drill-down from advice.
 - The heatmap is camera/selection-centred (`_materialization_center`, 512 m), read-only, and does not aggregate cohorts, settlements, or off-screen districts. It renders Population, Jobs, or Happiness (one at a time) and only nonzero cells; food, water, rest, employment, and housing are not heatmap modes. Headless Godot returns default MultiMesh transform/colour readback, so the smoke validates the deterministic payload-derived value/peak and colour helper instead of reading instance colours. The F7 overlay, metric line, status line, legend, and unavailable/empty text are localized and pooled through one `MultiMesh`.
 - District policies remain a developer-only data surface. The standalone scene in §4.2 can create, update, remove, and list them, and the bridge world save persists the registry as an optional `policies` object; the scene itself does not save or load, and `New session` discards its in-memory registry. It is a separate scene from the world and the dashboard, and the dashboard does not show or edit policies. No simulation, household, advisor, treasury, or economy code reads a policy, so saving or loading one applies no tax, funding, construction, or allowlist effect. There is no policy overlay, selection, priority rule, or effect on tax, funding, construction, or blueprint placement.
+- The §4.3 district overview is a read-only developer scene, not the dashboard. It lists settlements and samples one fixed 256 m district around each settlement centre; it cannot found, edit, or remove a settlement or policy, does not save or load, and adds no save field, checksum, network message, or simulation effect. Its fixture data exists only in memory, and its panel digest is presentation-only. There is no map view, district selection on the world, per-settlement budget, or drill-down.
 - Thresholds are fixed; no difficulty, policy, or player preference.
 - Advice is not persisted, acknowledged, or suppressed.
 - No click-to-select, camera focus, or one-click policy action.
@@ -333,3 +390,4 @@ POLICY_EDITOR_SMOKE OK status=ok policies=0 checksum=8cc529a07d1c924f
 3. Add persisted acknowledgement and a notification history.
 4. Finish number formatting, remaining content names, and error-code display.
 5. Add selectable district/settlement panels with per-settlement budgets and policies; the current District section now has camera and selection focus but is not a settlement panel.
+6. Optionally integrate the §4.3 read-only settlement overview into the dashboard once policies have simulation effects; the standalone scene remains the developer harness and is not the dashboard.
