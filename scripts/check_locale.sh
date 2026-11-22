@@ -3,7 +3,7 @@
 #
 # Parses the runtime `TABLES` const in `godot/editor_i18n.gd` and
 # `godot/world_i18n.gd`, plus the `DISPLAY` const in
-# `godot/content_i18n.gd`, without Godot, Python, or any third-party tool and
+# `godot/content_i18n.gd`, without Godot or any third-party tool, and
 # asserts:
 #   1. EN and DE expose the same key set (no duplicates either).
 #   2. Each locale meets its file's key floor (ratchet floor).
@@ -446,6 +446,7 @@ case "${1:-}" in
 		;;
 	"")
 		check_all
+		python3 "$ROOT/scripts/check_pseudo_locale.py"
 		;;
 	*)
 		check_file "$1"

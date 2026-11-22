@@ -285,16 +285,25 @@ Acceptance checks:
 
 ### Static gate
 
-`scripts/check_locale.sh` parses the `TABLES` const in `godot/editor_i18n.gd` and `godot/world_i18n.gd`, plus the `DISPLAY` const in `godot/content_i18n.gd`, and checks key parity, per-file key floors, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. The floors ratchet independently: editor `111`, world `143` (currently 210 keys), content `34`. Default mode prints one line per table plus a summary:
+`scripts/check_locale.sh` parses the `TABLES` const in `godot/editor_i18n.gd` and `godot/world_i18n.gd`, plus the `DISPLAY` const in `godot/content_i18n.gd`, and checks key parity, per-file key floors, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. The floors ratchet independently: editor `111`, world `143` (currently 211 keys), content `34`. Default mode prints one line per table plus a summary:
 
 ```text
 LOCALE_CHECK file=godot/editor_i18n.gd keys=111 min=111 status=ok
-LOCALE_CHECK file=godot/world_i18n.gd keys=143 min=143 status=ok
+LOCALE_CHECK file=godot/world_i18n.gd keys=211 min=143 status=ok
 LOCALE_CHECK file=godot/content_i18n.gd keys=34 min=34 status=ok
 LOCALE_CHECK editor=111 world=211 content=34 status=ok
 ```
 
 Single-file mode (`scripts/check_locale.sh [FILE]`) keeps the original `LOCALE_CHECK keys=N status=ok` marker and derives the floor from the file name (`world_i18n.gd` gets 143, `content_i18n.gd` gets 34, anything else 96). `--self-test` covers twelve cases: the six editor cases (valid, missing DE key, extra DE key, empty value, placeholder mismatch, too few keys), a world-style fixture pass, a too-few world table, a world EN/DE placeholder mismatch, and the same three checks for the `DISPLAY` content table. The gate runs in `scripts/check.sh` and the Rust CI job before the Godot locale smoke.
+
+A pseudo-localization gate follows the table check in default mode:
+
+```bash
+./scripts/check_pseudo_locale.py
+PSEUDO_LOCALE editor=111 world=211 content=34 long=11 status=ok
+```
+
+It accents vowels, keeps `{name}`/`{0}` placeholders byte-for-byte, and expands text to 130% of the EN length with a `«…»` marker. It checks EN/DE parity both ways, duplicate/empty keys, placeholder parity, and a 120-character length limit with an explicit 11-key allowlist for long explanatory strings. This catches structural/layout risk before German QA; it is not a translation. `--self-test` covers 17 generator/check cases without writing repository files.
 
 `scripts/smoke_locale.sh` parses the last `LOCALE_SMOKE` line and requires:
 
