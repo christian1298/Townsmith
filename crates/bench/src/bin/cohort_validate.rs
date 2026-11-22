@@ -12,11 +12,12 @@
 //!    either 0 or 1 employed. That structural difference is reported in the
 //!    `structural` block, not hidden behind a loose gate on the strict check.
 //! 2. **Coarse vs fine.** The mixed profile (`jobs = 0.9`) runs for 365 days
-//!    with 1-day steps and with 1/24-day steps. The exponential need and
-//!    happiness filters converge to the same fixed point at both step sizes;
-//!    integer employment does not, because a 1/24-day employment step rounds
-//!    back to the current value. The measured divergence is reported, along
-//!    with the documented bound, as evidence for dormant catch-up.
+//!    with 1-day steps and with 1/24-day steps. The exponential need,
+//!    happiness, and employment filters converge to the same fixed point at
+//!    both step sizes; the only residual is f32 integration order in the
+//!    needs. The fractional employment carry (F-023) removes the old
+//!    round-back freeze, so both step sizes reach the same integer employment.
+//!    The measured divergence is reported, along with the documented bound.
 //!
 //! The output is one JSON object with exact deltas, a deterministic FNV
 //! checksum over every run, and a `status`. `--smoke` runs the default scene
@@ -41,9 +42,16 @@ const CITIZENS_PER_COHORT: u32 = 100;
 const FINE_STEPS_PER_DAY: usize = 24;
 /// Gate for the strict aggregate-vs-individual comparison.
 const STRICT_TOLERANCE: f64 = 1e-4;
-/// Bound on the employment-rounding divergence (8% of the population at
-/// `jobs = 0.9`). This is a regression bound, not a correctness bound.
-const EMPLOYMENT_BOUND: f64 = 0.10;
+/// Gate for coarse-vs-fine step agreement. The documented 365-day scene
+/// measures ~6e-6; shorter test scenes are still inside the exponential
+/// transient, where the f32 Euler-order residual is larger, so the gate is
+/// 1e-3. The reported `step_invariant` flag applies `STRICT_TOLERANCE`.
+const DT_BOUND: f64 = 1e-3;
+/// Bound on the count=1 structural divergence. `round(1 * 0.9) = 1` keeps
+/// every one-citizen cohort fully employed while 100-citizen cohorts settle at
+/// 90%, so 10% is the expected value by construction; the regression bound
+/// leaves a float margin around it.
+const STRUCTURAL_BOUND: f64 = 0.11;
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -249,9 +257,9 @@ fn simulate(config: Config) -> Outcome {
         && strict_deltas.population == 0
         && strict_aggregate.population == config.population()
         && per_cohort_max_delta <= STRICT_TOLERANCE
-        && dt_deltas.max_delta() <= EMPLOYMENT_BOUND
+        && dt_deltas.max_delta() <= DT_BOUND
         && dt_deltas.population == 0
-        && structural_deltas.max_delta() <= EMPLOYMENT_BOUND
+        && structural_deltas.max_delta() <= STRUCTURAL_BOUND
         && structural_deltas.population == 0;
 
     Outcome {
@@ -384,19 +392,19 @@ fn report(outcome: &Outcome) -> serde_json::Value {
             "fine": metrics_json(&outcome.fine),
             "deltas": deltas_json(&outcome.dt_deltas),
             "max_delta": outcome.dt_deltas.max_delta(),
-            "tolerance": EMPLOYMENT_BOUND,
+            "tolerance": DT_BOUND,
             "step_invariant": outcome.dt_deltas.max_delta() <= STRICT_TOLERANCE,
-            "within_tolerance": outcome.dt_deltas.max_delta() <= EMPLOYMENT_BOUND,
-            "divergence_cause": "integer employment: a 1/24-day step rounds back to the current employed count",
+            "within_tolerance": outcome.dt_deltas.max_delta() <= DT_BOUND,
+            "divergence_cause": "f32 integration order in the needs only; the fractional employment carry converges at both step sizes",
         },
         "structural": {
-            "note": "500 x 1 with jobs=0.9: round(1 * 0.9) = 1, so every one-citizen cohort stays fully employed while the 100-citizen cohorts converge toward 90 jobs. Needs are still identical.",
+            "note": "500 x 1 with jobs=0.9: round(1 * 0.9) = 1, so every one-citizen cohort stays fully employed while the 100-citizen cohorts settle at 90 employed. Needs are still identical.",
             "profile": "mixed: jobs=0.9, 1-day steps",
             "aggregate": metrics_json(&outcome.coarse),
             "individual": metrics_json(&outcome.structural_individual),
             "deltas": deltas_json(&outcome.structural_deltas),
             "max_delta": outcome.structural_deltas.max_delta(),
-            "tolerance": EMPLOYMENT_BOUND,
+            "tolerance": STRUCTURAL_BOUND,
         },
         "checksum": format!("{:016x}", outcome.checksum),
         "checksum_scope": "seed + days + every cohort of all five final city states",
@@ -499,11 +507,8 @@ fn same_deltas(left: &Deltas, right: &Deltas) -> bool {
 mod tests {
     use super::*;
 
-    fn small() -> Config {
-        Config {
-            days: 30,
-            ..Config::default()
-        }
+    fn default_scene() -> Config {
+        Config::default()
     }
 
     #[test]
@@ -580,7 +585,7 @@ mod tests {
 
     #[test]
     fn strict_comparison_matches_within_tolerance() {
-        let outcome = simulate(small());
+        let outcome = simulate(default_scene());
         assert_eq!(
             outcome.strict_aggregate.population,
             outcome.strict_individual.population
@@ -600,29 +605,28 @@ mod tests {
     }
 
     #[test]
-    fn coarse_and_fine_diverge_only_through_employment() {
-        let outcome = simulate(small());
+    fn coarse_and_fine_steps_agree() {
+        let outcome = simulate(default_scene());
         assert_eq!(outcome.dt_deltas.population, 0);
-        assert!(outcome.dt_deltas.employed_fraction > 0.0);
-        // Needs otherwise converge to the same fixed point; allow f32
-        // integration/reduction noise.
-        assert!(outcome.dt_deltas.average_need < 1e-4);
-        assert!(outcome.dt_deltas.happiness < 0.01);
-        assert!(outcome.dt_deltas.employed > 0);
-        assert!(!report(&outcome)["dt"]["step_invariant"]
-            .as_bool()
-            .expect("bool"));
-        assert!(outcome.dt_deltas.max_delta() <= EMPLOYMENT_BOUND);
+        // The fractional employment carry converges at both step sizes, so the
+        // old round-back freeze is gone.
+        assert_eq!(outcome.dt_deltas.employed, 0);
+        assert_eq!(outcome.coarse.employed, outcome.fine.employed);
+        // The only residual is f32 integration/reduction noise in the needs.
+        assert!(outcome.dt_deltas.average_need < DT_BOUND);
+        assert!(outcome.dt_deltas.happiness < DT_BOUND);
+        assert!(outcome.dt_deltas.max_delta() <= DT_BOUND);
     }
 
     #[test]
     fn structural_delta_is_the_rounding_of_one_citizen_employment() {
-        let outcome = simulate(small());
+        let outcome = simulate(default_scene());
         assert_eq!(outcome.structural_deltas.population, 0);
         assert!(outcome.structural_deltas.average_need < 1e-5);
         assert_eq!(outcome.structural_individual.employed, 500);
-        assert!(outcome.structural_deltas.employed > 0);
-        assert!(outcome.structural_deltas.max_delta() <= EMPLOYMENT_BOUND);
+        assert_eq!(outcome.coarse.employed, 450);
+        assert_eq!(outcome.structural_deltas.employed, 50);
+        assert!(outcome.structural_deltas.max_delta() <= STRUCTURAL_BOUND);
     }
 
     #[test]
@@ -642,14 +646,20 @@ mod tests {
             &second.structural_deltas
         ));
         assert!(first.ok, "default scene must pass its gates");
+        let report = report(&first);
+        assert!(
+            report["dt"]["step_invariant"].as_bool().expect("bool"),
+            "the 365-day scene must be step-invariant: {}",
+            report["dt"]["max_delta"]
+        );
     }
 
     #[test]
     fn report_carries_the_expected_keys() {
-        let outcome = simulate(small());
+        let outcome = simulate(default_scene());
         let report = report(&outcome);
         assert_eq!(report["scene"], "cohort_validate");
-        assert_eq!(report["days"], 30);
+        assert_eq!(report["days"], DEFAULT_DAYS);
         assert_eq!(report["status"], "ok");
         assert_eq!(report["population"], 500);
         assert!(report["aggregate"]["happiness"].is_number());

@@ -163,14 +163,11 @@ mod tests {
         income: f32,
         employed: u32,
     ) -> Cohort {
-        Cohort {
-            district,
-            count,
-            employed,
-            needs: [need; crate::cohort::NEED_COUNT],
-            happiness,
-            income,
-        }
+        let mut cohort = Cohort::new(district, count, need);
+        cohort.employed = employed;
+        cohort.happiness = happiness;
+        cohort.income = income;
+        cohort
     }
 
     #[test]
