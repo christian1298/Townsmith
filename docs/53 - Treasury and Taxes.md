@@ -94,7 +94,7 @@ The acceptance house costs **38,028.80**; its first installment is **1,140.86**,
 
 A removed building does not refund construction spending. Clearing all placements keeps the treasury and debt, because the city's money is independent of its buildings.
 
-Utility and civic sites also charge their catalog construction cost when added through `utility_add_site`/`service_add_site`. The charge happens before the site is committed; an unaffordable or bankrupt treasury returns `insufficient_funds` and leaves no site. With no open treasury the site is added with `charged=false` for legacy/dev use. Re-adding a site charges again; removal does not refund.
+Utility and civic sites also charge their catalog construction cost when added through `utility_add_site`/`service_add_site`. With no open treasury, the bridge opens a seed treasury at the 100,000 starting balance (the same policy as `world_place_blueprint`), checks affordability, and charges the initial installment; the call reports `charged=true` with the paid amount in `cost_paid`. An unaffordable or bankrupt treasury returns `insufficient_funds` and leaves no site. A failed add or charge rolls back a treasury opened by that call, so a rejected infrastructure add leaves no treasury and cannot pin the world to that seed; a pre-existing treasury is never removed. Re-adding a site charges the amount still due; removal does not refund.
 
 ## 5. Loans
 
