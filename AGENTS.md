@@ -286,6 +286,9 @@ cargo run --release -p townsmith-bench --bin placements -- --smoke
 # 150,000-resident Modern-age balance probe
 cargo run --release -p townsmith-bench --bin modern -- --smoke
 
+# 1M-resident operating-ledger balance probe (no households/agents/render)
+cargo run --release -p townsmith-bench --bin metropolis_balance -- --smoke
+
 # 2,000 active-agent tick benchmark (sparse + dense)
 cargo run --release -p townsmith-bench --bin agents
 

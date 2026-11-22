@@ -2,7 +2,7 @@
 title: Modern Balance
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-23
 tags:
   - townsmith
   - phase-4
@@ -82,6 +82,38 @@ The shipping cap, not tax revenue at 20/4, is the binding constraint: at no poin
 | Modern | bankrupt | 6 / 18,750 | 494,521 (day 10) | 504,764 | 13,782 | 48 | 65 |
 
 Live checksum `acb418b780e0b076`; the default projection checksum remains `5b3a8777b0fe999e`. D-029 is still Proposed; this is evidence, not a balance pass.
+
+### 2.2 Metropolis 1M operating ledger
+
+```bash
+cargo run --release -p townsmith-bench --bin metropolis_balance
+cargo run --release -p townsmith-bench --bin metropolis_balance -- --smoke
+```
+
+The 1M complement to the 20k and 150k probes. It is **ledger-only**: population, employment, and completed buildings are fixed constants, and only `Economy::tick_with_infrastructure_costs(86_400.0, …)` runs. There is no move-in, job assignment, construction, service-quality, congestion, traffic, or render step.
+
+- 250,000 buildings = **200,000 homes × 5 residents** = **1,000,000 population** + **50,000 workplaces × 8 jobs** = **400,000 jobs**. Full occupancy and employment are assumed.
+- 1,000 utility sites (500 water, 500 power; 1 per 1,000 residents) and 400 civic sites (100 each school/clinic/fire/police; 1 per 2,500 residents) at the Advanced tier. Capacities and radii are scaled to the fixture and treated as abstract; only the real per-kind/per-tier upkeep enters the ledger.
+- Fixed operating costs: wages **8,000,000/day** (400,000 × 20), building upkeep **1,250,000/day** (250,000 × 5), infrastructure **4,900/day** (utility 2,500 + service 2,400). No loans and no construction cost.
+- 30 daily ticks per policy at three fixed rates: low **8/4**, default **20/4**, high **30/6** (resident/job per day).
+
+| Policy | Income/day | Expenses/day | Net/day | Balance day 30 | Net/resident/day | Net/job/day | Bankrupt |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Low 8/4 | 9,600,000 | 9,254,900 | **+345,100** | **10,453,000** | 0.3451 | 0.86275 | no |
+| Default 20/4 | 21,600,000 | 9,254,900 | **+12,345,100** | **370,453,000** | 12.3451 | 30.86275 | no |
+| High 30/6 | 32,400,000 | 9,254,900 | **+23,145,100** | **694,453,000** | 23.1451 | 57.86275 | no |
+
+Every policy is solvent from day 0; the minimum balance is the 100,000 starting treasury and there is no bankruptcy day. The low policy's margin is thin (3.7% of operating expenses), while default and high are far into surplus at this employment ratio.
+
+Checksums: report `bebbaa2a56133b92`, utilities `104de94c047e791f`, services `9ab67e47d40f26dd`; economy per policy `82c87ac8bd055b4f`, `bec79f8a1afdf8c4`, `624174d5fff50e56`.
+
+> [!warning] Fixture arithmetic differs from the first 1M brief
+> The brief's 250,000 buildings at 5/6 homes × 16 capacity and 1/6 workplaces × 12 jobs would be **3,333,333 residents** and **500,000 jobs** (before rounding). It cannot also be 1,000,000/400,000. The probe uses the exact 1M/400k distribution above and records the deviation in the JSON `fixture_note`.
+
+> [!note] What this does and does not show
+> At 400,000 jobs for 1,000,000 residents, the wage bill is 8/resident/day instead of the 20/resident/day of the 1:1-job Industrial and Modern fixtures. That ratio, not the tax rate alone, makes the 1M ledger profitable even at 8/4. This is an operating-rate accounting probe, not evidence that a real 1M city with unemployment, service shortfalls, construction cost, or traffic is solvent. It is not the [[68 - Metropolis Gate]] scene and does not close any gate gap.
+
+Limits: static occupancy and employment; no construction or phased build cost; flat global tax rates; no loans or debt service; no service-quality or utility-shortage feedback; one abstract site layout with scaled capacities; daily ledger ticks; no cohorts, households, agents, traffic, or render. The probe is a deterministic regression fixture, not a tuning proof.
 
 ## 3. Problems found
 
