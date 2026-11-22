@@ -1,18 +1,23 @@
-//! Road-graph build, pair-query, and flow-field reuse microbenchmark.
+//! Road-graph build, pair-query, flow-field reuse, and congestion microbenchmark.
 #![recursion_limit = "256"]
 //!
 //! Builds a deterministic square road grid, then measures graph construction,
 //! a fixed batch of point-to-point commute queries, one flow field with batched
-//! queries, and repeated-goal flow-field reuse through `FlowFieldCache`. It is
-//! derived state: no save file, renderer, or game loop is involved.
+//! queries, repeated-goal flow-field reuse through `FlowFieldCache`, and an
+//! aggregated commute-flow congestion report. It is derived state: no save
+//! file, renderer, or game loop is involved.
 
 use std::time::Instant;
 
-use core_city::{FlowField, FlowFieldCache, RoadGraph, RoadSegment};
+use core_city::{
+    CommuteFlow, FlowField, FlowFieldCache, RoadGraph, RoadSegment, MAX_CONGESTION_FLOWS,
+};
 
 const DEFAULT_GRID: usize = 64;
 const DEFAULT_QUERIES: usize = 1_000;
 const DEFAULT_GOALS: usize = 64;
+const DEFAULT_CONGESTION_FLOWS: usize = 1_000;
+const CONGESTION_HUBS: usize = 16;
 const CACHE_PASSES: usize = 4;
 const SPACING_M: i32 = 16;
 
@@ -293,6 +298,51 @@ fn main() {
     assert_eq!(edit_cache.hits(), 1);
     assert_eq!(edit_cache.rebuilds(), 1);
 
+    // Congestion v0: aggregate 1,000 synthetic commute flows into undirected
+    // edge loads. Origins are deterministic random nodes; destinations come
+    // from a small hub set so routes share corridors. The report is diagnostic
+    // and does not feed assignment or stored travel time.
+    let congestion_flows = commute_flows(DEFAULT_CONGESTION_FLOWS, extent);
+    let congestion_start = Instant::now();
+    let congestion = graph
+        .congestion(&congestion_flows, MAX_CONGESTION_FLOWS)
+        .expect("congestion report");
+    let congestion_ms = congestion_start.elapsed().as_secs_f64() * 1_000.0;
+    let congestion_repeat = graph
+        .congestion(&congestion_flows, MAX_CONGESTION_FLOWS)
+        .expect("repeat congestion report");
+    assert_eq!(
+        congestion.checksum(),
+        congestion_repeat.checksum(),
+        "congestion report is not deterministic"
+    );
+    assert_eq!(congestion.top_edges, congestion_repeat.top_edges);
+    assert_eq!(congestion.routed_flows, congestion_flows.len());
+
+    let peak_edge_json = congestion.peak_edge.map(|edge| {
+        serde_json::json!({
+            "from": edge.from,
+            "to": edge.to,
+            "length_m": edge.length_m,
+            "load": edge.load,
+            "capacity": edge.capacity,
+            "factor": edge.factor,
+        })
+    });
+    let top_edges_json: Vec<serde_json::Value> = congestion
+        .top_edges
+        .iter()
+        .map(|edge| {
+            serde_json::json!({
+                "from": edge.from,
+                "to": edge.to,
+                "length_m": edge.length_m,
+                "load": edge.load,
+                "factor": edge.factor,
+            })
+        })
+        .collect();
+
     let result = serde_json::json!({
         "scene": "traffic",
         "grid": grid,
@@ -354,6 +404,22 @@ fn main() {
         "append_rebuild_checksum": format!("{:016x}", rebuilt.checksum()),
         "append_single_ms": append_single_ms,
         "append_single_speedup": if append_single_ms > 0.0 { append_rebuild_ms / append_single_ms } else { 0.0 },
+        "congestion": {
+            "flows": congestion_flows.len(),
+            "routed_flows": congestion.routed_flows,
+            "skipped_flows": congestion.skipped_flows,
+            "trips": congestion.total_trips,
+            "route_ms": congestion_ms,
+            "edges": congestion.edges,
+            "overloaded_edges": congestion.overloaded_edges,
+            "average_factor": congestion.average_factor,
+            "peak_factor": congestion.peak_factor,
+            "peak_load": congestion.peak_load,
+            "peak_edge": peak_edge_json,
+            "total_route_length_m": congestion.total_route_length_m,
+            "top_edges": top_edges_json,
+            "checksum": format!("{:016x}", congestion.checksum()),
+        },
         "checksum": format!("{:016x}", graph.checksum()),
     });
     println!(
@@ -396,6 +462,20 @@ fn goal_points(count: usize, extent: i32) -> Vec<[f32; 2]> {
                 ((index * 131 + 17) % span) as f32,
                 ((index * 197 + 43) % span) as f32,
             ]
+        })
+        .collect()
+}
+
+/// Deterministic commute flows: scattered origins, a small hub set as
+/// destinations, and 1–3 trips per flow so corridors overload.
+fn commute_flows(count: usize, extent: i32) -> Vec<CommuteFlow> {
+    let hubs = goal_points(CONGESTION_HUBS, extent);
+    let mut seed = 0x00C0_FFEE_1234_5678_u64;
+    (0..count)
+        .map(|index| CommuteFlow {
+            from: [next_coord(&mut seed, extent), next_coord(&mut seed, extent)],
+            to: hubs[index % hubs.len()],
+            trips: 1 + (index % 3) as u32,
         })
         .collect()
 }
