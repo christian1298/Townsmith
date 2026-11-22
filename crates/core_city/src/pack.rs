@@ -3,8 +3,11 @@
 //! A [`ContentPack`] binds one validated [`ModManifest`] to the material, room,
 //! and prop documents it contributes. Construction is deliberately explicit:
 //! [`ContentPack::from_json`] takes the four document bodies as strings, so the
-//! same code path will serve bundled fixtures, tests, an editor, or a future
-//! package loader without any file I/O here.
+//! same code path serves bundled fixtures, tests, an editor, and
+//! [`ContentPack::from_dir`]. Directory loading only resolves the four files
+//! named by the manifest; all content, namespace, and collision checks stay in
+//! [`ContentPack::from_json`], so a pack loaded from disk and the same pack
+//! loaded from memory have the same checksum.
 //!
 //! # Namespace rule
 //!
@@ -22,10 +25,24 @@
 //! [`PackError::CollisionWithBase`]. The merged registry is validated before it
 //! is returned, and its own checksum is deterministic.
 //!
+//! # Directory loading
+//!
+//! [`ContentPack::from_dir`] reads one mod directory. The manifest is
+//! `mod.json`; a single `*.mod.json` in the same directory is also accepted so
+//! repositories can keep a named manifest. The three content paths are
+//! resolved relative to the mod directory (for example
+//! `content/materials.json`). Paths must stay under that directory after
+//! canonicalization, so absolute paths, `..`, and symlinks that point outside
+//! the pack are rejected. Each file must be UTF-8 and at most
+//! [`MAX_PACK_FILE_BYTES`]; the manifest plus three documents are capped at
+//! [`MAX_PACK_BYTES`].
+//!
 //! # What v0 does not do
 //!
-//! - It does not read the filesystem, discover packages, download mods, unpack
-//!   ZIP archives, or execute scripts.
+//! - It does not discover mods, read a mods root, download packages, unpack ZIP
+//!   archives, or execute scripts. [`ContentPack::from_dir`] takes exactly one
+//!   directory supplied by the caller.
+//! - It does not watch the directory or hot reload a pack.
 //! - It does not resolve dependency versions, load order, overrides, or save
 //!   references. A pack is validated in isolation; `dependencies` are not
 //!   resolved here.
@@ -94,15 +111,37 @@
 
 use std::error::Error;
 use std::fmt;
+use std::fs::{self, File};
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
+use std::string::FromUtf8Error;
 
 use crate::manifest::{ManifestError, ModManifest, MOD_FORMAT_VERSION};
 use crate::registry::{ContentRegistry, Fnv1a, RegistryError};
 
+/// Largest single file accepted by [`ContentPack::from_dir`], in bytes.
+///
+/// Manifests are normally a few kilobytes; the limit leaves room for generated
+/// documents while keeping one broken pack from exhausting memory.
+pub const MAX_PACK_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Largest combined size of a manifest and its three documents, in bytes.
+///
+/// Four documents at [`MAX_PACK_FILE_BYTES`] reach this cap exactly.
+pub const MAX_PACK_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Canonical manifest file name inside a mod directory.
+pub const MANIFEST_FILE_NAME: &str = "mod.json";
+
+/// Repository-style manifest suffix accepted when `mod.json` is absent.
+const NAMED_MANIFEST_SUFFIX: &str = ".mod.json";
+
 /// A validated, in-memory mod content pack.
 ///
-/// Build one with [`Self::from_json`]. The raw document strings are retained
-/// for future packaging and save manifests; they are not re-parsed. Fields are
-/// private so a pack cannot be mutated into an invalid state.
+/// Build one with [`Self::from_json`] or [`Self::from_dir`]. The raw document
+/// strings are retained for future packaging and save manifests; they are not
+/// re-parsed. Fields are private so a pack cannot be mutated into an invalid
+/// state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContentPack {
     manifest: ModManifest,
@@ -174,6 +213,85 @@ impl ContentPack {
             registry,
             checksum,
         })
+    }
+
+    /// Load and validate one mod directory.
+    ///
+    /// The manifest is `<dir>/mod.json`, or exactly one `*.mod.json` in the
+    /// same directory when `mod.json` is absent. The three content paths from
+    /// the manifest are resolved relative to `dir`, then handed to
+    /// [`Self::from_json`] unchanged, so namespace, duplicate, and base
+    /// collision rules are identical to an in-memory load.
+    ///
+    /// # Security rules
+    ///
+    /// - Every path must be relative and may only contain normal components.
+    ///   Absolute paths, `.`, `..`, and Windows prefix or `\` separators are
+    ///   rejected before touching the filesystem.
+    /// - The resolved file must stay under the canonical mod directory after
+    ///   symlink resolution. A symlink that leaves the directory is rejected.
+    /// - Every file must be a regular, UTF-8 file of at most
+    ///   [`MAX_PACK_FILE_BYTES`]; the four files together may not exceed
+    ///   [`MAX_PACK_BYTES`].
+    ///
+    /// This function does not discover mods, search parent directories, unpack
+    /// archives, follow dependency or `dependencies` metadata, or watch for
+    /// changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PackError::MissingManifest`], [`PackError::AmbiguousManifest`],
+    /// [`PackError::NotADirectory`], [`PackError::MissingFile`],
+    /// [`PackError::UnsafePath`], [`PackError::PathEscape`],
+    /// [`PackError::NotAFile`], [`PackError::FileTooLarge`],
+    /// [`PackError::PackTooLarge`], [`PackError::NotUtf8`], or
+    /// [`PackError::Io`] for directory and file problems. Manifest and content
+    /// problems are returned exactly as [`Self::from_json`] reports them.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use std::path::Path;
+    ///
+    /// use core_city::pack::ContentPack;
+    ///
+    /// let pack = ContentPack::from_dir(Path::new("mods/example")).expect("valid pack");
+    /// assert_eq!(pack.namespace(), "example");
+    /// ```
+    pub fn from_dir(dir: &Path) -> Result<Self, PackError> {
+        let root = fs::canonicalize(dir).map_err(|source| PackError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        if !root.is_dir() {
+            return Err(PackError::NotADirectory { path: root });
+        }
+
+        let manifest_name = find_manifest(&root)?;
+        let mut budget = MAX_PACK_BYTES;
+        let manifest_json = read_pack_file(&root, "manifest", &manifest_name, &mut budget)?;
+        let manifest = ModManifest::from_json_str(&manifest_json).map_err(PackError::Manifest)?;
+
+        let materials_json =
+            read_pack_file(&root, "materials", &manifest.content.materials, &mut budget)?;
+        let rooms_json = read_pack_file(&root, "rooms", &manifest.content.rooms, &mut budget)?;
+        let props_json = read_pack_file(&root, "props", &manifest.content.props, &mut budget)?;
+
+        Self::from_json(&manifest_json, &materials_json, &rooms_json, &props_json)
+    }
+
+    /// Load one mod directory and merge it with the bundled base content.
+    ///
+    /// Shorthand for [`Self::from_dir`] followed by
+    /// [`Self::merged_with_base`]. The returned registry is validated and has
+    /// the same deterministic checksum as the equivalent in-memory merge.
+    ///
+    /// # Errors
+    ///
+    /// Returns every error from [`Self::from_dir`] and
+    /// [`Self::merged_with_base`].
+    pub fn load_dir_with_base(dir: &Path) -> Result<ContentRegistry, PackError> {
+        Self::from_dir(dir)?.merged_with_base()
     }
 
     /// The validated manifest.
@@ -253,6 +371,207 @@ fn id_namespace(id: &str) -> Option<&str> {
     id.split_once(':').map(|(namespace, _)| namespace)
 }
 
+/// Find `mod.json`, or exactly one `*.mod.json`, directly in `root`.
+fn find_manifest(root: &Path) -> Result<String, PackError> {
+    let canonical = root.join(MANIFEST_FILE_NAME);
+    match fs::symlink_metadata(&canonical) {
+        Ok(_) => return Ok(MANIFEST_FILE_NAME.to_owned()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(PackError::Io {
+                path: canonical,
+                source,
+            });
+        }
+    }
+
+    let entries = fs::read_dir(root).map_err(|source| PackError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let mut manifests = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| PackError::Io {
+            path: root.to_path_buf(),
+            source,
+        })?;
+        let file_type = entry.file_type().map_err(|source| PackError::Io {
+            path: entry.path(),
+            source,
+        })?;
+        if !file_type.is_file() && !file_type.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.ends_with(NAMED_MANIFEST_SUFFIX) {
+            manifests.push(name.to_owned());
+        }
+    }
+    manifests.sort_unstable();
+
+    match manifests.len() {
+        0 => Err(PackError::MissingManifest {
+            dir: root.to_path_buf(),
+        }),
+        1 => Ok(manifests.remove(0)),
+        _ => Err(PackError::AmbiguousManifest {
+            dir: root.to_path_buf(),
+            manifests,
+        }),
+    }
+}
+
+/// Reject relative paths that could address anything outside the mod directory.
+fn unsafe_relative_path(path: &str) -> Option<&'static str> {
+    if path.is_empty() {
+        return Some("must not be empty");
+    }
+    if path.contains('\\') {
+        return Some("must use '/' separators");
+    }
+    if path.contains(':') {
+        return Some("must not contain ':'");
+    }
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(_) => {}
+            Component::CurDir => return Some("must not contain '.' components"),
+            Component::ParentDir => return Some("must not contain '..' components"),
+            Component::RootDir | Component::Prefix(_) => return Some("must be relative"),
+        }
+    }
+    None
+}
+
+/// Whether a canonical path is inside a canonical root.
+///
+/// Windows canonical paths are case-insensitive and can mix an 8.3 short name
+/// with its long form, so a component prefix is compared case-insensitively
+/// and the unique root directory name is checked at the expected depth.
+fn path_is_within(root: &Path, resolved: &Path, relative: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let eq = |a: &std::ffi::OsStr, b: &std::ffi::OsStr| {
+            a.to_string_lossy()
+                .eq_ignore_ascii_case(&b.to_string_lossy())
+        };
+        let Some(root_name) = root.file_name() else {
+            return false;
+        };
+        let resolved_components: Vec<_> = resolved.components().collect();
+        let relative_components: Vec<_> = Path::new(relative).components().collect();
+        if relative_components.is_empty() || resolved_components.len() <= relative_components.len()
+        {
+            return false;
+        }
+        let relative_start = resolved_components.len() - relative_components.len();
+        let root_index = relative_start - 1;
+        eq(resolved_components[root_index].as_os_str(), root_name)
+            && resolved_components[relative_start..]
+                .iter()
+                .zip(relative_components.iter())
+                .all(|(actual, expected)| eq(actual.as_os_str(), expected.as_os_str()))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = relative;
+        resolved.starts_with(root)
+    }
+}
+
+/// Read one UTF-8 pack file, enforcing path, size, and total-budget rules.
+fn read_pack_file(
+    root: &Path,
+    field: &'static str,
+    relative: &str,
+    budget: &mut u64,
+) -> Result<String, PackError> {
+    if let Some(reason) = unsafe_relative_path(relative) {
+        return Err(PackError::UnsafePath {
+            field,
+            path: relative.to_owned(),
+            reason,
+        });
+    }
+
+    let candidate = root.join(relative);
+    let resolved = fs::canonicalize(&candidate).map_err(|source| {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            PackError::MissingFile {
+                field,
+                path: candidate.clone(),
+            }
+        } else {
+            PackError::Io {
+                path: candidate.clone(),
+                source,
+            }
+        }
+    })?;
+    if !path_is_within(root, &resolved, relative) {
+        return Err(PackError::PathEscape {
+            field,
+            path: candidate,
+        });
+    }
+
+    let metadata = fs::metadata(&resolved).map_err(|source| PackError::Io {
+        path: resolved.clone(),
+        source,
+    })?;
+    if !metadata.is_file() {
+        return Err(PackError::NotAFile {
+            field,
+            path: resolved,
+        });
+    }
+    if metadata.len() > MAX_PACK_FILE_BYTES {
+        return Err(PackError::FileTooLarge {
+            field,
+            path: resolved,
+            bytes: metadata.len(),
+            limit: MAX_PACK_FILE_BYTES,
+        });
+    }
+
+    let file = File::open(&resolved).map_err(|source| PackError::Io {
+        path: resolved.clone(),
+        source,
+    })?;
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    file.take(MAX_PACK_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| PackError::Io {
+            path: resolved.clone(),
+            source,
+        })?;
+    let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if bytes_len > MAX_PACK_FILE_BYTES {
+        return Err(PackError::FileTooLarge {
+            field,
+            path: resolved,
+            bytes: bytes_len,
+            limit: MAX_PACK_FILE_BYTES,
+        });
+    }
+    if bytes_len > *budget {
+        return Err(PackError::PackTooLarge {
+            bytes: bytes_len,
+            limit: MAX_PACK_BYTES,
+        });
+    }
+    *budget -= bytes_len;
+
+    String::from_utf8(bytes).map_err(|source| PackError::NotUtf8 {
+        field,
+        path: resolved,
+        source,
+    })
+}
+
 fn pack_checksum(manifest: &ModManifest, registry: &ContentRegistry) -> u64 {
     let mut hash = Fnv1a::new();
     hash.write_str("townsmith:content-pack");
@@ -290,6 +609,87 @@ pub enum PackError {
     },
     /// The base and pack registries could not be merged.
     Merge(RegistryError),
+    /// A mod directory does not contain `mod.json` or a `*.mod.json` manifest.
+    MissingManifest {
+        /// Directory that was searched.
+        dir: PathBuf,
+    },
+    /// A mod directory contains more than one candidate `*.mod.json` manifest.
+    AmbiguousManifest {
+        /// Directory that was searched.
+        dir: PathBuf,
+        /// Candidate manifest file names, sorted.
+        manifests: Vec<String>,
+    },
+    /// The supplied path is not a directory.
+    NotADirectory {
+        /// Path that was supplied.
+        path: PathBuf,
+    },
+    /// A file named by the manifest does not exist.
+    MissingFile {
+        /// Content field: `manifest`, `materials`, `rooms`, or `props`.
+        field: &'static str,
+        /// Resolved path that was attempted.
+        path: PathBuf,
+    },
+    /// A path is absolute, traverses, or otherwise cannot stay inside the pack.
+    UnsafePath {
+        /// Content field: `manifest`, `materials`, `rooms`, or `props`.
+        field: &'static str,
+        /// Rejected path, relative to the mod directory.
+        path: String,
+        /// Short reason used in diagnostics.
+        reason: &'static str,
+    },
+    /// A path resolved outside the mod directory, usually through a symlink.
+    PathEscape {
+        /// Content field: `manifest`, `materials`, `rooms`, or `props`.
+        field: &'static str,
+        /// Path before canonicalization.
+        path: PathBuf,
+    },
+    /// A resolved path is not a regular file.
+    NotAFile {
+        /// Content field: `manifest`, `materials`, `rooms`, or `props`.
+        field: &'static str,
+        /// Resolved path.
+        path: PathBuf,
+    },
+    /// One file exceeds [`MAX_PACK_FILE_BYTES`].
+    FileTooLarge {
+        /// Content field: `manifest`, `materials`, `rooms`, or `props`.
+        field: &'static str,
+        /// Resolved path.
+        path: PathBuf,
+        /// File size in bytes.
+        bytes: u64,
+        /// Per-file limit in bytes.
+        limit: u64,
+    },
+    /// The manifest and content documents together exceed [`MAX_PACK_BYTES`].
+    PackTooLarge {
+        /// Size of the file that exceeded the remaining budget.
+        bytes: u64,
+        /// Total pack limit in bytes.
+        limit: u64,
+    },
+    /// A pack file is not valid UTF-8.
+    NotUtf8 {
+        /// Content field: `manifest`, `materials`, `rooms`, or `props`.
+        field: &'static str,
+        /// Resolved path.
+        path: PathBuf,
+        /// Underlying conversion error.
+        source: FromUtf8Error,
+    },
+    /// Reading the mod directory or one of its files failed.
+    Io {
+        /// Path that failed.
+        path: PathBuf,
+        /// Underlying I/O error.
+        source: std::io::Error,
+    },
 }
 
 impl fmt::Display for PackError {
@@ -310,6 +710,71 @@ impl fmt::Display for PackError {
                 "content namespace {namespace:?} is reserved for the base game"
             ),
             Self::Merge(source) => write!(formatter, "content pack merge failed: {source}"),
+            Self::MissingManifest { dir } => write!(
+                formatter,
+                "mod directory {} has no {MANIFEST_FILE_NAME} or {NAMED_MANIFEST_SUFFIX} manifest",
+                dir.display()
+            ),
+            Self::AmbiguousManifest { dir, manifests } => write!(
+                formatter,
+                "mod directory {} has {} candidate manifests ({})",
+                dir.display(),
+                manifests.len(),
+                manifests.join(", ")
+            ),
+            Self::NotADirectory { path } => {
+                write!(formatter, "mod path {} is not a directory", path.display())
+            }
+            Self::MissingFile { field, path } => write!(
+                formatter,
+                "content pack {field} file {} does not exist",
+                path.display()
+            ),
+            Self::UnsafePath {
+                field,
+                path,
+                reason,
+            } => write!(formatter, "content pack {field} path {path:?} {reason}"),
+            Self::PathEscape { field, path } => write!(
+                formatter,
+                "content pack {field} path {} escapes the mod directory",
+                path.display()
+            ),
+            Self::NotAFile { field, path } => write!(
+                formatter,
+                "content pack {field} path {} is not a regular file",
+                path.display()
+            ),
+            Self::FileTooLarge {
+                field,
+                path,
+                bytes,
+                limit,
+            } => write!(
+                formatter,
+                "content pack {field} file {} is {bytes} bytes; limit is {limit}",
+                path.display()
+            ),
+            Self::PackTooLarge { bytes, limit } => write!(
+                formatter,
+                "content pack needs {bytes} bytes; total limit is {limit}"
+            ),
+            Self::NotUtf8 {
+                field,
+                path,
+                source,
+            } => write!(
+                formatter,
+                "content pack {field} file {} is not valid UTF-8: {source}",
+                path.display()
+            ),
+            Self::Io { path, source } => {
+                write!(
+                    formatter,
+                    "content pack I/O failed at {}: {source}",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -319,9 +784,20 @@ impl Error for PackError {
         match self {
             Self::Manifest(source) => Some(source),
             Self::Content(source) | Self::Base(source) | Self::Merge(source) => Some(source),
+            Self::NotUtf8 { source, .. } => Some(source),
+            Self::Io { source, .. } => Some(source),
             Self::Namespace { .. }
             | Self::CollisionWithBase { .. }
-            | Self::ReservedNamespace { .. } => None,
+            | Self::ReservedNamespace { .. }
+            | Self::MissingManifest { .. }
+            | Self::AmbiguousManifest { .. }
+            | Self::NotADirectory { .. }
+            | Self::MissingFile { .. }
+            | Self::UnsafePath { .. }
+            | Self::PathEscape { .. }
+            | Self::NotAFile { .. }
+            | Self::FileTooLarge { .. }
+            | Self::PackTooLarge { .. } => None,
         }
     }
 }
@@ -336,6 +812,88 @@ mod tests {
     const EXAMPLE_MATERIALS: &str = include_str!("../../../content/mods/example/materials.json");
     const EXAMPLE_ROOMS: &str = include_str!("../../../content/mods/example/rooms.json");
     const EXAMPLE_PROPS: &str = include_str!("../../../content/mods/example/props.json");
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Self-cleaning temporary mod directory. Unique per process and test.
+    struct TempModDir {
+        path: PathBuf,
+    }
+
+    impl TempModDir {
+        fn new(label: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "townsmith-mod-pack-{}-{unique}-{label}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("temp mod directory");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempModDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn write_file(root: &Path, relative: &str, contents: &str) {
+        write_bytes(root, relative, contents.as_bytes());
+    }
+
+    fn write_bytes(root: &Path, relative: &str, contents: &[u8]) {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent directory");
+        }
+        fs::write(path, contents).expect("write test file");
+    }
+
+    fn example_manifest_value(content: (&str, &str, &str)) -> Value {
+        json!({
+            "format_version": 1,
+            "id": "example:copper_age",
+            "name": "Copper Age example",
+            "version": "0.1.0",
+            "game_version": ">=0.1.0 <0.2.0",
+            "description": "Example pack copied into a temporary directory.",
+            "content": {
+                "materials": content.0,
+                "rooms": content.1,
+                "props": content.2
+            },
+            "dependencies": [],
+            "draft": true
+        })
+    }
+
+    fn write_example_manifest(
+        root: &Path,
+        manifest_name: &str,
+        content: (&str, &str, &str),
+    ) -> String {
+        let manifest = serde_json::to_string_pretty(&example_manifest_value(content))
+            .expect("manifest serializes");
+        write_file(root, manifest_name, &manifest);
+        manifest
+    }
+
+    fn copy_example_content(root: &Path, prefix: &str) {
+        for (name, body) in [
+            ("materials.json", EXAMPLE_MATERIALS),
+            ("rooms.json", EXAMPLE_ROOMS),
+            ("props.json", EXAMPLE_PROPS),
+        ] {
+            write_file(root, &format!("{prefix}{name}"), body);
+        }
+    }
 
     fn example_pack() -> ContentPack {
         ContentPack::from_json(
@@ -617,5 +1175,376 @@ mod tests {
         manifest["version"] = json!("1.0.1");
         let other = build(&manifest, "example", "material").expect("pack loads");
         assert_ne!(other.checksum(), pack.checksum());
+    }
+
+    #[test]
+    fn from_dir_loads_example_copy_with_the_in_memory_checksum() {
+        let dir = TempModDir::new("valid");
+        let manifest = write_example_manifest(
+            dir.path(),
+            MANIFEST_FILE_NAME,
+            ("materials.json", "rooms.json", "props.json"),
+        );
+        copy_example_content(dir.path(), "");
+
+        let from_disk = ContentPack::from_dir(dir.path()).expect("pack loads from disk");
+        let in_memory =
+            ContentPack::from_json(&manifest, EXAMPLE_MATERIALS, EXAMPLE_ROOMS, EXAMPLE_PROPS)
+                .expect("pack loads in memory");
+        assert_eq!(from_disk, in_memory);
+        assert_eq!(from_disk.checksum(), in_memory.checksum());
+        assert_eq!(from_disk.namespace(), "example");
+        assert_eq!(from_disk.manifest().id, "example:copper_age");
+        assert_eq!(from_disk.registry().material_count(), 3);
+        assert_eq!(from_disk.registry().room_count(), 2);
+        assert_eq!(from_disk.registry().prop_count(), 3);
+        assert_eq!(from_disk.registry().len(), 8);
+        assert!(from_disk.materials_json().contains("example:copper_sheet"));
+        assert!(from_disk.rooms_json().contains("example:smelter_hall"));
+        assert!(from_disk.props_json().contains("example:copper_smelter"));
+
+        let merged = ContentPack::load_dir_with_base(dir.path()).expect("merge succeeds");
+        assert_eq!(merged.len(), 31);
+        assert_eq!(merged.checksum(), 0x330a_538d_0780_5b50);
+        assert!(merged.material("example:copper_sheet").is_some());
+    }
+
+    #[test]
+    fn from_dir_resolves_nested_content_and_named_manifest() {
+        let dir = TempModDir::new("nested");
+        write_example_manifest(
+            dir.path(),
+            "example.mod.json",
+            (
+                "content/materials.json",
+                "content/rooms.json",
+                "content/props.json",
+            ),
+        );
+        copy_example_content(dir.path(), "content/");
+
+        let pack = ContentPack::from_dir(dir.path()).expect("nested pack loads");
+        assert_eq!(pack.registry().len(), 8);
+        assert_eq!(pack.namespace(), "example");
+    }
+
+    #[test]
+    fn mod_json_takes_precedence_over_named_manifests() {
+        let dir = TempModDir::new("precedence");
+        write_example_manifest(
+            dir.path(),
+            MANIFEST_FILE_NAME,
+            ("materials.json", "rooms.json", "props.json"),
+        );
+        write_file(dir.path(), "broken.mod.json", "{");
+        copy_example_content(dir.path(), "");
+
+        let pack = ContentPack::from_dir(dir.path()).expect("mod.json wins");
+        assert_eq!(pack.registry().len(), 8);
+    }
+
+    #[test]
+    fn missing_manifest_is_reported() {
+        let dir = TempModDir::new("missing-manifest");
+        copy_example_content(dir.path(), "");
+
+        let error = ContentPack::from_dir(dir.path()).expect_err("no manifest");
+        assert!(
+            matches!(error, PackError::MissingManifest { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn ambiguous_named_manifests_are_rejected() {
+        let dir = TempModDir::new("ambiguous");
+        write_example_manifest(
+            dir.path(),
+            "one.mod.json",
+            ("materials.json", "rooms.json", "props.json"),
+        );
+        write_example_manifest(
+            dir.path(),
+            "two.mod.json",
+            ("materials.json", "rooms.json", "props.json"),
+        );
+
+        let error = ContentPack::from_dir(dir.path()).expect_err("two manifests");
+        match error {
+            PackError::AmbiguousManifest { manifests, .. } => {
+                assert_eq!(manifests, ["one.mod.json", "two.mod.json"]);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn missing_content_file_is_reported() {
+        let dir = TempModDir::new("missing-content");
+        write_example_manifest(
+            dir.path(),
+            MANIFEST_FILE_NAME,
+            ("materials.json", "rooms.json", "props.json"),
+        );
+        write_file(dir.path(), "rooms.json", EXAMPLE_ROOMS);
+        write_file(dir.path(), "props.json", EXAMPLE_PROPS);
+
+        let error = ContentPack::from_dir(dir.path()).expect_err("missing materials");
+        assert!(
+            matches!(
+                error,
+                PackError::MissingFile { field: "materials", ref path }
+                    if path.ends_with("materials.json")
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn directory_in_place_of_content_file_is_rejected() {
+        let dir = TempModDir::new("content-dir");
+        write_example_manifest(
+            dir.path(),
+            MANIFEST_FILE_NAME,
+            ("materials.json", "rooms.json", "props.json"),
+        );
+        fs::create_dir(dir.path().join("materials.json")).expect("create directory");
+        write_file(dir.path(), "rooms.json", EXAMPLE_ROOMS);
+        write_file(dir.path(), "props.json", EXAMPLE_PROPS);
+
+        let error = ContentPack::from_dir(dir.path()).expect_err("materials is a directory");
+        assert!(
+            matches!(
+                error,
+                PackError::NotAFile {
+                    field: "materials",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn manifest_path_traversal_and_absolute_paths_are_rejected() {
+        for bad_path in [
+            "../materials.json",
+            "/etc/materials.json",
+            "content/../../materials.json",
+            "C:/materials.json",
+        ] {
+            let dir = TempModDir::new("unsafe-manifest");
+            write_example_manifest(
+                dir.path(),
+                MANIFEST_FILE_NAME,
+                (bad_path, "rooms.json", "props.json"),
+            );
+            copy_example_content(dir.path(), "");
+
+            let error = ContentPack::from_dir(dir.path()).expect_err(bad_path);
+            assert!(
+                matches!(
+                    error,
+                    PackError::Manifest(ManifestError::InvalidPath {
+                        field: "materials",
+                        ..
+                    })
+                ),
+                "{bad_path}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn loader_rejects_unsafe_paths_before_resolution() {
+        let root = Path::new("/nonexistent-townsmith-mod");
+        for bad_path in [
+            "",
+            "/etc/passwd",
+            "../outside.json",
+            "./materials.json",
+            "content/../props.json",
+            "content\\props.json",
+            "C:/props.json",
+        ] {
+            let mut budget = MAX_PACK_BYTES;
+            let error =
+                read_pack_file(root, "materials", bad_path, &mut budget).expect_err(bad_path);
+            assert!(
+                matches!(
+                    error,
+                    PackError::UnsafePath {
+                        field: "materials",
+                        ..
+                    }
+                ),
+                "{bad_path}: {error}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escape_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempModDir::new("symlink");
+        let outside = TempModDir::new("outside");
+        write_file(outside.path(), "materials.json", EXAMPLE_MATERIALS);
+        write_example_manifest(
+            dir.path(),
+            MANIFEST_FILE_NAME,
+            ("materials.json", "rooms.json", "props.json"),
+        );
+        write_file(dir.path(), "rooms.json", EXAMPLE_ROOMS);
+        write_file(dir.path(), "props.json", EXAMPLE_PROPS);
+        symlink(
+            outside.path().join("materials.json"),
+            dir.path().join("materials.json"),
+        )
+        .expect("create symlink");
+
+        let error = ContentPack::from_dir(dir.path()).expect_err("symlink escape");
+        assert!(
+            matches!(
+                error,
+                PackError::PathEscape {
+                    field: "materials",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn oversize_file_is_rejected_before_parsing() {
+        let dir = TempModDir::new("oversize");
+        write_example_manifest(
+            dir.path(),
+            MANIFEST_FILE_NAME,
+            ("materials.json", "rooms.json", "props.json"),
+        );
+        write_file(dir.path(), "rooms.json", EXAMPLE_ROOMS);
+        write_file(dir.path(), "props.json", EXAMPLE_PROPS);
+        let mut oversized = String::from("{\"format_version\":1,\"materials\":[]}");
+        oversized
+            .push_str(&" ".repeat(usize::try_from(MAX_PACK_FILE_BYTES).expect("limit fits usize")));
+        write_file(dir.path(), "materials.json", &oversized);
+
+        let error = ContentPack::from_dir(dir.path()).expect_err("oversize file");
+        assert!(
+            matches!(
+                error,
+                PackError::FileTooLarge {
+                    field: "materials",
+                    bytes,
+                    limit,
+                    ..
+                } if bytes > limit && limit == MAX_PACK_FILE_BYTES
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn total_budget_is_enforced() {
+        let dir = TempModDir::new("budget");
+        write_file(dir.path(), "materials.json", "{}");
+
+        let mut budget = 1;
+        let error =
+            read_pack_file(dir.path(), "materials", "materials.json", &mut budget).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PackError::PackTooLarge {
+                    bytes: 2,
+                    limit: MAX_PACK_BYTES
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn malformed_content_json_is_reported_as_content_error() {
+        let dir = TempModDir::new("malformed");
+        write_example_manifest(
+            dir.path(),
+            MANIFEST_FILE_NAME,
+            ("materials.json", "rooms.json", "props.json"),
+        );
+        write_file(dir.path(), "materials.json", "{");
+        write_file(dir.path(), "rooms.json", EXAMPLE_ROOMS);
+        write_file(dir.path(), "props.json", EXAMPLE_PROPS);
+
+        let error = ContentPack::from_dir(dir.path()).expect_err("malformed materials");
+        assert!(
+            matches!(error, PackError::Content(RegistryError::Json { .. })),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn namespace_mismatch_is_rejected_from_directory() {
+        let dir = TempModDir::new("namespace");
+        write_example_manifest(
+            dir.path(),
+            MANIFEST_FILE_NAME,
+            ("materials.json", "rooms.json", "props.json"),
+        );
+        write_file(
+            dir.path(),
+            "materials.json",
+            &EXAMPLE_MATERIALS.replace("example:", "other:"),
+        );
+        write_file(dir.path(), "rooms.json", EXAMPLE_ROOMS);
+        write_file(dir.path(), "props.json", EXAMPLE_PROPS);
+
+        let error = ContentPack::from_dir(dir.path()).expect_err("wrong namespace");
+        assert!(
+            matches!(
+                error,
+                PackError::Namespace { ref namespace, ref id }
+                    if namespace == "example" && id.starts_with("other:")
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_is_rejected() {
+        let dir = TempModDir::new("utf8");
+        write_example_manifest(
+            dir.path(),
+            MANIFEST_FILE_NAME,
+            ("materials.json", "rooms.json", "props.json"),
+        );
+        write_bytes(dir.path(), "materials.json", &[b'{', 0xff, b'}']);
+        write_file(dir.path(), "rooms.json", EXAMPLE_ROOMS);
+        write_file(dir.path(), "props.json", EXAMPLE_PROPS);
+
+        let error = ContentPack::from_dir(dir.path()).expect_err("invalid UTF-8");
+        assert!(
+            matches!(
+                error,
+                PackError::NotUtf8 {
+                    field: "materials",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn file_path_instead_of_directory_is_rejected() {
+        let dir = TempModDir::new("not-a-dir");
+        write_file(dir.path(), "manifest.json", EXAMPLE_MANIFEST);
+        let file = dir.path().join("manifest.json");
+
+        let error = ContentPack::from_dir(&file).expect_err("not a directory");
+        assert!(matches!(error, PackError::NotADirectory { .. }), "{error}");
     }
 }
