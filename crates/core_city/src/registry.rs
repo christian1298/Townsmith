@@ -818,14 +818,14 @@ fn write_sorted_strings(hash: &mut Fnv1a, values: &[String]) {
     }
 }
 
-/// FNV-1a 64-bit hasher for [`ContentRegistry::checksum`].
-struct Fnv1a(u64);
+/// FNV-1a 64-bit hasher shared by content and mod-manifest checksums.
+pub(crate) struct Fnv1a(u64);
 
 impl Fnv1a {
     const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
 
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(Self::OFFSET_BASIS)
     }
 
@@ -834,13 +834,13 @@ impl Fnv1a {
         self.0 = self.0.wrapping_mul(Self::PRIME);
     }
 
-    fn write_u32(&mut self, value: u32) {
+    pub(crate) fn write_u32(&mut self, value: u32) {
         for byte in value.to_le_bytes() {
             self.write_u8(byte);
         }
     }
 
-    fn write_u64(&mut self, value: u64) {
+    pub(crate) fn write_u64(&mut self, value: u64) {
         for byte in value.to_le_bytes() {
             self.write_u8(byte);
         }
@@ -855,18 +855,18 @@ impl Fnv1a {
         self.write_u64(bits);
     }
 
-    fn write_bool(&mut self, value: bool) {
+    pub(crate) fn write_bool(&mut self, value: bool) {
         self.write_u8(u8::from(value));
     }
 
-    fn write_str(&mut self, value: &str) {
+    pub(crate) fn write_str(&mut self, value: &str) {
         self.write_u64(value.len() as u64);
         for byte in value.bytes() {
             self.write_u8(byte);
         }
     }
 
-    fn finish(self) -> u64 {
+    pub(crate) fn finish(self) -> u64 {
         self.0
     }
 }

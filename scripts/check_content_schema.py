@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Validate the Townsmith v1 material/room/prop content schemas and base data.
+"""Validate the Townsmith v1 content schemas, base data, and mod manifests.
 
-The runtime registry and mod loader are not implemented yet. This gate keeps
-the first data files structurally valid, namespaced, and cross-reference clean
-so a later registry starts from a known contract.
+The runtime registry loads the base documents and the manifest v0 validator
+checks manifest structure, IDs, versions, and safe relative paths. This gate
+keeps those data contracts structurally valid, namespaced, and cross-reference
+clean. It never reads the content files named by a manifest.
 """
 
 from __future__ import annotations
@@ -16,10 +17,12 @@ import tempfile
 from pathlib import Path
 
 ID_RE = re.compile(r"^[a-z0-9_]+:[a-z0-9_./-]+$")
+MOD_ID_RE = re.compile(r"^[a-z0-9_]+(:[a-z0-9_]+)?$")
+PATH_COMPONENT_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")
 TAG_RE = re.compile(r"^[a-z0-9_./-]+$")
 MATERIAL_CATEGORIES = {"wood", "masonry", "concrete", "metal", "glass", "earth", "other"}
 ROOM_CATEGORIES = {"living", "service", "work", "circulation", "storage", "other"}
-SCHEMA_FILES = ("material.schema.json", "room.schema.json", "prop.schema.json")
+SCHEMA_FILES = ("material.schema.json", "room.schema.json", "prop.schema.json", "mod.schema.json")
 
 
 class Checker:
@@ -27,6 +30,7 @@ class Checker:
         self.errors: list[str] = []
         self.ids: dict[str, str] = {}
         self.room_ids: set[str] = set()
+        self.mod_ids: dict[str, str] = {}
 
     def error(self, where: str, message: str) -> None:
         self.errors.append(f"{where}: {message}")
@@ -158,6 +162,117 @@ def check_rooms(checker: Checker, path: Path, doc: dict) -> int:
     return len(entries)
 
 
+def semver_like(value: str) -> bool:
+    """Mirror the Rust manifest's semver-like check."""
+    indexes = [index for index in (value.find("-"), value.find("+")) if index != -1]
+    split = min(indexes) if indexes else -1
+    core = value if split == -1 else value[:split]
+    suffix = None if split == -1 else value[split + 1:]
+    parts = core.split(".")
+    if len(parts) != 3 or any(not part.isascii() or not part.isdigit() for part in parts):
+        return False
+    if suffix is None:
+        return True
+    return (
+        bool(suffix)
+        and not suffix.startswith(".")
+        and not suffix.endswith(".")
+        and ".." not in suffix
+        and all(character.isascii() and (character.isalnum() or character in ".-+") for character in suffix)
+    )
+
+
+def content_path_problem(value: object) -> str | None:
+    """Return a short reason when a manifest content path is unsafe."""
+    if not isinstance(value, str) or not value:
+        return "must be a non-empty string"
+    if value.startswith("/"):
+        return "must be relative"
+    if "\\" in value:
+        return "must use '/' separators"
+    if ":" in value:
+        return "must not contain ':'"
+    if not value.endswith(".json"):
+        return "must end with .json"
+    for component in value.split("/"):
+        if not component:
+            return "must not contain empty components"
+        if component in (".", ".."):
+            return "must not contain '.' or '..' components"
+        if not PATH_COMPONENT_RE.match(component):
+            return "must use ASCII letters, digits, '_', '-', and '.'"
+    return None
+
+
+def check_manifest(checker: Checker, path: Path, doc: dict) -> int:
+    where = str(path)
+    required = ["format_version", "id", "name", "version", "game_version", "content"]
+    checker.object(where, doc, required)
+    allowed = {
+        "format_version",
+        "id",
+        "name",
+        "version",
+        "game_version",
+        "description",
+        "content",
+        "dependencies",
+        "draft",
+    }
+    for key in sorted(set(doc) - allowed):
+        checker.error(where, f"unexpected field '{key}'")
+    if doc.get("format_version") != 1:
+        checker.error(where, "format_version must be 1")
+
+    ident = doc.get("id")
+    if not isinstance(ident, str) or not MOD_ID_RE.match(ident):
+        checker.error(where, f"id must be namespaced (got {ident!r})")
+    elif ident in checker.mod_ids:
+        checker.error(where, f"duplicate mod id '{ident}' (already in {checker.mod_ids[ident]})")
+    else:
+        checker.mod_ids[ident] = where
+
+    checker.string(where, doc.get("name"), "name")
+    version = doc.get("version")
+    if not isinstance(version, str) or not semver_like(version):
+        checker.error(where, f"version must be semver-like (got {version!r})")
+    checker.string(where, doc.get("game_version"), "game_version")
+
+    if "description" in doc:
+        checker.string(where, doc.get("description"), "description")
+
+    content = doc.get("content")
+    if not isinstance(content, dict):
+        checker.error(where, "content must be an object")
+    else:
+        for key in sorted(set(content) - {"materials", "rooms", "props"}):
+            checker.error(where, f"unexpected content field '{key}'")
+        for field in ("materials", "rooms", "props"):
+            if field not in content:
+                checker.error(where, f"content.{field} is required")
+                continue
+            problem = content_path_problem(content[field])
+            if problem:
+                checker.error(where, f"content.{field} path {content[field]!r} {problem}")
+
+    dependencies = doc.get("dependencies", [])
+    if not isinstance(dependencies, list):
+        checker.error(where, "dependencies must be an array")
+    else:
+        seen: set[str] = set()
+        for dependency in dependencies:
+            if not isinstance(dependency, str) or not MOD_ID_RE.match(dependency):
+                checker.error(where, f"dependency {dependency!r} is not a valid mod id")
+            elif dependency in seen:
+                checker.error(where, f"dependency '{dependency}' is duplicated")
+            else:
+                seen.add(dependency)
+
+    if "draft" in doc and not isinstance(doc["draft"], bool):
+        checker.error(where, "draft must be a boolean")
+    return 1
+
+
 def check_props(checker: Checker, path: Path, doc: dict) -> int:
     entries = check_header(checker, path, doc, "props")
     if entries is None:
@@ -228,10 +343,30 @@ def validate_root(root: Path) -> tuple[list[str], int, int]:
     prop = load_json(checker, root / "content/base/props.json")
     if prop is not None:
         prop_count = check_props(checker, root / "content/base/props.json", prop)
-    return checker.errors, schema_count, material_count + room_count + prop_count
+    mod_count = 0
+    mods_dir = root / "content" / "mods"
+    if not mods_dir.is_dir():
+        checker.error(str(mods_dir), "missing mods directory")
+    else:
+        for manifest_path in sorted(mods_dir.glob("*.mod.json")):
+            manifest = load_json(checker, manifest_path)
+            if manifest is not None:
+                mod_count += check_manifest(checker, manifest_path, manifest)
+    return checker.errors, schema_count, material_count + room_count + prop_count + mod_count
 
 
-def write_fixture(root: Path, *, duplicate: bool = False, bad_room_ref: bool = False, bad_density: bool = False, bad_version: bool = False) -> None:
+def write_fixture(
+    root: Path,
+    *,
+    duplicate: bool = False,
+    bad_room_ref: bool = False,
+    bad_density: bool = False,
+    bad_version: bool = False,
+    bad_manifest_id: bool = False,
+    bad_manifest_version: bool = False,
+    unsafe_manifest_path: bool = False,
+    duplicate_manifest_dep: bool = False,
+) -> None:
     schema = root / "content" / "schema"
     schema.mkdir(parents=True)
     for name in SCHEMA_FILES:
@@ -252,6 +387,23 @@ def write_fixture(root: Path, *, duplicate: bool = False, bad_room_ref: bool = F
     (root / "content" / "base" / "rooms.json").write_text(json.dumps(room))
     (root / "content" / "base" / "props.json").write_text(json.dumps(prop))
 
+    manifest = {
+        "format_version": 1,
+        "id": "Example:Bad" if bad_manifest_id else "example:copper_age",
+        "name": "Copper Age example",
+        "version": "1.0" if bad_manifest_version else "0.1.0",
+        "game_version": ">=0.1.0 <0.2.0",
+        "content": {
+            "materials": "../materials.json" if unsafe_manifest_path else "content/materials.json",
+            "rooms": "content/rooms.json",
+            "props": "content/props.json",
+        },
+        "dependencies": ["example:core", "example:core"] if duplicate_manifest_dep else [],
+        "draft": True,
+    }
+    (root / "content" / "mods").mkdir()
+    (root / "content" / "mods" / "example.mod.json").write_text(json.dumps(manifest))
+
 
 def self_test() -> int:
     cases = 0
@@ -260,7 +412,7 @@ def self_test() -> int:
         write_fixture(root)
         errors, schemas, entries = validate_root(root)
         cases += 1
-        if errors or schemas != 3 or entries != 3:
+        if errors or schemas != 4 or entries != 4:
             print(f"self-test valid fixture failed: {errors}", file=sys.stderr)
             return 1
         for name, kwargs in (
@@ -268,6 +420,10 @@ def self_test() -> int:
             ("bad_room_ref", {"bad_room_ref": True}),
             ("bad_density", {"bad_density": True}),
             ("bad_version", {"bad_version": True}),
+            ("bad_manifest_id", {"bad_manifest_id": True}),
+            ("bad_manifest_version", {"bad_manifest_version": True}),
+            ("unsafe_manifest_path", {"unsafe_manifest_path": True}),
+            ("duplicate_manifest_dep", {"duplicate_manifest_dep": True}),
         ):
             case_root = root / name
             write_fixture(case_root, **kwargs)
@@ -290,9 +446,11 @@ def main() -> int:
     errors, schemas, entries = validate_root(args.root)
     for error in errors:
         print(f"CONTENT_SCHEMA_ERROR {error}", file=sys.stderr)
-    status = "ok" if not errors else "failed"
-    print(f"CONTENT_SCHEMA files={schemas} entries={entries} errors={len(errors)} status={status}")
-    return 0 if not errors else 1
+    if errors:
+        print(f"CONTENT_SCHEMA files={schemas} entries={entries} errors={len(errors)} status=failed")
+        return 1
+    print(f"CONTENT_SCHEMA files={schemas} entries={entries} status=ok")
+    return 0
 
 
 if __name__ == "__main__":

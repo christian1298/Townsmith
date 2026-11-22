@@ -28,7 +28,7 @@ content/
 
 The validator checks namespaced IDs, required fields/types, duplicate IDs,
 schema file presence, and prop -> room references. The final line is
-`CONTENT_SCHEMA files=3 entries=N status=ok`.
+`CONTENT_SCHEMA files=4 entries=24 status=ok`.
 
 ## Rules
 

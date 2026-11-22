@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://townsmith.local/schema/mod.schema.json",
+  "title": "Townsmith mod manifest v0",
+  "description": "Validated manifest for a data-only content mod. No script entry points, downloads, or override rules in v0.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format_version", "id", "name", "version", "game_version", "content"],
+  "properties": {
+    "format_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/mod_id" },
+    "name": { "type": "string", "minLength": 1 },
+    "version": { "$ref": "#/$defs/version" },
+    "game_version": { "type": "string", "minLength": 1 },
+    "description": { "type": "string", "minLength": 1 },
+    "content": { "$ref": "#/$defs/content" },
+    "dependencies": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/mod_id" }
+    },
+    "draft": { "type": "boolean" }
+  },
+  "$defs": {
+    "mod_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]+(:[a-z0-9_]+)?$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.+-]+)?$"
+    },
+    "content_path": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*\\.json$"
+    },
+    "content": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["materials", "rooms", "props"],
+      "properties": {
+        "materials": { "$ref": "#/$defs/content_path" },
+        "rooms": { "$ref": "#/$defs/content_path" },
+        "props": { "$ref": "#/$defs/content_path" }
+      }
+    }
+  }
+}

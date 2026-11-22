@@ -1,0 +1,15 @@
+{
+  "format_version": 1,
+  "id": "example:copper_age",
+  "name": "Copper Age example",
+  "version": "0.1.0",
+  "game_version": ">=0.1.0 <0.2.0",
+  "description": "Draft example manifest. It names content documents but does not ship or load them yet.",
+  "content": {
+    "materials": "content/materials.json",
+    "rooms": "content/rooms.json",
+    "props": "content/props.json"
+  },
+  "dependencies": [],
+  "draft": true
+}
