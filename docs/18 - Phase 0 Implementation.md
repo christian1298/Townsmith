@@ -159,12 +159,12 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 | Cohort, 1M citizens | — | — | — | ~0.21 ms/tick |
 | Active agents, 2k sparse | — | — | — | ~0.19 ms/tick |
 | Active agents, 2k dense | — | — | — | ~0.90 ms/tick |
-| Terrain mesh, 256 m chunk | 65,536 cells | — | 83,994 quads | ~1.41 ms |
-| Terrain LOD 2, 256 m chunk | 65,536 cells | — | 25,327 quads | ~0.39 ms |
-| Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,931 quads | ~0.12 ms |
+| Terrain mesh, 256 m chunk | 65,536 cells | — | 82,970 quads | ~1.65 ms |
+| Terrain LOD 2, 256 m chunk | 65,536 cells | — | 24,815 quads | ~0.41 ms |
+| Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,675 quads | ~0.11 ms |
 | Traffic graph, 32 × 32 grid | 64 roads | 1,024 nodes | 1,984 edges | ~0.44 ms build; 1.3 ms / 1,000 flow queries |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, agent, and traffic paths and a baseline for regressions. The workspace has **909 tests** (905 unit/integration + 4 doctests): 52 voxel, 62 world, 40 simulation, 460 city, 15 blueprint, 12 rooms, 87 bridge, 19 structure, 83 server, and 79 bench-bin tests (city_loop 8, cohort_validate 9, dormant 5, financing 8, industrial 4, infra_cost 1, materialization 2, metropolis 4, metropolis_balance 4, modern 5, movement 4, placements 2, save_1m 6, save_stress 6, streaming_scale 7, traffic 4).
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, agent, and traffic paths and a baseline for regressions. The terrain counts are for the skirt-free `terrain_mesh_lod` path, which has no neighbor sampler and therefore suppresses chunk-boundary walls (F-047): step 1/2/4 lose exactly 1,024/512/256 perimeter quads versus the old "wall down to height 0" behavior. Streamed chunks pass the generator sampler and add up to 1,024 skirt quads at LOD 1 (see [[21 - LOD Seams]]). The workspace has **916 tests** (912 unit/integration + 4 doctests): 55 voxel, 66 world, 40 simulation, 460 city, 15 blueprint, 12 rooms, 87 bridge, 19 structure, 83 server, and 79 bench-bin tests (city_loop 8, cohort_validate 9, dormant 5, financing 8, industrial 4, infra_cost 1, materialization 2, metropolis 4, metropolis_balance 4, modern 5, movement 4, placements 2, save_1m 6, save_stress 6, streaming_scale 7, traffic 4).
 
 ### Vertical slice acceptance
 
@@ -179,8 +179,8 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 - The Godot preview uses one material override; per-material surfaces/UV atlas mapping is not implemented.
 - Chunk generation and meshing run on a fixed Rust worker pool (up to 4 threads). The Godot main thread converts finished `TerrainMesh` values into packed `ArrayMesh` resources; uploads no longer call `SurfaceTool` per vertex, but large meshes still enter the renderer on the main thread.
 - LOD is distance-based (mesh stride), not a full imposter/HLOD pipeline. A 2 m perimeter skirt hides T-junction cracks between different LOD steps; extreme height differences, lighting seams, or biome color seams can still show.
-- The benchmark quads above are for the skirt-free `terrain_mesh_lod` path; streamed chunks add up to 1,024 skirt quads at LOD 1 (see [[21 - LOD Seams]]).
-- Boundary culling samples the deterministic generator, not live edited heights. Edited edge cells can render missing or doubled walls until the sampler reads the delta store.
+- The benchmark quads above are for the skirt-free no-sampler `terrain_mesh_lod` path, which suppresses boundary walls; streamed chunks add up to 1,024 skirt quads at LOD 1 and use the generator sampler for seam walls (see [[21 - LOD Seams]]).
+- Boundary culling samples the deterministic generator, not live edited heights. Edited edge cells can render missing or doubled walls until the sampler reads the delta store; the no-sampler tool path never renders a boundary wall.
 - Blueprint packages use `.tsbp` v1 (zip + RLE + BLAKE3). Terrain deltas still use the phase 0 blob; a world save format is later.
 - The Godot benchmark has terrain, streaming, and Early/Mid/Late box-city routes plus a 200-voxel-hut route; a real voxel city scene is later, and headless frame times are not render measurements.
 - Async chunk completion is staged in a ready map and committed in ring/distance/coordinate order with a 4-chunk frame budget; a fixed-center staged route is deterministic and gated by `smoke_stream_order.sh` (`STREAM_ORDER_SMOKE status=ok stream_order=ok`). The free-flight route can still change commit order when the camera crosses rings on different frames.

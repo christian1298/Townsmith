@@ -2,7 +2,7 @@
 title: Voxel and Scale
 project: Townsmith
 status: accepted
-updated: 2026-11-20
+updated: 2026-11-23
 tags:
   - townsmith
   - voxel
@@ -146,6 +146,8 @@ The world is not a fixed city tile. It is a **large, procedurally generated regi
 - Off-grid buildings are allowed but need self-contained utilities; connected settlements are more efficient.
 - The world is **effectively infinite**: there is no authored map edge. Practical limits are streaming radius, save size, and server resources; only visited/edited chunks are stored.
 - **Coordinates:** use 64-bit integer chunk/world coordinates. Rendering uses a **floating origin** that rebases near the player, because 32-bit floats lose precision far from spawn.
+- **f32 sampling bound:** terrain heights are sampled through `f32`, so 1 m cells stay exact only for `|x|, |z| <= 2^24 m = 16,777,216 m`. Beyond that the binary32 spacing is at least 2 m, adjacent cells can quantize to the same sample, and terrain appears flat-stepped. This is the supported world-coordinate bound, not a silent failure; chunk/world storage and rendering remain `i64` + floating origin. Sampling in `f64` would change every deterministic height and needs a `WORLDGEN_VERSION` bump plus a deliberate golden update.
+- **Terrain mesh winding:** quads are emitted clockwise from the outside, matching Godot's front-face convention and the voxel mesher. Culling stays disabled in the preview until a display-backed seam smoke proves it safe (see [[21 - LOD Seams]]).
 
 ## 5. Voxel data structures
 

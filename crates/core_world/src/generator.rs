@@ -1,4 +1,15 @@
 //! Deterministic terrain generation.
+//!
+//! World positions are sampled through `f32` because the noise field is
+//! `f32`-based. IEEE-754 binary32 represents every integer exactly only up to
+//! `2^24 = 16,777,216`; above that the spacing is at least 2 m, so adjacent
+//! 1 m cells can quantize to the same sample and distant terrain appears
+//! flat-stepped. That is the supported world-coordinate bound: `|x|, |z| <=
+//! 2^24 m`. Chunk and save coordinates stay `i64`, and rendering rebases with a
+//! floating origin, so the bound applies to sampling only. Moving to `f64`
+//! sampling would change every deterministic height (and the pinned worldgen /
+//! streaming checksums) and therefore needs a `WORLDGEN_VERSION` bump and a
+//! deliberate golden update, not a silent migration.
 
 use crate::biomes::Biome;
 use crate::chunk::WorldChunk;
