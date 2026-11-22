@@ -61,9 +61,14 @@ pub use advisor::{
     advise, AdvisorInput, AdvisorMessage, AdvisorReport, Severity, MAX_ADVISOR_MESSAGES,
 };
 pub use construction::{
-    total_seconds_for, ConstructionError, ConstructionPhase, ConstructionSite, ConstructionStore,
-    ConstructionTick, CONSTRUCTION_FORMAT_VERSION, MAX_SITES as MAX_CONSTRUCTION_SITES,
-    MAX_SITE_COST, MAX_TICK_SECONDS,
+    campaign_phase_days_for, campaign_total_days_for, total_seconds_for, ConstructionError,
+    ConstructionPhase, ConstructionSite, ConstructionStore, ConstructionTick,
+    ConstructionTimeScale, CAMPAIGN_COTTAGE_DAYS, CAMPAIGN_COTTAGE_VOXELS,
+    CAMPAIGN_DEFAULT_SECONDS_PER_GAME_DAY, CAMPAIGN_MATERIAL_LEAD_FRACTION,
+    CAMPAIGN_MAX_BUILD_DAYS, CAMPAIGN_MAX_PHASE_DAYS, CAMPAIGN_MAX_SECONDS_PER_GAME_DAY,
+    CAMPAIGN_MIN_BUILD_DAYS, CAMPAIGN_MIN_SECONDS_PER_GAME_DAY, CAMPAIGN_SIZE_EXPONENT,
+    CONSTRUCTION_FORMAT_VERSION, MAX_SITES as MAX_CONSTRUCTION_SITES, MAX_SITE_COST,
+    MAX_TICK_SECONDS,
 };
 pub use core_structure::{StructuralSystem, StructureError, StructureSpec, StructureSummary};
 pub use district::{summarize_district, DistrictSummary};

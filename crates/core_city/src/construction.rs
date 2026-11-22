@@ -11,6 +11,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::economy::DAY_SECONDS;
 use crate::trades::{Trade, TradeError, TradePool};
 
 /// Current construction save format.
@@ -24,6 +25,42 @@ pub const MAX_SITES: usize = 100_000;
 
 /// Upper bound for one construction site's total placement price.
 pub const MAX_SITE_COST: f64 = 1_000_000_000.0;
+
+/// Default campaign pacing: one game day takes 60 real seconds at 1×.
+pub const CAMPAIGN_DEFAULT_SECONDS_PER_GAME_DAY: f64 = 60.0;
+
+/// Fastest accepted campaign pacing, in real seconds per game day.
+pub const CAMPAIGN_MIN_SECONDS_PER_GAME_DAY: f64 = 10.0;
+
+/// Slowest accepted campaign pacing, in real seconds per game day.
+pub const CAMPAIGN_MAX_SECONDS_PER_GAME_DAY: f64 = 3600.0;
+
+/// Solid litres in the cottage reference used by the campaign duration curve.
+pub const CAMPAIGN_COTTAGE_VOXELS: u64 = 10_000;
+
+/// Campaign build days for a cottage-scale reference building.
+pub const CAMPAIGN_COTTAGE_DAYS: f64 = 3.0;
+
+/// Smallest uncapped campaign build total; a cottage never finishes faster.
+pub const CAMPAIGN_MIN_BUILD_DAYS: f64 = 2.0;
+
+/// Largest uncapped campaign build total, a guard against malformed sizes.
+pub const CAMPAIGN_MAX_BUILD_DAYS: f64 = 210.0;
+
+/// Exponent that turns the size ratio into a campaign build-time factor.
+pub const CAMPAIGN_SIZE_EXPONENT: f64 = 0.6;
+
+/// Hard cap on one campaign phase (D-029).
+pub const CAMPAIGN_MAX_PHASE_DAYS: f64 = 30.0;
+
+/// Share of a campaign build over which its materials are delivered.
+///
+/// The v0 material gate is a stockpile check, not a per-phase procurement
+/// model. In campaign mode a rate tied to the full multi-day build would make
+/// every phase wait for its whole material target and roughly double the
+/// authored durations, so procurement is modelled as the first tenth of the
+/// build. A small stockpile still stalls the site.
+pub const CAMPAIGN_MATERIAL_LEAD_FRACTION: f64 = 0.1;
 
 fn is_zero_cost(value: &f64) -> bool {
     *value == 0.0
@@ -181,6 +218,151 @@ impl fmt::Display for ConstructionPhase {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.label())
     }
+}
+
+/// Clock used to turn construction phase weights into simulated seconds.
+///
+/// [`DeveloperSeconds`] is the default and keeps the original 8–120 second
+/// vertical-slice curve, including its checksums. [`CampaignDays`] follows
+/// D-029: phase targets are authored in game days on the same 86,400-second
+/// simulated clock as population, needs, production, and the economy.
+///
+/// [`DeveloperSeconds`]: Self::DeveloperSeconds
+/// [`CampaignDays`]: Self::CampaignDays
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConstructionTimeScale {
+    /// Original developer clock from [`total_seconds_for`].
+    #[default]
+    DeveloperSeconds,
+    /// Campaign clock; phase targets are game days.
+    CampaignDays {
+        /// Real seconds per game day at 1×, used by the bridge and HUD.
+        seconds_per_game_day: f64,
+    },
+}
+
+impl ConstructionTimeScale {
+    /// Default campaign pacing: 60 real seconds per game day.
+    pub const DEFAULT_SECONDS_PER_GAME_DAY: f64 = CAMPAIGN_DEFAULT_SECONDS_PER_GAME_DAY;
+
+    /// Fastest accepted campaign pacing.
+    pub const MIN_SECONDS_PER_GAME_DAY: f64 = CAMPAIGN_MIN_SECONDS_PER_GAME_DAY;
+
+    /// Slowest accepted campaign pacing.
+    pub const MAX_SECONDS_PER_GAME_DAY: f64 = CAMPAIGN_MAX_SECONDS_PER_GAME_DAY;
+
+    /// Build the default campaign clock.
+    #[must_use]
+    pub const fn campaign_default() -> Self {
+        Self::CampaignDays {
+            seconds_per_game_day: Self::DEFAULT_SECONDS_PER_GAME_DAY,
+        }
+    }
+
+    /// Build a campaign clock after validating its real-time pacing.
+    pub fn campaign(seconds_per_game_day: f64) -> Result<Self, ConstructionError> {
+        let scale = Self::CampaignDays {
+            seconds_per_game_day,
+        };
+        scale.validate()?;
+        Ok(scale)
+    }
+
+    /// Whether this is the default developer clock.
+    #[must_use]
+    pub const fn is_developer(&self) -> bool {
+        matches!(*self, Self::DeveloperSeconds)
+    }
+
+    /// Stable identifier used by reports and save files.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::DeveloperSeconds => "developer_seconds",
+            Self::CampaignDays { .. } => "campaign_days",
+        }
+    }
+
+    /// Campaign pacing in real seconds per game day, or `None` for developer.
+    #[must_use]
+    pub const fn seconds_per_game_day(&self) -> Option<f64> {
+        match *self {
+            Self::DeveloperSeconds => None,
+            Self::CampaignDays {
+                seconds_per_game_day,
+            } => Some(seconds_per_game_day),
+        }
+    }
+
+    /// Validate campaign pacing: finite and within 10–3600 s per game day.
+    pub fn validate(&self) -> Result<(), ConstructionError> {
+        if let Self::CampaignDays {
+            seconds_per_game_day,
+        } = *self
+        {
+            if !seconds_per_game_day.is_finite()
+                || !(Self::MIN_SECONDS_PER_GAME_DAY..=Self::MAX_SECONDS_PER_GAME_DAY)
+                    .contains(&seconds_per_game_day)
+            {
+                return Err(ConstructionError::InvalidTimeScale);
+            }
+        }
+        Ok(())
+    }
+
+    /// Total build time for `solid_voxels` under this clock, in simulated seconds.
+    #[must_use]
+    pub fn total_seconds_for(self, solid_voxels: u64) -> f32 {
+        match self {
+            Self::DeveloperSeconds => total_seconds_for(solid_voxels),
+            Self::CampaignDays { .. } => {
+                let days: f64 = ConstructionPhase::ALL
+                    .iter()
+                    .map(|phase| campaign_phase_days_for(*phase, solid_voxels))
+                    .sum();
+                seconds_from_days(days)
+            }
+        }
+    }
+
+    /// Duration of one phase under this clock, in simulated seconds.
+    #[must_use]
+    pub fn phase_seconds_for(self, phase: ConstructionPhase, solid_voxels: u64) -> f32 {
+        match self {
+            Self::DeveloperSeconds => total_seconds_for(solid_voxels) * phase.weight(),
+            Self::CampaignDays { .. } => {
+                seconds_from_days(campaign_phase_days_for(phase, solid_voxels))
+            }
+        }
+    }
+}
+
+fn seconds_from_days(days: f64) -> f32 {
+    (days * DAY_SECONDS) as f32
+}
+
+/// Campaign build time in game days before the per-phase cap.
+///
+/// The curve is deterministic: the [`CAMPAIGN_COTTAGE_VOXELS`] reference takes
+/// [`CAMPAIGN_COTTAGE_DAYS`], and larger buildings scale by
+/// `(litres / reference)^CAMPAIGN_SIZE_EXPONENT`. Phase durations multiply the
+/// total by the existing phase weights and then cap each phase at
+/// [`CAMPAIGN_MAX_PHASE_DAYS`] (D-029).
+#[must_use]
+pub fn campaign_total_days_for(solid_voxels: u64) -> f64 {
+    let ratio = solid_voxels.max(1) as f64 / CAMPAIGN_COTTAGE_VOXELS as f64;
+    (CAMPAIGN_COTTAGE_DAYS * ratio.powf(CAMPAIGN_SIZE_EXPONENT))
+        .clamp(CAMPAIGN_MIN_BUILD_DAYS, CAMPAIGN_MAX_BUILD_DAYS)
+}
+
+/// One campaign phase in game days, capped at [`CAMPAIGN_MAX_PHASE_DAYS`].
+#[must_use]
+pub fn campaign_phase_days_for(phase: ConstructionPhase, solid_voxels: u64) -> f64 {
+    if phase.is_complete() {
+        return 0.0;
+    }
+    (campaign_total_days_for(solid_voxels) * f64::from(phase.weight())).min(CAMPAIGN_MAX_PHASE_DAYS)
 }
 
 /// One construction site created by a placement.
@@ -389,6 +571,11 @@ pub struct ConstructionStore {
     /// Age-derived trade roster. Missing on legacy saves and the runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trades: Option<TradePool>,
+    /// Construction clock. Omitted from saves at the developer default so old
+    /// saves load as [`ConstructionTimeScale::DeveloperSeconds`] and the
+    /// legacy checksums stay pinned (D-029).
+    #[serde(default, skip_serializing_if = "ConstructionTimeScale::is_developer")]
+    pub time_scale: ConstructionTimeScale,
     /// Sites keyed by placement id.
     pub sites: BTreeMap<u64, ConstructionSite>,
 }
@@ -408,6 +595,7 @@ impl ConstructionStore {
             crew_capacity,
             materials_stock,
             trades: None,
+            time_scale: ConstructionTimeScale::default(),
             sites: BTreeMap::new(),
         }
     }
@@ -508,6 +696,31 @@ impl ConstructionStore {
         self.trades = trades;
     }
 
+    /// Replace the construction clock after validating campaign pacing.
+    pub fn set_time_scale(
+        &mut self,
+        scale: ConstructionTimeScale,
+    ) -> Result<(), ConstructionError> {
+        scale.validate()?;
+        self.time_scale = scale;
+        Ok(())
+    }
+
+    /// Current construction clock.
+    #[must_use]
+    pub const fn time_scale(&self) -> ConstructionTimeScale {
+        self.time_scale
+    }
+
+    /// Total build time for `solid_voxels` under the current clock.
+    ///
+    /// Developer mode returns [`total_seconds_for`] exactly. Campaign mode
+    /// sums the capped phase targets on the 86,400-second simulation clock.
+    #[must_use]
+    pub fn total_seconds_for_scaled(&self, solid_voxels: u64) -> f32 {
+        self.time_scale.total_seconds_for(solid_voxels)
+    }
+
     /// Crew slots actually available after the trade roster cap.
     #[must_use]
     pub fn effective_crew_capacity(&self) -> u16 {
@@ -553,6 +766,8 @@ impl ConstructionStore {
 
         let mut remaining_crew = self.effective_crew_capacity();
         let mut remaining_materials = self.materials_stock;
+        let time_scale = self.time_scale;
+        let developer_clock = time_scale.is_developer();
 
         for site in self.sites.values_mut() {
             if site.is_complete() {
@@ -576,7 +791,21 @@ impl ConstructionStore {
             }
             remaining_crew -= site_crew;
 
-            let rate = (site.materials_required as f64 / f64::from(site.total_s.max(1.0))).max(1.0);
+            // Developer mode keeps the exact legacy curve and arithmetic.
+            // Campaign mode derives the effective duration from the authoring
+            // curve; `site.total_s` stays the saved developer baseline.
+            let total_s = if developer_clock {
+                site.total_s
+            } else {
+                time_scale.total_seconds_for(site.materials_required)
+            };
+            let material_seconds = if developer_clock {
+                site.total_s
+            } else {
+                total_s * CAMPAIGN_MATERIAL_LEAD_FRACTION as f32
+            };
+            let rate =
+                (site.materials_required as f64 / f64::from(material_seconds.max(1.0))).max(1.0);
             let wanted = (rate * f64::from(dt)).ceil() as u64;
             let delivered = wanted.min(remaining_materials).min(
                 site.materials_required
@@ -584,7 +813,7 @@ impl ConstructionStore {
             );
             site.materials_delivered += delivered;
             remaining_materials -= delivered;
-            site.elapsed_s = (site.elapsed_s + dt).min(site.total_s * 4.0);
+            site.elapsed_s = (site.elapsed_s + dt).min(total_s * 4.0);
 
             if site.materials_delivered < site.phase_material_target() {
                 remaining_crew += site_crew;
@@ -595,7 +824,7 @@ impl ConstructionStore {
 
             let mut left = dt;
             while left > 0.0 && !site.is_complete() {
-                let duration = site.total_s * site.phase.weight();
+                let duration = total_s * site.phase.weight();
                 if duration <= f32::EPSILON {
                     let next = site.phase.next();
                     site.set_phase(next);
@@ -699,6 +928,7 @@ impl ConstructionStore {
         if self.crew_capacity > 64 {
             return Err(ConstructionError::InvalidSite("crew capacity is too large"));
         }
+        self.time_scale.validate()?;
         if let Some(trades) = &self.trades {
             trades.validate()?;
         }
@@ -778,6 +1008,8 @@ pub enum ConstructionError {
     TooManySites(usize),
     /// Invalid trade roster.
     Trade(TradeError),
+    /// Invalid campaign time scale.
+    InvalidTimeScale,
 }
 
 impl fmt::Display for ConstructionError {
@@ -794,6 +1026,9 @@ impl fmt::Display for ConstructionError {
             Self::DuplicateSite(id) => write!(formatter, "placement {id} already has a site"),
             Self::TooManySites(count) => write!(formatter, "too many construction sites: {count}"),
             Self::Trade(error) => write!(formatter, "invalid construction trades: {error}"),
+            Self::InvalidTimeScale => {
+                write!(formatter, "invalid construction time scale")
+            }
         }
     }
 }
@@ -1264,5 +1499,77 @@ mod tests {
         store.add_site(1, 10_000).expect("site");
         store.tick(1.0);
         assert_eq!(store.checksum(), 0xefbc_5502_6c81_24d7);
+    }
+
+    #[test]
+    fn campaign_time_scale_validates_and_defaults_to_developer() {
+        assert_eq!(
+            ConstructionTimeScale::default(),
+            ConstructionTimeScale::DeveloperSeconds
+        );
+        assert!(ConstructionTimeScale::campaign(10.0).is_ok());
+        assert!(ConstructionTimeScale::campaign(3600.0).is_ok());
+        for bad in [f64::NAN, f64::INFINITY, 0.0, 9.99, 3600.1] {
+            assert!(ConstructionTimeScale::campaign(bad).is_err());
+        }
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        assert_eq!(store.time_scale(), ConstructionTimeScale::DeveloperSeconds);
+        store
+            .set_time_scale(ConstructionTimeScale::campaign_default())
+            .expect("scale");
+        assert_eq!(store.time_scale().name(), "campaign_days");
+        assert_eq!(store.time_scale().seconds_per_game_day(), Some(60.0));
+    }
+
+    #[test]
+    fn campaign_duration_curve_matches_d029_ranges() {
+        let cottage = campaign_total_days_for(10_000);
+        assert!((2.0..=4.0).contains(&cottage), "cottage {cottage}");
+        let mid = campaign_total_days_for(150_000);
+        assert!((15.0..=40.0).contains(&mid), "mid {mid}");
+        let high = campaign_total_days_for(2_000_000);
+        let structure = campaign_phase_days_for(ConstructionPhase::Structure, 2_000_000);
+        let envelope = campaign_phase_days_for(ConstructionPhase::Envelope, 2_000_000);
+        assert!((10.0..=30.0).contains(&structure), "structure {structure}");
+        assert!((10.0..=30.0).contains(&envelope), "envelope {envelope}");
+        assert!(campaign_phase_days_for(ConstructionPhase::Foundation, 8_000_000) <= 30.0);
+        assert!(high >= 2.0);
+    }
+
+    #[test]
+    fn campaign_tick_is_slower_than_developer_and_deterministic() {
+        let mut developer = ConstructionStore::new(4, 10_000_000);
+        developer.add_site(1, 10_000).expect("site");
+        let mut campaign = ConstructionStore::new(4, 10_000_000);
+        campaign.add_site(1, 10_000).expect("site");
+        campaign
+            .set_time_scale(ConstructionTimeScale::campaign_default())
+            .expect("scale");
+        assert_eq!(developer.tick(600.0).completed.len(), 1);
+        let first = campaign.tick(600.0);
+        assert!(first.completed.is_empty());
+        let mut clone = campaign.clone();
+        let second = campaign.tick(600.0);
+        assert_eq!(first.phase_changed, second.phase_changed);
+        assert_eq!(campaign.checksum(), {
+            let again = clone.tick(600.0);
+            assert_eq!(second.phase_changed, again.phase_changed);
+            clone.checksum()
+        });
+    }
+
+    #[test]
+    fn campaign_scale_round_trips_and_old_save_defaults() {
+        let mut store = ConstructionStore::new(4, 1_000_000);
+        store
+            .set_time_scale(ConstructionTimeScale::campaign(60.0).expect("scale"))
+            .expect("set");
+        let json = store.to_json_pretty().expect("json");
+        let decoded = ConstructionStore::from_json(&json).expect("decode");
+        assert_eq!(decoded.time_scale(), store.time_scale());
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("value");
+        value.as_object_mut().expect("object").remove("time_scale");
+        let old = ConstructionStore::from_json(&value.to_string()).expect("old decode");
+        assert_eq!(old.time_scale(), ConstructionTimeScale::DeveloperSeconds);
     }
 }
