@@ -37,8 +37,8 @@ tags:
 | F-015, F-016 | Refund-on-failed-mark-paid and the no-treasury utility/service fallback change charges/checksums. Needs an economy decision, not a mechanical fix. |
 | F-017..F-020, F-022, F-043..F-051, F-053, F-055 | World/mesh/blueprint/structure cluster; design changes (delta reload semantics, winding, palette/blueprint caps, basement depth) need focused PRs and golden updates. |
 | F-024..F-028 | Scale work (flow-field cache, service spatial index, graph build, mod duplicate/recursion guards) needs benchmarks and mod-format decisions. |
-| F-035..F-038, F-068..F-072 | Godot shell cluster; needs a display-backed behavior/smoke pass, not a blind edit. |
-| F-082, F-084 | Operational: the extension was rebuilt and the world/bench/stream/movement/MP smokes were run in this session. |
+| F-035..F-038, F-068..F-071 | Godot shell cluster; needs a display-backed behavior/smoke pass, not a blind edit. |
+| F-072, F-082, F-084 | Operational: the generated script UID sidecars are tracked; the extension was rebuilt and the world/bench/stream/movement/MP smokes were run in this session. |
 
 ## How to use this document
 
