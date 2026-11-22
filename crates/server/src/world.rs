@@ -10,6 +10,7 @@
 //! (`step`) or an explicit [`ServerWorld::advance_day`] call, so transcripts
 //! are deterministic.
 
+use std::collections::VecDeque;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::thread;
@@ -20,8 +21,8 @@ use core_city::road::{RoadError, RoadRequest, RoadStore};
 use crate::protocol::{
     codes as protocol_codes, configure_stream, decode_client_command, frame_to_io, read_frame,
     read_json_frame, session_id_for_seed, validate_hello, validate_road, validate_tax_rates,
-    write_json_frame, ClientCommand, Rejection, ServerMessage, SessionConfig, TimeAction,
-    LOOPBACK_SEED, PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
+    write_json_frame, ClientCommand, FrameError, Rejection, ServerMessage, SessionConfig,
+    TimeAction, LOOPBACK_SEED, PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
 };
 
 /// Fixed road width for v0 placement commands.
@@ -42,10 +43,44 @@ pub const AUTHORITY_COMMANDS: u64 = 6;
 /// Application frames exchanged in both directions by the authority loopback.
 pub const AUTHORITY_FRAMES: u64 = 12;
 
+/// Sessions exercised by the role/rate-limit loopback (viewer, mayor, admin).
+pub const ROLES_SESSIONS: u64 = 3;
+
+/// Maximum audit entries retained per session.
+pub const AUDIT_CAPACITY: usize = 256;
+
+/// Audit code recorded for an accepted command.
+pub const AUDIT_ACCEPTED: &str = "ok";
+
+/// Sustained command rate, in credits per authoritative second.
+///
+/// The rate is nominal: v0 has no wall-clock loop, so virtual time comes from
+/// the authoritative tick and the monotonic command counter.
+pub const RATE_CREDITS_PER_SECOND: u64 = 20;
+
+/// Token-bucket burst size, in credits.
+pub const RATE_BURST_CREDITS: u64 = 40;
+
+/// Virtual milliseconds granted per authoritative tick (one nominal second).
+pub const RATE_TICK_MS: u64 = 1_000;
+
+/// Virtual milliseconds granted per applied command (a nominal 100 commands/s).
+pub const RATE_COMMAND_MS: u64 = 10;
+
+/// Thousandths of a credit; one command costs [`RATE_CREDIT_MILLI`].
+const RATE_CREDIT_MILLI: u64 = 1_000;
+
+/// One credit per second is one thousandth of a credit per millisecond.
+const RATE_MILLI_CREDITS_PER_MS: u64 = RATE_CREDITS_PER_SECOND;
+
 /// Stable executor error codes. These are wire/API contracts; do not rename.
 pub mod codes {
     /// A non-hello command arrived before an accepted `hello`.
     pub const NOT_HELLO: &str = "not_hello";
+    /// The command is not permitted for the session's role.
+    pub const FORBIDDEN: &str = "role.forbidden";
+    /// The deterministic command token bucket is empty.
+    pub const RATE_LIMITED: &str = "rate.limited";
     /// A time action the executor does not support (speed controls).
     pub const TIME_INVALID_ACTION: &str = "time.invalid_action";
     /// Road endpoints do not share an axis.
@@ -73,6 +108,151 @@ fn fnv_update(mut hash: u64, bytes: &[u8]) -> u64 {
     hash
 }
 
+/// Player role for one protocol v0 session.
+///
+/// Roles are ordered `Viewer < Mayor < Admin`: a role may issue every command
+/// its rank permits. v0 has no accounts or per-player permission storage; the
+/// role is assigned by the server process (`--role` on the dev harness) and is
+/// **not** authentication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum ClientRole {
+    /// Read-only: `hello`, `ping`, and `disconnect`.
+    #[default]
+    Viewer,
+    /// Viewer plus economy and placement commands (`set_tax`, `place_road`).
+    Mayor,
+    /// Mayor plus `time_control`.
+    Admin,
+}
+
+impl ClientRole {
+    /// Every role, weakest first.
+    pub const ALL: [Self; 3] = [Self::Viewer, Self::Mayor, Self::Admin];
+
+    /// Stable lowercase name used on the wire, in logs, and in `--role`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Viewer => "viewer",
+            Self::Mayor => "mayor",
+            Self::Admin => "admin",
+        }
+    }
+
+    /// Parse a role name (case-insensitive). Unknown names are rejected.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|role| role.as_str().eq_ignore_ascii_case(value))
+    }
+
+    /// Minimum role required to issue a command `tag`.
+    ///
+    /// Unknown tags require [`Self::Admin`]: the matrix fails closed so a new
+    /// command cannot become open to everyone by omission.
+    #[must_use]
+    pub fn required_role(tag: &str) -> Self {
+        match tag {
+            "hello" | "ping" | "disconnect" => Self::Viewer,
+            "set_tax" | "place_road" => Self::Mayor,
+            // `time_control` and any future/unknown tag.
+            _ => Self::Admin,
+        }
+    }
+
+    /// Whether this role may issue a command that requires `required`.
+    #[must_use]
+    pub fn allows(self, required: Self) -> bool {
+        self >= required
+    }
+}
+
+/// Deterministic token bucket for one session.
+///
+/// Virtual time is measured in milliseconds and comes from the authoritative
+/// tick plus a monotonic command counter, never from `Instant`. One credit is
+/// [`RATE_CREDIT_MILLI`] milli-credits and every command costs one credit.
+#[derive(Debug, Clone)]
+struct RateBucket {
+    milli_credits: u64,
+    clock_ms: u64,
+}
+
+impl RateBucket {
+    fn full() -> Self {
+        Self {
+            milli_credits: RATE_BURST_CREDITS * RATE_CREDIT_MILLI,
+            clock_ms: 0,
+        }
+    }
+
+    /// Credits available at `now_ms`, including unapplied replenishment.
+    fn credits_milli_at(&self, now_ms: u64) -> u64 {
+        let gained = now_ms
+            .saturating_sub(self.clock_ms)
+            .saturating_mul(RATE_MILLI_CREDITS_PER_MS);
+        self.milli_credits
+            .saturating_add(gained)
+            .min(RATE_BURST_CREDITS * RATE_CREDIT_MILLI)
+    }
+
+    /// Apply replenishment up to `now_ms` and remember the new clock.
+    fn refill(&mut self, now_ms: u64) {
+        if now_ms > self.clock_ms {
+            self.milli_credits = self.credits_milli_at(now_ms);
+            self.clock_ms = now_ms;
+        }
+    }
+
+    /// Spend one credit at `now_ms`. Returns false when the bucket is empty;
+    /// a failed spend never consumes a partial credit.
+    fn try_consume(&mut self, now_ms: u64) -> bool {
+        self.refill(now_ms);
+        if self.milli_credits >= RATE_CREDIT_MILLI {
+            self.milli_credits -= RATE_CREDIT_MILLI;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// One entry in the bounded per-session audit ring.
+///
+/// Accepted commands use [`AUDIT_ACCEPTED`] as their code. The ring is
+/// deliberately excluded from [`ServerWorld::checksum`] so the snapshot golden
+/// stays a pure function of simulation state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuditEntry {
+    /// Authoritative tick after the command was evaluated.
+    pub tick: u64,
+    /// Role the session held when the command arrived.
+    pub role: ClientRole,
+    /// Command tag, for example `place_road`.
+    pub tag: &'static str,
+    /// Rejection code, or [`AUDIT_ACCEPTED`].
+    pub code: &'static str,
+}
+
+impl AuditEntry {
+    /// Whether the command was accepted.
+    #[must_use]
+    pub fn accepted(self) -> bool {
+        self.code == AUDIT_ACCEPTED
+    }
+}
+
+fn audit_entry_hash(mut hash: u64, entry: &AuditEntry) -> u64 {
+    hash = fnv_update(hash, &entry.tick.to_le_bytes());
+    hash = fnv_update(hash, entry.role.as_str().as_bytes());
+    hash = fnv_update(hash, &[0x1f]);
+    hash = fnv_update(hash, entry.tag.as_bytes());
+    hash = fnv_update(hash, &[0x1f]);
+    hash = fnv_update(hash, entry.code.as_bytes());
+    fnv_update(hash, &[0x1e])
+}
+
 /// Authoritative state for one protocol v0 session.
 #[derive(Debug, Clone)]
 pub struct ServerWorld {
@@ -94,6 +274,11 @@ pub struct ServerWorld {
     pub paused: bool,
     /// Checksum of the last accepted state, refreshed after each mutation.
     pub session_checksum: String,
+    role: ClientRole,
+    /// Monotonic count of applied commands, including rejections.
+    commands: u64,
+    rate: RateBucket,
+    audit: VecDeque<AuditEntry>,
     hello: bool,
     closed: bool,
     session_id: String,
@@ -101,18 +286,33 @@ pub struct ServerWorld {
 
 impl ServerWorld {
     /// Create a session world from a seed.
+    ///
+    /// The default role is [`ClientRole::Viewer`]; use [`Self::with_role`] for
+    /// a dev harness that needs more permissions.
     #[must_use]
     pub fn new(seed: u64) -> Self {
         Self::with_population(seed, SessionConfig::for_seed(seed).population)
     }
 
-    /// Create a session world with an explicit population.
+    /// Create a session world with an explicit population and the viewer role.
     ///
     /// `employed` is 60% of the population and `buildings` is one per 25
     /// citizens (at least one), both derived deterministically. The treasury
     /// starts at [`STARTING_BALANCE`].
     #[must_use]
     pub fn with_population(seed: u64, population: u32) -> Self {
+        Self::with_population_and_role(seed, population, ClientRole::Viewer)
+    }
+
+    /// Create a session world with an explicit role and the seed population.
+    #[must_use]
+    pub fn with_role(seed: u64, role: ClientRole) -> Self {
+        Self::with_population_and_role(seed, SessionConfig::for_seed(seed).population, role)
+    }
+
+    /// Create a session world with an explicit population and role.
+    #[must_use]
+    pub fn with_population_and_role(seed: u64, population: u32, role: ClientRole) -> Self {
         let population = population.max(1);
         let employed = population.saturating_mul(3) / 5;
         let buildings = (population / 25).max(1);
@@ -126,12 +326,28 @@ impl ServerWorld {
             roads: RoadStore::new(seed),
             paused: false,
             session_checksum: String::new(),
+            role,
+            commands: 0,
+            rate: RateBucket::full(),
+            audit: VecDeque::with_capacity(AUDIT_CAPACITY),
             hello: false,
             closed: false,
             session_id: session_id_for_seed(seed),
         };
         world.refresh_checksum();
         world
+    }
+
+    /// Dev-only role for this session. Not authentication.
+    #[must_use]
+    pub fn role(&self) -> ClientRole {
+        self.role
+    }
+
+    /// Applied commands, including rejected ones.
+    #[must_use]
+    pub fn commands(&self) -> u64 {
+        self.commands
     }
 
     /// Deterministic session identifier.
@@ -150,6 +366,57 @@ impl ServerWorld {
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.closed
+    }
+
+    /// Whole credits currently available in the command bucket.
+    #[must_use]
+    pub fn rate_credits(&self) -> u64 {
+        self.rate.credits_milli_at(self.rate_clock_ms()) / RATE_CREDIT_MILLI
+    }
+
+    /// Audit entries, oldest first.
+    #[must_use]
+    pub fn audit_state(&self) -> Vec<AuditEntry> {
+        self.audit.iter().copied().collect()
+    }
+
+    /// Number of retained audit entries (capped at [`AUDIT_CAPACITY`]).
+    #[must_use]
+    pub fn audit_len(&self) -> usize {
+        self.audit.len()
+    }
+
+    /// FNV-1a checksum over the retained audit ring.
+    ///
+    /// This is intentionally separate from [`Self::checksum`]: auditing never
+    /// changes the world snapshot golden.
+    #[must_use]
+    pub fn audit_checksum(&self) -> String {
+        format!(
+            "{:016x}",
+            self.audit
+                .iter()
+                .fold(FNV_OFFSET, |hash, entry| audit_entry_hash(hash, entry))
+        )
+    }
+
+    /// Virtual milliseconds elapsed for the token bucket.
+    fn rate_clock_ms(&self) -> u64 {
+        self.tick
+            .saturating_mul(RATE_TICK_MS)
+            .saturating_add(self.commands.saturating_mul(RATE_COMMAND_MS))
+    }
+
+    fn record_audit(&mut self, tag: &'static str, code: &'static str) {
+        if self.audit.len() >= AUDIT_CAPACITY {
+            self.audit.pop_front();
+        }
+        self.audit.push_back(AuditEntry {
+            tick: self.tick,
+            role: self.role,
+            tag,
+            code,
+        });
     }
 
     /// Treasury balance rounded to whole cost units for the snapshot.
@@ -183,12 +450,71 @@ impl ServerWorld {
 
     /// Validate and apply one command, returning exactly one response.
     ///
-    /// Rejections never mutate state. `hello` and `disconnect` are accepted
-    /// before `hello`; every other command is rejected with
-    /// [`codes::NOT_HELLO`].
+    /// The batch order is fixed:
+    ///
+    /// 1. closed sessions reject everything;
+    /// 2. `hello` sequencing (`hello.duplicate`, then `not_hello`);
+    /// 3. role authorization ([`codes::FORBIDDEN`]);
+    /// 4. the deterministic token bucket ([`codes::RATE_LIMITED`]);
+    /// 5. payload validation and mutation.
+    ///
+    /// A rejection never mutates simulation state. Every command, accepted or
+    /// rejected, is recorded in the bounded audit ring.
     pub fn apply(&mut self, command: &ClientCommand) -> ServerMessage {
+        self.commands = self.commands.saturating_add(1);
+        let (message, code) = self.evaluate(command);
+        self.record_audit(command.tag(), code);
+        message
+    }
+
+    fn evaluate(&mut self, command: &ClientCommand) -> (ServerMessage, &'static str) {
         if self.closed {
-            return reject(protocol_codes::SESSION_CLOSED, "session is already closed");
+            return reject_with(protocol_codes::SESSION_CLOSED, "session is already closed");
+        }
+
+        // Hello sequencing comes before role and rate checks so a duplicate or
+        // pre-hello command keeps its stable protocol code.
+        match command {
+            ClientCommand::Hello { .. } if self.hello => {
+                return reject_with(
+                    protocol_codes::HELLO_DUPLICATE,
+                    "hello was already accepted",
+                );
+            }
+            ClientCommand::Hello { .. } | ClientCommand::Disconnect => {}
+            _ if !self.hello => {
+                return reject_with(
+                    codes::NOT_HELLO,
+                    format!("`{}` requires a successful hello first", command.tag()),
+                );
+            }
+            _ => {}
+        }
+
+        let required = ClientRole::required_role(command.tag());
+        if !self.role.allows(required) {
+            return reject_with(
+                codes::FORBIDDEN,
+                format!(
+                    "`{}` requires the {} role; this session is {}",
+                    command.tag(),
+                    required.as_str(),
+                    self.role.as_str()
+                ),
+            );
+        }
+
+        // `disconnect` is never throttled: a rate-limited client can always
+        // close its session.
+        let now = self.rate_clock_ms();
+        if !matches!(command, ClientCommand::Disconnect) && !self.rate.try_consume(now) {
+            return reject_with(
+                codes::RATE_LIMITED,
+                format!(
+                    "command rate exceeded (nominal {RATE_CREDITS_PER_SECOND} credits/s, \
+                     burst {RATE_BURST_CREDITS}); wait for the next tick"
+                ),
+            );
         }
 
         match command {
@@ -197,52 +523,42 @@ impl ServerWorld {
                 content_hash,
                 player_name,
             } => {
-                if self.hello {
-                    return reject(
-                        protocol_codes::HELLO_DUPLICATE,
-                        "hello was already accepted",
-                    );
-                }
                 if let Err(rejection) = validate_hello(*protocol_version, content_hash, player_name)
                 {
-                    return rejection.into_message();
+                    return from_rejection(rejection);
                 }
                 self.hello = true;
                 self.refresh_checksum();
-                ServerMessage::Welcome {
+                accepted(ServerMessage::Welcome {
                     session_id: self.session_id.clone(),
                     tick: self.tick,
                     protocol_version: PROTOCOL_VERSION,
-                }
+                })
             }
             ClientCommand::Disconnect => {
                 self.closed = true;
-                ServerMessage::Goodbye
+                accepted(ServerMessage::Goodbye)
             }
-            _ if !self.hello => reject(
-                codes::NOT_HELLO,
-                format!("`{}` requires a successful hello first", command.tag()),
-            ),
-            ClientCommand::Ping { nonce } => ServerMessage::Pong { nonce: *nonce },
+            ClientCommand::Ping { nonce } => accepted(ServerMessage::Pong { nonce: *nonce }),
             ClientCommand::TimeControl { action } => self.apply_time_control(*action),
             ClientCommand::SetTax {
                 resident_rate,
                 business_rate,
             } => {
                 if let Err(rejection) = validate_tax_rates(*resident_rate, *business_rate) {
-                    return rejection.into_message();
+                    return from_rejection(rejection);
                 }
                 self.economy
                     .set_taxes(f64::from(*resident_rate), f64::from(*business_rate));
                 self.tick = self.tick.saturating_add(1);
                 self.refresh_checksum();
-                self.snapshot()
+                accepted(self.snapshot())
             }
             ClientCommand::PlaceRoad { start, end } => self.apply_place_road(*start, *end),
         }
     }
 
-    fn apply_time_control(&mut self, action: TimeAction) -> ServerMessage {
+    fn apply_time_control(&mut self, action: TimeAction) -> (ServerMessage, &'static str) {
         match action {
             TimeAction::Pause => self.paused = true,
             TimeAction::Resume => self.paused = false,
@@ -250,32 +566,36 @@ impl ServerWorld {
                 self.advance_unpaused(DAY_SECONDS);
             }
             TimeAction::Speed1x | TimeAction::Speed2x | TimeAction::Speed4x => {
-                return reject(
+                return reject_with(
                     codes::TIME_INVALID_ACTION,
                     "speed controls are not supported by the v0 authority executor",
                 );
             }
         }
         self.refresh_checksum();
-        self.snapshot()
+        accepted(self.snapshot())
     }
 
-    fn apply_place_road(&mut self, start: [i32; 2], end: [i32; 2]) -> ServerMessage {
+    fn apply_place_road(
+        &mut self,
+        start: [i32; 2],
+        end: [i32; 2],
+    ) -> (ServerMessage, &'static str) {
         if let Err(rejection) = validate_road(start, end) {
-            return rejection.into_message();
+            return from_rejection(rejection);
         }
 
         let dx = i64::from(end[0]) - i64::from(start[0]);
         let dz = i64::from(end[1]) - i64::from(start[1]);
         if dx != 0 && dz != 0 {
-            return reject(
+            return reject_with(
                 codes::ROAD_NOT_AXIS_ALIGNED,
                 "road must be horizontal or vertical; diagonals are not supported",
             );
         }
         let length = dx.abs() + dz.abs();
         if length > i64::from(MAX_WORLD_ROAD_LENGTH) {
-            return reject(
+            return reject_with(
                 protocol_codes::ROAD_TOO_LONG,
                 format!(
                     "road length {length} exceeds the v0 maximum of {MAX_WORLD_ROAD_LENGTH} cells"
@@ -283,7 +603,7 @@ impl ServerWorld {
             );
         }
         if let Some(code) = self.road_conflict(start, end) {
-            return reject(code, "road duplicates or overlaps an existing segment");
+            return reject_with(code, "road duplicates or overlaps an existing segment");
         }
 
         let request = RoadRequest {
@@ -295,7 +615,7 @@ impl ServerWorld {
             Ok(_) => {
                 self.tick = self.tick.saturating_add(1);
                 self.refresh_checksum();
-                self.snapshot()
+                accepted(self.snapshot())
             }
             Err(error) => reject_road_error(error),
         }
@@ -381,6 +701,8 @@ impl ServerWorld {
             0,
         );
         self.tick = self.tick.saturating_add(1);
+        let now = self.rate_clock_ms();
+        self.rate.refill(now);
         self.refresh_checksum();
         tick
     }
@@ -412,11 +734,23 @@ fn sanitize_dt(dt_s: f64) -> f64 {
     }
 }
 
-fn reject(code: &'static str, message: impl Into<String>) -> ServerMessage {
-    Rejection::new(code, message).into_message()
+fn reject_with(
+    code: &'static str,
+    message: impl Into<String>,
+) -> (ServerMessage, &'static str) {
+    (Rejection::new(code, message).into_message(), code)
 }
 
-fn reject_road_error(error: RoadError) -> ServerMessage {
+fn from_rejection(rejection: Rejection) -> (ServerMessage, &'static str) {
+    let code = rejection.code;
+    (rejection.into_message(), code)
+}
+
+fn accepted(message: ServerMessage) -> (ServerMessage, &'static str) {
+    (message, AUDIT_ACCEPTED)
+}
+
+fn reject_road_error(error: RoadError) -> (ServerMessage, &'static str) {
     let code = match error {
         RoadError::TooMany => codes::ROAD_STORE_FULL,
         RoadError::IdExhausted => codes::ROAD_ID_EXHAUSTED,
@@ -425,7 +759,7 @@ fn reject_road_error(error: RoadError) -> ServerMessage {
         RoadError::CoordinateOutOfRange => protocol_codes::ROAD_OUT_OF_BOUNDS,
         _ => codes::ROAD_REJECTED,
     };
-    reject(code, error.to_string())
+    reject_with(code, error.to_string())
 }
 
 /// Result of one deterministic authority loopback run.
@@ -466,21 +800,60 @@ pub fn run_authority_loopback() -> io::Result<AuthorityReport> {
     server_result
 }
 
-fn serve_authority(listener: TcpListener) -> io::Result<AuthorityReport> {
-    let (mut stream, _peer) = listener.accept()?;
+/// Counters for one served session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SessionStats {
+    commands: u64,
+    forbidden: u64,
+    rate_limited: u64,
+}
+
+fn response_code(response: &ServerMessage) -> Option<&str> {
+    match response {
+        ServerMessage::Reject { code, .. } => Some(code.as_str()),
+        _ => None,
+    }
+}
+
+/// Serve one accepted TCP connection with the authoritative executor.
+///
+/// Reads length-prefixed JSON commands until `disconnect`, EOF, or an I/O
+/// error, and returns the number of application frames exchanged. A peer that
+/// connects and closes without a frame is a clean session close.
+pub fn serve_world_connection(stream: TcpStream, seed: u64, role: ClientRole) -> io::Result<u64> {
+    serve_world_session(stream, ServerWorld::with_role(seed, role))
+        .map(|(_world, frames, _stats)| frames)
+}
+
+fn serve_world_session(
+    mut stream: TcpStream,
+    mut world: ServerWorld,
+) -> io::Result<(ServerWorld, u64, SessionStats)> {
     configure_stream(&stream)?;
 
-    let mut world = ServerWorld::new(LOOPBACK_SEED);
-    let mut commands = 0u64;
     let mut frames = 0u64;
+    let mut stats = SessionStats::default();
 
     loop {
-        let payload = read_frame(&mut stream).map_err(frame_to_io)?;
+        let payload = match read_frame(&mut stream) {
+            Ok(payload) => payload,
+            // EOF at the header or body boundary means the peer went away.
+            Err(FrameError::Truncated { .. }) | Err(FrameError::Io(_)) => break,
+            Err(error) => return Err(io::Error::other(error.to_string())),
+        };
         frames += 1;
-        commands += 1;
+        stats.commands += 1;
 
         let response = match decode_client_command(&payload) {
-            Ok(command) => world.apply(&command),
+            Ok(command) => {
+                let response = world.apply(&command);
+                match response_code(&response) {
+                    Some(codes::FORBIDDEN) => stats.forbidden += 1,
+                    Some(codes::RATE_LIMITED) => stats.rate_limited += 1,
+                    _ => {}
+                }
+                response
+            }
             Err(rejection) => rejection.into_message(),
         };
         write_json_frame(&mut stream, &response).map_err(frame_to_io)?;
@@ -491,8 +864,19 @@ fn serve_authority(listener: TcpListener) -> io::Result<AuthorityReport> {
         }
     }
 
+    Ok((world, frames, stats))
+}
+
+fn serve_authority(listener: TcpListener) -> io::Result<AuthorityReport> {
+    let (stream, _peer) = listener.accept()?;
+    // `time_control` is admin-only, so the authority transcript runs as admin.
+    let (world, frames, stats) = serve_world_session(
+        stream,
+        ServerWorld::with_role(LOOPBACK_SEED, ClientRole::Admin),
+    )?;
+
     Ok(AuthorityReport {
-        commands,
+        commands: stats.commands,
         frames,
         checksum: world.checksum(),
         tick: world.tick,
@@ -502,13 +886,14 @@ fn serve_authority(listener: TcpListener) -> io::Result<AuthorityReport> {
     })
 }
 
+
 fn run_authority_client(address: SocketAddr) -> io::Result<()> {
     let mut stream = TcpStream::connect_timeout(&address, SESSION_IO_TIMEOUT)?;
     configure_stream(&stream)?;
 
     // A local reference world pins the exact expected responses. Any transport
     // or state divergence fails the exchange.
-    let mut reference = ServerWorld::new(LOOPBACK_SEED);
+    let mut reference = ServerWorld::with_role(LOOPBACK_SEED, ClientRole::Admin);
     let expected_population = SessionConfig::for_seed(LOOPBACK_SEED).population;
 
     let hello = ClientCommand::Hello {
@@ -585,6 +970,248 @@ fn run_authority_client(address: SocketAddr) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+/// Result of one deterministic role/rate-limit loopback run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RolesReport {
+    /// Sessions served (viewer, mayor, admin).
+    pub sessions: u64,
+    /// Commands denied by the role matrix.
+    pub role_checks: u64,
+    /// Commands rejected by the deterministic token bucket.
+    pub rate_limited: u64,
+    /// Retained audit entries across every session.
+    pub audit: u64,
+    /// FNV-1a over every audited command, in session order.
+    pub checksum: String,
+}
+
+/// Run three deterministic sessions over TCP loopback:
+///
+/// * viewer: `set_tax`, `place_road`, and `time_control` are forbidden;
+/// * mayor: `set_tax` and `place_road` succeed, `time_control` is forbidden;
+/// * admin: `step` succeeds, then pings until the token bucket rate-limits one.
+///
+/// Both sides use bounded socket timeouts; the harness never sleeps.
+pub fn run_roles_loopback() -> io::Result<RolesReport> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let address = listener.local_addr()?;
+
+    let server = thread::spawn(move || serve_roles(listener));
+    let client_result = run_roles_client(address);
+    let server_result = server
+        .join()
+        .map_err(|_| io::Error::other("roles loopback server thread panicked"))?;
+
+    client_result?;
+    server_result
+}
+
+fn serve_roles(listener: TcpListener) -> io::Result<RolesReport> {
+    let mut report = RolesReport {
+        sessions: 0,
+        role_checks: 0,
+        rate_limited: 0,
+        audit: 0,
+        checksum: String::new(),
+    };
+    let mut hash = FNV_OFFSET;
+
+    for role in ClientRole::ALL {
+        let (stream, _peer) = listener.accept()?;
+        let (world, _frames, stats) =
+            serve_world_session(stream, ServerWorld::with_role(LOOPBACK_SEED, role))?;
+        report.sessions += 1;
+        report.role_checks += stats.forbidden;
+        report.rate_limited += stats.rate_limited;
+        for entry in world.audit_state() {
+            report.audit += 1;
+            hash = audit_entry_hash(hash, &entry);
+        }
+    }
+
+    report.checksum = format!("{hash:016x}");
+    Ok(report)
+}
+
+fn run_roles_client(address: SocketAddr) -> io::Result<()> {
+    run_viewer_role_session(address)?;
+    run_mayor_role_session(address)?;
+    run_admin_role_session(address)?;
+    Ok(())
+}
+
+fn role_reference(address: SocketAddr, role: ClientRole) -> io::Result<(TcpStream, ServerWorld)> {
+    let stream = TcpStream::connect_timeout(&address, SESSION_IO_TIMEOUT)?;
+    configure_stream(&stream)?;
+    Ok((stream, ServerWorld::with_role(LOOPBACK_SEED, role)))
+}
+
+fn loopback_hello(player_name: &str) -> ClientCommand {
+    ClientCommand::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        content_hash: "0123456789abcdef".repeat(4),
+        player_name: player_name.to_string(),
+    }
+}
+
+fn expect_welcome(message: &ServerMessage) -> io::Result<()> {
+    match message {
+        ServerMessage::Welcome {
+            session_id,
+            tick: 0,
+            protocol_version,
+        } if session_id == &session_id_for_seed(LOOPBACK_SEED)
+            && *protocol_version == PROTOCOL_VERSION =>
+        {
+            Ok(())
+        }
+        other => Err(unexpected("welcome", other)),
+    }
+}
+
+fn expect_goodbye(message: &ServerMessage) -> io::Result<()> {
+    match message {
+        ServerMessage::Goodbye => Ok(()),
+        other => Err(unexpected("goodbye", other)),
+    }
+}
+
+fn expect_forbidden(message: &ServerMessage) -> io::Result<()> {
+    match message {
+        ServerMessage::Reject { code, .. } if code == codes::FORBIDDEN => Ok(()),
+        other => Err(unexpected("role.forbidden", other)),
+    }
+}
+
+fn run_viewer_role_session(address: SocketAddr) -> io::Result<()> {
+    let (mut stream, mut reference) = role_reference(address, ClientRole::Viewer)?;
+    expect_welcome(&exchange(&mut stream, &mut reference, &loopback_hello("role"))?)?;
+
+    for command in [
+        ClientCommand::SetTax {
+            resident_rate: 10,
+            business_rate: 10,
+        },
+        ClientCommand::PlaceRoad {
+            start: [0, 0],
+            end: [8, 0],
+        },
+        ClientCommand::TimeControl {
+            action: TimeAction::Step,
+        },
+    ] {
+        expect_forbidden(&exchange(&mut stream, &mut reference, &command)?)?;
+    }
+
+    match exchange(
+        &mut stream,
+        &mut reference,
+        &ClientCommand::Ping { nonce: 1 },
+    )? {
+        ServerMessage::Pong { nonce: 1 } => {}
+        other => return Err(unexpected("viewer pong", &other)),
+    }
+    expect_goodbye(&exchange(
+        &mut stream,
+        &mut reference,
+        &ClientCommand::Disconnect,
+    )?)
+}
+
+fn run_mayor_role_session(address: SocketAddr) -> io::Result<()> {
+    let (mut stream, mut reference) = role_reference(address, ClientRole::Mayor)?;
+    expect_welcome(&exchange(&mut stream, &mut reference, &loopback_hello("role"))?)?;
+
+    match exchange(
+        &mut stream,
+        &mut reference,
+        &ClientCommand::SetTax {
+            resident_rate: 12,
+            business_rate: 8,
+        },
+    )? {
+        ServerMessage::Snapshot { tick: 1, .. } => {}
+        other => return Err(unexpected("mayor set_tax snapshot", &other)),
+    }
+    match exchange(
+        &mut stream,
+        &mut reference,
+        &ClientCommand::PlaceRoad {
+            start: [0, 0],
+            end: [8, 0],
+        },
+    )? {
+        ServerMessage::Snapshot { tick: 2, .. } => {}
+        other => return Err(unexpected("mayor place_road snapshot", &other)),
+    }
+    expect_forbidden(&exchange(
+        &mut stream,
+        &mut reference,
+        &ClientCommand::TimeControl {
+            action: TimeAction::Step,
+        },
+    )?)?;
+
+    match exchange(
+        &mut stream,
+        &mut reference,
+        &ClientCommand::Ping { nonce: 2 },
+    )? {
+        ServerMessage::Pong { nonce: 2 } => {}
+        other => return Err(unexpected("mayor pong", &other)),
+    }
+    expect_goodbye(&exchange(
+        &mut stream,
+        &mut reference,
+        &ClientCommand::Disconnect,
+    )?)
+}
+
+fn run_admin_role_session(address: SocketAddr) -> io::Result<()> {
+    let (mut stream, mut reference) = role_reference(address, ClientRole::Admin)?;
+    expect_welcome(&exchange(&mut stream, &mut reference, &loopback_hello("role"))?)?;
+
+    match exchange(
+        &mut stream,
+        &mut reference,
+        &ClientCommand::TimeControl {
+            action: TimeAction::Step,
+        },
+    )? {
+        ServerMessage::Snapshot { tick: 1, .. } => {}
+        other => return Err(unexpected("admin step snapshot", &other)),
+    }
+
+    // A full bucket plus the command-clock refill is a few dozen commands.
+    let limit = RATE_BURST_CREDITS * 4;
+    let mut limited = false;
+    for nonce in 0..limit {
+        match exchange(
+            &mut stream,
+            &mut reference,
+            &ClientCommand::Ping { nonce },
+        )? {
+            ServerMessage::Pong { nonce: echoed } if echoed == nonce => {}
+            ServerMessage::Reject { code, .. } if code == codes::RATE_LIMITED => {
+                limited = true;
+                break;
+            }
+            other => return Err(unexpected("pong or rate.limited", &other)),
+        }
+    }
+    if !limited {
+        return Err(io::Error::other(format!(
+            "rate limit was not reached within {limit} pings"
+        )));
+    }
+
+    expect_goodbye(&exchange(
+        &mut stream,
+        &mut reference,
+        &ClientCommand::Disconnect,
+    )?)
 }
 
 fn exchange(
