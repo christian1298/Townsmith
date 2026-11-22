@@ -235,6 +235,18 @@ cargo run --release -p townsmith-server -- --loopback-smoke
 
 The harness binds `127.0.0.1:0`, runs `hello → welcome`, `ping → pong`, `set_tax → snapshot`, `disconnect → goodbye`, and derives the session id and snapshot checksum deterministically from a fixed seed. It uses socket timeouts rather than sleeps, so it is safe for CI.
 
+**Client v0**
+
+`godot/mp_client.gd` + `mp_client.tscn` speak the same framing over `StreamPeerTCP` (big-endian length prefix, JSON, 1 MiB cap). The client sends `hello`, `ping`, a valid and an invalid `set_tax`, a `place_road`, then `disconnect`, and asserts `welcome`, `pong`, two snapshots, a rejection, and `goodbye`. `townsmith-server --listen PORT` binds loopback only and serves one session at a time.
+
+```bash
+GODOT=/path/to/godot ./scripts/smoke_mp_client.sh
+# MP_CLIENT status=ok welcome=ok ping=ok snapshot=ok reject=ok road=ok
+# MP_CLIENT_SMOKE status=ok ... frames=12
+```
+
+Limits: loopback only; no render integration, authentication, roles, interest filtering, delta compression, reconnect, or persistent server state. The client is a protocol/smoke harness, not the multiplayer UI.
+
 ## 6. Voxel editing and blueprint sync
 
 Voxel editing is the hardest sync problem because edits are frequent and fine-grained.

@@ -2,18 +2,25 @@
 //!
 //! Phase 0: builds a cohort-scale city, runs a fixed number of ticks on the
 //! CPU, and emits JSON. `--loopback-smoke` exercises protocol v0 over a local
-//! socket instead.
+//! socket instead. `--listen PORT` serves protocol v0 sessions on
+//! `127.0.0.1:PORT` until the process is stopped.
 
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::time::Instant;
 
 use core_sim::{Cohort, CohortSimulation};
-use townsmith_server::protocol::run_loopback_smoke;
+use townsmith_server::protocol::{run_loopback_smoke, serve_connection, LOOPBACK_SEED};
 
-fn parse_arg(name: &str, default: usize) -> usize {
+fn arg_value(name: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
     args.iter()
         .position(|arg| arg == name)
         .and_then(|index| args.get(index + 1))
+        .cloned()
+}
+
+fn parse_arg(name: &str, default: usize) -> usize {
+    arg_value(name)
         .and_then(|value| value.parse().ok())
         .unwrap_or(default)
 }
@@ -24,6 +31,31 @@ fn percentile(samples: &[f64], fraction: f64) -> f64 {
     }
     let index = ((samples.len() - 1) as f64 * fraction).round() as usize;
     samples[index]
+}
+
+/// Serve protocol v0 sessions sequentially on the IPv4 loopback interface
+/// until the process is stopped. v0 is single-connection-at-a-time by design.
+fn run_listen(port: u16) {
+    let requested = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let listener = match TcpListener::bind(requested) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("SERVER_PROTOCOL status=error error=bind {requested}: {error}");
+            std::process::exit(1);
+        }
+    };
+    let address = listener.local_addr().unwrap_or(requested);
+    println!("SERVER_PROTOCOL status=listening address={address} protocol=0");
+
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => match serve_connection(stream, LOOPBACK_SEED) {
+                Ok(frames) => println!("SERVER_PROTOCOL status=session frames={frames}"),
+                Err(error) => eprintln!("SERVER_PROTOCOL status=session_error error={error}"),
+            },
+            Err(error) => eprintln!("SERVER_PROTOCOL status=accept_error error={error}"),
+        }
+    }
 }
 
 fn main() {
@@ -40,6 +72,18 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        return;
+    }
+
+    if let Some(value) = arg_value("--listen") {
+        let port: u16 = match value.parse() {
+            Ok(port) => port,
+            Err(_) => {
+                eprintln!("SERVER_PROTOCOL status=error error=invalid --listen port `{value}`");
+                std::process::exit(2);
+            }
+        };
+        run_listen(port);
         return;
     }
 
