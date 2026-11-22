@@ -528,16 +528,27 @@ LOD split: near **2,123** instances / 118,888 quads / 237,776 triangles; mid **8
 
 `--switch` uses the same single layout with runtime bands. Final sample: near 704 / mid 2,055 / far 23,241; **74,995 quads / 149,990 triangles**; 12 samples, 60 updates, 12 rebuilds, 48 skips, three reused nodes, checksum **`730ad355`**. Setup ~153 ms, rebuild average ~11.5 ms, instance buffer 1,248,000 B. Default and `--lod` checksums are unchanged.
 
+`--buildings N` (or `--scale-250k`) builds one N-building grid with the same static bands, for setup/memory scale evidence:
+
+| Buildings | Grid | Near / mid / far | Quads | Triangles | Buffer | Setup | Static delta | Checksum |
+|---:|---|---|---:|---:|---:|---:|---:|---|
+| 50,000 | 224 × 224 | 716 / 4,308 / 44,976 | 110,920 | 221,840 | 2.40 MB | 49 ms | 4.2 MB | `a387e352` |
+| 250,000 | 500 × 500 | 716 / 4,308 / 244,976 | 310,920 | 621,840 | 12.00 MB | 178–184 ms | 19.1 MB | `aab83a92` |
+
+These are headless CPU setup numbers on a Ryzen 9 7950X. The 250k case is **setup only**: it does not run frames, measure FPS/draw calls/GPU time, stream, or simulate. It is not the 1M/3060 gate.
+
 ```bash
 GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only
 GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --lod
 GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --switch
+GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --buildings 50000
+GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --buildings 250000
 GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --short
 GODOT=/path/to/godot ./scripts/smoke_metropolis_voxel_gate.sh
 ```
 
 > [!warning] Evidence limit
-> This is **26k reused low-poly proxies** with static bands by default and optional runtime switching, not 250k distinct voxel buildings. It has no streaming, shadows/GI/SSAO, simulation, save/load, or RTX 3060 reference run. It proves the voxel-proxy instance/LOD memory/hysteresis-free switch shape, and it can capture a frame budget; it does not close the M5 gate.
+> This is **26k reused low-poly proxies** with static bands by default and optional runtime switching; `--buildings 250000` proves only the CPU instance/LOD setup and memory shape at that count. It has no streaming, shadows/GI/SSAO, simulation, save/load, or RTX 3060 reference run. It does not close the M5 gate.
 
 ### 7.8 Cohort vs individual validation
 
