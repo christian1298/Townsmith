@@ -351,6 +351,12 @@ GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only
 GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --lod
 GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --switch
 GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --buildings 250000
+
+# Evaluate a recorded 1M gate result against docs/68 thresholds
+./scripts/check_metropolis_gate.py --result benchmarks/results/gate/late_metropolis_v1.json
+./scripts/check_metropolis_gate.py --result benchmarks/results/gate/cohort_1m_v1.json
+./scripts/check_metropolis_gate.sh
+./scripts/check_metropolis_gate.py --self-test
 GODOT=/path/to/godot ./scripts/smoke_volume.sh
 GODOT=/path/to/godot ./scripts/smoke_editor.sh
 GODOT=/path/to/godot ./scripts/smoke_locale.sh

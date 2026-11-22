@@ -252,14 +252,20 @@ Each run records at least:
   "route_hash": "blake3:...",
   "settings": "standard_1080p_high_v1",
   "settings_hash": "blake3:...",
+  "duration_s": 210,
+  "warmup_s": 15,
+  "runs": 3,
   "game_version": "0.5.0",
   "git_commit": "...",
   "git_dirty": false,
   "hardware": {
     "cpu": "8c/16t ...",
+    "cpu_cores": 8,
+    "cpu_threads": 16,
     "gpu": "RTX 3060 12 GB",
     "driver": "...",
     "ram_gb": 32,
+    "display": "1920x1080",
     "os": "Windows 11 ..."
   },
   "results": {
@@ -270,16 +276,19 @@ Each run records at least:
     "frametime_ms_p95": 38.0,
     "frametime_ms_p99": 44.0,
     "frametime_ms_p99_9": 55.0,
+    "frametime_ms_max": 120.0,
     "hitches_50ms": 1,
     "stalls_250ms": 0,
+    "streaming_stalls_100ms": 0,
     "draw_calls_p99": 1840,
     "triangles_avg": 7600000,
     "vram_mb_peak": 9800,
-    "ram_mb_peak": 12400,
+    "ram_mb_peak": 12000,
     "sim_tick_ms_p99": 8.1,
     "sim_cpu_ms_per_s": 180,
     "load_ms": 21000,
     "save_ms": 24000,
+    "save_bytes": 182808978,
     "overhead_pct": 1.2
   },
   "rating": "playable",
@@ -637,6 +646,62 @@ Rules that keep the gate honest:
 - Do not compare a Compatibility-renderer result to a Forward+ baseline. They are different tiers.
 - The gate report is signed by the performance lead and an independent reviewer. A single-person run is provisional.
 
+### 8.4 Automated evaluator (2026-11-23)
+
+`scripts/check_metropolis_gate.py` checks a **recorded** result JSON for the two 1M scenes (`late_metropolis_v1`, `cohort_1m_v1`) against §5 and §8. It is Python 3 stdlib only, measurement-free, and deliberately **not** wired into `scripts/check.sh`: no result file exists in a clean checkout, and a missing local run must not fail correctness CI.
+
+```bash
+# Evaluator self-test (fixtures in a temp directory)
+./scripts/check_metropolis_gate.py --self-test
+
+# Newest recorded files under benchmarks/results/gate/
+./scripts/check_metropolis_gate.sh
+
+# Explicit files
+./scripts/check_metropolis_gate.py \
+  --result benchmarks/results/gate/late_metropolis_v1.json \
+  --result benchmarks/results/gate/cohort_1m_v1.json
+
+# Require the reference rig (8c/16t, RTX 3060 12 GB, 32 GB, 1920x1080)
+./scripts/check_metropolis_gate.py --require-hardware \
+  --result benchmarks/results/gate/late_metropolis_v1.json
+```
+
+The result schema and example files are in `benchmarks/results/gate/README.md`. Every file must carry `scene`, `route`, `settings`, `duration_s`, `warmup_s`, `runs`, `hardware` (CPU/RAM, plus GPU/display for the render scene), and `results`. A run missing a required field is `insufficient`, not a pass.
+
+| Evaluator check | §8.2 rule | Threshold |
+|---|---|---|
+| `fps_avg` | #1 | ≥30 |
+| `fps_low_1pct` | #2 | ≥22 |
+| `fps_low_0_1pct` | #3 | ≥15 (checked when p99.9 is recorded) |
+| `frametime_ms_p99` / `frametime_ms_p99_9` | #4 | ≤45 ms / ≤67 ms |
+| `frametime_ms_max` / `stalls_250ms` | #5 | ≤250 ms / 0 |
+| `hitches_50ms` | #5 | ≤3 |
+| `draw_calls_p99` | #8 | <2,000 |
+| `triangles` | #8 | 5–10M median |
+| `vram_mb_peak` / `ram_mb_peak` | #9 | ≤10.5 GB / ≤12 GB |
+| `vbus_mb_peak` | supplemental | ≤8 GB (optional; see note) |
+| `cohort_tick_ms_p99` / `full_tick_ms_p99` | #10 | ≤10 ms / ≤50 ms |
+| `active_agents_ms_p99` / `pathfinding_ms_p99` | #11 | ≤10 ms / ≤4 ms |
+| `sim_cpu_ms_per_s` | #12 | ≤250 ms |
+| `server_rss_mb_peak` | §5.3 | ≤4 GB |
+| `traffic_*` | #14 | build ≤250 ms; incremental ≤16 ms; flow ≤4 ms; 5,000 queries ≤10 ms |
+| `save_ms` / `load_ms` | #15 | ≤30 s each |
+| `dropped_chunks` / `streaming_stalls_100ms` | #16 | 0 / 0 |
+| `overhead_pct` / `fps_avg_spread_pct` | #17 | <2% / <5% |
+| `runs` / `duration_s` / `warmup_s` | §5.5 | ≥3 / ≥90 s (Late) / ≥15 s (Late) |
+| `valid` / `crashed` / `oom` / `hashes_match` | #19 | true / false / false / true when recorded |
+
+- **Optional metrics:** p99.9, draw calls, triangles, VBUS, overhead, variance, agent/pathfinding, server RSS, traffic, load time, dropped chunks, and the correctness flags are checked **when recorded**. Missing required fields are always `insufficient`.
+- **VBUS:** docs/68 has no separate VBUS row. The tooling brief caps a recorded `vbus_mb_peak` at 8 GB as a supplemental asset/GPU-buffer budget; it does not replace the 10.5 GB VRAM rule. A file without the field is not penalised.
+- **Hardware match:** GPU must be an **RTX 3060 12 GB** (a 3060 Ti or 8 GB card does not match), CPU ≥8 cores / ≥16 threads, RAM ≥32 GB (30 GiB floor for firmware reserve), and display 1920×1080 for the render scene. The headless scene requires CPU/RAM only. Without `--require-hardware`, a mismatch is `warn` and `hardware_match=false`; the metric checks still run. With it, the mismatch is a failure. Missing hardware fields are always `insufficient`.
+- **Status:** each check prints `METROPOLIS_GATE_CHECK ... status=pass|fail|warn|skip|missing`, then `METROPOLIS_GATE status=pass|fail|insufficient scenes=N checks=N failed=N hardware_match=true|false|unknown`.
+- **Exit codes:** 0 = pass, 1 = fail (including a required-hardware mismatch), 2 = insufficient/bad input (missing field, wrong scene, unreadable JSON, no results).
+- **Self-test:** `./scripts/check_metropolis_gate.py --self-test` covers pass, metric fail, missing field, headless render scene, non-reference hardware with and without `--require-hardware`, wrong scene, max-frame stall, streaming stall, VBUS over budget, both headless pass/fail cases, and invalid JSON; it prints `METROPOLIS_GATE_SELFTEST cases=N status=ok`.
+
+> [!warning] A passing evaluator is necessary but not sufficient
+> The evaluator only reads a JSON. It cannot prove the file was produced on the reference rig, verify the save/content/route/settings hashes, run C1/C2, or replace the signed report. A `status=pass` means "this file is internally complete and inside the §5/§8 numbers", nothing more. The gate passes only with the recorded C1 and C2 runs and the §10.2 sign-off.
+
 ## 9. Fallback tiers
 
 If the gate misses, diagnose first. The wrong fallback wastes weeks.
@@ -661,6 +726,9 @@ Order of application:
 
 > [!warning] Offload is not a free win
 > A dedicated server helps a CPU-bound client. If the late route is GPU-bound at 25 FPS, moving the simulation to another machine changes nothing. Measure the bottleneck before choosing a tier.
+
+> [!warning] Fallback tiers are not an automated pass
+> `scripts/check_metropolis_gate.py` can only evaluate a recorded result. It cannot turn an F1–F4 conditional result into a gate pass, and it never edits a report. A fallback still needs the matching ADR and a fresh full-gate run; only an F0 run with no content change can pass on its own.
 
 ## 10. Staged plan to the gate
 

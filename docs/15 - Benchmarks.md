@@ -53,6 +53,9 @@ A benchmark run is not a synthetic fly-through of an empty map. It is a represen
 > [!info] Streaming-scale data harness
 > `cargo run --release -p townsmith-bench --bin streaming_scale` models 100 km² of terrain through a bounded near/mid/far resident set and LOD meshing. Current run: 525 chunks visited, 775 generated, 225 peak resident, ~281 MB peak mesh bytes, 280.3 ms mean generate, 17.4 ms mean mesh, 12.35 s total, checksum `4dfb48204244e377`. It reports `status=capped` when the per-step generation budget skips chunks. Data harness only; not the render gate.
 
+> [!info] Metropolis gate evaluator
+> `./scripts/check_metropolis_gate.py --result PATH` evaluates a recorded `late_metropolis_v1` or `cohort_1m_v1` JSON against the docs/68 thresholds and prints `METROPOLIS_GATE status=pass|fail|insufficient`. `./scripts/check_metropolis_gate.sh` finds the newest file under `benchmarks/results/gate/`. It never renders or measures; a result missing provenance is `insufficient`, and `--require-hardware` fails a non-8c/16t/RTX 3060-12GB run. `--self-test` covers 14 cases. See [[68 - Metropolis Gate]] §8.4.
+
 > [!info] Industrial balance probe
 > `cargo run --release -p townsmith-bench --bin industrial` builds a 20,000-resident Industrial city and runs 30 days at two tax policies. Current result: default 8/4 bankrupt in ~2.3 days at −175,385/day; 20/4 ends +2,288,306 at +64,615/day. Notional construction cost is 195M against 600k of available financing. See [[72 - Industrial Balance]].
 
