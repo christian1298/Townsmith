@@ -176,7 +176,7 @@ func _ready() -> void:
 	if _ensure_blueprint():
 		_refresh_preview(true)
 	else:
-		_set_modal("Blueprint failed: " + blueprint_path, true)
+		_set_modal(i18n.t("base.ui.modal.blueprint_failed", {"path": blueprint_path}), true)
 	_update_hud()
 	if OS.get_cmdline_user_args().has("--scene-smoke"):
 		_run_scene_smoke()
@@ -278,7 +278,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif lot_mode:
 				if lot_start.x != -999999:
 					lot_start = Vector2i(-999999, -999999)
-					_set_modal("Lot corner cleared", false)
+					_set_modal(i18n.t("base.ui.modal.lot_corner_cleared"), false)
 				else:
 					lot_mode = false
 					_set_modal("", false)
@@ -717,7 +717,7 @@ func _toggle_lot_mode() -> void:
 	if lot_mode:
 		road_mode = false
 		road_start = Vector2i(-999999, -999999)
-		_set_modal("Lot mode: click two corners · 1/2/3 zone · Esc cancels", false)
+		_set_modal(i18n.t("base.ui.modal.lot_mode_help"), false)
 	else:
 		_set_modal("", false)
 	_update_hud()
@@ -726,7 +726,7 @@ func _set_lot_zone(zone: String) -> void:
 	if not lot_materials.has(zone):
 		return
 	lot_zone = zone
-	_set_modal("Lot zone: " + zone, false)
+	_set_modal(i18n.t("base.ui.modal.lot_zone", {"zone": zone}), false)
 	_update_hud()
 
 func _lot_click(screen: Vector2) -> bool:
@@ -734,14 +734,14 @@ func _lot_click(screen: Vector2) -> bool:
 	var cell := Vector2i(roundi(point.x / 4.0) * 4, roundi(point.y / 4.0) * 4)
 	if lot_start.x == -999999:
 		lot_start = cell
-		_set_modal("Lot corner (%d, %d) · click the opposite corner" % [cell.x, cell.y], false)
+		_set_modal(i18n.t("base.ui.modal.lot_corner", {"x": cell.x, "z": cell.y}), false)
 		return true
 	var min_x := mini(lot_start.x, cell.x)
 	var min_z := mini(lot_start.y, cell.y)
 	var max_x := maxi(lot_start.x, cell.x)
 	var max_z := maxi(lot_start.y, cell.y)
 	if max_x - min_x < 4 or max_z - min_z < 4:
-		_set_modal("Lot needs at least 4 × 4 m", true)
+		_set_modal(i18n.t("base.ui.modal.lot_min_size"), true)
 		return false
 	var ok := _add_lot(min_x, min_z, max_x, max_z, lot_zone)
 	if ok:
@@ -753,7 +753,9 @@ func _add_lot(min_x: int, min_z: int, max_x: int, max_z: int, zone: String) -> b
 		SEED, min_x, min_z, max_x, max_z, zone
 	)
 	if not bool(result.get("ok", false)):
-		_set_modal("Lot rejected: " + str(result.get("error_code", "unknown")), true)
+		_set_modal(i18n.t("base.ui.modal.lot_rejected", {
+			"code": str(result.get("error_code", "unknown")),
+		}), true)
 		return false
 	_add_lot_node(result.get("lot", {}))
 	_update_hud()
@@ -1210,35 +1212,43 @@ func _refresh_industry_visuals() -> void:
 func _cycle_starter() -> void:
 	var catalog: Dictionary = core.starter_library(SEED)
 	if not bool(catalog.get("ok", false)):
-		_set_modal("Starter catalog failed: " + str(catalog.get("error_code", "unknown")), true)
+		_set_modal(i18n.t("base.ui.modal.starter_catalog_failed", {
+			"code": str(catalog.get("error_code", "unknown")),
+		}), true)
 		return
 	starter_ids.clear()
 	for item in catalog.get("items", []):
 		if bool(item.get("available", false)):
 			starter_ids.append(str(item.get("id", "")))
 	if starter_ids.is_empty():
-		_set_modal("No starter buildings at this age", true)
+		_set_modal(i18n.t("base.ui.modal.starter_none"), true)
 		return
 	starter_index = (starter_index + 1) % starter_ids.size()
 	var selected_id := str(starter_ids[starter_index])
 	var result: Dictionary = core.starter_blueprint(SEED, selected_id)
 	if not bool(result.get("ok", false)):
 		_set_modal(
-			"Starter failed: " + str(result.get("error_code", result.get("error", ""))),
+			i18n.t("base.ui.modal.starter_failed", {
+				"code": str(result.get("error_code", result.get("error", ""))),
+			}),
 			true
 		)
 		return
 	var path := str(result.get("path", ""))
 	if path == "":
-		_set_modal("Starter has no package path", true)
+		_set_modal(i18n.t("base.ui.modal.starter_no_path"), true)
 		return
 	blueprint_path = path
 	if not _ensure_blueprint():
-		_set_modal("Starter package rejected", true)
+		_set_modal(i18n.t("base.ui.modal.starter_package_rejected"), true)
 		return
 	_refresh_preview(true)
 	_set_modal(
-		"Starter: %s (%d/%d)" % [str(result.get("name", selected_id)), starter_index + 1, starter_ids.size()],
+		i18n.t("base.ui.modal.starter_selected", {
+			"name": str(result.get("name", selected_id)),
+			"index": starter_index + 1,
+			"total": starter_ids.size(),
+		}),
 		false
 	)
 	_update_hud()
@@ -1264,16 +1274,18 @@ func _cycle_industry() -> void:
 			next = ""
 	if next == "":
 		core.industry_remove_site(selected_id)
-		_set_modal("Industry removed", false)
+		_set_modal(i18n.t("base.ui.modal.industry_removed"), false)
 	else:
 		var result: Dictionary = core.industry_add_site(SEED, selected_id, next)
 		if not bool(result.get("ok", false)):
 			_set_modal(
-				"Industry failed: " + str(result.get("error_code", result.get("error", ""))),
+				i18n.t("base.ui.modal.industry_failed", {
+					"code": str(result.get("error_code", result.get("error", ""))),
+				}),
 				true
 			)
 			return
-		_set_modal("Industry: " + next, false)
+		_set_modal(i18n.t("base.ui.modal.industry_selected", {"kind": next}), false)
 	_refresh_industry_visuals()
 	_update_hud()
 
@@ -1396,16 +1408,18 @@ func _cycle_service() -> void:
 			next = ""
 	if next == "":
 		core.service_remove_site(SEED, selected_id)
-		_set_modal("Civic service removed", false)
+		_set_modal(i18n.t("base.ui.modal.service_removed"), false)
 	else:
 		var result: Dictionary = core.service_add_site(SEED, selected_id, next)
 		if not bool(result.get("ok", false)):
 			_set_modal(
-				"Civic service failed: " + str(result.get("error_code", result.get("error", ""))),
+				i18n.t("base.ui.modal.service_failed", {
+					"code": str(result.get("error_code", result.get("error", ""))),
+				}),
 				true
 			)
 			return
-		_set_modal("Civic service: " + next, false)
+		_set_modal(i18n.t("base.ui.modal.service_selected", {"kind": next}), false)
 	_refresh_service_visuals()
 	_update_hud()
 
@@ -1490,25 +1504,31 @@ func _cycle_utility() -> void:
 	if not has_water and not has_power:
 		var result: Dictionary = core.utility_add_site(SEED, selected_id, "water")
 		if not bool(result.get("ok", false)):
-			_set_modal("Utility failed: " + str(result.get("error_code", "")), true)
+			_set_modal(i18n.t("base.ui.modal.utility_failed", {
+				"code": str(result.get("error_code", "")),
+			}), true)
 			return
-		_set_modal("Utility: water", false)
+		_set_modal(i18n.t("base.ui.modal.utility_water"), false)
 	elif has_water and not has_power:
 		var result: Dictionary = core.utility_add_site(SEED, selected_id, "power")
 		if not bool(result.get("ok", false)):
-			_set_modal("Utility failed: " + str(result.get("error_code", "")), true)
+			_set_modal(i18n.t("base.ui.modal.utility_failed", {
+				"code": str(result.get("error_code", "")),
+			}), true)
 			return
-		_set_modal("Utility: water + power", false)
+		_set_modal(i18n.t("base.ui.modal.utility_water_power"), false)
 	elif has_power and not has_water:
 		var result: Dictionary = core.utility_add_site(SEED, selected_id, "water")
 		if not bool(result.get("ok", false)):
-			_set_modal("Utility failed: " + str(result.get("error_code", "")), true)
+			_set_modal(i18n.t("base.ui.modal.utility_failed", {
+				"code": str(result.get("error_code", "")),
+			}), true)
 			return
-		_set_modal("Utility: water + power", false)
+		_set_modal(i18n.t("base.ui.modal.utility_water_power"), false)
 	else:
 		core.utility_remove_site(SEED, selected_id, "water")
 		core.utility_remove_site(SEED, selected_id, "power")
-		_set_modal("Utility removed", false)
+		_set_modal(i18n.t("base.ui.modal.utility_removed"), false)
 	_refresh_utility_visuals()
 	_update_hud()
 
@@ -1527,18 +1547,25 @@ func _cycle_tax_policy() -> void:
 		SEED, float(next["resident"]), float(next["business"])
 	)
 	if not bool(result.get("ok", false)):
-		_set_modal("Tax change failed: " + str(result.get("error_code", "")), true)
+		_set_modal(i18n.t("base.ui.modal.tax_failed", {
+			"code": str(result.get("error_code", "")),
+		}), true)
 		return
-	_set_modal("Tax policy: %s" % str(next["name"]), false)
+	_set_modal(i18n.t("base.ui.modal.tax_policy", {"name": str(next["name"])}), false)
 	_update_hud()
 
 func _borrow() -> void:
 	var result: Dictionary = core.economy_borrow(SEED, LOAN_AMOUNT)
 	if not bool(result.get("ok", false)):
-		_set_modal("Loan rejected: " + str(result.get("error_code", "")), true)
+		_set_modal(i18n.t("base.ui.modal.loan_rejected", {
+			"code": str(result.get("error_code", "")),
+		}), true)
 		_update_hud()
 		return
-	_set_modal("Borrowed %.0f · debt %.0f" % [LOAN_AMOUNT, float(result.get("debt", 0.0))], false)
+	_set_modal(i18n.t("base.ui.modal.loan_taken", {
+		"amount": "%.0f" % LOAN_AMOUNT,
+		"debt": "%.0f" % float(result.get("debt", 0.0)),
+	}), false)
 	_update_hud()
 
 func _found_settlement() -> bool:
@@ -1560,18 +1587,22 @@ func _found_settlement() -> bool:
 		64
 	)
 	if not bool(result.get("ok", false)):
-		_set_modal("Settlement rejected: " + str(result.get("error_code", "unknown")), true)
+		_set_modal(i18n.t("base.ui.modal.settlement_rejected", {
+			"code": str(result.get("error_code", "unknown")),
+		}), true)
 		_update_hud()
 		return false
 	_add_settlement_node(result.get("settlement", {}))
-	_set_modal("Founded %s" % str(result.get("settlement", {}).get("name", "settlement")), false)
+	_set_modal(i18n.t("base.ui.modal.settlement_founded", {
+		"name": str(result.get("settlement", {}).get("name", "settlement")),
+	}), false)
 	_update_hud()
 	return true
 
 func _clear_settlements() -> void:
 	core.settlement_clear()
 	_clear_settlement_nodes()
-	_set_modal("Settlements cleared", false)
+	_set_modal(i18n.t("base.ui.modal.settlements_cleared"), false)
 	_update_hud()
 
 func _rebuild_settlements() -> void:
@@ -1683,19 +1714,21 @@ func _ensure_blueprint() -> bool:
 
 	var info: Dictionary = core.world_blueprint_info(blueprint_path)
 	if not bool(info.get("ok", false)):
-		_set_modal("Blueprint rejected: " + str(info.get("error_code", "unknown")), true)
+		_set_modal(i18n.t("base.ui.modal.blueprint_rejected", {
+			"code": str(info.get("error_code", "unknown")),
+		}), true)
 		return false
 	blueprint_info = info
 	blueprint_info_cache[blueprint_path] = info
 	var mesh: ArrayMesh = core.build_blueprint_mesh(blueprint_path)
 	if mesh.get_surface_count() == 0:
-		_set_modal("Blueprint mesh is empty", true)
+		_set_modal(i18n.t("base.ui.modal.blueprint_mesh_empty"), true)
 		return false
 	blueprint_mesh = mesh
 	mesh_cache[blueprint_path] = mesh
 	var bounds: PackedFloat32Array = info.get("bounds", PackedFloat32Array())
 	if bounds.size() != 3:
-		_set_modal("Blueprint bounds are invalid", true)
+		_set_modal(i18n.t("base.ui.modal.blueprint_bounds_invalid"), true)
 		return false
 	ghost_mesh.mesh = mesh
 	ghost_mesh.position = Vector3(-bounds[0] * 0.5, 0.0, -bounds[2] * 0.5)
@@ -2522,7 +2555,7 @@ func _enter_architect() -> bool:
 	selection_box.visible = false
 	if DisplayServer.get_name() != "headless":
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-	_set_modal("Read-only Architect view at the door · M returns to Mayor · voxel editing uses the workshop editor", false)
+	_set_modal(i18n.t("base.ui.modal.architect_view"), false)
 	_update_hud()
 	return true
 
@@ -2544,14 +2577,16 @@ func _return_to_mayor() -> bool:
 func _edit_target(delta: int) -> bool:
 	var current: float = core.world_height_at(SEED, target_x, target_z)
 	if current < 0.0:
-		_set_modal("No terrain at the target", true)
+		_set_modal(i18n.t("base.ui.modal.no_terrain"), true)
 		return false
 	var height := clampi(roundi(current) + delta, 0, 255)
 	var result: Dictionary = core.terrain_edit_height(
 		SEED, int(target_x), int(target_z), height
 	)
 	if not bool(result.get("ok", false)):
-		_set_modal("Terrain edit failed: " + str(result.get("error_code", "unknown")), true)
+		_set_modal(i18n.t("base.ui.modal.terrain_edit_failed", {
+			"code": str(result.get("error_code", "unknown")),
+		}), true)
 		_update_hud()
 		return false
 	var chunk := Vector2i(
@@ -2561,7 +2596,11 @@ func _edit_target(delta: int) -> bool:
 	var local_z := int(result.get("local_z", 0))
 	for coord in _touched_chunks(chunk, local_x, local_z):
 		streamer.invalidate_chunk(coord)
-	_set_modal("Terrain %d m at (%d, %d)" % [height, int(target_x), int(target_z)], false)
+	_set_modal(i18n.t("base.ui.modal.terrain_edit", {
+		"height": height,
+		"x": int(target_x),
+		"z": int(target_z),
+	}), false)
 	_refresh_preview(true)
 	return true
 
@@ -2583,7 +2622,7 @@ func _toggle_road_mode() -> void:
 	if road_mode:
 		lot_mode = false
 		lot_start = Vector2i(-999999, -999999)
-		_set_modal("Road mode: click start, then end · 8 m wide · Esc cancels", false)
+		_set_modal(i18n.t("base.ui.modal.road_mode_help"), false)
 	else:
 		_set_modal("", false)
 	_update_hud()
@@ -2593,7 +2632,7 @@ func _road_click(screen: Vector2) -> bool:
 	var cell := Vector2i(roundi(point.x), roundi(point.y))
 	if road_start.x == -999999:
 		road_start = cell
-		_set_modal("Road start (%d, %d) · click the end" % [cell.x, cell.y], false)
+		_set_modal(i18n.t("base.ui.modal.road_start", {"x": cell.x, "z": cell.y}), false)
 		return true
 	var end := cell
 	if absi(end.x - road_start.x) >= absi(end.y - road_start.y):
@@ -2601,21 +2640,26 @@ func _road_click(screen: Vector2) -> bool:
 	else:
 		end.x = road_start.x
 	if end == road_start:
-		_set_modal("Road needs a non-zero length", true)
+		_set_modal(i18n.t("base.ui.modal.road_zero_length"), true)
 		return false
 	var ok := _add_road(road_start.x, road_start.y, end.x, end.y)
 	if ok:
-		_set_modal("Road %d m at (%d, %d)..(%d, %d)" % [
-			absi(end.x - road_start.x) + absi(end.y - road_start.y),
-			road_start.x, road_start.y, end.x, end.y
-		], false)
+		_set_modal(i18n.t("base.ui.modal.road_added", {
+			"length": absi(end.x - road_start.x) + absi(end.y - road_start.y),
+			"x1": road_start.x,
+			"z1": road_start.y,
+			"x2": end.x,
+			"z2": end.y,
+		}), false)
 		road_start = Vector2i(-999999, -999999)
 	return ok
 
 func _add_road(x1: int, z1: int, x2: int, z2: int) -> bool:
 	var result: Dictionary = core.road_add(SEED, x1, z1, x2, z2, 8)
 	if not bool(result.get("ok", false)):
-		_set_modal("Road rejected: " + str(result.get("error_code", "unknown")), true)
+		_set_modal(i18n.t("base.ui.modal.road_rejected", {
+			"code": str(result.get("error_code", "unknown")),
+		}), true)
 		return false
 	_rebuild_roads()
 	_update_hud()
@@ -2839,13 +2883,17 @@ func _research_next() -> void:
 			best = str(node.get("id", ""))
 			best_cost = float(node.get("cost", INF))
 	if best == "":
-		_set_modal("Research: nothing is affordable yet", true)
+		_set_modal(i18n.t("base.ui.modal.research_none"), true)
 		return
 	var result: Dictionary = core.research_unlock(SEED, best)
 	if bool(result.get("ok", false)):
-		_set_modal("Researched " + str(result.get("name", best)), false)
+		_set_modal(i18n.t("base.ui.modal.researched", {
+			"name": str(result.get("name", best)),
+		}), false)
 	else:
-		_set_modal("Research failed: " + str(result.get("error", "unknown")), true)
+		_set_modal(i18n.t("base.ui.modal.research_failed", {
+			"error": str(result.get("error", "unknown")),
+		}), true)
 	_update_hud()
 
 func _advance_construction(seconds: float) -> Dictionary:
@@ -3015,6 +3063,7 @@ func _run_scene_smoke() -> void:
 	var advisor_i18n_ok := false
 	var advisor_detail_i18n_ok := false
 	var hud_i18n_ok := false
+	var modal_i18n_ok := false
 	var hud_body_i18n_ok := false
 	var hud_status_i18n_ok := false
 	var dashboard_body_i18n_ok := false
@@ -3651,6 +3700,16 @@ func _run_scene_smoke() -> void:
 				hud_status_i18n_ok = hud_status_i18n_ok and modal_label != null and modal_label.text.contains("Construction crew")
 				_set_modal("", false)
 				dashboard_ok = dashboard_ok and hud_i18n_ok
+				var saved_selected := selected_id
+				selected_id = -1
+				i18n.set_locale("de")
+				_cycle_industry()
+				modal_i18n_ok = modal_label.text.contains("Zuerst ein Gebäude auswählen")
+				i18n.set_locale("en")
+				_cycle_industry()
+				modal_i18n_ok = modal_i18n_ok and modal_label.text.contains("Select a building first")
+				selected_id = saved_selected
+				_set_modal("", false)
 				var balance_before_loan := float(economy_after.get("balance", 0.0))
 				var loan_state: Dictionary = core.economy_borrow(SEED, LOAN_AMOUNT)
 				var tax_state: Dictionary = core.economy_set_taxes(SEED, 100.0, 8.0)
@@ -3860,7 +3919,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -3900,6 +3959,7 @@ func _run_scene_smoke() -> void:
 		"ok" if dashboard_body_i18n_ok else "failed",
 		"ok" if advisor_i18n_ok else "failed",
 		"ok" if advisor_detail_i18n_ok else "failed",
+		"ok" if modal_i18n_ok else "failed",
 		"ok" if traffic_ok else "failed",
 		"ok" if select_ok else "failed",
 		"ok" if enter_ok else "failed",
