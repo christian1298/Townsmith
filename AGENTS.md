@@ -320,6 +320,7 @@ cargo run --release -p townsmith-server -- --loopback-smoke
 cargo test -p townsmith-server
 cargo run --release -p townsmith-server -- --loopback-smoke   # protocol + authority + roles + resume + interest goldens
 cargo run --release -p townsmith-server -- --interest-smoke   # viewport + bounded 64-road interest view loopback
+GODOT=/path/to/godot ./scripts/smoke_interest_preview.sh   # headless 3D interest-view road preview, two runs, same checksum
 GODOT=/path/to/godot ./scripts/smoke_mp_client.sh   # normal path (frames 7/8) + reconnect resume via --sessions 2
 GODOT=/path/to/godot ./scripts/smoke_movement_stress.sh
 GODOT=/path/to/godot "${GODOT:-godot}" --headless --path godot res://movement_stress.tscn -- --agents 2000
@@ -386,6 +387,10 @@ GODOT=/path/to/godot ./scripts/smoke_blueprint.sh
 # Standalone district policy CRUD editor (developer scene; not the dashboard)
 "${GODOT:-godot}" --path godot res://policy_editor.tscn
 GODOT=/path/to/godot ./scripts/smoke_policy_editor.sh
+
+# Standalone 3D interest-view preview (debug harness; no server, no gate)
+"${GODOT:-godot}" --path godot res://interest_preview.tscn
+"${GODOT:-godot}" --path godot res://interest_preview.tscn -- --input path/to/interest_view.json
 
 # 200 real voxel-hut instances
 VOXEL_INSTANCES=200 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_voxel_instances.json
