@@ -42,6 +42,7 @@ pub mod manifest;
 pub mod metrics;
 pub mod movement;
 pub mod named;
+pub mod pack;
 pub mod placement;
 pub mod population;
 pub mod progression;
@@ -115,6 +116,7 @@ pub use named::{
     MAX_DETAILED_CITIZENS, MAX_MATERIALIZATION_CHANGES, MAX_NAMED_CITIZENS, MAX_NAMED_NAME_BYTES,
     NAMED_FORMAT_VERSION,
 };
+pub use pack::{ContentPack, PackError};
 pub use placement::{
     footprint_for, normalize_rotation, validate_placement, Placement, PlacementError,
     PlacementIndex, PlacementPlan, PlacementRequest, PlacementStore, MAX_BUILDING_HEIGHT_M,

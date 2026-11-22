@@ -1,0 +1,56 @@
+{
+  "format_version": 1,
+  "props": [
+    {
+      "id": "example:copper_smelter",
+      "name_key": "content.prop.copper_smelter",
+      "footprint_m": [
+        2.0,
+        2.0
+      ],
+      "height_m": 2.4,
+      "cost": 800.0,
+      "allowed_rooms": [
+        "example:smelter_hall"
+      ],
+      "tags": [
+        "craft",
+        "heat"
+      ],
+      "draft": true
+    },
+    {
+      "id": "example:copper_anvil",
+      "name_key": "content.prop.copper_anvil",
+      "footprint_m": [
+        0.8,
+        1.2
+      ],
+      "height_m": 0.9,
+      "cost": 240.0,
+      "allowed_rooms": [
+        "example:smelter_hall"
+      ],
+      "tags": [
+        "craft"
+      ],
+      "draft": true
+    },
+    {
+      "id": "example:copper_downpipe",
+      "name_key": "content.prop.copper_downpipe",
+      "footprint_m": [
+        0.15,
+        0.15
+      ],
+      "height_m": 3.0,
+      "cost": 35.0,
+      "allowed_rooms": [],
+      "tags": [
+        "roof",
+        "drainage"
+      ],
+      "draft": true
+    }
+  ]
+}

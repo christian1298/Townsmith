@@ -17,6 +17,12 @@ content/
     materials.json         # base: materials, draft balances
     rooms.json             # base: room types
     props.json             # base: props and allowed rooms
+  mods/
+    example.mod.json       # example manifest, draft
+    example/
+      materials.json       # example: pack materials (3)
+      rooms.json           # example: pack rooms (2)
+      props.json           # example: pack props (3)
 ```
 
 ## Validate
@@ -28,7 +34,7 @@ content/
 
 The validator checks namespaced IDs, required fields/types, duplicate IDs,
 schema file presence, and prop -> room references. The final line is
-`CONTENT_SCHEMA files=4 entries=24 status=ok`.
+`CONTENT_SCHEMA files=4 entries=32 status=ok`.
 
 ## Rules
 

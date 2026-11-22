@@ -84,14 +84,18 @@ The first data contracts are in `content/`:
 
 - `content/schema/{material,room,prop}.schema.json` — draft 2020-12 schemas with namespaced IDs (`^[a-z0-9_]+:[a-z0-9_./-]+$`), required `format_version: 1`, `name_key`, and draft markers.
 - `content/base/{materials,rooms,props}.json` — 8 materials, 7 room types, and 8 props tagged `draft: true`; prop `allowed_rooms` references room IDs.
-- `scripts/check_content_schema.py` — stdlib validator for structure, duplicate IDs, namespaced IDs, and prop -> room cross-references. `--self-test` covers valid, duplicate, bad-reference, bad-density, and bad-version fixtures.
+- `scripts/check_content_schema.py` — stdlib validator for structure, duplicate IDs, namespaced IDs, prop -> room cross-references, mod manifests, and example pack content. `--self-test` covers valid, duplicate, bad-reference, bad-density, bad-version, wrong-namespace, duplicate-with-base, missing-pack, and bad-pack-room fixtures.
 - `scripts/check.sh` runs it after the locale gate.
 - `core_city::registry` loads the same three base documents at compile time (`ContentRegistry::base()`), validates namespaced IDs, duplicate IDs, numbers, tags, and prop → room references, and indexes definitions by ID. Stable base checksum `c2df0f242f5e78d2`; 14 registry tests.
 
-Current output: `CONTENT_SCHEMA files=3 entries=23 errors=0 status=ok`.
+Current output: `CONTENT_SCHEMA files=4 entries=32 errors=0 status=ok`; self-test `cases=13 status=ok`. Entries are 23 base definitions, one manifest, and 8 example-pack definitions.
 
 > [!warning] Contract, not runtime
-> The runtime registry loads and validates the bundled base content. A v0 mod manifest (`core_city::manifest`) parses `content/mods/*.mod.json`, validates namespaced IDs, semver-like versions, safe relative content paths, dependency sets/cycles, and duplicate content IDs across registries; `validate_set`/`merged_content` are in-memory only (checksum `7d907860f7e7d20d` for the example). Content packaging, filesystem loading, save references, hot reload, and balance tuning are still open. D-006 remains **Proposed**; these files do not make it accepted. Values in `content/base/` are placeholders, not campaign balance.
+> The runtime registry loads and validates the bundled base content. A v0 mod manifest (`core_city::manifest`) parses `content/mods/*.mod.json`, validates namespaced IDs, semver-like versions, safe relative content paths, dependency sets/cycles, and duplicate content IDs across registries; `validate_set`/`merged_content` are in-memory only (checksum `7d907860f7e7d20d` for the example).
+>
+> `core_city::pack::ContentPack` adds the first in-memory pack: `from_json(manifest, materials, rooms, props)` validates the pack registry, requires every content ID to use the manifest's namespace (the part before the first `:`; `base` is reserved), and rejects collisions with base content. `merged_with_base()` returns a merged registry (no overrides, no load-order wins) with pack checksum `ad4c645869a411ed` and merged checksum `330a538d07805b50` for the example (8 pack definitions, 31 merged). Pack content is validated in isolation, so pack props cannot reference base rooms in v0.
+>
+> Content packaging, filesystem loading, ZIP, scripts, Workshop, save references, cross-mod references, hot reload, and balance tuning are still open. D-006 remains **Proposed**; these files do not make it accepted. Values in `content/base/` are placeholders, not campaign balance.
 
 ## 4. Mod package format
 

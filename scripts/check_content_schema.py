@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Validate the Townsmith v1 content schemas, base data, and mod manifests.
+"""Validate the Townsmith v1 content schemas, base data, and mod packs.
 
-The runtime registry loads the base documents and the manifest v0 validator
-checks manifest structure, IDs, versions, and safe relative paths. This gate
-keeps those data contracts structurally valid, namespaced, and cross-reference
-clean. It never reads the content files named by a manifest.
+The runtime registry loads the base documents, the manifest v0 validator
+checks manifest structure, IDs, versions, and safe relative paths, and the
+in-memory content pack validates one manifest with its materials, rooms, and
+props. This gate keeps those data contracts structurally valid, namespaced,
+and cross-reference clean. It reads the example pack by directory convention;
+it does not resolve arbitrary manifest content paths on disk.
 """
 
 from __future__ import annotations
@@ -273,10 +275,66 @@ def check_manifest(checker: Checker, path: Path, doc: dict) -> int:
     return 1
 
 
-def check_props(checker: Checker, path: Path, doc: dict) -> int:
+def check_pack_namespace(checker: Checker, path: Path, doc: dict, collection: str, namespace: str) -> None:
+    """Require every well-formed ID in a pack document to use the manifest namespace."""
+    entries = doc.get(collection)
+    if not isinstance(entries, list):
+        return
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        ident = entry.get("id")
+        if isinstance(ident, str) and ID_RE.match(ident) and ident.split(":", 1)[0] != namespace:
+            checker.error(
+                f"{path} {collection}[{index}]",
+                f"id '{ident}' is outside the mod namespace '{namespace}'",
+            )
+
+
+def check_mod_content(checker: Checker, manifest_path: Path, manifest_doc: dict) -> int:
+    """Validate the example pack directory that sits next to a manifest.
+
+    Content is discovered by convention: `example.mod.json` maps to
+    `example/{materials,rooms,props}.json`. Props may only reference rooms
+    defined by the same pack, matching `ContentPack::from_json`.
+    """
+    ident = manifest_doc.get("id")
+    if not isinstance(ident, str) or not MOD_ID_RE.match(ident):
+        return 0
+    namespace = ident.split(":", 1)[0]
+    pack_dir = manifest_path.with_name(manifest_path.name.removesuffix(".mod.json"))
+    total = 0
+    pack_room_ids: set[str] = set()
+    for collection in ("materials", "rooms", "props"):
+        path = pack_dir / f"{collection}.json"
+        if not path.is_file():
+            checker.error(str(path), "missing mod content file")
+            continue
+        doc = load_json(checker, path)
+        if doc is None:
+            continue
+        if collection == "materials":
+            total += check_materials(checker, path, doc)
+        elif collection == "rooms":
+            total += check_rooms(checker, path, doc)
+            pack_room_ids = {
+                entry["id"]
+                for entry in doc.get("rooms", [])
+                if isinstance(entry, dict)
+                and isinstance(entry.get("id"), str)
+                and ID_RE.match(entry["id"])
+            }
+        else:
+            total += check_props(checker, path, doc, room_ids=pack_room_ids)
+        check_pack_namespace(checker, path, doc, collection, namespace)
+    return total
+
+
+def check_props(checker: Checker, path: Path, doc: dict, *, room_ids: set[str] | None = None) -> int:
     entries = check_header(checker, path, doc, "props")
     if entries is None:
         return 0
+    known_rooms = checker.room_ids if room_ids is None else room_ids
     allowed = {"id", "name_key", "footprint_m", "height_m", "cost", "allowed_rooms", "tags", "draft"}
     pending: list[tuple[str, list[str]]] = []
     for index, raw in enumerate(entries):
@@ -309,7 +367,7 @@ def check_props(checker: Checker, path: Path, doc: dict) -> int:
             checker.error(where, "draft must be a boolean")
     for where, rooms in pending:
         for room in rooms:
-            if room not in checker.room_ids:
+            if room not in known_rooms:
                 checker.error(where, f"allowed_rooms references unknown room '{room}'")
     return len(entries)
 
@@ -352,6 +410,7 @@ def validate_root(root: Path) -> tuple[list[str], int, int]:
             manifest = load_json(checker, manifest_path)
             if manifest is not None:
                 mod_count += check_manifest(checker, manifest_path, manifest)
+                mod_count += check_mod_content(checker, manifest_path, manifest)
     return checker.errors, schema_count, material_count + room_count + prop_count + mod_count
 
 
@@ -366,6 +425,10 @@ def write_fixture(
     bad_manifest_version: bool = False,
     unsafe_manifest_path: bool = False,
     duplicate_manifest_dep: bool = False,
+    mod_wrong_namespace: bool = False,
+    mod_duplicate_with_base: bool = False,
+    mod_missing_content: bool = False,
+    mod_bad_room_ref: bool = False,
 ) -> None:
     schema = root / "content" / "schema"
     schema.mkdir(parents=True)
@@ -387,9 +450,10 @@ def write_fixture(
     (root / "content" / "base" / "rooms.json").write_text(json.dumps(room))
     (root / "content" / "base" / "props.json").write_text(json.dumps(prop))
 
+    manifest_id = "Example:Bad" if bad_manifest_id else ("base:example" if mod_duplicate_with_base else "example:copper_age")
     manifest = {
         "format_version": 1,
-        "id": "Example:Bad" if bad_manifest_id else "example:copper_age",
+        "id": manifest_id,
         "name": "Copper Age example",
         "version": "1.0" if bad_manifest_version else "0.1.0",
         "game_version": ">=0.1.0 <0.2.0",
@@ -404,6 +468,28 @@ def write_fixture(
     (root / "content" / "mods").mkdir()
     (root / "content" / "mods" / "example.mod.json").write_text(json.dumps(manifest))
 
+    pack_namespace = "base" if mod_duplicate_with_base else "example"
+    material_id = f"{pack_namespace}:oak" if mod_duplicate_with_base else (
+        "other:plank" if mod_wrong_namespace else f"{pack_namespace}:plank"
+    )
+    room_id = f"{pack_namespace}:room"
+    prop_id = f"{pack_namespace}:prop"
+    pack = root / "content" / "mods" / "example"
+    pack.mkdir()
+    pack_materials = {"format_version": 1, "materials": [
+        {"id": material_id, "name_key": "content.material.plank", "category": "wood", "density_kg_m3": 700, "color": [0.5, 0.4, 0.2], "cost_per_litre": 0.1, "tags": ["timber"]},
+    ]}
+    pack_rooms = {"format_version": 1, "rooms": [
+        {"id": room_id, "name_key": "content.room.test", "category": "living", "min_area_m2": 9, "required_tags": ["bed"]},
+    ]}
+    pack_props = {"format_version": 1, "props": [
+        {"id": prop_id, "name_key": "content.prop.test", "footprint_m": [1.6, 2.0], "height_m": 0.6, "cost": 10, "allowed_rooms": ["base:bedroom" if mod_bad_room_ref else room_id], "tags": ["sleep"]},
+    ]}
+    (pack / "materials.json").write_text(json.dumps(pack_materials))
+    (pack / "rooms.json").write_text(json.dumps(pack_rooms))
+    if not mod_missing_content:
+        (pack / "props.json").write_text(json.dumps(pack_props))
+
 
 def self_test() -> int:
     cases = 0
@@ -412,7 +498,7 @@ def self_test() -> int:
         write_fixture(root)
         errors, schemas, entries = validate_root(root)
         cases += 1
-        if errors or schemas != 4 or entries != 4:
+        if errors or schemas != 4 or entries != 7:
             print(f"self-test valid fixture failed: {errors}", file=sys.stderr)
             return 1
         for name, kwargs in (
@@ -424,6 +510,10 @@ def self_test() -> int:
             ("bad_manifest_version", {"bad_manifest_version": True}),
             ("unsafe_manifest_path", {"unsafe_manifest_path": True}),
             ("duplicate_manifest_dep", {"duplicate_manifest_dep": True}),
+            ("mod_wrong_namespace", {"mod_wrong_namespace": True}),
+            ("mod_duplicate_with_base", {"mod_duplicate_with_base": True}),
+            ("mod_missing_content", {"mod_missing_content": True}),
+            ("mod_bad_room_ref", {"mod_bad_room_ref": True}),
         ):
             case_root = root / name
             write_fixture(case_root, **kwargs)
