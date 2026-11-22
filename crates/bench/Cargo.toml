@@ -19,6 +19,14 @@ name = "rooms"
 path = "src/bin/rooms.rs"
 
 [[bin]]
+name = "cohort_validate"
+path = "src/bin/cohort_validate.rs"
+
+[[bin]]
+name = "dormant"
+path = "src/bin/dormant.rs"
+
+[[bin]]
 name = "traffic"
 path = "src/bin/traffic.rs"
 

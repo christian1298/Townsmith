@@ -234,6 +234,9 @@ cargo run --release -p townsmith-bench --bin cohort
 # Cohort vs individual / time-step validation
 cargo run --release -p townsmith-bench --bin cohort_validate -- --smoke
 
+# Dormant district catch-up validation
+cargo run --release -p townsmith-bench --bin dormant -- --smoke
+
 # Campaign construction clock (D-029 opt-in)
 cargo run --release -p townsmith-bench --bin city_loop -- --campaign-days --days 30
 
