@@ -7,8 +7,11 @@
 //!
 //! The graph is deliberately small and deterministic. It splits every segment
 //! at crossings and endpoints, deduplicates shared edges, and runs Dijkstra
-//! with integer metre weights. A spatial index is future work before the
-//! hundred-thousand-building scale.
+//! with integer metre weights. Nearest-node lookups use a uniform 32 m grid
+//! built with the graph, so point queries do not scan every node. The grid is
+//! derived state too: it is never persisted, and the linear scan remains the
+//! reference for correctness (and the fallback for queries outside its
+//! bounds).
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
@@ -50,6 +53,36 @@ pub fn travel_time_seconds(distance_m: f32, speed_mps: f32) -> Option<f32> {
 
 /// Maximum graph nodes accepted by one traffic graph.
 pub const MAX_TRAFFIC_NODES: usize = 20_000;
+
+/// Edge length of one nearest-node index cell, in metres.
+///
+/// Nodes sit on the 1 m road grid; intersections and endpoints are typically
+/// 8–32 m apart and one segment may be up to 512 m long. A 32 m cell holds a
+/// handful of nodes per occupied bucket, so a lookup usually resolves in one
+/// or two rings while construction stays linear in the node count (one bucket
+/// per occupied cell, no pairwise work).
+const NEAREST_CELL_M: i32 = 32;
+
+/// Ring cap for the indexed nearest-node search.
+///
+/// The search normally stops as soon as an arithmetic bound proves that
+/// unvisited cells cannot hold a closer or equal node. This cap is a safety
+/// valve for pathological graphs (for example two nodes kilometres apart):
+/// after it, the exact linear scan runs. 64 rings cover 2,048 m around the
+/// query cell.
+const NEAREST_MAX_RINGS: i32 = 64;
+
+/// Relative slack for the nearest-node termination proof.
+///
+/// The index and the linear reference share one `f32` distance expression, so
+/// equality must be evaluated on identical values. The bound absorbs `f32`
+/// coordinate conversion, subtraction, square, and square-root rounding, whose
+/// error is `O((|coordinate| + distance) × 2^-24)`; `1e-5` is a conservative
+/// multiple and at most costs an extra ring.
+const NEAREST_BOUND_SLACK: f64 = 1e-5;
+
+/// Absolute floor for the termination slack, in metres.
+const NEAREST_BOUND_FLOOR_M: f64 = 1e-3;
 
 /// FNV-1a 64-bit offset basis used by graph, field, and route checksums.
 pub(crate) const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
@@ -118,11 +151,121 @@ impl std::fmt::Display for TrafficError {
 
 impl std::error::Error for TrafficError {}
 
+/// Uniform grid over graph nodes used by [`RoadGraph::nearest_node`].
+///
+/// Cells are keyed by floor-divided world coordinates, so negative positions
+/// bucket consistently. Only occupied cells are stored: the index costs one
+/// entry per occupied cell, never a dense rectangle over the world. Node lists
+/// inherit the lexicographic order of the graph's node list, which keeps scans
+/// deterministic.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct NodeGrid {
+    cells: BTreeMap<(i32, i32), Vec<RoadNode>>,
+    min_cell: [i32; 2],
+    max_cell: [i32; 2],
+    max_abs_coord: f64,
+}
+
+impl NodeGrid {
+    fn build(nodes: &[RoadNode]) -> Self {
+        let mut grid = Self::default();
+        let Some(&first) = nodes.first() else {
+            return grid;
+        };
+        grid.min_cell = [node_cell(first[0]), node_cell(first[1])];
+        grid.max_cell = grid.min_cell;
+        for &node in nodes {
+            let cell = [node_cell(node[0]), node_cell(node[1])];
+            grid.cells.entry((cell[0], cell[1])).or_default().push(node);
+            grid.min_cell[0] = grid.min_cell[0].min(cell[0]);
+            grid.min_cell[1] = grid.min_cell[1].min(cell[1]);
+            grid.max_cell[0] = grid.max_cell[0].max(cell[0]);
+            grid.max_cell[1] = grid.max_cell[1].max(cell[1]);
+            grid.max_abs_coord = grid
+                .max_abs_coord
+                .max(f64::from(node[0].unsigned_abs()))
+                .max(f64::from(node[1].unsigned_abs()));
+        }
+        grid
+    }
+
+    fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+
+    /// Whether a query cell is close enough to the node bounds to search.
+    ///
+    /// One cell of margin lets points just off the network use the index.
+    /// Anything farther falls back to the linear scan instead of expanding
+    /// rings across empty space.
+    fn contains_query_cell(&self, cell: [i32; 2]) -> bool {
+        cell[0] >= self.min_cell[0].saturating_sub(1)
+            && cell[0] <= self.max_cell[0].saturating_add(1)
+            && cell[1] >= self.min_cell[1].saturating_sub(1)
+            && cell[1] <= self.max_cell[1].saturating_add(1)
+    }
+}
+
+fn node_cell(value: i32) -> i32 {
+    value.div_euclid(NEAREST_CELL_M)
+}
+
+fn query_cell(value: f32) -> i32 {
+    (f64::from(value) / f64::from(NEAREST_CELL_M)).floor() as i32
+}
+
+/// Straight-line distance from `point` to `node`, in the exact `f32`
+/// expression used by the linear reference scan.
+fn node_distance(node: RoadNode, point: [f32; 2]) -> f32 {
+    let dx = node[0] as f32 - point[0];
+    let dz = node[1] as f32 - point[1];
+    (dx * dx + dz * dz).sqrt()
+}
+
+/// Whether `(node, distance)` beats the current best.
+///
+/// Equal distances prefer the lexicographically smallest node. This is the
+/// single tie-break rule shared by the indexed search and the linear
+/// reference, so both return the same node and the same `f32` distance.
+fn closer(node: RoadNode, distance: f32, best: Option<(RoadNode, f32)>) -> bool {
+    best.is_none_or(|(best_node, best_distance)| {
+        distance < best_distance || (distance == best_distance && node < best_node)
+    })
+}
+
+/// Whether every point outside the visited cell rectangle is farther than
+/// `best_distance`, allowing for `f32` rounding in the distance expression.
+///
+/// The query is inside the rectangle because it sits in the centre cell. The
+/// nearest point outside is therefore on one of the four rectangle edges, and
+/// the smallest edge distance is a lower bound for every unvisited cell.
+fn ring_proves_nearest(
+    min_cell: [i32; 2],
+    max_cell: [i32; 2],
+    point: [f32; 2],
+    best_distance: f32,
+    max_abs_coord: f64,
+) -> bool {
+    let cell = f64::from(NEAREST_CELL_M);
+    let min_x = f64::from(min_cell[0]) * cell;
+    let max_x = f64::from(max_cell[0].saturating_add(1)) * cell;
+    let min_z = f64::from(min_cell[1]) * cell;
+    let max_z = f64::from(max_cell[1].saturating_add(1)) * cell;
+    let x = f64::from(point[0]);
+    let z = f64::from(point[1]);
+    let outside = (x - min_x).min(max_x - x).min(z - min_z).min(max_z - z);
+    let distance = f64::from(best_distance);
+    let coordinate = max_abs_coord.max(x.abs()).max(z.abs());
+    let slack = (coordinate + distance).mul_add(NEAREST_BOUND_SLACK, NEAREST_BOUND_FLOOR_M);
+    outside > distance + slack
+}
+
 /// A derived graph over the saved road network.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RoadGraph {
     adjacency: BTreeMap<RoadNode, Vec<(RoadNode, u32)>>,
     nodes: Vec<RoadNode>,
+    grid: NodeGrid,
     road_count: usize,
 }
 
@@ -428,9 +571,11 @@ impl RoadGraph {
             neighbors.sort_unstable_by_key(|left| left.0);
         }
         let nodes: Vec<RoadNode> = adjacency.keys().copied().collect();
+        let grid = NodeGrid::build(&nodes);
         Ok(Self {
             adjacency,
             nodes,
+            grid,
             road_count: contributing_roads,
         })
     }
@@ -618,20 +763,89 @@ impl RoadGraph {
         hash
     }
 
-    fn nearest_node(&self, point: [f32; 2]) -> Option<(RoadNode, f32)> {
+    /// Nearest graph node to a world point and the straight-line distance to
+    /// it, in metres.
+    ///
+    /// The lookup uses the uniform node grid built with the graph. It expands
+    /// cell rings around the query until an arithmetic bound proves that no
+    /// unvisited cell can contain a closer node, then returns. Equal distances
+    /// resolve to the lexicographically smallest node, exactly matching
+    /// [`Self::nearest_node_linear`]. Non-finite points, an empty graph, points
+    /// more than one cell outside the node bounds, and pathological sparse
+    /// graphs fall back to the exact linear scan.
+    #[must_use]
+    pub fn nearest_node(&self, point: [f32; 2]) -> Option<(RoadNode, f32)> {
+        if !point.iter().all(|value| value.is_finite())
+            || self.grid.is_empty()
+            || !self
+                .grid
+                .contains_query_cell([query_cell(point[0]), query_cell(point[1])])
+        {
+            return self.nearest_node_linear(point);
+        }
+
+        let cell = [query_cell(point[0]), query_cell(point[1])];
+        let mut best: Option<(RoadNode, f32)> = None;
+        for ring in 0..=NEAREST_MAX_RINGS {
+            let min_x = cell[0].saturating_sub(ring);
+            let max_x = cell[0].saturating_add(ring);
+            let min_z = cell[1].saturating_sub(ring);
+            let max_z = cell[1].saturating_add(ring);
+            if ring == 0 {
+                self.scan_cell((cell[0], cell[1]), point, &mut best);
+            } else {
+                for x in min_x..=max_x {
+                    self.scan_cell((x, min_z), point, &mut best);
+                    self.scan_cell((x, max_z), point, &mut best);
+                }
+                for z in min_z.saturating_add(1)..max_z {
+                    self.scan_cell((min_x, z), point, &mut best);
+                    self.scan_cell((max_x, z), point, &mut best);
+                }
+            }
+            let Some((_, best_distance)) = best else {
+                continue;
+            };
+            if ring_proves_nearest(
+                [min_x, min_z],
+                [max_x, max_z],
+                point,
+                best_distance,
+                self.grid.max_abs_coord,
+            ) {
+                return best;
+            }
+        }
+        self.nearest_node_linear(point)
+    }
+
+    /// Exact linear nearest-node scan, retained as the reference.
+    ///
+    /// This scans every node and uses the same distance expression and
+    /// tie-break as the indexed path. Tests and the traffic microbenchmark use
+    /// it to prove the index returns identical nodes and distances.
+    #[must_use]
+    pub fn nearest_node_linear(&self, point: [f32; 2]) -> Option<(RoadNode, f32)> {
         let mut best: Option<(RoadNode, f32)> = None;
         for &node in &self.nodes {
-            let dx = node[0] as f32 - point[0];
-            let dz = node[1] as f32 - point[1];
-            let distance = (dx * dx + dz * dz).sqrt();
-            let replace = best.is_none_or(|(best_node, best_distance)| {
-                distance < best_distance || (distance == best_distance && node < best_node)
-            });
-            if replace {
+            let distance = node_distance(node, point);
+            if closer(node, distance, best) {
                 best = Some((node, distance));
             }
         }
         best
+    }
+
+    fn scan_cell(&self, cell: (i32, i32), point: [f32; 2], best: &mut Option<(RoadNode, f32)>) {
+        let Some(nodes) = self.grid.cells.get(&cell) else {
+            return;
+        };
+        for &node in nodes {
+            let distance = node_distance(node, point);
+            if closer(node, distance, *best) {
+                *best = Some((node, distance));
+            }
+        }
     }
 
     fn shortest_path(&self, start: RoadNode, goal: RoadNode) -> Option<u32> {
@@ -1056,5 +1270,204 @@ mod tests {
         let third = RoadGraph::build(&[road(1, [0, 0], [12, 0])]).expect("build");
         assert_eq!(first.checksum(), second.checksum());
         assert_ne!(first.checksum(), third.checksum());
+    }
+
+    fn grid_roads(size: usize, spacing: i32, origin: [i32; 2]) -> Vec<RoadSegment> {
+        assert!(size >= 2);
+        let extent = (size as i32 - 1) * spacing;
+        let mut roads = Vec::with_capacity(size * 2);
+        let mut id = 1_u64;
+        for index in 0..size {
+            let offset = index as i32 * spacing;
+            roads.push(road(
+                id,
+                [origin[0], origin[1] + offset],
+                [origin[0] + extent, origin[1] + offset],
+            ));
+            id += 1;
+            roads.push(road(
+                id,
+                [origin[0] + offset, origin[1]],
+                [origin[0] + offset, origin[1] + extent],
+            ));
+            id += 1;
+        }
+        roads
+    }
+
+    fn next_test_coord(seed: &mut u64, min: i32, max: i32) -> f32 {
+        *seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let quarter_steps = u64::try_from((max - min) * 4).expect("range");
+        min as f32 + ((*seed >> 33) % (quarter_steps + 1)) as f32 * 0.25
+    }
+
+    fn assert_matches_linear(graph: &RoadGraph, points: &[[f32; 2]]) {
+        for &point in points {
+            assert_eq!(
+                graph.nearest_node(point),
+                graph.nearest_node_linear(point),
+                "indexed lookup disagreed at {point:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn indexed_nearest_matches_linear_for_every_node_and_nearby_point() {
+        let graph = RoadGraph::build(&grid_roads(12, 16, [-96, -96])).expect("build");
+        let mut points = Vec::with_capacity(graph.nodes.len() * 7);
+        for &node in &graph.nodes {
+            let x = node[0] as f32;
+            let z = node[1] as f32;
+            points.push([x, z]);
+            points.push([x + 0.5, z]);
+            points.push([x, z + 0.5]);
+            points.push([x - 3.25, z + 7.5]);
+            points.push([x + 8.5, z + 8.5]);
+        }
+        assert_matches_linear(&graph, &points);
+    }
+
+    #[test]
+    fn indexed_nearest_matches_linear_at_road_midpoints() {
+        let graph = RoadGraph::build(&grid_roads(16, 16, [0, 0])).expect("build");
+        let mut points = Vec::with_capacity(graph.nodes.len() * 3);
+        for &node in &graph.nodes {
+            let x = node[0] as f32;
+            let z = node[1] as f32;
+            points.push([x + 8.0, z]);
+            points.push([x, z + 8.0]);
+            points.push([x + 8.0, z + 8.0]);
+        }
+        assert_matches_linear(&graph, &points);
+    }
+
+    #[test]
+    fn indexed_nearest_matches_linear_across_and_outside_the_bounds() {
+        let graph = RoadGraph::build(&grid_roads(20, 24, [-240, -240])).expect("build");
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut points = Vec::with_capacity(2_000);
+        for _ in 0..2_000 {
+            points.push([
+                next_test_coord(&mut seed, -480, 480),
+                next_test_coord(&mut seed, -480, 480),
+            ]);
+        }
+        assert_matches_linear(&graph, &points);
+    }
+
+    #[test]
+    fn far_away_queries_fall_back_to_the_linear_scan() {
+        let graph = RoadGraph::build(&grid_roads(8, 16, [0, 0])).expect("build");
+        // The grid ends at 112 m. One cell beyond still uses the index; two
+        // cells beyond and every distant point use the exact linear scan.
+        assert_matches_linear(
+            &graph,
+            &[
+                [144.0, 0.0],
+                [144.0, 144.0],
+                [160.0, 0.0],
+                [1_000_000.0, -1_000_000.0],
+                [-1_000_000.0, 1_000_000.0],
+                [1.0e9, 1.0e9],
+                [-3.0e8, 0.0],
+                [0.0, 5.0e8],
+            ],
+        );
+    }
+
+    #[test]
+    fn an_empty_graph_has_no_nearest_node() {
+        let graph = RoadGraph::build(&[]).expect("build");
+        assert_eq!(graph.nearest_node([0.0, 0.0]), None);
+        assert_eq!(graph.nearest_node_linear([0.0, 0.0]), None);
+        assert_eq!(graph.nearest_node([f32::NAN, 0.0]), None);
+    }
+
+    #[test]
+    fn equal_distance_ties_keep_the_stable_node_choice() {
+        let plus = RoadGraph::build(&[
+            road(1, [-10, 0], [-20, 0]),
+            road(2, [10, 0], [20, 0]),
+            road(3, [0, -10], [0, -20]),
+            road(4, [0, 10], [0, 20]),
+        ])
+        .expect("build");
+        let indexed_result = plus.nearest_node([0.0, 0.0]);
+        assert_eq!(indexed_result, plus.nearest_node_linear([0.0, 0.0]));
+        let indexed = indexed_result.expect("nearest");
+        // Four nodes are exactly 10 m away; the lexicographically smallest wins.
+        assert_eq!(indexed, ([-10, 0], 10.0));
+
+        let square = RoadGraph::build(&[
+            road(11, [0, 0], [10, 0]),
+            road(12, [10, 0], [10, 10]),
+            road(13, [10, 10], [0, 10]),
+            road(14, [0, 10], [0, 0]),
+        ])
+        .expect("build");
+        let indexed_result = square.nearest_node([5.0, 5.0]);
+        assert_eq!(indexed_result, square.nearest_node_linear([5.0, 5.0]));
+        assert_eq!(indexed_result.expect("nearest").0, [0, 0]);
+    }
+
+    #[test]
+    fn sparse_graphs_fall_back_after_the_ring_cap() {
+        let graph = RoadGraph::build(&[
+            road(1, [0, 0], [10, 0]),
+            road(2, [10_000, 10_000], [10_010, 10_000]),
+        ])
+        .expect("build");
+        assert_matches_linear(
+            &graph,
+            &[
+                [0.0, 0.0],
+                [9_900.0, 9_900.0],
+                [5_000.0, 5_000.0],
+                [5_000.0, 5.0],
+            ],
+        );
+    }
+
+    #[test]
+    fn non_finite_queries_use_the_linear_reference() {
+        let graph = RoadGraph::build(&grid_roads(4, 16, [0, 0])).expect("build");
+        for point in [
+            [f32::NAN, 0.0],
+            [0.0, f32::NAN],
+            [f32::INFINITY, f32::INFINITY],
+            [f32::NEG_INFINITY, 0.0],
+        ] {
+            let indexed = graph.nearest_node(point);
+            let linear = graph.nearest_node_linear(point);
+            match (indexed, linear) {
+                (Some((indexed_node, indexed_distance)), Some((linear_node, linear_distance))) => {
+                    assert_eq!(indexed_node, linear_node);
+                    assert_eq!(indexed_distance.to_bits(), linear_distance.to_bits());
+                }
+                (None, None) => {}
+                other => panic!("indexed and linear disagreed at {point:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_nearest_matches_linear_on_a_large_grid() {
+        let graph = RoadGraph::build(&grid_roads(64, 16, [0, 0])).expect("build");
+        assert_eq!(graph.nodes.len(), 4_096);
+        let mut points = Vec::with_capacity(graph.nodes.len() * 2 + 256);
+        for &node in &graph.nodes {
+            points.push([node[0] as f32, node[1] as f32]);
+            points.push([node[0] as f32 + 8.0, node[1] as f32 + 3.5]);
+        }
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        for _ in 0..256 {
+            points.push([
+                next_test_coord(&mut seed, -32, 1_040),
+                next_test_coord(&mut seed, -32, 1_040),
+            ]);
+        }
+        assert_matches_linear(&graph, &points);
     }
 }

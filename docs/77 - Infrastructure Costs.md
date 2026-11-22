@@ -13,7 +13,7 @@ tags:
 # 77 — Infrastructure Costs
 
 > [!info] What this note is
-> Data-only construction and operating costs for utility and civic-service sites. This closes the accounting gap noted in the Industrial and Modern balance probes without changing placement, saves, the bridge, or the economy tick.
+> Data-only construction and operating costs for utility and civic-service sites. This closes the accounting gap noted in the Industrial and Modern balance probes and now feeds the per-kind operating totals into the real bridge economy tick.
 
 ## 1. Model
 
@@ -35,7 +35,7 @@ tags:
 | Fire/police construction | 2,500 | 4,000 | 6,000 |
 | Fire/police upkeep | 1.5 | 3 | 5 |
 
-`UtilityStore` and `ServiceStore` expose per-kind and total construction/upkeep methods. Utility/civic construction is now charged when a site is added through the bridge; operating upkeep is still charged by the aggregate economy tick.
+`UtilityStore` and `ServiceStore` expose per-kind and total construction/upkeep methods. Utility/civic construction is charged when a site is added through the bridge. The bridge reads each store's `total_upkeep_per_day()` before locking the treasury and passes an `InfrastructureCosts` total into `Economy::tick_with_infrastructure_costs`; `economy_state` and `economy_tick` report `utility_upkeep` and `service_upkeep` alongside the site counts.
 
 ## 2. Fixture results
 
@@ -68,7 +68,7 @@ Output is deterministic; smoke checksum `a920cf0c4eb9a4f1`.
 ## 5. Limits
 
 - Site construction is charged on add; re-adding/replacing a site charges again. Removing a site does not refund.
-- Operating upkeep still uses the aggregate utility/service site counts, not per-kind tables.
+- The bridge now charges per-kind/per-tier totals, but the core count-based `tick_with_infrastructure` wrapper remains for pinned balance probes and legacy callers.
 - No phased payment for infrastructure sites; the full site cost is charged immediately. The core construction schedule for buildings is in D-028, but the bridge still prepays it.
 - If no treasury is open, the site is added with `charged=false` (legacy/dev path).
 - Site counts are fixed probe fixtures; real cities may have different coverage/site mixes.
@@ -77,7 +77,7 @@ Output is deterministic; smoke checksum `a920cf0c4eb9a4f1`.
 
 ## 6. Next
 
-1. Wire per-kind operating upkeep into `economy_tick` (counts are already available).
-2. Feed the site upkeep into the bridge economy tick instead of the legacy count path.
+1. ~~Wire per-kind operating upkeep into `economy_tick`.~~ Done: the bridge passes store totals through `InfrastructureCosts`.
+2. ~~Feed the site upkeep into the bridge economy tick instead of the legacy count path.~~ Done.
 3. Add site replacement/refund rules and service-quality funding.
 4. Wire the D-028 building installment schedule through the bridge and construction tick.

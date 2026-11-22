@@ -16,13 +16,13 @@
 #   scripts/check_locale.sh --self-test
 #
 # Default success prints one line per table plus a summary:
-#   LOCALE_CHECK file=godot/editor_i18n.gd keys=96 min=96 status=ok
+#   LOCALE_CHECK file=godot/editor_i18n.gd keys=111 min=111 status=ok
 #   LOCALE_CHECK file=godot/world_i18n.gd keys=33 min=33 status=ok
 #   LOCALE_CHECK file=godot/content_i18n.gd keys=32 min=32 status=ok
-#   LOCALE_CHECK editor=96 world=33 content=32 status=ok
+#   LOCALE_CHECK editor=111 world=210 content=32 status=ok
 #
 # Single-file success keeps the original contract:
-#   LOCALE_CHECK keys=96 status=ok
+#   LOCALE_CHECK keys=111 status=ok
 #
 # Failure prints `LOCALE_CHECK status=fail` plus file/key details and exits 1.
 # `--self-test` builds throwaway fixtures and proves the failure paths fire.
@@ -33,7 +33,7 @@ SCRIPT="$ROOT/scripts/$(basename "${BASH_SOURCE[0]}")"
 EDITOR_FILE="$ROOT/godot/editor_i18n.gd"
 WORLD_FILE="$ROOT/godot/world_i18n.gd"
 CONTENT_FILE="$ROOT/godot/content_i18n.gd"
-EDITOR_MIN_KEYS=96
+EDITOR_MIN_KEYS=111
 WORLD_MIN_KEYS=143
 CONTENT_MIN_KEYS=32
 LOCALES=(en de)

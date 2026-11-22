@@ -2,7 +2,7 @@
 title: Localization Audit
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-22
 tags:
   - townsmith
   - localization
@@ -16,13 +16,13 @@ tags:
 > A coverage audit of user-facing strings at the Phase 3 slice, plus a concrete expansion plan. It records the current state, separates player-facing text from developer-only text, proposes key conventions and interpolation rules, and defines the migration phases and the smoke/CI gate. No code or locale files were changed by this audit.
 
 > [!warning] Runtime layout differs from the original brief
-> There is **no `godot/locale/` directory** and no `en.json` / `de.json` at this commit. The only runtime table is inline in `godot/editor_i18n.gd` (`TABLES`), with **96 EN and 96 DE keys**. [[38 - Editor Localization]] documents this as a deliberate slice stand-in for the compiled pipeline in [[16 - Localization]]. The audit below targets the actual files, not the assumed layout.
+> There is **no `godot/locale/` directory** and no `en.json` / `de.json` at this commit. The only runtime table is inline in `godot/editor_i18n.gd` (`TABLES`), with **111 EN and 111 DE keys**. [[38 - Editor Localization]] documents this as a deliberate slice stand-in for the compiled pipeline in [[16 - Localization]]. The audit below targets the actual files, not the assumed layout.
 
 ## 1. Current coverage
 
 | Surface | Runtime source | EN keys | DE keys | Parity | Gate |
 |---|---|---:|---:|---|---|
-| First-person volume editor | `godot/editor_i18n.gd` | 96 | 96 | complete | `check_locale.sh` + `smoke_locale.sh` |
+| First-person volume editor | `godot/editor_i18n.gd` | 111 | 111 | complete | `check_locale.sh` + `smoke_locale.sh` |
 | World-placement HUD, status, help | `godot/world_placement.gd` | 210 world keys | 0 | `world_i18n.gd` | dashboard shell/body, HUD shell/status, all role-player modals, and advisor titles/details keyed; content names/numbers raw |
 | Dashboard shell and body | `world_placement.gd` + Rust `core_city` payload | 0 | 0 | n/a | none |
 | Advisor titles | Rust `core_city::advisor` | 22 code titles | 0 | `world_i18n.gd` | titles and parameterized details keyed by code |
@@ -33,7 +33,7 @@ tags:
 
 Facts about the current table:
 
-- `TABLES` contains the same 96 keys under `en` and `de`; the locale smoke asserts parity and required key groups.
+- `TABLES` contains the same 111 keys under `en` and `de`; the locale smoke asserts parity and required key groups.
 - Lookup returns `!key!` for a missing key, so gaps are visible instead of silently falling back.
 - Placeholders are `{0}`, `{1}`, … for arrays and `{name}` for dictionaries. There is no plural helper and no locale-aware number formatter.
 - The editor table is owned by the editor slice. It is not yet the shared content registry or the moddable language-pack pipeline from [[16 - Localization]].
@@ -285,13 +285,13 @@ Acceptance checks:
 
 ### Static gate
 
-`scripts/check_locale.sh` parses the `TABLES` const in `godot/editor_i18n.gd` and `godot/world_i18n.gd`, plus the `DISPLAY` const in `godot/content_i18n.gd`, and checks key parity, per-file key floors, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. The floors ratchet independently: editor `96`, world `143` (currently 143 keys), content `32`. Default mode prints one line per table plus a summary:
+`scripts/check_locale.sh` parses the `TABLES` const in `godot/editor_i18n.gd` and `godot/world_i18n.gd`, plus the `DISPLAY` const in `godot/content_i18n.gd`, and checks key parity, per-file key floors, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. The floors ratchet independently: editor `111`, world `143` (currently 210 keys), content `32`. Default mode prints one line per table plus a summary:
 
 ```text
-LOCALE_CHECK file=godot/editor_i18n.gd keys=96 min=96 status=ok
+LOCALE_CHECK file=godot/editor_i18n.gd keys=111 min=111 status=ok
 LOCALE_CHECK file=godot/world_i18n.gd keys=143 min=143 status=ok
 LOCALE_CHECK file=godot/content_i18n.gd keys=32 min=32 status=ok
-LOCALE_CHECK editor=96 world=143 content=32 status=ok
+LOCALE_CHECK editor=111 world=210 content=32 status=ok
 ```
 
 Single-file mode (`scripts/check_locale.sh [FILE]`) keeps the original `LOCALE_CHECK keys=N status=ok` marker and derives the floor from the file name (`world_i18n.gd` gets 143, `content_i18n.gd` gets 32, anything else 96). `--self-test` covers twelve cases: the six editor cases (valid, missing DE key, extra DE key, empty value, placeholder mismatch, too few keys), a world-style fixture pass, a too-few world table, a world EN/DE placeholder mismatch, and the same three checks for the `DISPLAY` content table. The gate runs in `scripts/check.sh` and the Rust CI job before the Godot locale smoke.
@@ -299,15 +299,15 @@ Single-file mode (`scripts/check_locale.sh [FILE]`) keeps the original `LOCALE_C
 `scripts/smoke_locale.sh` parses the last `LOCALE_SMOKE` line and requires:
 
 ```bash
-if [[ -z "$KEYS" || "$KEYS" -lt 96 || "$STATUS" != "ok" ]]; then
+if [[ -z "$KEYS" || "$KEYS" -lt 111 || "$STATUS" != "ok" ]]; then
 ```
 
-The exact `96` was a hand-edited constant in the runtime smoke. The static gate now enforces independent floors (`EDITOR_MIN_KEYS=96`, `WORLD_MIN_KEYS=143`, `CONTENT_MIN_KEYS=32`) plus EN/DE parity, empty values, and placeholder parity for all three tables; `smoke_locale.sh` accepts editor `keys >= 96`. Adding keys is no longer a red build.
+The exact `96` was a hand-edited constant in the runtime smoke. The static gate now enforces independent floors (`EDITOR_MIN_KEYS=111`, `WORLD_MIN_KEYS=143`, `CONTENT_MIN_KEYS=32`) plus EN/DE parity, empty values, and placeholder parity for all three tables; `smoke_locale.sh` accepts editor `keys >= 111`. Adding keys is no longer a red build.
 
 ### Proposed contract
 
 1. Emit both counts: `LOCALE_SMOKE en=ok de=ok keys_en=96 keys_de=96 status=ok`.
-2. Assert `keys_en == keys_de`, `status=ok`, and `keys_en >= 96` as a ratchet floor.
+2. Assert `keys_en == keys_de`, `status=ok`, and `keys_en >= 111` as a ratchet floor.
 3. Commit the floor and required key groups in a small manifest (`scripts/locale_contract.json` or equivalent) so raising coverage is a visible one-line change in the same PR.
 4. Keep the exact-count check only as an optional “no unintended key loss” warning, not a hard failure.
 
@@ -374,7 +374,7 @@ Sequence:
 ## 9. Open items
 
 - `docs/22 - UI and UX.md` does not exist at this commit; reconcile HUD/dashboard conventions when it lands.
-- Audit `godot/editor.gd` for residual literals not covered by the 96-key table (the table is the current contract, not proof of zero literals).
+- The editor table now covers the player-facing labels, structure names, room fallback, palette rows, and default blueprint name. Remaining literals are developer/debug text, raw ids, core English error messages, and engine FileDialog chrome.
 - Decide whether new UI keys live in `editor_i18n.gd`, a shared `base.ui.*` table, or the future compiled pipeline.
 - Decide the developer-mode policy for showing error codes and raw content IDs.
 - Decide settlement naming: auto-generated `Settlement N`, player-entered name, or both.
