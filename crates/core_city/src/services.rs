@@ -56,6 +56,22 @@ pub const CLINIC_UPKEEP_PER_DAY_PER_TIER: [f64; 3] = [2.0, 4.0, 6.0];
 /// advanced.
 pub const FIRE_POLICE_UPKEEP_PER_DAY_PER_TIER: [f64; 3] = [1.5, 3.0, 5.0];
 
+/// Campaign lead time before a new school is operational, by tier.
+pub const CAMPAIGN_SCHOOL_BUILD_DAYS_PER_TIER: [f32; 3] = [2.0, 2.5, 3.0];
+
+/// Campaign lead time before a new clinic is operational, by tier.
+pub const CAMPAIGN_CLINIC_BUILD_DAYS_PER_TIER: [f32; 3] = [1.5, 2.0, 2.5];
+
+/// Campaign lead time before a new fire or police site is operational, by tier.
+pub const CAMPAIGN_FIRE_POLICE_BUILD_DAYS_PER_TIER: [f32; 3] = [1.0, 1.5, 2.0];
+
+/// Largest accepted site lead time, a guard against malformed saves.
+pub const MAX_SERVICE_BUILD_DAYS: f32 = 365.0;
+
+fn is_zero_f32(value: &f32) -> bool {
+    *value == 0.0
+}
+
 /// One civic service kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -112,6 +128,26 @@ impl ServiceKind {
     #[must_use]
     pub fn produces_research(self) -> bool {
         self == Self::School
+    }
+
+    /// Campaign lead time before a new site is operational, in game days.
+    ///
+    /// | Kind | Basic | Improved | Advanced |
+    /// |---|---:|---:|---:|
+    /// | School | 2 | 2.5 | 3 |
+    /// | Clinic | 1.5 | 2 | 2.5 |
+    /// | Fire | 1 | 1.5 | 2 |
+    /// | Police | 1 | 1.5 | 2 |
+    ///
+    /// Developer mode ignores this and adds sites immediately operational.
+    #[must_use]
+    pub fn campaign_build_days(self, tier: ServiceTier) -> f32 {
+        let days = match self {
+            Self::School => CAMPAIGN_SCHOOL_BUILD_DAYS_PER_TIER,
+            Self::Clinic => CAMPAIGN_CLINIC_BUILD_DAYS_PER_TIER,
+            Self::Fire | Self::Police => CAMPAIGN_FIRE_POLICE_BUILD_DAYS_PER_TIER,
+        };
+        days[tier.cost_index()]
     }
 
     /// Construction cost of one site of this kind at a tier.
@@ -240,6 +276,13 @@ pub struct ServiceSite {
     pub capacity: f64,
     /// Research produced per game day when the site covers residents.
     pub research_per_day: f64,
+    /// Game days left before the site is operational.
+    ///
+    /// Zero is the legacy immediate default and is omitted from the save so
+    /// existing checksums stay pinned. Only the opt-in campaign clock assigns
+    /// a positive lead time.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub build_days_remaining: f32,
 }
 
 impl ServiceSite {
@@ -272,7 +315,14 @@ impl ServiceSite {
             radius_m,
             capacity,
             research_per_day,
+            build_days_remaining: 0.0,
         }
+    }
+
+    /// Whether the site is finished and can supply service.
+    #[must_use]
+    pub fn is_operational(&self) -> bool {
+        self.build_days_remaining <= 0.0
     }
 
     /// Construction cost of this site from its kind and tier.
@@ -374,6 +424,36 @@ impl ServiceStore {
         self.sites.len()
     }
 
+    /// Sites of one kind that are operational.
+    #[must_use]
+    pub fn operational_site_count(&self, kind: ServiceKind) -> usize {
+        self.sites
+            .values()
+            .filter(|site| site.kind == kind && site.is_operational())
+            .count()
+    }
+
+    /// Operational sites across every kind.
+    #[must_use]
+    pub fn operational_total(&self) -> usize {
+        self.sites
+            .values()
+            .filter(|site| site.is_operational())
+            .count()
+    }
+
+    /// Operational sites across every kind; alias for [`Self::operational_total`].
+    #[must_use]
+    pub fn ready_count(&self) -> usize {
+        self.operational_total()
+    }
+
+    /// Sites still inside their lead time.
+    #[must_use]
+    pub fn building_count(&self) -> usize {
+        self.site_count() - self.ready_count()
+    }
+
     /// Number of sites of one kind.
     #[must_use]
     pub fn count_of(&self, kind: ServiceKind) -> usize {
@@ -393,11 +473,16 @@ impl ServiceStore {
             .sum()
     }
 
-    /// Operating upkeep of every site of one kind per game day.
+    /// Operating upkeep of every operational site of one kind per game day.
+    ///
+    /// Sites still inside their campaign lead time are not staffed yet, so
+    /// they do not bill operating upkeep.
     #[must_use]
     pub fn upkeep_per_day_of(&self, kind: ServiceKind) -> f64 {
-        self.sites_of(kind)
-            .map(|(_, site)| site.upkeep_per_day())
+        self.sites
+            .values()
+            .filter(|site| site.kind == kind && site.is_operational())
+            .map(ServiceSite::upkeep_per_day)
             .sum()
     }
 
@@ -410,13 +495,20 @@ impl ServiceStore {
             .sum()
     }
 
-    /// Operating upkeep of every civic service site per game day.
+    /// Operating upkeep of every operational civic service site per game day.
     #[must_use]
     pub fn total_upkeep_per_day(&self) -> f64 {
-        self.sites.values().map(ServiceSite::upkeep_per_day).sum()
+        self.sites
+            .values()
+            .filter(|site| site.is_operational())
+            .map(ServiceSite::upkeep_per_day)
+            .sum()
     }
 
     /// Add or replace one service site.
+    ///
+    /// The site is immediately operational; use
+    /// [`Self::add_site_with_lead_days`] for the campaign lead time.
     pub fn add_site(
         &mut self,
         placement_id: u64,
@@ -424,6 +516,25 @@ impl ServiceStore {
         tier: ServiceTier,
         center: [f32; 3],
     ) -> Result<(), ServiceError> {
+        self.add_site_with_lead_days(placement_id, kind, tier, center, 0.0)
+    }
+
+    /// Add or replace one service site with a lead time in game days.
+    ///
+    /// `lead_days` must be finite and within `0.0..=MAX_SERVICE_BUILD_DAYS`.
+    /// A non-zero lead time hides the site from supply, coverage, research,
+    /// and operating upkeep until [`Self::tick`] clears it.
+    pub fn add_site_with_lead_days(
+        &mut self,
+        placement_id: u64,
+        kind: ServiceKind,
+        tier: ServiceTier,
+        center: [f32; 3],
+        lead_days: f32,
+    ) -> Result<(), ServiceError> {
+        if !lead_days.is_finite() || !(0.0..=MAX_SERVICE_BUILD_DAYS).contains(&lead_days) {
+            return Err(ServiceError::Invalid("site lead days"));
+        }
         if placement_id > i64::MAX as u64 {
             return Err(ServiceError::Invalid("site id is above i64::MAX"));
         }
@@ -432,7 +543,25 @@ impl ServiceStore {
         }
         let mut site = ServiceSite::default_for(kind, tier);
         site.center = center;
+        site.build_days_remaining = lead_days;
         self.sites.insert(placement_id, site);
+        Ok(())
+    }
+
+    /// Advance every site's lead time by `days`, clamping at zero.
+    ///
+    /// Negative or non-finite input is rejected rather than silently ignored.
+    /// A zero step is a valid no-op.
+    pub fn tick(&mut self, days: f32) -> Result<(), ServiceError> {
+        if !days.is_finite() || days < 0.0 {
+            return Err(ServiceError::Invalid("tick days"));
+        }
+        if days == 0.0 {
+            return Ok(());
+        }
+        for site in self.sites.values_mut() {
+            site.build_days_remaining = (site.build_days_remaining - days).max(0.0);
+        }
         Ok(())
     }
 
@@ -474,7 +603,7 @@ impl ServiceStore {
             let capacity: f64 = self
                 .sites
                 .values()
-                .filter(|site| site.kind == kind)
+                .filter(|site| site.kind == kind && site.is_operational())
                 .map(|site| site.capacity)
                 .sum();
             let covered_demand: f64 = consumers
@@ -482,7 +611,12 @@ impl ServiceStore {
                 .filter(|consumer| covered(consumer, kind, &self.sites))
                 .map(|consumer| consumer.demand(kind))
                 .sum();
-            let service = supply_share(demand, covered_demand, capacity, self.count_of(kind));
+            let service = supply_share(
+                demand,
+                covered_demand,
+                capacity,
+                self.operational_site_count(kind),
+            );
             match kind {
                 ServiceKind::School => {
                     self.school_supply = service.supply;
@@ -534,7 +668,7 @@ impl ServiceStore {
         for site in self
             .sites
             .values()
-            .filter(|site| site.kind == ServiceKind::School)
+            .filter(|site| site.kind == ServiceKind::School && site.is_operational())
         {
             if remaining <= 0.0 || site.capacity <= 0.0 {
                 continue;
@@ -604,6 +738,11 @@ impl ServiceStore {
             if !site.capacity.is_finite() || !(0.0..=MAX_SERVICE_CAPACITY).contains(&site.capacity)
             {
                 return Err(ServiceError::Invalid("site capacity"));
+            }
+            if !site.build_days_remaining.is_finite()
+                || !(0.0..=MAX_SERVICE_BUILD_DAYS).contains(&site.build_days_remaining)
+            {
+                return Err(ServiceError::Invalid("site lead days"));
             }
             if !site.research_per_day.is_finite()
                 || !(0.0..=MAX_SERVICE_RESEARCH_PER_DAY).contains(&site.research_per_day)
@@ -712,7 +851,7 @@ fn covered(
 ) -> bool {
     sites
         .values()
-        .any(|site| site.kind == kind && site_covers(site, consumer))
+        .any(|site| site.kind == kind && site.is_operational() && site_covers(site, consumer))
 }
 
 fn supply_share(demand: f64, covered: f64, capacity: f64, sites: usize) -> ServiceShare {
@@ -1005,6 +1144,163 @@ mod tests {
     }
 
     #[test]
+    fn developer_service_sites_are_operational_and_omit_the_lead_field() {
+        let mut store = ServiceStore::new(2026);
+        store
+            .add_site(1, ServiceKind::School, ServiceTier::Basic, [1.0, 2.0, 3.0])
+            .expect("school");
+        store
+            .add_site(2, ServiceKind::Fire, ServiceTier::Advanced, [4.0, 5.0, 6.0])
+            .expect("fire");
+        assert_eq!(store.site_count(), 2);
+        assert_eq!(store.ready_count(), 2);
+        assert_eq!(store.building_count(), 0);
+        assert_eq!(store.operational_total(), 2);
+        let json = serde_json::to_string(&store).expect("json");
+        assert!(!json.contains("build_days_remaining"));
+        // A legacy save without the field decodes as immediately operational.
+        let legacy: ServiceStore = serde_json::from_str(&json).expect("legacy");
+        assert_eq!(legacy, store);
+        assert!(legacy.sites.values().all(ServiceSite::is_operational));
+    }
+
+    #[test]
+    fn campaign_lead_times_follow_the_tier_table() {
+        for tier in ServiceTier::ALL {
+            assert!(ServiceKind::School.campaign_build_days(tier) >= 2.0);
+            assert!(ServiceKind::Clinic.campaign_build_days(tier) >= 1.5);
+            assert!(ServiceKind::Fire.campaign_build_days(tier) >= 1.0);
+            assert!(ServiceKind::Fire.campaign_build_days(tier) <= 2.0);
+            assert_eq!(
+                ServiceKind::Fire.campaign_build_days(tier),
+                ServiceKind::Police.campaign_build_days(tier)
+            );
+        }
+        assert_eq!(
+            ServiceKind::School.campaign_build_days(ServiceTier::Basic),
+            2.0
+        );
+        assert_eq!(
+            ServiceKind::School.campaign_build_days(ServiceTier::Advanced),
+            3.0
+        );
+        assert_eq!(
+            ServiceKind::Clinic.campaign_build_days(ServiceTier::Improved),
+            2.0
+        );
+        assert_eq!(
+            ServiceKind::Police.campaign_build_days(ServiceTier::Basic),
+            1.0
+        );
+    }
+
+    #[test]
+    fn campaign_lead_time_hides_a_service_until_the_days_pass() {
+        let mut store = ServiceStore::new(2026);
+        store
+            .add_site_with_lead_days(
+                1,
+                ServiceKind::Clinic,
+                ServiceTier::Basic,
+                [0.0, 0.0, 0.0],
+                1.5,
+            )
+            .expect("site");
+        assert_eq!(store.site_count(), 1);
+        assert_eq!(store.ready_count(), 0);
+        assert_eq!(store.building_count(), 1);
+        assert_eq!(store.operational_site_count(ServiceKind::Clinic), 0);
+        assert_eq!(store.total_upkeep_per_day(), 0.0);
+        let report = store.refresh(&[consumer(10, 0.0, 4, 2)]);
+        assert_eq!(report.clinic_supply, 0.0);
+        assert_eq!(report.clinic_capacity, 0.0);
+        assert_eq!(report.covered_buildings[ServiceKind::Clinic as usize], 0);
+
+        store.tick(1.0).expect("tick");
+        assert_eq!(store.ready_count(), 0);
+        assert_eq!(store.total_upkeep_per_day(), 0.0);
+        assert_eq!(store.refresh(&[consumer(10, 0.0, 4, 2)]).clinic_supply, 0.0);
+
+        store.tick(0.5).expect("tick");
+        assert_eq!(store.ready_count(), 1);
+        assert_eq!(store.building_count(), 0);
+        assert_eq!(store.total_upkeep_per_day(), 2.0);
+        let report = store.refresh(&[consumer(10, 0.0, 4, 2)]);
+        assert_eq!(report.clinic_supply, 1.0);
+        assert_eq!(report.clinic_capacity, 300.0);
+    }
+
+    #[test]
+    fn building_sites_add_no_capacity_coverage_research_or_upkeep() {
+        let mut store = ServiceStore::new(2026);
+        store
+            .add_site(1, ServiceKind::School, ServiceTier::Basic, [0.0, 0.0, 0.0])
+            .expect("ready");
+        store
+            .add_site_with_lead_days(
+                2,
+                ServiceKind::School,
+                ServiceTier::Basic,
+                [0.0, 0.0, 0.0],
+                2.0,
+            )
+            .expect("building");
+        assert_eq!(store.count_of(ServiceKind::School), 2);
+        assert_eq!(store.operational_site_count(ServiceKind::School), 1);
+        assert_eq!(store.upkeep_per_day_of(ServiceKind::School), 3.0);
+        assert_eq!(store.total_upkeep_per_day(), 3.0);
+        let report = store.refresh(&[consumer(10, 0.0, 4_000, 0)]);
+        // Only the operational school's 200 capacity is installed, and only
+        // one school's research is produced.
+        assert_eq!(report.school_capacity, 200.0);
+        assert_eq!(report.school_served, 200.0);
+        assert_eq!(report.school_coverage, 1.0);
+        assert!(report.school_supply < 0.21);
+        assert!((report.research_per_day - 8.0).abs() < 0.001);
+        assert_eq!(report.sites_of[ServiceKind::School as usize], 2);
+    }
+
+    #[test]
+    fn tick_rejects_invalid_days() {
+        let mut store = ServiceStore::new(2026);
+        store
+            .add_site_with_lead_days(
+                1,
+                ServiceKind::Fire,
+                ServiceTier::Basic,
+                [0.0, 0.0, 0.0],
+                1.0,
+            )
+            .expect("site");
+        assert!(store.tick(f32::NAN).is_err());
+        assert!(store.tick(f32::INFINITY).is_err());
+        assert!(store.tick(-1.0).is_err());
+        assert!(store.tick(0.0).is_ok());
+        assert_eq!(store.sites[&1].build_days_remaining, 1.0);
+    }
+
+    #[test]
+    fn lead_time_and_operational_state_round_trip() {
+        let mut store = ServiceStore::new(2026);
+        store
+            .add_site_with_lead_days(
+                1,
+                ServiceKind::Fire,
+                ServiceTier::Improved,
+                [1.0, 2.0, 3.0],
+                1.5,
+            )
+            .expect("site");
+        store.tick(0.5).expect("tick");
+        assert_eq!(store.sites[&1].build_days_remaining, 1.0);
+        let json = store.to_json_pretty().expect("json");
+        let decoded = ServiceStore::from_json(&json).expect("decode");
+        assert_eq!(decoded, store);
+        assert_eq!(decoded.sites[&1].build_days_remaining, 1.0);
+        assert_eq!(decoded.checksum(), store.checksum());
+    }
+
+    #[test]
     fn invalid_service_is_rejected() {
         let mut store = ServiceStore::new(2026);
         store.school_supply = f32::NAN;
@@ -1015,6 +1311,14 @@ mod tests {
             .add_site(1, ServiceKind::School, ServiceTier::Basic, [0.0, 0.0, 0.0])
             .expect("site");
         store.sites.get_mut(&1).expect("site").radius_m = -1.0;
+        assert!(store.validate().is_err());
+        let mut store = ServiceStore::new(2026);
+        store
+            .add_site(1, ServiceKind::School, ServiceTier::Basic, [0.0, 0.0, 0.0])
+            .expect("site");
+        store.sites.get_mut(&1).expect("site").build_days_remaining = -0.5;
+        assert!(store.validate().is_err());
+        store.sites.get_mut(&1).expect("site").build_days_remaining = f32::NAN;
         assert!(store.validate().is_err());
     }
 }

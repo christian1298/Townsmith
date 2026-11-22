@@ -3447,6 +3447,32 @@ impl TownsmithCore {
         GString::from(&format!("{checksum:016x}"))
     }
 
+    /// Advance utility and civic lead times by `days` for one seed.
+    ///
+    /// Only existing stores for the matching seed are touched, so a closed or
+    /// foreign store is left alone. Errors come from invalid day steps.
+    fn advance_infrastructure_lead(&self, seed: u64, days: f32) -> Result<(), String> {
+        {
+            let mut guard = self
+                .utilities
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(store) = guard.as_mut().filter(|store| store.seed == seed) {
+                store.tick(days).map_err(|error| error.to_string())?;
+            }
+        }
+        {
+            let mut guard = self
+                .services
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(store) = guard.as_mut().filter(|store| store.seed == seed) {
+                store.tick(days).map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
     fn utility_infrastructure_for_seed(&self, seed: u64) -> (u64, f64) {
         let guard = self
             .utilities
@@ -3578,6 +3604,13 @@ impl TownsmithCore {
         };
         if !seconds.is_finite() || !(0.0..=core_city::MAX_ECONOMY_TICK_SECONDS).contains(&seconds) {
             return placement_simple_error("invalid_delta", "economy delta is outside 0..=86400");
+        }
+        // Utility and civic lead times run on the same simulated day clock as
+        // the treasury. In developer mode every lead is already zero, so this
+        // is a no-op and default checksums stay pinned.
+        let days = (seconds / core_city::DAY_SECONDS) as f32;
+        if let Err(error) = self.advance_infrastructure_lead(seed, days) {
+            return placement_simple_error("invalid_delta", error);
         }
         let summary = self.city_summary();
         let population = summary
@@ -4034,7 +4067,7 @@ impl TownsmithCore {
                 "utility kind must be water or power",
             );
         };
-        let center = {
+        let (center, time_scale) = {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             let Some(store) = world.as_ref() else {
                 return placement_simple_error("no_world", "no world placement store is open");
@@ -4068,8 +4101,9 @@ impl TownsmithCore {
                     "a utility site needs a completed building",
                 );
             }
-            placement.center
+            (placement.center, construction.time_scale())
         };
+        let lead_days = construction_lead_days(time_scale, kind.campaign_build_days());
         let cost = kind.construction_cost();
         let mut economy = self
             .economy
@@ -4104,7 +4138,9 @@ impl TownsmithCore {
                 );
             }
             let utilities = guard.get_or_insert_with(|| UtilityStore::new(seed));
-            if let Err(error) = utilities.add_site(placement_id, kind, center) {
+            if let Err(error) =
+                utilities.add_site_with_lead_days(placement_id, kind, center, lead_days)
+            {
                 return placement_simple_error("utility_failed", error.to_string());
             }
             if let Some(economy) = economy.as_mut() {
@@ -4267,7 +4303,7 @@ impl TownsmithCore {
         let city = self.city_summary();
         let age = AgeState::from_population(variant_u64(&city, "population")).age;
         let tier = ServiceTier::from_age(age);
-        let center = {
+        let (center, time_scale) = {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             let Some(store) = world.as_ref() else {
                 return placement_simple_error("no_world", "no world placement store is open");
@@ -4301,8 +4337,9 @@ impl TownsmithCore {
                     "a civic service site needs a completed building",
                 );
             }
-            placement.center
+            (placement.center, construction.time_scale())
         };
+        let lead_days = construction_lead_days(time_scale, kind.campaign_build_days(tier));
         let cost = kind.construction_cost(tier);
         let mut economy = self
             .economy
@@ -4334,7 +4371,9 @@ impl TownsmithCore {
                 );
             }
             let services = guard.get_or_insert_with(|| ServiceStore::new(seed));
-            if let Err(error) = services.add_site(placement_id, kind, tier, center) {
+            if let Err(error) =
+                services.add_site_with_lead_days(placement_id, kind, tier, center, lead_days)
+            {
                 return placement_simple_error("service_failed", error.to_string());
             }
             if let Some(economy) = economy.as_mut() {
@@ -7280,6 +7319,19 @@ fn first_construction_payment(material_cost: f64) -> f64 {
     (material_cost * ConstructionPhase::Survey.billing_weight() * 100.0).round() / 100.0
 }
 
+/// Lead time assigned to a new utility or civic site under a construction clock.
+///
+/// Developer mode keeps the legacy immediate behavior; campaign mode assigns
+/// the kind/tier lead time in game days. Storing days rather than seconds keeps
+/// the value independent of the campaign pacing rate.
+fn construction_lead_days(scale: ConstructionTimeScale, days: f32) -> f32 {
+    if scale.is_developer() {
+        0.0
+    } else {
+        days
+    }
+}
+
 /// Parse the bridge construction-clock mode.
 ///
 /// `developer` restores the fast default and ignores the rate. `campaign`
@@ -7820,6 +7872,8 @@ fn service_closed_payload(consumers: usize) -> VarDictionary {
     result.set("open", false);
     result.set("seed", 0);
     result.set("site_count", 0);
+    result.set("ready", 0);
+    result.set("building", 0);
     result.set("school_sites", 0);
     result.set("clinic_sites", 0);
     result.set("fire_sites", 0);
@@ -7857,6 +7911,8 @@ fn service_payload(store: &ServiceStore, report: &ServiceReport) -> VarDictionar
     result.set("open", true);
     result.set("seed", store.seed as i64);
     result.set("site_count", store.site_count() as i64);
+    result.set("ready", store.ready_count() as i64);
+    result.set("building", store.building_count() as i64);
     result.set("school_sites", store.count_of(ServiceKind::School) as i64);
     result.set("clinic_sites", store.count_of(ServiceKind::Clinic) as i64);
     result.set("fire_sites", store.count_of(ServiceKind::Fire) as i64);
@@ -7893,6 +7949,7 @@ fn service_payload(store: &ServiceStore, report: &ServiceReport) -> VarDictionar
         item.set("radius_m", f64::from(site.radius_m));
         item.set("capacity", site.capacity);
         item.set("research_per_day", site.research_per_day);
+        item.set("build_days_remaining", f64::from(site.build_days_remaining));
         item.set("center_x", f64::from(site.center[0]));
         item.set("center_y", f64::from(site.center[1]));
         item.set("center_z", f64::from(site.center[2]));
@@ -7912,6 +7969,8 @@ fn utility_closed_payload(consumers: usize) -> VarDictionary {
     result.set("open", false);
     result.set("seed", 0);
     result.set("site_count", 0);
+    result.set("ready", 0);
+    result.set("building", 0);
     result.set("water_sites", 0);
     result.set("power_sites", 0);
     result.set("water_supply", 0.0);
@@ -7938,6 +7997,8 @@ fn utility_payload(store: &UtilityStore, report: &UtilityReport) -> VarDictionar
     result.set("open", true);
     result.set("seed", store.seed as i64);
     result.set("site_count", store.site_count() as i64);
+    result.set("ready", store.ready_count() as i64);
+    result.set("building", store.building_count() as i64);
     result.set("water_sites", store.water_sites.len() as i64);
     result.set("power_sites", store.power_sites.len() as i64);
     result.set("water_supply", f64::from(report.water_supply));
@@ -7970,6 +8031,7 @@ fn utility_payload(store: &UtilityStore, report: &UtilityReport) -> VarDictionar
             item.set("kind", &GString::from(kind.as_str()));
             item.set("radius_m", f64::from(site.radius_m));
             item.set("capacity", site.capacity);
+            item.set("build_days_remaining", f64::from(site.build_days_remaining));
             item.set("center_x", f64::from(site.center[0]));
             item.set("center_y", f64::from(site.center[1]));
             item.set("center_z", f64::from(site.center[2]));
@@ -11185,6 +11247,17 @@ mod tests {
             .join("world.json");
         assert!(write_text_atomic(&path, "{}").is_err());
         assert!(read_json_with_backup(&path).is_err());
+    }
+
+    #[test]
+    fn construction_lead_days_is_zero_only_for_developer() {
+        assert_eq!(
+            construction_lead_days(ConstructionTimeScale::DeveloperSeconds, 5.0),
+            0.0
+        );
+        let campaign = ConstructionTimeScale::campaign_default();
+        assert_eq!(construction_lead_days(campaign, 1.5), 1.5);
+        assert_eq!(construction_lead_days(campaign, 0.0), 0.0);
     }
 
     #[test]
