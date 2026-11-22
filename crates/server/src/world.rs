@@ -74,6 +74,12 @@ const RATE_CREDIT_MILLI: u64 = 1_000;
 /// One credit per second is one thousandth of a credit per millisecond.
 const RATE_MILLI_CREDITS_PER_MS: u64 = RATE_CREDITS_PER_SECOND;
 
+/// Authoritative ticks a disconnected session stays resumable.
+///
+/// The window is measured in ticks, never wall-clock time: a server with no
+/// running simulation loop keeps the window open until the tick advances.
+pub const RESUME_GRACE_TICKS: u64 = 300;
+
 /// Stable executor error codes. These are wire/API contracts; do not rename.
 pub mod codes {
     /// A non-hello command arrived before an accepted `hello`.
@@ -84,6 +90,16 @@ pub mod codes {
     pub const RATE_LIMITED: &str = "rate.limited";
     /// A time action the executor does not support (speed controls).
     pub const TIME_INVALID_ACTION: &str = "time.invalid_action";
+    /// The resume token is empty, unknown, or does not match this world.
+    pub const RESUME_UNKNOWN: &str = "resume.unknown";
+    /// `last_tick` is ahead of the authoritative tick.
+    pub const RESUME_STALE: &str = "resume.stale";
+    /// The reconnect grace window has passed.
+    pub const RESUME_EXPIRED: &str = "resume.expired";
+    /// A session is already active; `resume` cannot run twice.
+    pub const RESUME_DUPLICATE: &str = "resume.duplicate";
+    /// A fresh `hello` was sent while a disconnected session can still resume.
+    pub const HELLO_RESUMABLE: &str = "hello.resumable";
     /// Road endpoints do not share an axis.
     pub const ROAD_NOT_AXIS_ALIGNED: &str = "road.not_axis_aligned";
     /// An identical road already exists.
@@ -155,7 +171,7 @@ impl ClientRole {
     #[must_use]
     pub fn required_role(tag: &str) -> Self {
         match tag {
-            "hello" | "ping" | "disconnect" => Self::Viewer,
+            "hello" | "resume" | "ping" | "disconnect" => Self::Viewer,
             "set_tax" | "place_road" | "time_control" => Self::Mayor,
             // Any future/unknown tag.
             _ => Self::Admin,
@@ -266,6 +282,29 @@ fn audit_entry_hash(mut hash: u64, entry: &AuditEntry) -> u64 {
     fnv_update(hash, &[0x1e])
 }
 
+/// In-memory reconnect record for a disconnected session.
+///
+/// The record is deliberately excluded from [`ServerWorld::checksum`] and is
+/// not written to [`crate::save::ServerSave`]. Reconnect is process-local; a
+/// loaded world always starts with no resumable session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResumeWindow {
+    /// Last authoritative tick at which `resume` is still accepted.
+    deadline_tick: u64,
+}
+
+impl ResumeWindow {
+    fn starting_at(tick: u64) -> Self {
+        Self {
+            deadline_tick: tick.saturating_add(RESUME_GRACE_TICKS),
+        }
+    }
+
+    fn is_open_at(self, tick: u64) -> bool {
+        tick <= self.deadline_tick
+    }
+}
+
 /// Authoritative state for one protocol v0 session.
 #[derive(Debug, Clone)]
 pub struct ServerWorld {
@@ -294,6 +333,8 @@ pub struct ServerWorld {
     audit: VecDeque<AuditEntry>,
     hello: bool,
     closed: bool,
+    resume_window: Option<ResumeWindow>,
+    last_seen_tick: u64,
     session_id: String,
 }
 
@@ -347,6 +388,8 @@ impl ServerWorld {
             audit: VecDeque::with_capacity(AUDIT_CAPACITY),
             hello: false,
             closed: false,
+            resume_window: None,
+            last_seen_tick: 0,
             session_id: session_id_for_seed(seed),
         };
         world.refresh_checksum();
@@ -371,10 +414,14 @@ impl ServerWorld {
 
     /// Rebuild a world from an already validated [`crate::save::ServerSave`].
     ///
-    /// The restored session is open and has not accepted a `hello`, so a
-    /// reconnecting client must handshake again. Saved tick, paused flag,
-    /// treasury, and roads resume unchanged; the checksum is recomputed from
-    /// the restored state.
+    /// The restored session is open, has not accepted a `hello`, and has **no
+    /// resumable session**: reconnect state (the grace window and
+    /// `last_seen_tick`) is process-local and is not part of the save. The
+    /// session token is derived from the seed, so a client that knew it before
+    /// the restart still needs a fresh `hello`; `resume` answers
+    /// `resume.unknown` until a new session disconnects. Saved tick, paused
+    /// flag, treasury, and roads resume unchanged; the checksum is recomputed
+    /// from the restored state.
     pub(crate) fn restore(save: crate::save::ServerSave) -> Self {
         let mut world = Self {
             seed: save.seed,
@@ -392,6 +439,8 @@ impl ServerWorld {
             audit: VecDeque::with_capacity(AUDIT_CAPACITY),
             hello: false,
             closed: false,
+            resume_window: None,
+            last_seen_tick: save.tick,
             session_id: session_id_for_seed(save.seed),
         };
         world.refresh_checksum();
@@ -402,6 +451,54 @@ impl ServerWorld {
     #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Stable reconnect token returned in `welcome`.
+    ///
+    /// v0 derives it from the seed and keeps it equal to [`Self::session_id`].
+    /// It identifies a session; it is **not** an authentication credential.
+    #[must_use]
+    pub fn session_token(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Tick at which the current reconnect window closes, if one is open.
+    #[must_use]
+    pub fn resume_deadline(&self) -> Option<u64> {
+        self.resume_window.map(|window| window.deadline_tick)
+    }
+
+    /// Whether a disconnected session can still be resumed at the current tick.
+    #[must_use]
+    pub fn is_resumable(&self) -> bool {
+        self.resume_window
+            .is_some_and(|window| window.is_open_at(self.tick))
+    }
+
+    /// Last authoritative tick at which the session was seen.
+    #[must_use]
+    pub fn last_seen_tick(&self) -> u64 {
+        self.last_seen_tick
+    }
+
+    /// Prepare the world for a newly accepted connection.
+    ///
+    /// A clean `disconnect` already closed the previous session and opened the
+    /// grace window. A connection that dropped without `disconnect` (EOF, read
+    /// timeout, reset) is closed here and also becomes resumable. Either way
+    /// the grace window survives: only [`Self::tick`] advancing past its
+    /// deadline expires it.
+    pub fn begin_connection(&mut self) {
+        if self.hello {
+            self.remember_disconnect();
+        }
+        self.hello = false;
+        self.closed = false;
+    }
+
+    fn remember_disconnect(&mut self) {
+        self.last_seen_tick = self.tick;
+        self.resume_window = Some(ResumeWindow::starting_at(self.tick));
     }
 
     /// Whether an accepted `hello` has been seen.
@@ -496,10 +593,16 @@ impl ServerWorld {
 
     /// Validate and apply one command, returning exactly one response.
     ///
+    /// This is the single-message convenience wrapper used by tests and the
+    /// authority loopback. A successful `resume` produces two messages
+    /// (`welcome`, then `snapshot`); this method returns the `welcome` and
+    /// drops the snapshot. Transport code must use [`Self::apply_all`].
+    ///
     /// The batch order is fixed:
     ///
     /// 1. closed sessions reject everything;
-    /// 2. `hello` sequencing (`hello.duplicate`, then `not_hello`);
+    /// 2. `hello`/`resume` sequencing (`hello.duplicate`, `hello.resumable`,
+    ///    `resume.duplicate`, then `not_hello`);
     /// 3. role authorization ([`codes::FORBIDDEN`]);
     /// 4. the deterministic token bucket ([`codes::RATE_LIMITED`]);
     /// 5. payload validation and mutation.
@@ -507,10 +610,30 @@ impl ServerWorld {
     /// A rejection never mutates simulation state. Every command, accepted or
     /// rejected, is recorded in the bounded audit ring.
     pub fn apply(&mut self, command: &ClientCommand) -> ServerMessage {
+        self.apply_all(command)
+            .into_iter()
+            .next()
+            .expect("every command yields at least one response")
+    }
+
+    /// Validate and apply one command, returning every response it produces.
+    ///
+    /// Every command yields one message except a successful `resume`, which
+    /// yields `welcome { resumed: true }` followed by the current `snapshot`
+    /// so the client can reconcile immediately. Rejections never mutate
+    /// simulation state.
+    pub fn apply_all(&mut self, command: &ClientCommand) -> Vec<ServerMessage> {
         self.commands = self.commands.saturating_add(1);
         let (message, code) = self.evaluate(command);
         self.record_audit(command.tag(), code);
-        message
+        if self.hello && code == AUDIT_ACCEPTED {
+            self.last_seen_tick = self.tick;
+        }
+        if matches!(&message, ServerMessage::Welcome { resumed: true, .. }) {
+            vec![message, self.snapshot()]
+        } else {
+            vec![message]
+        }
     }
 
     fn evaluate(&mut self, command: &ClientCommand) -> (ServerMessage, &'static str) {
@@ -518,8 +641,8 @@ impl ServerWorld {
             return reject_with(protocol_codes::SESSION_CLOSED, "session is already closed");
         }
 
-        // Hello sequencing comes before role and rate checks so a duplicate or
-        // pre-hello command keeps its stable protocol code.
+        // Handshake sequencing comes before role and rate checks so a
+        // duplicate, resumable, or pre-hello command keeps its stable code.
         match command {
             ClientCommand::Hello { .. } if self.hello => {
                 return reject_with(
@@ -527,11 +650,30 @@ impl ServerWorld {
                     "hello was already accepted",
                 );
             }
-            ClientCommand::Hello { .. } | ClientCommand::Disconnect => {}
+            ClientCommand::Hello { .. } => {
+                if let Some(window) = self.resume_window {
+                    if window.is_open_at(self.tick) {
+                        return reject_with(
+                            codes::HELLO_RESUMABLE,
+                            format!(
+                                "a disconnected session can resume until tick {}; \
+                                 send `resume` or wait for the grace window to expire",
+                                window.deadline_tick
+                            ),
+                        );
+                    }
+                    // The grace window expired: a fresh session may start.
+                    self.resume_window = None;
+                }
+            }
+            ClientCommand::Resume { .. } | ClientCommand::Disconnect => {}
             _ if !self.hello => {
                 return reject_with(
                     codes::NOT_HELLO,
-                    format!("`{}` requires a successful hello first", command.tag()),
+                    format!(
+                        "`{}` requires a successful hello or resume first",
+                        command.tag()
+                    ),
                 );
             }
             _ => {}
@@ -550,10 +692,14 @@ impl ServerWorld {
             );
         }
 
-        // `disconnect` is never throttled: a rate-limited client can always
-        // close its session.
+        // Handshake commands are never throttled: a client must always be able
+        // to close or reclaim its session.
         let now = self.rate_clock_ms();
-        if !matches!(command, ClientCommand::Disconnect) && !self.rate.try_consume(now) {
+        if !matches!(
+            command,
+            ClientCommand::Disconnect | ClientCommand::Resume { .. }
+        ) && !self.rate.try_consume(now)
+        {
             return reject_with(
                 codes::RATE_LIMITED,
                 format!(
@@ -574,15 +720,23 @@ impl ServerWorld {
                     return from_rejection(rejection);
                 }
                 self.hello = true;
+                self.closed = false;
+                self.resume_window = None;
+                self.last_seen_tick = self.tick;
                 self.refresh_checksum();
-                accepted(ServerMessage::Welcome {
-                    session_id: self.session_id.clone(),
-                    tick: self.tick,
-                    protocol_version: PROTOCOL_VERSION,
-                })
+                accepted(welcome(self, false))
             }
+            ClientCommand::Resume {
+                session_id,
+                last_tick,
+            } => self.apply_resume(session_id, *last_tick),
             ClientCommand::Disconnect => {
+                let was_active = self.hello;
                 self.closed = true;
+                self.hello = false;
+                if was_active {
+                    self.remember_disconnect();
+                }
                 accepted(ServerMessage::Goodbye)
             }
             ClientCommand::Ping { nonce } => accepted(ServerMessage::Pong { nonce: *nonce }),
@@ -602,6 +756,61 @@ impl ServerWorld {
             }
             ClientCommand::PlaceRoad { start, end } => self.apply_place_road(*start, *end),
         }
+    }
+
+    /// Validate a reconnect claim without changing simulation state.
+    ///
+    /// The token is checked before the grace window so a wrong token never
+    /// reveals whether a session is resumable. The role is not part of the
+    /// claim: it is the role the world already holds, so a resumed session
+    /// keeps the role assigned by the server process.
+    fn apply_resume(&mut self, token: &str, last_tick: u64) -> (ServerMessage, &'static str) {
+        if self.hello {
+            return reject_with(
+                codes::RESUME_DUPLICATE,
+                "a session is already active; only a disconnected session can resume",
+            );
+        }
+        if token.is_empty() {
+            return reject_with(codes::RESUME_UNKNOWN, "resume token must not be empty");
+        }
+        if token != self.session_token() {
+            return reject_with(
+                codes::RESUME_UNKNOWN,
+                "resume token does not match this world",
+            );
+        }
+        let Some(window) = self.resume_window else {
+            return reject_with(
+                codes::RESUME_UNKNOWN,
+                "no disconnected session is waiting to resume",
+            );
+        };
+        if !window.is_open_at(self.tick) {
+            self.resume_window = None;
+            return reject_with(
+                codes::RESUME_EXPIRED,
+                format!(
+                    "the reconnect window closed at tick {}; the current tick is {}",
+                    window.deadline_tick, self.tick
+                ),
+            );
+        }
+        if last_tick > self.tick {
+            return reject_with(
+                codes::RESUME_STALE,
+                format!(
+                    "last_tick {last_tick} is ahead of the authoritative tick {}",
+                    self.tick
+                ),
+            );
+        }
+
+        self.resume_window = None;
+        self.hello = true;
+        self.closed = false;
+        self.last_seen_tick = self.tick;
+        accepted(welcome(self, true))
     }
 
     fn apply_time_control(&mut self, action: TimeAction) -> (ServerMessage, &'static str) {
@@ -780,6 +989,16 @@ fn sanitize_dt(dt_s: f64) -> f64 {
     }
 }
 
+fn welcome(world: &ServerWorld, resumed: bool) -> ServerMessage {
+    ServerMessage::Welcome {
+        session_id: world.session_id().to_string(),
+        session_token: world.session_token().to_string(),
+        tick: world.tick,
+        protocol_version: PROTOCOL_VERSION,
+        resumed,
+    }
+}
+
 fn reject_with(code: &'static str, message: impl Into<String>) -> (ServerMessage, &'static str) {
     (Rejection::new(code, message).into_message(), code)
 }
@@ -849,6 +1068,7 @@ struct SessionStats {
     commands: u64,
     forbidden: u64,
     rate_limited: u64,
+    resumed: bool,
 }
 
 fn response_code(response: &ServerMessage) -> Option<&str> {
@@ -887,20 +1107,27 @@ fn serve_world_session(
         frames += 1;
         stats.commands += 1;
 
-        let response = match decode_client_command(&payload) {
+        let responses = match decode_client_command(&payload) {
             Ok(command) => {
-                let response = world.apply(&command);
-                match response_code(&response) {
-                    Some(codes::FORBIDDEN) => stats.forbidden += 1,
-                    Some(codes::RATE_LIMITED) => stats.rate_limited += 1,
-                    _ => {}
+                let responses = world.apply_all(&command);
+                for response in &responses {
+                    match response_code(response) {
+                        Some(codes::FORBIDDEN) => stats.forbidden += 1,
+                        Some(codes::RATE_LIMITED) => stats.rate_limited += 1,
+                        _ => {}
+                    }
+                    if matches!(response, ServerMessage::Welcome { resumed: true, .. }) {
+                        stats.resumed = true;
+                    }
                 }
-                response
+                responses
             }
-            Err(rejection) => rejection.into_message(),
+            Err(rejection) => vec![rejection.into_message()],
         };
-        write_json_frame(&mut stream, &response).map_err(frame_to_io)?;
-        frames += 1;
+        for response in &responses {
+            write_json_frame(&mut stream, response).map_err(frame_to_io)?;
+            frames += 1;
+        }
 
         if world.is_closed() {
             break;
@@ -948,6 +1175,8 @@ fn run_authority_client(address: SocketAddr) -> io::Result<()> {
             session_id,
             tick,
             protocol_version,
+            resumed: false,
+            ..
         } if tick == 0
             && protocol_version == PROTOCOL_VERSION
             && session_id == session_id_for_seed(LOOPBACK_SEED) => {}
@@ -1104,6 +1333,8 @@ fn expect_welcome(message: &ServerMessage) -> io::Result<()> {
             session_id,
             tick: 0,
             protocol_version,
+            resumed: false,
+            ..
         } if session_id == &session_id_for_seed(LOOPBACK_SEED)
             && *protocol_version == PROTOCOL_VERSION =>
         {
@@ -1264,14 +1495,159 @@ fn run_admin_role_session(address: SocketAddr) -> io::Result<()> {
     )?)
 }
 
+/// Result of one deterministic reconnect loopback run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeReport {
+    /// TCP sessions served (the initial session and the resumed one).
+    pub sessions: u64,
+    /// Client commands accepted or rejected by the executor.
+    pub commands: u64,
+    /// Application frames exchanged in both directions.
+    pub frames: u64,
+    /// Whether the second session resumed instead of sending `hello`.
+    pub resumed: bool,
+    /// Final authoritative tick.
+    pub tick: u64,
+    /// Final world checksum.
+    pub checksum: String,
+    /// Deterministic session identifier / token.
+    pub session_id: String,
+}
+
+/// Run one deterministic reconnect exchange over TCP loopback.
+///
+/// Connection 1 runs hello, set-tax, and disconnect. Connection 2 resumes the
+/// same in-memory world and receives a resumed welcome plus a snapshot before
+/// disconnecting. The client compares every response against a local reference
+/// world, so transport and state divergence fail the smoke. Both sides use
+/// bounded socket timeouts; the harness never sleeps.
+pub fn run_resume_loopback() -> io::Result<ResumeReport> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let address = listener.local_addr()?;
+
+    let server = thread::spawn(move || serve_resume(listener));
+    let client_result = run_resume_client(address);
+    let server_result = server
+        .join()
+        .map_err(|_| io::Error::other("resume loopback server thread panicked"))?;
+
+    client_result?;
+    server_result
+}
+
+fn serve_resume(listener: TcpListener) -> io::Result<ResumeReport> {
+    let (first, _peer) = listener.accept()?;
+    let (mut world, first_frames, first_stats) = serve_world_session(
+        first,
+        ServerWorld::with_role(LOOPBACK_SEED, ClientRole::Admin),
+    )?;
+
+    // The reconnect happens on a new socket against the same world.
+    world.begin_connection();
+
+    let (second, _peer) = listener.accept()?;
+    let (world, second_frames, second_stats) = serve_world_session(second, world)?;
+
+    Ok(ResumeReport {
+        sessions: 2,
+        commands: first_stats.commands.saturating_add(second_stats.commands),
+        frames: first_frames.saturating_add(second_frames),
+        resumed: first_stats.resumed || second_stats.resumed,
+        tick: world.tick,
+        checksum: world.checksum(),
+        session_id: world.session_id().to_string(),
+    })
+}
+
+fn run_resume_client(address: SocketAddr) -> io::Result<()> {
+    let mut reference = ServerWorld::with_role(LOOPBACK_SEED, ClientRole::Admin);
+
+    let mut first = TcpStream::connect_timeout(&address, SESSION_IO_TIMEOUT)?;
+    configure_stream(&first)?;
+
+    let token = match exchange(&mut first, &mut reference, &loopback_hello("resume"))? {
+        ServerMessage::Welcome {
+            session_token,
+            resumed: false,
+            ..
+        } => session_token,
+        other => return Err(unexpected("fresh welcome", &other)),
+    };
+
+    match exchange(
+        &mut first,
+        &mut reference,
+        &ClientCommand::SetTax {
+            resident_rate: 12,
+            business_rate: 8,
+        },
+    )? {
+        ServerMessage::Snapshot { tick: 1, .. } => {}
+        other => return Err(unexpected("set_tax snapshot", &other)),
+    }
+
+    expect_goodbye(&exchange(
+        &mut first,
+        &mut reference,
+        &ClientCommand::Disconnect,
+    )?)?;
+    drop(first);
+
+    // A new connection starts from the resumable record left by `disconnect`.
+    reference.begin_connection();
+
+    let mut second = TcpStream::connect_timeout(&address, SESSION_IO_TIMEOUT)?;
+    configure_stream(&second)?;
+
+    let resumed = exchange_all(
+        &mut second,
+        &mut reference,
+        &ClientCommand::Resume {
+            session_id: token.clone(),
+            last_tick: 1,
+        },
+    )?;
+    match resumed.as_slice() {
+        [ServerMessage::Welcome {
+            resumed: true,
+            tick: 1,
+            session_token,
+            ..
+        }, ServerMessage::Snapshot { tick: 1, .. }]
+            if session_token == &token => {}
+        other => {
+            return Err(io::Error::other(format!(
+                "resume loopback expected resumed welcome + snapshot, received {other:?}"
+            )));
+        }
+    }
+
+    expect_goodbye(&exchange(
+        &mut second,
+        &mut reference,
+        &ClientCommand::Disconnect,
+    )?)
+}
+
 fn exchange(
     stream: &mut TcpStream,
     reference: &mut ServerWorld,
     command: &ClientCommand,
 ) -> io::Result<ServerMessage> {
-    let expected = reference.apply(command);
+    exchange_all(stream, reference, command).map(|mut messages| messages.remove(0))
+}
+
+fn exchange_all(
+    stream: &mut TcpStream,
+    reference: &mut ServerWorld,
+    command: &ClientCommand,
+) -> io::Result<Vec<ServerMessage>> {
+    let expected = reference.apply_all(command);
     write_json_frame(stream, command).map_err(frame_to_io)?;
-    let actual = read_json_frame::<_, ServerMessage>(stream).map_err(frame_to_io)?;
+    let mut actual = Vec::with_capacity(expected.len());
+    for _ in 0..expected.len() {
+        actual.push(read_json_frame::<_, ServerMessage>(stream).map_err(frame_to_io)?);
+    }
     if actual != expected {
         return Err(io::Error::other(format!(
             "authority loopback mismatch for `{}`: expected {expected:?}, received {actual:?}",
@@ -1370,10 +1746,13 @@ mod tests {
                 session_id,
                 tick,
                 protocol_version,
+                resumed,
+                ..
             } => {
                 assert_eq!(session_id, session_id_for_seed(SEED));
                 assert_eq!(tick, 0);
                 assert_eq!(protocol_version, PROTOCOL_VERSION);
+                assert!(!resumed);
             }
             other => panic!("expected welcome, got {other:?}"),
         }
@@ -1832,6 +2211,86 @@ mod tests {
 
         let second = run_authority_loopback().expect("second authority loopback");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn resume_returns_welcome_and_snapshot() {
+        let mut world = world_with_hello();
+        let token = world.session_token().to_string();
+        world.apply(&ClientCommand::SetTax {
+            resident_rate: 12,
+            business_rate: 8,
+        });
+        world.apply(&ClientCommand::Disconnect);
+        world.begin_connection();
+
+        let responses = world.apply_all(&ClientCommand::Resume {
+            session_id: token,
+            last_tick: 1,
+        });
+        assert!(matches!(
+            responses.first(),
+            Some(ServerMessage::Welcome { resumed: true, .. })
+        ));
+        assert!(matches!(
+            responses.get(1),
+            Some(ServerMessage::Snapshot { tick: 1, .. })
+        ));
+        assert!(world.hello_accepted());
+    }
+
+    #[test]
+    fn resume_rejects_unknown_token_and_stale_tick() {
+        let mut world = world_with_hello();
+        let token = world.session_token().to_string();
+        world.apply(&ClientCommand::Disconnect);
+        world.begin_connection();
+
+        expect_reject(
+            &world.apply(&ClientCommand::Resume {
+                session_id: "wrong".to_string(),
+                last_tick: 0,
+            }),
+            codes::RESUME_UNKNOWN,
+        );
+        expect_reject(
+            &world.apply(&ClientCommand::Resume {
+                session_id: token,
+                last_tick: 99,
+            }),
+            codes::RESUME_STALE,
+        );
+    }
+
+    #[test]
+    fn resume_window_expires_after_the_grace_ticks() {
+        let mut world = world_with_hello();
+        let token = world.session_token().to_string();
+        world.apply(&ClientCommand::Disconnect);
+        world.begin_connection();
+        world.tick = world
+            .tick
+            .saturating_add(crate::world::RESUME_GRACE_TICKS + 1);
+        expect_reject(
+            &world.apply(&ClientCommand::Resume {
+                session_id: token,
+                last_tick: 0,
+            }),
+            codes::RESUME_EXPIRED,
+        );
+    }
+
+    #[test]
+    fn resume_is_rejected_while_a_session_is_active() {
+        let mut world = world_with_hello();
+        let token = world.session_token().to_string();
+        expect_reject(
+            &world.apply(&ClientCommand::Resume {
+                session_id: token,
+                last_tick: 0,
+            }),
+            codes::RESUME_DUPLICATE,
+        );
     }
 
     #[test]

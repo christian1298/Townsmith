@@ -542,3 +542,5 @@ The `bench` crate loads the scene, applies settings, runs the fixed route, sampl
 - **Q-097–Q-100:** Basement scope/depth/groundwater, underground parking, tunnels.
 
 See [[09 - Open Questions]] and [[10 - Decisions]].
+
+Reconnect state lives in `ServerWorld` (`session_token`, 300-tick grace window, `Resume`) and is deliberately excluded from the world checksum. The save file restores the world state but not a resumable connection.

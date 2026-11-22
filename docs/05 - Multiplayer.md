@@ -445,3 +445,9 @@ Multiplayer + modding is a trust problem. The server is the authority.
 - **Q-032:** Steam networking (lobbies, server browser) or direct IP first? Default: direct IP + invite codes first, Steam later.
 
 See [[09 - Open Questions]] and [[10 - Decisions]].
+
+### Session resume v0
+
+A disconnected client can resume the same in-memory world with `resume {session_id, last_tick}` inside a 300-tick grace window. The token is the seed-derived session id returned in `welcome`; it is **not** authentication. Success returns `welcome {resumed:true}` plus a snapshot and preserves the dev role. Unknown/empty token, a last tick ahead of the authority, an expired window, or resuming while a session is active are rejected (`resume.*`). Reconnect state is process-local and is not restored by `ServerSave`; a fresh `hello` after expiry starts a new session.
+
+`cargo run --release -p townsmith-server -- --resume-smoke` prints `SERVER_RESUME status=ok ...`.

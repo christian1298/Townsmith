@@ -69,6 +69,9 @@ pub mod codes {
     pub const PLAYER_NAME_INVALID: &str = "player_name.invalid";
     pub const CONTENT_HASH_INVALID: &str = "content_hash.invalid";
     pub const SESSION_CLOSED: &str = "session.closed";
+    /// `resume` is only implemented by the authoritative executor; the
+    /// transport-only reference session rejects it.
+    pub const RESUME_UNAVAILABLE: &str = "resume.unavailable";
 
     // Command payloads.
     pub const TAX_RATE_OUT_OF_RANGE: &str = "tax.rate_out_of_range";
@@ -171,6 +174,15 @@ pub enum ClientCommand {
         content_hash: String,
         player_name: String,
     },
+    /// Reconnect to a session that disconnected within the grace window.
+    ///
+    /// `session_id` carries the token the server returned in `welcome`. v0
+    /// has no authentication: the token identifies a session, it does not
+    /// prove ownership.
+    Resume {
+        session_id: String,
+        last_tick: u64,
+    },
     Ping {
         nonce: u64,
     },
@@ -192,6 +204,7 @@ impl ClientCommand {
     pub fn tag(&self) -> &'static str {
         match self {
             ClientCommand::Hello { .. } => "hello",
+            ClientCommand::Resume { .. } => "resume",
             ClientCommand::Ping { .. } => "ping",
             ClientCommand::TimeControl { .. } => "time_control",
             ClientCommand::SetTax { .. } => "set_tax",
@@ -224,8 +237,18 @@ pub enum TimeAction {
 pub enum ServerMessage {
     Welcome {
         session_id: String,
+        /// Stable reconnect token for this world/session.
+        ///
+        /// v0 derives it from the seed and sets it to the same value as
+        /// `session_id`. A future authenticated revision can rotate it without
+        /// changing the `resume` command shape.
+        #[serde(default)]
+        session_token: String,
         tick: u64,
         protocol_version: u16,
+        /// True when this `welcome` answers a successful `resume`.
+        #[serde(default)]
+        resumed: bool,
     },
     Pong {
         nonce: u64,
@@ -347,6 +370,7 @@ pub fn decode_client_command(payload: &[u8]) -> Result<ClientCommand, Rejection>
 
     const KNOWN_TAGS: &[&str] = &[
         "hello",
+        "resume",
         "ping",
         "time_control",
         "set_tax",
@@ -588,10 +612,16 @@ impl Session {
                 });
                 vec![ServerMessage::Welcome {
                     session_id: self.session_id.clone(),
+                    session_token: self.session_id.clone(),
                     tick: self.tick,
                     protocol_version: PROTOCOL_VERSION,
+                    resumed: false,
                 }]
             }
+            ClientCommand::Resume { .. } => reject(
+                codes::RESUME_UNAVAILABLE,
+                "resume is not supported by the transport-only session",
+            ),
             ClientCommand::Disconnect => {
                 self.closed = true;
                 vec![ServerMessage::Goodbye]
@@ -762,8 +792,11 @@ fn run_loopback_client(address: SocketAddr) -> io::Result<()> {
             session_id,
             tick,
             protocol_version,
+            resumed,
+            ..
         } if protocol_version == PROTOCOL_VERSION
             && tick == 0
+            && !resumed
             && session_id == session_id_for_seed(LOOPBACK_SEED) => {}
         other => return Err(unexpected("welcome", &other)),
     }
