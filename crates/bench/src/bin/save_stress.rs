@@ -1,11 +1,12 @@
 //! Deterministic save/load stress harness for the core city layers.
 //!
-//! Builds a 120-placement city, composes every core store into one JSON object,
-//! and round-trips it repeatedly. This is a core harness, not the Godot world
-//! save: it catches layer-local serialization/validation drift without needing
-//! a Godot runtime.
+//! Builds a fixed city (120 placements by default), composes every core store
+//! into one JSON object, and round-trips it repeatedly. This is a core harness,
+//! not the Godot world save: it catches layer-local serialization/validation
+//! drift without needing a Godot runtime.
 
 use std::collections::BTreeSet;
+use std::time::Instant;
 
 use core_city::{
     Age, CityRuntime, ConstructionStore, Economy, Home, IndustryKind, IndustryStore, LotRequest,
@@ -16,20 +17,48 @@ use core_city::{
 };
 
 const SEED: u64 = 2026;
-const HOUSES: u64 = 100;
-const WORKPLACES: u64 = 20;
+const DEFAULT_PLACEMENTS: usize = 120;
+const MIN_PLACEMENTS: usize = 6;
+/// The fixture stockpiles 10,000,000 litres and every site needs 10,000, so
+/// 1,000 placements is also the material ceiling for a fully completed city.
+const MAX_PLACEMENTS: usize = 1_000;
+const HOUSES_PER_SIX: usize = 5;
+const RESIDENTS_PER_HOUSE: u32 = 10;
+const JOBS_PER_WORKPLACE: u32 = 10;
 const SOLID_VOXELS: u64 = 10_000;
 const HEIGHT: u16 = 40;
+const MOVE_IN_TICK_SECONDS: f64 = 60.0;
+const MOVE_IN_BASE_RATE: f32 = 100.0;
+const MAX_MOVE_IN_TICKS: usize = 16;
+const MAX_CYCLES: usize = 10_000;
+
+/// Per-cycle timing samples, only populated when `--timing` is set.
+#[derive(Default)]
+struct CycleTiming {
+    cycle_ms: Vec<f64>,
+    serialize_ms: f64,
+    parse_ms: f64,
+    combined_json_bytes: usize,
+}
 
 fn main() {
     let cycles = arg_value("--cycles")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(60);
-    if cycles == 0 || cycles > 10_000 {
-        eprintln!("usage: save_stress [--cycles N] [--smoke]");
+    let placements = arg_value("--placements").map_or(DEFAULT_PLACEMENTS, |value| {
+        value.parse::<usize>().unwrap_or(0)
+    });
+    let timing = std::env::args().any(|arg| arg == "--timing" || arg == "--bench");
+    if cycles == 0
+        || cycles > MAX_CYCLES
+        || !(MIN_PLACEMENTS..=MAX_PLACEMENTS).contains(&placements)
+    {
+        eprintln!(
+            "usage: save_stress [--cycles N] [--placements {MIN_PLACEMENTS}..={MAX_PLACEMENTS}] [--timing|--bench] [--smoke]"
+        );
         std::process::exit(2);
     }
-    match run(cycles) {
+    match run(cycles, placements, timing) {
         Ok(summary) => {
             println!(
                 "{}",
@@ -43,15 +72,24 @@ fn main() {
     }
 }
 
-fn run(cycles: usize) -> Result<serde_json::Value, String> {
-    let city = City::build()?;
+fn run(cycles: usize, placements: usize, timing: bool) -> Result<serde_json::Value, String> {
+    let run_start = Instant::now();
+    let build_start = Instant::now();
+    let city = City::build(placements)?;
+    let build_ms = elapsed_ms(build_start);
     let mut checksum: Option<u64> = None;
+    let mut timings = CycleTiming::default();
     for _ in 0..cycles {
+        let cycle_start = Instant::now();
         city.validate()?;
         let value = city.to_value();
+        let serialize_start = Instant::now();
         let encoded = serde_json::to_string(&value).map_err(|error| error.to_string())?;
+        let serialize_ms = elapsed_ms(serialize_start);
+        let parse_start = Instant::now();
         let decoded: serde_json::Value =
             serde_json::from_str(&encoded).map_err(|error| error.to_string())?;
+        let parse_ms = elapsed_ms(parse_start);
         city.check_value(&decoded)?;
         let cycle_checksum = combined_checksum(&city);
         if let Some(previous) = checksum {
@@ -60,10 +98,18 @@ fn run(cycles: usize) -> Result<serde_json::Value, String> {
             }
         }
         checksum = Some(cycle_checksum);
+        if timing {
+            timings.cycle_ms.push(elapsed_ms(cycle_start));
+            timings.serialize_ms += serialize_ms;
+            timings.parse_ms += parse_ms;
+            timings.combined_json_bytes = encoded.len();
+        }
     }
     let checksum = checksum.ok_or_else(|| "no cycles".to_string())?;
     reject_bad_inputs(&city)?;
-    Ok(serde_json::json!({
+    let total_ms = elapsed_ms(run_start);
+    let (houses, workplaces) = placement_split(placements);
+    let mut summary = serde_json::json!({
         "scene": "save_stress",
         "seed": SEED,
         "cycles": cycles,
@@ -75,7 +121,72 @@ fn run(cycles: usize) -> Result<serde_json::Value, String> {
         "research_completed": city.research.completed_count(),
         "combined_checksum": format!("{checksum:016x}"),
         "status": "ok",
-    }))
+    });
+    if timing {
+        summary["timing"] = timing_report(
+            &timings, &city, houses, workplaces, build_ms, total_ms, placements,
+        );
+    }
+    Ok(summary)
+}
+
+fn timing_report(
+    timings: &CycleTiming,
+    city: &City,
+    houses: usize,
+    workplaces: usize,
+    build_ms: f64,
+    total_ms: f64,
+    placements: usize,
+) -> serde_json::Value {
+    let cycle_ms: Vec<f64> = timings.cycle_ms.iter().copied().map(round_ms).collect();
+    let cycle_total: f64 = timings.cycle_ms.iter().sum();
+    let cycle_min = timings
+        .cycle_ms
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    let cycle_max = timings
+        .cycle_ms
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let cycle_mean = if timings.cycle_ms.is_empty() {
+        0.0
+    } else {
+        cycle_total / timings.cycle_ms.len() as f64
+    };
+    serde_json::json!({
+        "placements": placements,
+        "houses": houses,
+        "workplaces": workplaces,
+        "build_ms": round_ms(build_ms),
+        "total_ms": round_ms(total_ms),
+        "cycle_ms_total": round_ms(cycle_total),
+        "cycle_ms_mean": round_ms(cycle_mean),
+        "cycle_ms_min": round_ms(cycle_min),
+        "cycle_ms_max": round_ms(cycle_max),
+        "cycle_ms": cycle_ms,
+        "serialize_ms": round_ms(timings.serialize_ms),
+        "parse_ms": round_ms(timings.parse_ms),
+        "combined_json_bytes": timings.combined_json_bytes,
+        "store_checksums": city.checksum_map(),
+    })
+}
+
+fn elapsed_ms(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
+}
+
+fn round_ms(value: f64) -> f64 {
+    (value * 1_000.0).round() / 1_000.0
+}
+
+/// Split a placement budget into houses and workplaces: five sixths houses,
+/// one sixth workplaces, with at least one of each.
+fn placement_split(placements: usize) -> (usize, usize) {
+    let houses = placements * HOUSES_PER_SIX / 6;
+    (houses, placements - houses)
 }
 
 struct City {
@@ -94,22 +205,31 @@ struct City {
 }
 
 impl City {
-    fn build() -> Result<Self, String> {
+    fn build(placement_count: usize) -> Result<Self, String> {
+        if !(MIN_PLACEMENTS..=MAX_PLACEMENTS).contains(&placement_count) {
+            return Err(format!(
+                "placements must be {MIN_PLACEMENTS}..={MAX_PLACEMENTS}, got {placement_count}"
+            ));
+        }
+        let (houses, _workplaces) = placement_split(placement_count);
         let tree = TechTree::default_tree();
         let mut placements = PlacementStore::new(SEED);
         let mut construction = ConstructionStore::new(8, 10_000_000);
-        for index in 0..HOUSES + WORKPLACES {
-            let workplace = index >= HOUSES;
-            let local = index % 20;
-            let x = if workplace {
-                328.0 + (local % 5) as f32 * 20.0
+        for index in 0..placement_count {
+            let workplace = index >= houses;
+            let (x, z) = if workplace {
+                // Workplaces sit east of the house grid in a five-column block.
+                let local = index - houses;
+                (
+                    328.0 + (local % 5) as f32 * 20.0,
+                    128.0 + (local / 5) as f32 * 20.0,
+                )
             } else {
-                128.0 + (local % 10) as f32 * 20.0
-            };
-            let z = if workplace {
-                128.0 + (local / 5) as f32 * 20.0
-            } else {
-                128.0 + (index / 10) as f32 * 20.0
+                // Houses use a ten-column grid, growing south with the count.
+                (
+                    128.0 + (index % 10) as f32 * 20.0,
+                    128.0 + (index / 10) as f32 * 20.0,
+                )
             };
             let request = PlacementRequest {
                 blueprint_id: if workplace {
@@ -125,8 +245,8 @@ impl City {
                 center_z: z,
                 rotation_deg: 0,
                 material_cost: 3_000.0,
-                resident_capacity: if workplace { 0 } else { 10 },
-                job_slots: if workplace { 10 } else { 0 },
+                resident_capacity: if workplace { 0 } else { RESIDENTS_PER_HOUSE },
+                job_slots: if workplace { JOBS_PER_WORKPLACE } else { 0 },
                 solid_voxels: SOLID_VOXELS,
                 structure: None,
             };
@@ -168,8 +288,28 @@ impl City {
             })
             .collect();
         let mut runtime = CityRuntime::new(SEED);
-        runtime.set_move_in_per_second(100.0);
-        runtime.tick_with_workplaces(60.0, &homes, &workplaces);
+        runtime.set_move_in_per_second(MOVE_IN_BASE_RATE);
+        // The move-in cap is 100 residents per simulated second, so a large
+        // fixture needs more than one 60 s step to fill every home. Small
+        // fixtures stop after the first step, as before.
+        for _ in 0..MAX_MOVE_IN_TICKS {
+            runtime.tick_with_workplaces(MOVE_IN_TICK_SECONDS, &homes, &workplaces);
+            let vacant: u32 = runtime
+                .households
+                .values()
+                .map(|household| household.capacity - household.residents)
+                .sum();
+            if vacant == 0 {
+                break;
+            }
+        }
+        let capacity: u32 = homes.iter().map(|home| home.capacity).sum();
+        if runtime.population() != u64::from(capacity) {
+            return Err(format!(
+                "move-in did not fill the city: {} of {capacity}",
+                runtime.population()
+            ));
+        }
 
         let mut economy = Economy::new(SEED);
         economy
@@ -387,6 +527,31 @@ impl City {
         Ok(())
     }
 
+    fn checksum_map(&self) -> serde_json::Value {
+        const NAMES: [&str; 12] = [
+            "placements",
+            "construction",
+            "population",
+            "economy",
+            "industry",
+            "utilities",
+            "services",
+            "research",
+            "named",
+            "settlements",
+            "roads",
+            "lots",
+        ];
+        let mut map = serde_json::Map::new();
+        for (name, value) in NAMES.iter().zip(self.checksums()) {
+            map.insert(
+                (*name).to_string(),
+                serde_json::Value::String(format!("{value:016x}")),
+            );
+        }
+        serde_json::Value::Object(map)
+    }
+
     fn checksums(&self) -> [u64; 12] {
         [
             self.placements.checksum(),
@@ -561,7 +726,7 @@ mod tests {
 
     #[test]
     fn a_small_city_round_trips() {
-        let summary = run(2).expect("stress");
+        let summary = run(2, 120, false).expect("stress");
         assert_eq!(summary["status"], "ok");
         assert_eq!(summary["placements"], 120);
         assert!(summary["population"].as_u64().expect("population") > 0);
