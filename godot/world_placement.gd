@@ -38,7 +38,8 @@ const CONSTRUCTION_STEP_SECONDS := 0.25
 # explicitly; the clamp is the only dropped-time path.
 const CONSTRUCTION_MAX_STEPS := 8
 # The dashboard's District section queries one circular district around the
-# Mayor camera target; this matches the 512 m aggregate district cell scale in
+# selected building (F6 selection focus) or the Mayor camera target; this
+# matches the 512 m aggregate district cell scale in
 # docs/07 and stays well inside the bridge's 0..=1,000,000 m radius guard.
 const DISTRICT_RADIUS_M := 256.0
 # F7 district heatmap overlay: one read-only query per refresh around the same
@@ -210,6 +211,9 @@ var service_time := 0.0
 var lot_zone := "residential"
 var selection_box: MeshInstance3D
 var selected_id := -1
+# District focus follows the selected building when true (F6); the default is
+# the Mayor camera target. Clearing the selection resets this to camera focus.
+var district_focus_selection := false
 var follow_active := false
 var follow_target := Vector3.ZERO
 var follow_prev_target := Vector3.ZERO
@@ -468,6 +472,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					_toggle_follow()
 				KEY_F4:
 					_toggle_materialization()
+				KEY_F6:
+					_toggle_district_focus()
 				KEY_F7:
 					_toggle_heatmap()
 				KEY_F8:
@@ -2862,6 +2868,7 @@ func _update_dashboard() -> void:
 	var progression: Dictionary = core.progression_state(SEED)
 	var research: Dictionary = core.research_state(SEED)
 	var advice: Dictionary = core.city_advisor(SEED)
+	var district_focus := not _district_focus_placement().is_empty()
 	var district_center: Vector2 = _district_center_xz()
 	var district: Dictionary = core.district_summary(
 		SEED, district_center.x, district_center.y, DISTRICT_RADIUS_M
@@ -2926,7 +2933,7 @@ func _update_dashboard() -> void:
 			"active": i18n.format_int(materialization_counts.x),
 			"detailed": i18n.format_int(materialization_counts.y),
 		}) + "\n"
-	text += _district_section(district)
+	text += _district_section(district, district_focus)
 	var age_line := "—"
 	if bool(progression.get("ok", false)):
 		var next_age := str(progression.get("next_age", ""))
@@ -3035,15 +3042,45 @@ func _update_dashboard() -> void:
 			]
 	dashboard_text.text = text
 
+func _district_focus_placement() -> Dictionary:
+	if not district_focus_selection or selected_id < 0:
+		return {}
+	return _selected_placement()
+
 func _district_center_xz() -> Vector2:
+	var focus := _district_focus_placement()
+	if not focus.is_empty():
+		var center: PackedFloat32Array = focus.get("center", PackedFloat32Array())
+		if center.size() == 3:
+			return Vector2(center[0], center[2])
+		# The selection vanished or its placement is malformed: fall back to
+		# the camera rather than querying a stale centre.
+		district_focus_selection = false
 	if mayor_camera != null:
 		return Vector2(mayor_camera.target.x, mayor_camera.target.z)
 	return Vector2(target_x, target_z)
 
-func _district_section(district: Dictionary) -> String:
+func _toggle_district_focus() -> bool:
+	if _selected_placement().is_empty():
+		district_focus_selection = false
+		_set_modal(i18n.t("base.ui.modal.select_building_full"), false)
+		return false
+	district_focus_selection = not district_focus_selection
+	dashboard_refresh_accum = 0.0
+	if dashboard_visible:
+		_update_dashboard()
+	return district_focus_selection
+
+func _district_section(district: Dictionary, focus_selected := false) -> String:
 	var section := "[b]%s[/b]\n" % i18n.t("base.ui.dashboard.section.district")
+	var action_key := "base.ui.dashboard.body.district_focus_action_camera" if focus_selected else "base.ui.dashboard.body.district_focus_action_selection"
+	if focus_selected:
+		section += i18n.t("base.ui.dashboard.body.district_focus") + "\n"
 	if not bool(district.get("ok", false)):
-		return section + i18n.t("base.ui.dashboard.body.district_unavailable") + "\n"
+		section += i18n.t("base.ui.dashboard.body.district_unavailable") + "\n"
+		if selected_id >= 0:
+			section += i18n.t(action_key) + "\n"
+		return section
 	var population := int(district.get("population", 0))
 	var happiness: String = i18n.NOT_AVAILABLE
 	var needs: String = i18n.NOT_AVAILABLE
@@ -3068,9 +3105,12 @@ func _district_section(district: Dictionary) -> String:
 		"needs": needs,
 		"commute": i18n.format_float(float(district.get("average_commute_m", 0.0)), 0),
 	}) + "\n"
-	section += i18n.t("base.ui.dashboard.body.district_hint", {
-		"radius": i18n.format_float(DISTRICT_RADIUS_M, 0),
-	}) + "\n"
+	section += i18n.t(
+		"base.ui.dashboard.body.district_focus_hint" if focus_selected else "base.ui.dashboard.body.district_hint",
+		{"radius": i18n.format_float(DISTRICT_RADIUS_M, 0)},
+	) + "\n"
+	if selected_id >= 0:
+		section += i18n.t(action_key) + "\n"
 	return section
 
 func _info_for_path(path: String) -> Dictionary:
@@ -3127,6 +3167,7 @@ func _select_placement(id: int) -> bool:
 func _clear_selection() -> void:
 	_stop_follow()
 	selected_id = -1
+	district_focus_selection = false
 	if selection_box != null:
 		selection_box.visible = false
 	_update_hud()
@@ -3850,6 +3891,7 @@ func _run_scene_smoke() -> void:
 	var economy_ok := false
 	var dashboard_ok := false
 	var district_ui_ok := false
+	var district_select_ok := false
 	var heatmap_ui_ok := false
 	var advisor_i18n_ok := false
 	var advisor_detail_i18n_ok := false
@@ -4565,6 +4607,64 @@ func _run_scene_smoke() -> void:
 				district_ui_ok = district_ui_ok and str(core.world_placement_checksum()) == district_world_checksum
 				district_ui_ok = district_ui_ok and str(core.population_checksum()) == district_population_checksum
 				district_ui_ok = district_ui_ok and str(core.construction_checksum()) == district_construction_checksum
+				# District focus: F6 moves the district query to the selected
+				# building and F6 returns it to the camera. Clearing the
+				# selection also returns it to the camera.
+				var focus_placement := _selected_placement()
+				var focus_center: PackedFloat32Array = focus_placement.get("center", PackedFloat32Array())
+				var camera_district_center: Vector2 = _district_center_xz()
+				district_select_ok = not district_focus_selection and focus_center.size() == 3
+				district_select_ok = district_select_ok and not dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.district_focus"))
+				if focus_center.size() == 3:
+					var focus_on := _toggle_district_focus()
+					district_select_ok = district_select_ok and focus_on and district_focus_selection
+					var district_focus_center: Vector2 = _district_center_xz()
+					district_select_ok = district_select_ok and absf(district_focus_center.x - focus_center[0]) < 0.001
+					district_select_ok = district_select_ok and absf(district_focus_center.y - focus_center[2]) < 0.001
+					var focused_district: Dictionary = core.district_summary(
+						SEED, district_focus_center.x, district_focus_center.y, DISTRICT_RADIUS_M
+					)
+					district_select_ok = district_select_ok and bool(focused_district.get("ok", false))
+					var focused_center: PackedFloat32Array = focused_district.get("center", PackedFloat32Array())
+					district_select_ok = district_select_ok and focused_center.size() == 2
+					if focused_center.size() == 2:
+						district_select_ok = district_select_ok and absf(focused_center[0] - focus_center[0]) < 0.001
+						district_select_ok = district_select_ok and absf(focused_center[1] - focus_center[2]) < 0.001
+					district_select_ok = district_select_ok and int(focused_district.get("population", -1)) == 2
+					district_select_ok = district_select_ok and int(focused_district.get("jobs", -1)) == 2
+					_update_dashboard()
+					district_select_ok = district_select_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.district_focus"))
+					district_select_ok = district_select_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.district_focus_hint", {
+						"radius": i18n.format_float(DISTRICT_RADIUS_M, 0),
+					}))
+					district_select_ok = district_select_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.district_focus_action_camera"))
+					i18n.set_locale("de")
+					_update_dashboard()
+					district_select_ok = district_select_ok and dashboard_text.text.contains("Stadtteilfokus: ausgewähltes Gebäude")
+					district_select_ok = district_select_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.district_focus_action_camera"))
+					district_select_ok = district_select_ok and dashboard_text.text.contains("Im Umkreis von 256 m um das ausgewählte Gebäude")
+					i18n.set_locale("en")
+					_update_dashboard()
+					var focus_off := not _toggle_district_focus()
+					district_select_ok = district_select_ok and focus_off and not district_focus_selection
+					var camera_again: Vector2 = _district_center_xz()
+					district_select_ok = district_select_ok and camera_again.distance_to(camera_district_center) < 0.001
+					_update_dashboard()
+					district_select_ok = district_select_ok and not dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.district_focus"))
+					district_select_ok = district_select_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.district_hint", {
+						"radius": i18n.format_float(DISTRICT_RADIUS_M, 0),
+					}))
+					district_select_ok = district_select_ok and _toggle_district_focus()
+					_clear_selection()
+					district_select_ok = district_select_ok and not district_focus_selection
+					var cleared_center: Vector2 = _district_center_xz()
+					district_select_ok = district_select_ok and cleared_center.distance_to(camera_district_center) < 0.001
+					district_select_ok = district_select_ok and _select_placement(1)
+					_update_dashboard()
+					district_select_ok = district_select_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.district_focus_action_selection"))
+					district_select_ok = district_select_ok and str(core.world_placement_checksum()) == district_world_checksum
+					district_select_ok = district_select_ok and str(core.population_checksum()) == district_population_checksum
+					district_select_ok = district_select_ok and str(core.construction_checksum()) == district_construction_checksum
 				_toggle_dashboard()
 				dashboard_ok = dashboard_ok and not dashboard_panel.visible
 				var heatmap_checksum := ""
@@ -4988,10 +5088,13 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and not movement_lod_ok:
 		status = "movement_lod_failed"
 
+	if status == "ok" and not district_select_ok:
+		status = "district_select_failed"
+
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s heatmap_ui=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s district_select=%s heatmap_ui=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -5032,6 +5135,7 @@ func _run_scene_smoke() -> void:
 		"ok" if economy_ok else "failed",
 		"ok" if dashboard_ok else "failed",
 		"ok" if district_ui_ok else "failed",
+		"ok" if district_select_ok else "failed",
 		"ok" if heatmap_ui_ok else "failed",
 		"ok" if hud_i18n_ok else "failed",
 		"ok" if hud_body_i18n_ok else "failed",
