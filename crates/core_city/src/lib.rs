@@ -38,6 +38,7 @@ pub mod economy;
 pub mod industry;
 pub mod library;
 pub mod lot;
+pub mod manifest;
 pub mod metrics;
 pub mod movement;
 pub mod named;
@@ -97,6 +98,9 @@ pub use library::{
 pub use lot::{
     Lot, LotError, LotRequest, LotStore, Zone, LOT_FORMAT_VERSION, LOT_ROAD_GAP_M, MAX_LOTS,
     MAX_LOT_AREA_M2, MAX_LOT_SIDE_M, MAX_LOT_SLOPE_M, MIN_LOT_AREA_M2, MIN_LOT_SIDE_M,
+};
+pub use manifest::{
+    merged_content, validate_set, ManifestError, ModContentPaths, ModManifest, MOD_FORMAT_VERSION,
 };
 pub use metrics::{summarize, CitySummary};
 pub use movement::{

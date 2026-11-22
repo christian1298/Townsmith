@@ -91,7 +91,7 @@ The first data contracts are in `content/`:
 Current output: `CONTENT_SCHEMA files=3 entries=23 errors=0 status=ok`.
 
 > [!warning] Contract, not runtime
-> The runtime registry now loads and validates the bundled base content. The mod manifest loader, content packaging, save references, hot reload, and balance tuning are still open. D-006 remains **Proposed**; these files do not make it accepted. Values in `content/base/` are placeholders, not campaign balance.
+> The runtime registry loads and validates the bundled base content. A v0 mod manifest (`core_city::manifest`) parses `content/mods/*.mod.json`, validates namespaced IDs, semver-like versions, safe relative content paths, dependency sets/cycles, and duplicate content IDs across registries; `validate_set`/`merged_content` are in-memory only (checksum `7d907860f7e7d20d` for the example). Content packaging, filesystem loading, save references, hot reload, and balance tuning are still open. D-006 remains **Proposed**; these files do not make it accepted. Values in `content/base/` are placeholders, not campaign balance.
 
 ## 4. Mod package format
 
