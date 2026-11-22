@@ -11,6 +11,7 @@ extends RefCounted
 ## Key layout:
 ## - `base.content.starter.<slug>` where `<slug>` is the starter ID without
 ##   the `base:` namespace (`base:stone_house` -> `...starter.stone_house`);
+## - `base.content.utility.<kind>` for `water`, `power`;
 ## - `base.content.industry.<kind>` for `lumberjack`, `farm`, `hunt`;
 ## - `base.content.service.<kind>` for `school`, `clinic`, `fire`, `police`;
 ## - `base.content.tutorial.<step>` for the five tutorial step IDs.
@@ -50,6 +51,7 @@ const _STARTER_IDS := [
 	"base:data_center",
 ]
 
+const _UTILITY_KINDS := ["water", "power"]
 const _INDUSTRY_KINDS := ["lumberjack", "farm", "hunt"]
 const _SERVICE_KINDS := ["school", "clinic", "fire", "police"]
 const _TUTORIAL_STEPS := ["lumber_camp", "farm", "well", "house", "school"]
@@ -77,6 +79,10 @@ const DISPLAY := {
 		"base.content.starter.tower": "Tower",
 		"base.content.starter.university": "University",
 		"base.content.starter.data_center": "Data Center",
+
+		# Utility kinds (`crates/core_city/src/utilities.rs`).
+		"base.content.utility.water": "Water",
+		"base.content.utility.power": "Power",
 
 		# Primary industry kinds (`crates/core_city/src/industry.rs`).
 		"base.content.industry.lumberjack": "Lumberjack",
@@ -118,6 +124,10 @@ const DISPLAY := {
 		"base.content.starter.tower": "Turm",
 		"base.content.starter.university": "Universität",
 		"base.content.starter.data_center": "Rechenzentrum",
+
+		# Versorgungsarten (`crates/core_city/src/utilities.rs`).
+		"base.content.utility.water": "Wasser",
+		"base.content.utility.power": "Strom",
 
 		# Primäre Industriezweige (`crates/core_city/src/industry.rs`).
 		"base.content.industry.lumberjack": "Holzfäller",
