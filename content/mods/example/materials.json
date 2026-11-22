@@ -1,0 +1,57 @@
+{
+  "format_version": 1,
+  "materials": [
+    {
+      "id": "example:copper_sheet",
+      "name_key": "content.material.copper_sheet",
+      "category": "metal",
+      "density_kg_m3": 8960,
+      "color": [
+        0.72,
+        0.42,
+        0.24
+      ],
+      "cost_per_litre": 0.3,
+      "tags": [
+        "finish",
+        "conductive"
+      ],
+      "draft": true
+    },
+    {
+      "id": "example:copper_roof_tile",
+      "name_key": "content.material.copper_roof_tile",
+      "category": "metal",
+      "density_kg_m3": 8960,
+      "color": [
+        0.45,
+        0.65,
+        0.55
+      ],
+      "cost_per_litre": 0.34,
+      "tags": [
+        "roof",
+        "finish",
+        "conductive"
+      ],
+      "draft": true
+    },
+    {
+      "id": "example:tin_sheet",
+      "name_key": "content.material.tin_sheet",
+      "category": "metal",
+      "density_kg_m3": 7300,
+      "color": [
+        0.78,
+        0.78,
+        0.76
+      ],
+      "cost_per_litre": 0.24,
+      "tags": [
+        "finish",
+        "roof"
+      ],
+      "draft": true
+    }
+  ]
+}

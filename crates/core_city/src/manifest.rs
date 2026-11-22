@@ -125,6 +125,19 @@ impl ModManifest {
     /// Manifest format version understood by this build.
     pub const FORMAT_VERSION: u32 = MOD_FORMAT_VERSION;
 
+    /// Content namespace this manifest owns.
+    ///
+    /// A manifest ID is either a bare namespace (`mymod`) or a namespace plus
+    /// pack name (`mymod:pack`). In both forms the part before the first `:`
+    /// is the content namespace, so `mymod:pack` may define `mymod:*` IDs but
+    /// never `base:*` or `other:*` IDs.
+    #[must_use]
+    pub fn namespace(&self) -> &str {
+        self.id
+            .split_once(':')
+            .map_or(self.id.as_str(), |(namespace, _)| namespace)
+    }
+
     /// Parse and validate one manifest document.
     ///
     /// # Errors
@@ -660,6 +673,16 @@ mod tests {
         let manifest = manifest_with("mymod", &[]);
         assert_eq!(manifest.id, "mymod");
         assert!(manifest.validate().is_ok());
+    }
+
+    #[test]
+    fn namespace_is_derived_from_the_manifest_id() {
+        assert_eq!(manifest_with("mymod", &[]).namespace(), "mymod");
+        assert_eq!(manifest_with("mymod:pack", &[]).namespace(), "mymod");
+        assert_eq!(
+            manifest_with("example:copper_age", &[]).namespace(),
+            "example"
+        );
     }
 
     #[test]

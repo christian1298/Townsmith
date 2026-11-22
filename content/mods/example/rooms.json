@@ -1,0 +1,25 @@
+{
+  "format_version": 1,
+  "rooms": [
+    {
+      "id": "example:smelter_hall",
+      "name_key": "content.room.smelter_hall",
+      "category": "work",
+      "min_area_m2": 30.0,
+      "required_tags": [
+        "smelter"
+      ],
+      "draft": true
+    },
+    {
+      "id": "example:copper_store",
+      "name_key": "content.room.copper_store",
+      "category": "storage",
+      "min_area_m2": 8.0,
+      "required_tags": [
+        "shelf"
+      ],
+      "draft": true
+    }
+  ]
+}

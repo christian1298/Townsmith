@@ -237,6 +237,14 @@ impl ContentRegistry {
         CONTENT_FORMAT_VERSION
     }
 
+    /// Whether any collection defines `id`.
+    #[must_use]
+    pub fn contains(&self, id: &str) -> bool {
+        self.materials.contains_key(id)
+            || self.rooms.contains_key(id)
+            || self.props.contains_key(id)
+    }
+
     /// Material with `id`, if present.
     #[must_use]
     pub fn material(&self, id: &str) -> Option<&MaterialDef> {
@@ -362,6 +370,55 @@ impl ContentRegistry {
             }
         }
         Ok(())
+    }
+
+    /// Merge two validated registries into a new one, rejecting shared IDs.
+    ///
+    /// Definitions from `base` are copied first; `overlay` may only add IDs.
+    /// There are no overrides: a shared ID in any collection returns
+    /// [`RegistryError::DuplicateId`]. The merged registry is validated before
+    /// it is returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::DuplicateId`] when `base` and `overlay` share an
+    /// ID, or another [`RegistryError`] if the merged result fails validation,
+    /// for example because an overlay prop references a room that is in neither
+    /// registry.
+    pub fn merge(base: &Self, overlay: &Self) -> Result<Self, RegistryError> {
+        let mut merged = base.clone();
+        for definition in overlay.materials.values() {
+            if merged.contains(&definition.id) {
+                return Err(RegistryError::DuplicateId {
+                    id: definition.id.clone(),
+                });
+            }
+            merged
+                .materials
+                .insert(definition.id.clone(), definition.clone());
+        }
+        for definition in overlay.rooms.values() {
+            if merged.contains(&definition.id) {
+                return Err(RegistryError::DuplicateId {
+                    id: definition.id.clone(),
+                });
+            }
+            merged
+                .rooms
+                .insert(definition.id.clone(), definition.clone());
+        }
+        for definition in overlay.props.values() {
+            if merged.contains(&definition.id) {
+                return Err(RegistryError::DuplicateId {
+                    id: definition.id.clone(),
+                });
+            }
+            merged
+                .props
+                .insert(definition.id.clone(), definition.clone());
+        }
+        merged.validate()?;
+        Ok(merged)
     }
 
     /// Stable 64-bit checksum of the registry contents.
@@ -930,6 +987,51 @@ mod tests {
         assert!(registry.material("base:missing").is_none());
         assert!(registry.room("base:missing").is_none());
         assert!(registry.prop("base:missing").is_none());
+    }
+
+    #[test]
+    fn contains_checks_all_collections() {
+        let registry = ContentRegistry::base().expect("base content loads");
+        assert!(registry.contains("base:oak_plank"));
+        assert!(registry.contains("base:bedroom"));
+        assert!(registry.contains("base:bed"));
+        assert!(!registry.contains("base:missing"));
+        assert!(!registry.contains("other:oak_plank"));
+    }
+
+    #[test]
+    fn merge_adds_disjoint_registries_and_rejects_collisions() {
+        let base = ContentRegistry::base().expect("base content loads");
+        let overlay = test_registry("test");
+        let merged = ContentRegistry::merge(&base, &overlay).expect("disjoint merge");
+        assert_eq!(merged.len(), base.len() + overlay.len());
+        assert_eq!(merged.material_count(), base.material_count() + 1);
+        assert_eq!(merged.room_count(), base.room_count() + 1);
+        assert_eq!(merged.prop_count(), base.prop_count() + 1);
+        assert!(merged.contains("base:oak_plank"));
+        assert!(merged.contains("test:material"));
+        assert!(merged.validate().is_ok());
+        assert_eq!(base.len(), 23, "merge must not mutate its inputs");
+        assert_eq!(overlay.len(), 3, "merge must not mutate its inputs");
+
+        let error = ContentRegistry::merge(&base, &base).expect_err("shared ids");
+        assert!(matches!(
+            error,
+            RegistryError::DuplicateId { id } if id == "base:brick"
+        ));
+    }
+
+    fn test_registry(namespace: &str) -> ContentRegistry {
+        let materials = format!(
+            r#"{{"format_version":1,"materials":[{{"id":"{namespace}:material","name_key":"content.material.test","category":"wood","density_kg_m3":700,"color":[0.5,0.4,0.2],"cost_per_litre":0.1,"tags":["test"]}}]}}"#
+        );
+        let rooms = format!(
+            r#"{{"format_version":1,"rooms":[{{"id":"{namespace}:room","name_key":"content.room.test","category":"living","min_area_m2":9,"required_tags":["bed"]}}]}}"#
+        );
+        let props = format!(
+            r#"{{"format_version":1,"props":[{{"id":"{namespace}:prop","name_key":"content.prop.test","footprint_m":[1.6,2.0],"height_m":0.6,"cost":10,"allowed_rooms":["{namespace}:room"],"tags":["sleep"]}}]}}"#
+        );
+        ContentRegistry::from_json_strs(&materials, &rooms, &props).expect("test registry loads")
     }
 
     #[test]
