@@ -209,7 +209,7 @@ The staged cut is in [[49 - Phase 3 Slice Plan]]: city ledger, households/needs,
 ### Phase 5 — Metropolis scale (6–8 weeks)
 
 > [!info] Gate plan
-> The measurable gate — reference hardware, required scenes, thresholds, 3-run protocol, pass/fail rules, and fallbacks — is in [[68 - Metropolis Gate]]. **The 1M / RTX 3060 gate is not yet passed.** The 21-house 6,195 FPS result is an RTX 4080 data point for the slice, not the gate.
+> The measurable gate — reference hardware, required scenes, thresholds, 3-run protocol, pass/fail rules, and fallbacks — is in [[68 - Metropolis Gate]]. **The 1M / RTX 3060 gate is not yet passed.** The 21-house 6,195 FPS result is an RTX 4080 data point for the slice, not the gate. Recorded results can be evaluated with `./scripts/check_metropolis_gate.py --result PATH` (PASS/FAIL/insufficient, plus `--require-hardware`); the evaluator cannot stand in for missing reference-hardware runs. The standalone Q-101 capture form in [[66 - Playtest Kit]] §9 records the human playtest that remains open.
 
 **Goals**
 - Prove 1M+ population on 8-core/16-thread + RTX 3060-class hardware.

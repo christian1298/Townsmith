@@ -47,6 +47,9 @@ tags:
 |---|---|
 | F-003 | The v0 world assumes one `hello` per process; a multi-connection vote loopback needs a multi-session model, not a test-only patch. The pure vote state machine has 18 tests. |
 
+> [!info] Post-audit tooling
+> The Q-101 observer form (`godot/playtest_capture.tscn`, PR #259) and the 1M gate-result evaluator (`scripts/check_metropolis_gate.py`, PR #258) landed after this audit. They are workflow tools, not additional audit fixes; F-003 remains the only deferred finding.
+
 ## How to use this document
 
 - Fix in priority order: **P0 (F-001)** first, then the P1 clusters — each cluster is sized for one focused PR.
