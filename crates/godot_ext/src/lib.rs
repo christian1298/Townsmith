@@ -551,6 +551,7 @@ struct TownsmithCore {
     research: Mutex<Option<ResearchStore>>,
     route_preview: Mutex<Option<RoutePreviewState>>,
     graph_cache: Mutex<Option<RoadGraphCache>>,
+    movement_cache: Mutex<Option<MovementCache>>,
     terrain_deltas: Arc<RwLock<DeltaStore>>,
     terrain_seed: Mutex<Option<u64>>,
 }
@@ -575,6 +576,7 @@ impl Default for TownsmithCore {
             research: Mutex::new(None),
             route_preview: Mutex::new(None),
             graph_cache: Mutex::new(None),
+            movement_cache: Mutex::new(None),
             terrain_deltas: Arc::new(RwLock::new(DeltaStore::new())),
             terrain_seed: Mutex::new(None),
         }
@@ -3051,12 +3053,13 @@ impl TownsmithCore {
             Err((code, message)) => return placement_simple_error(code, message),
         };
 
-        let (placement_centers, workplaces, world_seed) = {
+        let (placement_centers, workplaces, world_seed, world_checksum, construction_checksum) = {
             let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
             let construction = self
                 .construction
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
+            let construction_checksum = construction.checksum();
             match world.as_ref() {
                 Some(store) => (
                     completed_homes(store, &construction)
@@ -3065,8 +3068,10 @@ impl TownsmithCore {
                         .collect(),
                     completed_workplaces(store, &construction),
                     Some(store.seed),
+                    store.checksum(),
+                    construction_checksum,
                 ),
-                None => (BTreeMap::new(), Vec::new(), None),
+                None => (BTreeMap::new(), Vec::new(), None, 0, construction_checksum),
             }
         };
         let population = self
@@ -3092,11 +3097,35 @@ impl TownsmithCore {
                 Err((code, message)) => return placement_simple_error(code, message),
             }
         };
+        let key = MovementCacheKey {
+            seed: request.seed,
+            world_checksum,
+            construction_checksum,
+            population_checksum: population.as_ref().map_or(0, CityRuntime::checksum),
+            named_checksum: named.as_ref().map_or(0, NamedCitizens::checksum),
+            roads_checksum: roads.as_ref().map_or(0, RoadStore::checksum),
+            center: [request.center[0].to_bits(), request.center[1].to_bits()],
+            active_radius: request.active_radius_m.to_bits(),
+            detailed_radius: request.detailed_radius_m.to_bits(),
+        };
+        let mut movement_cache = self
+            .movement_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(cache) = movement_cache.as_ref().filter(|cache| cache.key == key) {
+            let payload = movement_payload_from_motion(
+                request.seed,
+                request.center,
+                request.time_s,
+                &cache.motion,
+            );
+            return movement_payload_to_dictionary(&payload);
+        }
         let empty = BTreeMap::new();
         let households = population
             .as_ref()
             .map_or(&empty, |runtime| &runtime.households);
-        let payload = match movement_payload(
+        let motion = match movement_motion(
             request.seed,
             named.as_ref(),
             households,
@@ -3106,14 +3135,57 @@ impl TownsmithCore {
             request.center,
             request.active_radius_m,
             request.detailed_radius_m,
-            request.time_s,
         ) {
-            Ok(payload) => payload,
+            Ok(motion) => motion,
             Err(error) => {
                 return placement_simple_error("materialization_failed", error.to_string())
             }
         };
+        let payload =
+            movement_payload_from_motion(request.seed, request.center, request.time_s, &motion);
+        *movement_cache = Some(MovementCache { key, motion });
         movement_payload_to_dictionary(&payload)
+    }
+
+    /// Movement cache counters and key.
+    #[func]
+    fn movement_cache_state(&self) -> VarDictionary {
+        let guard = self
+            .movement_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        match guard.as_ref() {
+            Some(cache) => {
+                result.set("open", true);
+                result.set("seed", cache.key.seed as i64);
+                result.set("routes", cache.motion.route_count() as i64);
+                result.set("citizens", cache.motion.citizen_count() as i64);
+                result.set(
+                    "checksum",
+                    &GString::from(&format!("{:016x}", cache.motion.checksum())),
+                );
+            }
+            None => {
+                result.set("open", false);
+                result.set("seed", 0);
+                result.set("routes", 0);
+                result.set("citizens", 0);
+                result.set("checksum", &GString::from("0000000000000000"));
+            }
+        }
+        result
+    }
+
+    /// Drop the cached movement tracks and their counters.
+    #[func]
+    fn movement_cache_clear(&self) -> bool {
+        *self
+            .movement_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        true
     }
 
     /// Remove every household.
@@ -7821,6 +7893,24 @@ fn movement_seed_error(
 ///
 /// A missing store is `no_roads`; a store for another seed is
 /// `seed_mismatch`; an invalid segment list is `traffic_failed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MovementCacheKey {
+    seed: u64,
+    world_checksum: u64,
+    construction_checksum: u64,
+    population_checksum: u64,
+    named_checksum: u64,
+    roads_checksum: u64,
+    center: [u32; 2],
+    active_radius: u32,
+    detailed_radius: u32,
+}
+
+struct MovementCache {
+    key: MovementCacheKey,
+    motion: CitizenMotion,
+}
+
 /// Selected movement positions for one materialization selection.
 #[derive(Debug, Clone, PartialEq)]
 struct MovementPayload {
@@ -7840,6 +7930,39 @@ struct MovementPayload {
 /// Citizens in households with no reachable workplace are omitted. Named-pool
 /// or argument errors are returned unchanged from the selection layer.
 #[allow(clippy::too_many_arguments)]
+fn movement_motion(
+    seed: u64,
+    named: Option<&NamedCitizens>,
+    households: &BTreeMap<u64, Household>,
+    placement_centers: &BTreeMap<u64, [f32; 2]>,
+    workplaces: &[Workplace],
+    graph: &RoadGraph,
+    center: [f32; 2],
+    active_radius_m: f32,
+    detailed_radius_m: f32,
+) -> Result<CitizenMotion, core_city::NamedError> {
+    let selection = materialization_payload(
+        seed,
+        named,
+        households,
+        placement_centers,
+        center,
+        active_radius_m,
+        detailed_radius_m,
+    )?;
+    Ok(CitizenMotion::new(
+        &MaterializationSelection {
+            active: selection.active,
+            detailed: selection.detailed,
+        },
+        workplaces,
+        graph,
+        DEFAULT_ROUTE_CACHE_CAPACITY,
+    ))
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn movement_payload(
     seed: u64,
     named: Option<&NamedCitizens>,
@@ -7852,25 +7975,33 @@ fn movement_payload(
     detailed_radius_m: f32,
     time_s: f64,
 ) -> Result<MovementPayload, core_city::NamedError> {
-    let selection = materialization_payload(
+    let motion = movement_motion(
         seed,
         named,
         households,
         placement_centers,
+        workplaces,
+        graph,
         center,
         active_radius_m,
         detailed_radius_m,
     )?;
-    let motion = CitizenMotion::new(
-        &MaterializationSelection {
-            active: selection.active,
-            detailed: selection.detailed,
-        },
-        workplaces,
-        graph,
-        DEFAULT_ROUTE_CACHE_CAPACITY,
-    );
-    Ok(MovementPayload {
+    Ok(movement_payload_from_motion(seed, center, time_s, &motion))
+}
+const fn motion_leg_name(leg: MotionLeg) -> &'static str {
+    match leg {
+        MotionLeg::Outbound => "outbound",
+        MotionLeg::Return => "return",
+    }
+}
+
+fn movement_payload_from_motion(
+    seed: u64,
+    center: [f32; 2],
+    time_s: f64,
+    motion: &CitizenMotion,
+) -> MovementPayload {
+    MovementPayload {
         seed,
         center,
         time_s,
@@ -7878,13 +8009,6 @@ fn movement_payload(
         citizens: motion.citizen_count(),
         positions: motion.positions_at(time_s),
         checksum: motion.checksum(),
-    })
-}
-
-const fn motion_leg_name(leg: MotionLeg) -> &'static str {
-    match leg {
-        MotionLeg::Outbound => "outbound",
-        MotionLeg::Return => "return",
     }
 }
 
@@ -9736,6 +9860,34 @@ mod tests {
         let empty_second =
             cached_road_graph(&mut empty_cache, 2026, Some(&empty)).expect("empty reuse");
         assert!(Arc::ptr_eq(&empty_first, &empty_second));
+    }
+
+    #[test]
+    fn movement_cache_key_tracks_every_input() {
+        let base = MovementCacheKey {
+            seed: 2026,
+            world_checksum: 1,
+            construction_checksum: 2,
+            population_checksum: 3,
+            named_checksum: 4,
+            roads_checksum: 5,
+            center: [10.0_f32.to_bits(), 20.0_f32.to_bits()],
+            active_radius: 50.0_f32.to_bits(),
+            detailed_radius: 20.0_f32.to_bits(),
+        };
+        assert_eq!(base, base);
+        let mut changed = base;
+        changed.seed += 1;
+        assert_ne!(base, changed);
+        let mut changed = base;
+        changed.roads_checksum += 1;
+        assert_ne!(base, changed);
+        let mut changed = base;
+        changed.center[0] = 11.0_f32.to_bits();
+        assert_ne!(base, changed);
+        let mut changed = base;
+        changed.active_radius = 51.0_f32.to_bits();
+        assert_ne!(base, changed);
     }
 
     #[test]
