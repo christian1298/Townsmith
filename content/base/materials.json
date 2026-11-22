@@ -1,0 +1,146 @@
+{
+  "format_version": 1,
+  "materials": [
+    {
+      "id": "base:oak_plank",
+      "name_key": "content.material.oak_plank",
+      "category": "wood",
+      "density_kg_m3": 700,
+      "color": [
+        0.55,
+        0.38,
+        0.22
+      ],
+      "cost_per_litre": 0.08,
+      "tags": [
+        "structural",
+        "timber",
+        "finish"
+      ],
+      "draft": true
+    },
+    {
+      "id": "base:brick",
+      "name_key": "content.material.brick",
+      "category": "masonry",
+      "density_kg_m3": 1800,
+      "color": [
+        0.62,
+        0.28,
+        0.2
+      ],
+      "cost_per_litre": 0.14,
+      "tags": [
+        "structural",
+        "masonry",
+        "fire_resistant"
+      ],
+      "draft": true
+    },
+    {
+      "id": "base:stone",
+      "name_key": "content.material.stone",
+      "category": "masonry",
+      "density_kg_m3": 2400,
+      "color": [
+        0.48,
+        0.48,
+        0.46
+      ],
+      "cost_per_litre": 0.18,
+      "tags": [
+        "structural",
+        "masonry",
+        "heavy"
+      ],
+      "draft": true
+    },
+    {
+      "id": "base:concrete",
+      "name_key": "content.material.concrete",
+      "category": "concrete",
+      "density_kg_m3": 2400,
+      "color": [
+        0.62,
+        0.63,
+        0.64
+      ],
+      "cost_per_litre": 0.12,
+      "tags": [
+        "structural",
+        "fire_resistant"
+      ],
+      "draft": true
+    },
+    {
+      "id": "base:steel",
+      "name_key": "content.material.steel",
+      "category": "metal",
+      "density_kg_m3": 7850,
+      "color": [
+        0.55,
+        0.58,
+        0.62
+      ],
+      "cost_per_litre": 0.3,
+      "tags": [
+        "structural",
+        "frame",
+        "recyclable"
+      ],
+      "draft": true
+    },
+    {
+      "id": "base:glass",
+      "name_key": "content.material.glass",
+      "category": "glass",
+      "density_kg_m3": 2500,
+      "color": [
+        0.72,
+        0.84,
+        0.88
+      ],
+      "cost_per_litre": 0.22,
+      "tags": [
+        "finish",
+        "transparent"
+      ],
+      "draft": true
+    },
+    {
+      "id": "base:copper",
+      "name_key": "content.material.copper",
+      "category": "metal",
+      "density_kg_m3": 8960,
+      "color": [
+        0.72,
+        0.42,
+        0.24
+      ],
+      "cost_per_litre": 0.28,
+      "tags": [
+        "finish",
+        "conductive"
+      ],
+      "draft": true
+    },
+    {
+      "id": "base:thatch",
+      "name_key": "content.material.thatch",
+      "category": "earth",
+      "density_kg_m3": 240,
+      "color": [
+        0.68,
+        0.55,
+        0.3
+      ],
+      "cost_per_litre": 0.03,
+      "tags": [
+        "roof",
+        "insulation",
+        "flammable"
+      ],
+      "draft": true
+    }
+  ]
+}
