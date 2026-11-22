@@ -317,6 +317,7 @@ GODOT=/path/to/godot ./scripts/smoke_movement_stress.sh
 GODOT=/path/to/godot "${GODOT:-godot}" --headless --path godot res://movement_stress.tscn -- --agents 2000
 
 # Server save/load smoke (atomic .tmp/.bak, deterministic checksum)
+cargo run --release -p townsmith-server -- --resume-smoke
 cargo run --release -p townsmith-server -- --save-load-smoke
 cargo run --release -p townsmith-server -- --listen 0 --save /tmp/opencode/townsmith-world.json --once
 
