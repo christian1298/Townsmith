@@ -54,6 +54,13 @@ pub const MAX_INTEREST_RADIUS_M: f64 = 2_048.0;
 /// Default interest radius for a fresh session, in metres (the v0 cap).
 pub const DEFAULT_INTEREST_RADIUS_M: f64 = MAX_INTEREST_RADIUS_M;
 
+/// Maximum road details carried by one [`ServerMessage::InterestView`].
+///
+/// The list is bounded so a viewport covering a large city can never grow the
+/// response past [`MAX_FRAME_LEN`]. Roads are ordered by ascending id and
+/// `truncated` marks that more roads matched than fit in the list.
+pub const MAX_INTEREST_ROADS: usize = 64;
+
 /// Fixed seed for the deterministic loopback smoke.
 pub const LOOPBACK_SEED: u64 = 0x544F_574E_534D_4954; // "TOWNSMIT"
 
@@ -239,7 +246,10 @@ pub enum ClientCommand {
     ///
     /// This never changes the authoritative simulation: it only narrows what
     /// the next snapshot reports. `radius_m` must be finite and within
-    /// `0..=MAX_INTEREST_RADIUS_M`; the centre must be finite.
+    /// `0..=MAX_INTEREST_RADIUS_M`; the centre must be finite. A successful
+    /// command is answered with [`ServerMessage::Snapshot`] followed by
+    /// [`ServerMessage::InterestView`] so the client gets the filtered road
+    /// details immediately, without a second round trip.
     SetInterest {
         center_x: f64,
         center_z: f64,
@@ -295,6 +305,23 @@ pub enum VoteAction {
     Cancel,
 }
 
+/// One road detail in [`ServerMessage::InterestView`].
+///
+/// This is a read-only copy of the authoritative segment, limited to the
+/// geometry a client needs to draw the road. It carries no cost, ownership, or
+/// simulation state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoadView {
+    /// Stable road id within the world.
+    pub id: u64,
+    /// Start centreline cell `[x, z]`.
+    pub start: [i32; 2],
+    /// End centreline cell `[x, z]`.
+    pub end: [i32; 2],
+    /// Road width in metres.
+    pub width_m: u8,
+}
+
 /// Messages the authoritative server sends.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -333,8 +360,30 @@ pub enum ServerMessage {
         /// Roads whose midpoint is inside the interest circle.
         ///
         /// Aggregate count only; the authoritative road store is unchanged.
+        /// [`ServerMessage::InterestView`] carries the bounded per-road detail
+        /// for the same viewport, so this count can exceed `roads.len()`.
         #[serde(default)]
         visible_roads: u32,
+    },
+    /// Bounded road details for the session's current interest viewport.
+    ///
+    /// Sent after the matching [`ServerMessage::Snapshot`] whenever
+    /// `set_interest` succeeds. This is the first filtered snapshot payload: it
+    /// is a view-only copy, never a mutation. Roads are filtered by their
+    /// midpoint against the inclusive circle, ordered by ascending id, and
+    /// capped at [`MAX_INTEREST_ROADS`]; `truncated` is true when more roads
+    /// matched than the list carries.
+    InterestView {
+        /// Authoritative tick the view was built from.
+        tick: u64,
+        /// Viewport centre `[x, z]` in metres.
+        center: [f32; 2],
+        /// Viewport radius in metres.
+        radius_m: f32,
+        /// Matching roads, ascending by id, at most [`MAX_INTEREST_ROADS`].
+        roads: Vec<RoadView>,
+        /// True when more roads matched than fit in `roads`.
+        truncated: bool,
     },
     Reject {
         code: String,
@@ -1345,6 +1394,56 @@ mod tests {
                 radius_m: 32.0,
             }),
             codes::INTEREST_UNAVAILABLE,
+        );
+        assert_eq!(session.tick(), tick);
+        assert_eq!(session.checksum(), checksum);
+    }
+
+    #[test]
+    fn interest_view_round_trips_with_bounded_road_details() {
+        let message = ServerMessage::InterestView {
+            tick: 7,
+            center: [4.0, -2.0],
+            radius_m: 64.0,
+            roads: vec![RoadView {
+                id: 1,
+                start: [0, 0],
+                end: [8, 0],
+                width_m: 6,
+            }],
+            truncated: true,
+        };
+
+        let payload = encode_json(&message).expect("interest view encodes");
+        let value: serde_json::Value = serde_json::from_slice(&payload).expect("valid JSON");
+        assert_eq!(value["type"], "interest_view");
+        assert_eq!(value["roads"][0]["id"], 1);
+        assert_eq!(value["roads"][0]["start"][0], 0);
+        assert_eq!(value["roads"][0]["width_m"], 6);
+        assert_eq!(value["truncated"], true);
+
+        let decoded: ServerMessage = decode_json(&payload).expect("interest view decodes");
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn transport_session_rejects_set_interest_and_never_emits_a_view() {
+        let mut session = Session::new(LOOPBACK_SEED);
+        session.handle(hello());
+        let tick = session.tick();
+        let checksum = session.checksum();
+
+        let messages = session.handle(ClientCommand::SetInterest {
+            center_x: 4.0,
+            center_z: 0.0,
+            radius_m: 16.0,
+        });
+        expect_reject(&messages, codes::INTEREST_UNAVAILABLE);
+        assert!(
+            !messages
+                .iter()
+                .any(|message| matches!(message, ServerMessage::InterestView { .. })),
+            "the transport-only session has no road view"
         );
         assert_eq!(session.tick(), tick);
         assert_eq!(session.checksum(), checksum);

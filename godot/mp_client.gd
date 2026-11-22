@@ -4,10 +4,11 @@ extends Control
 ##
 ## Speaks the server's length-prefixed JSON protocol end to end over
 ## `StreamPeerTCP`: hello -> welcome, ping -> pong, set_tax -> snapshot,
-## invalid set_tax -> reject, place_road -> snapshot, disconnect -> goodbye.
+## invalid set_tax -> reject, place_road -> snapshot, set_interest ->
+## snapshot + interest_view, disconnect -> goodbye.
 ##
 ## The client is deliberately a protocol probe, not a game client: it has no
-## render integration, auth, roles, interest management, or delta snapshots.
+## render integration, auth, roles, entity streaming, or delta snapshots.
 ## v0 is loopback-only and the server serves one connection at a time.
 ##
 ## Run:
@@ -27,6 +28,8 @@ enum Phase {
 	TAX_SENT,
 	TAX_REJECT_WAIT,
 	ROAD_SENT,
+	INTEREST_SENT,
+	INTEREST_VIEW_WAIT,
 	DISCONNECT_SENT,
 }
 
@@ -60,6 +63,9 @@ var _ok_ping := false
 var _ok_snapshot := false
 var _ok_reject := false
 var _ok_road := false
+var _ok_interest := false
+var _interest_roads := -1
+var _interest_truncated := true
 var _session_id := ""
 var _last_tick := -1
 var _last_population := -1
@@ -181,6 +187,8 @@ func _handle_message(message: Dictionary) -> void:
 			_on_pong(message)
 		"snapshot":
 			_on_snapshot(message)
+		"interest_view":
+			_on_interest_view(message)
 		"reject":
 			_on_reject(message)
 		"goodbye":
@@ -256,15 +264,90 @@ func _on_snapshot(message: Dictionary) -> void:
 		_last_population = population
 		_last_balance = balance
 		_last_checksum = checksum
-		_set_status("Road accepted; disconnecting.")
+		_set_status("Road accepted; requesting the interest view.")
 		_refresh_ui()
-		if not _send({"type": "disconnect"}):
+		if not _send({"type": "set_interest", "center_x": 0.0, "center_z": 0.0, "radius_m": 16.0}):
 			return
-		_phase = Phase.DISCONNECT_SENT
+		_phase = Phase.INTEREST_SENT
+		_arm_deadline(_timeout_ms)
+		return
+
+	if _phase == Phase.INTEREST_SENT:
+		# set_interest is view-only: the snapshot must not advance the tick or
+		# move the checksum, and it carries the accepted viewport.
+		if tick != _last_tick:
+			_fail("interest_tick_changed")
+			return
+		if checksum != _last_checksum:
+			_fail("interest_checksum_changed")
+			return
+		if int(message.get("visible_roads", -1)) != 1:
+			_fail("interest_visible_roads")
+			return
+		if not _is_pair(message.get("interest_center", null), 0, 0):
+			_fail("interest_center")
+			return
+		if absf(float(message.get("interest_radius_m", -1.0)) - 16.0) > 0.001:
+			_fail("interest_radius")
+			return
+		_phase = Phase.INTEREST_VIEW_WAIT
+		_set_status("Interest snapshot received; awaiting the road view.")
 		_arm_deadline(_timeout_ms)
 		return
 
 	_fail("snapshot_in_%s" % _phase_name())
+
+func _on_interest_view(message: Dictionary) -> void:
+	if _phase != Phase.INTEREST_VIEW_WAIT:
+		_fail("interest_view_in_%s" % _phase_name())
+		return
+	var tick := int(message.get("tick", -1))
+	var radius_m := float(message.get("radius_m", -1.0))
+	var truncated := bool(message.get("truncated", true))
+	var roads: Variant = message.get("roads", null)
+	if tick != _last_tick:
+		_fail("interest_view_tick")
+		return
+	if not _is_pair(message.get("center", null), 0, 0):
+		_fail("interest_view_center")
+		return
+	if absf(radius_m - 16.0) > 0.001:
+		_fail("interest_view_radius")
+		return
+	if typeof(roads) != TYPE_ARRAY:
+		_fail("interest_view_roads")
+		return
+	if roads.size() != 1:
+		_fail("interest_view_road_count_%d" % roads.size())
+		return
+	var road: Variant = roads[0]
+	if typeof(road) != TYPE_DICTIONARY:
+		_fail("interest_view_road")
+		return
+	if int(road.get("id", -1)) != 1:
+		_fail("interest_view_road_id")
+		return
+	if not _is_pair(road.get("start", null), 0, 0):
+		_fail("interest_view_road_start")
+		return
+	if not _is_pair(road.get("end", null), 8, 0):
+		_fail("interest_view_road_end")
+		return
+	if int(road.get("width_m", -1)) != 6:
+		_fail("interest_view_road_width")
+		return
+	if truncated:
+		_fail("interest_view_truncated")
+		return
+	_ok_interest = true
+	_interest_roads = roads.size()
+	_interest_truncated = truncated
+	_set_status("Interest view received; disconnecting.")
+	_refresh_ui()
+	if not _send({"type": "disconnect"}):
+		return
+	_phase = Phase.DISCONNECT_SENT
+	_arm_deadline(_timeout_ms)
 
 func _on_reject(message: Dictionary) -> void:
 	if _phase != Phase.TAX_REJECT_WAIT:
@@ -321,11 +404,14 @@ func _finish_ok() -> void:
 		_peer.disconnect_from_host()
 	print(
 		(
-			"MP_CLIENT status=ok welcome=ok ping=ok snapshot=ok reject=ok road=ok"
+			"MP_CLIENT status=ok welcome=ok ping=ok snapshot=ok reject=ok road=ok interest=ok"
+			+ " roads=%d truncated=%s"
 			+ " tick=%d population=%d balance=%d checksum=%s session=%s"
 			+ " frames_sent=%d frames_received=%d"
 		)
 		% [
+			_interest_roads,
+			str(_interest_truncated),
 			_last_tick,
 			_last_population,
 			_last_balance,
@@ -355,12 +441,13 @@ func _fail(reason: String) -> void:
 		get_tree().quit(1)
 
 func _flags_text() -> String:
-	return "welcome=%s ping=%s snapshot=%s reject=%s road=%s" % [
+	return "welcome=%s ping=%s snapshot=%s reject=%s road=%s interest=%s" % [
 		_ok_text(_ok_welcome),
 		_ok_text(_ok_ping),
 		_ok_text(_ok_snapshot),
 		_ok_text(_ok_reject),
 		_ok_text(_ok_road),
+		_ok_text(_ok_interest),
 	]
 
 func _ok_text(ok: bool) -> String:
@@ -380,6 +467,10 @@ func _phase_name() -> String:
 			return "tax_reject_wait"
 		Phase.ROAD_SENT:
 			return "road_sent"
+		Phase.INTEREST_SENT:
+			return "interest_sent"
+		Phase.INTEREST_VIEW_WAIT:
+			return "interest_view_wait"
 		Phase.DISCONNECT_SENT:
 			return "disconnect_sent"
 		_:
@@ -387,6 +478,13 @@ func _phase_name() -> String:
 
 func _arm_deadline(duration_ms: int) -> void:
 	_deadline_ms = Time.get_ticks_msec() + duration_ms
+
+func _is_pair(value: Variant, x: int, z: int) -> bool:
+	if typeof(value) != TYPE_ARRAY:
+		return false
+	if value.size() != 2:
+		return false
+	return int(value[0]) == x and int(value[1]) == z
 
 func _is_hex16(value: String) -> bool:
 	if value.length() != 16:
@@ -439,7 +537,7 @@ func _build_ui() -> void:
 	root.add_child(title)
 
 	var subtitle := Label.new()
-	subtitle.text = "Loopback TCP, length-prefixed JSON. Protocol probe only; no render integration, auth, roles, interest, or deltas."
+	subtitle.text = "Loopback TCP, length-prefixed JSON. Protocol probe only; no render integration, auth, roles, entity streaming, or deltas."
 	subtitle.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	subtitle.add_theme_color_override("font_color", Color(0.70, 0.75, 0.82))
 	subtitle.add_theme_font_size_override("font_size", 15)

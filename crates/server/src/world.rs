@@ -11,9 +11,10 @@
 //! [`ServerWorld::advance_day`] call, so transcripts are deterministic.
 //!
 //! Interest filtering v0 is a **per-session viewport**: [`ClientCommand::SetInterest`]
-//! stores a centre and radius that only narrow the aggregate numbers in
-//! [`ServerMessage::Snapshot`]. It never mutates the simulation, never advances
-//! the tick, and is excluded from [`ServerWorld::checksum`].
+//! stores a centre and radius that narrow [`ServerMessage::Snapshot`] and add a
+//! bounded [`ServerMessage::InterestView`] road list. It never mutates the
+//! simulation, never advances the tick, and is excluded from
+//! [`ServerWorld::checksum`].
 
 use std::collections::{BTreeSet, VecDeque};
 use std::io;
@@ -21,13 +22,14 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::thread;
 
 use core_city::economy::{Economy, EconomyTick, DAY_SECONDS, STARTING_BALANCE};
-use core_city::road::{RoadError, RoadRequest, RoadStore};
+use core_city::road::{RoadError, RoadRequest, RoadSegment, RoadStore};
 
 use crate::protocol::{
     configure_stream, decode_client_command, frame_to_io, read_frame, read_json_frame,
     session_id_for_seed, validate_hello, validate_interest, validate_road, validate_tax_rates,
-    write_json_frame, ClientCommand, FrameError, Rejection, ServerMessage, SessionConfig,
-    TimeAction, DEFAULT_INTEREST_RADIUS_M, LOOPBACK_SEED, PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
+    write_json_frame, ClientCommand, FrameError, Rejection, RoadView, ServerMessage, SessionConfig,
+    TimeAction, DEFAULT_INTEREST_RADIUS_M, LOOPBACK_SEED, MAX_INTEREST_ROADS, PROTOCOL_VERSION,
+    SESSION_IO_TIMEOUT,
 };
 
 /// Fixed road width for v0 placement commands.
@@ -52,7 +54,10 @@ pub const AUTHORITY_FRAMES: u64 = 12;
 pub const INTEREST_COMMANDS: u64 = 8;
 
 /// Application frames exchanged in both directions by the interest loopback.
-pub const INTEREST_FRAMES: u64 = 16;
+///
+/// Eight commands yield twelve responses: `set_interest` answers with a
+/// `snapshot` plus an `interest_view`.
+pub const INTEREST_FRAMES: u64 = 20;
 
 /// Sessions exercised by the role/rate-limit loopback (viewer, mayor, admin).
 pub const ROLES_SESSIONS: u64 = 3;
@@ -648,20 +653,67 @@ impl ServerWorld {
     /// deterministic and independent of iteration order.
     #[must_use]
     pub fn visible_roads(&self) -> u32 {
-        let radius = f64::from(self.interest_radius_m);
-        let radius_squared = radius * radius;
         let count = self
             .roads
             .roads
             .iter()
-            .filter(|road| {
-                let center = road.center();
-                let dx = f64::from(center[0]) - f64::from(self.interest_center[0]);
-                let dz = f64::from(center[1]) - f64::from(self.interest_center[1]);
-                dx * dx + dz * dz <= radius_squared
-            })
+            .filter(|road| road_in_interest(road, self.interest_center, self.interest_radius_m))
             .count();
         u32::try_from(count).unwrap_or(u32::MAX)
+    }
+
+    /// Bounded road details for the current viewport, ascending by id.
+    ///
+    /// The filter is identical to [`Self::visible_roads`]: a road is included
+    /// when its midpoint satisfies `distance <= radius`. The list is capped at
+    /// [`MAX_INTEREST_ROADS`]; use [`Self::interest_view`] to learn whether
+    /// more roads matched.
+    #[must_use]
+    pub fn interest_roads(&self) -> Vec<RoadView> {
+        let mut roads = self.interest_matches();
+        roads.truncate(MAX_INTEREST_ROADS);
+        roads
+    }
+
+    /// Interest viewport plus the bounded road detail list.
+    ///
+    /// `truncated` is true when more roads matched than the list carries. The
+    /// view is a read-only copy of the authoritative road store: building it
+    /// mutates nothing and never advances the tick.
+    #[must_use]
+    pub fn interest_view(&self) -> ServerMessage {
+        let mut roads = self.interest_matches();
+        let truncated = roads.len() > MAX_INTEREST_ROADS;
+        roads.truncate(MAX_INTEREST_ROADS);
+        ServerMessage::InterestView {
+            tick: self.tick,
+            center: self.interest_center,
+            radius_m: self.interest_radius_m,
+            roads,
+            truncated,
+        }
+    }
+
+    /// Every road whose midpoint is inside the inclusive interest circle,
+    /// ordered by ascending id.
+    ///
+    /// Sorting explicitly keeps the wire order stable even if a loaded save
+    /// stores segments out of id order.
+    fn interest_matches(&self) -> Vec<RoadView> {
+        let mut roads: Vec<RoadView> = self
+            .roads
+            .roads
+            .iter()
+            .filter(|road| road_in_interest(road, self.interest_center, self.interest_radius_m))
+            .map(|road| RoadView {
+                id: road.id,
+                start: road.start,
+                end: road.end,
+                width_m: road.width_m,
+            })
+            .collect();
+        roads.sort_unstable_by_key(|road| road.id);
+        roads
     }
 
     /// Stable FNV-1a checksum over tick, population, balance, road checksum,
@@ -700,8 +752,9 @@ impl ServerWorld {
     ///
     /// This is the single-message convenience wrapper used by tests and the
     /// authority loopback. A successful `resume` produces two messages
-    /// (`welcome`, then `snapshot`); this method returns the `welcome` and
-    /// drops the snapshot. Transport code must use [`Self::apply_all`].
+    /// (`welcome`, then `snapshot`); a successful `set_interest` produces
+    /// `snapshot`, then `interest_view`. This method returns the first message
+    /// and drops the rest. Transport code must use [`Self::apply_all`].
     ///
     /// The batch order is fixed:
     ///
@@ -723,25 +776,21 @@ impl ServerWorld {
 
     /// Validate and apply one command, returning every response it produces.
     ///
-    /// Every command yields one message except a successful `resume`, which
-    /// yields `welcome { resumed: true }` followed by the current `snapshot`
-    /// so the client can reconcile immediately. Rejections never mutate
-    /// simulation state.
+    /// Most commands yield one message. A successful `resume` yields
+    /// `welcome { resumed: true }` followed by the current `snapshot`, and a
+    /// successful `set_interest` yields `snapshot` followed by the filtered
+    /// `interest_view`. Rejections never mutate simulation state.
     pub fn apply_all(&mut self, command: &ClientCommand) -> Vec<ServerMessage> {
         self.commands = self.commands.saturating_add(1);
-        let (message, code) = self.evaluate(command);
+        let (messages, code) = self.evaluate(command);
         self.record_audit(command.tag(), code);
         if self.hello && code == AUDIT_ACCEPTED {
             self.last_seen_tick = self.tick;
         }
-        if matches!(&message, ServerMessage::Welcome { resumed: true, .. }) {
-            vec![message, self.snapshot()]
-        } else {
-            vec![message]
-        }
+        messages
     }
 
-    fn evaluate(&mut self, command: &ClientCommand) -> (ServerMessage, &'static str) {
+    fn evaluate(&mut self, command: &ClientCommand) -> (Vec<ServerMessage>, &'static str) {
         if self.closed {
             return reject_with(
                 crate::protocol::codes::SESSION_CLOSED,
@@ -887,7 +936,7 @@ impl ServerWorld {
         &mut self,
         action: crate::protocol::VoteAction,
         time: Option<TimeAction>,
-    ) -> (ServerMessage, &'static str) {
+    ) -> (Vec<ServerMessage>, &'static str) {
         let Some(player) = self.player.clone() else {
             return reject_with(codes::NOT_HELLO, "send `hello` before voting");
         };
@@ -957,7 +1006,7 @@ impl ServerWorld {
     /// reveals whether a session is resumable. The role is not part of the
     /// claim: it is the role the world already holds, so a resumed session
     /// keeps the role assigned by the server process.
-    fn apply_resume(&mut self, token: &str, last_tick: u64) -> (ServerMessage, &'static str) {
+    fn apply_resume(&mut self, token: &str, last_tick: u64) -> (Vec<ServerMessage>, &'static str) {
         if self.hello {
             return reject_with(
                 codes::RESUME_DUPLICATE,
@@ -1011,10 +1060,10 @@ impl ServerWorld {
         self.hello = true;
         self.closed = false;
         self.last_seen_tick = self.tick;
-        accepted(welcome(self, true))
+        accepted_all(vec![welcome(self, true), self.snapshot()])
     }
 
-    fn apply_time_control(&mut self, action: TimeAction) -> (ServerMessage, &'static str) {
+    fn apply_time_control(&mut self, action: TimeAction) -> (Vec<ServerMessage>, &'static str) {
         match action {
             TimeAction::Pause => self.paused = true,
             TimeAction::Resume => self.paused = false,
@@ -1036,7 +1085,7 @@ impl ServerWorld {
         &mut self,
         start: [i32; 2],
         end: [i32; 2],
-    ) -> (ServerMessage, &'static str) {
+    ) -> (Vec<ServerMessage>, &'static str) {
         if let Err(rejection) = validate_road(start, end) {
             return from_rejection(rejection);
         }
@@ -1077,23 +1126,26 @@ impl ServerWorld {
         }
     }
 
-    /// Update this session's interest viewport and answer with a snapshot.
+    /// Update this session's interest viewport and answer with the bounded view.
     ///
-    /// This is view-only: it does not change the tick, treasury, roads, or
-    /// checksum, and it is never persisted. `set_interest` still consumes a
-    /// rate credit and is audited like every other command.
+    /// The batch is `snapshot` followed by `interest_view`, so a client gets the
+    /// filtered road details immediately instead of waiting for another
+    /// command. This is view-only: it does not change the tick, treasury,
+    /// roads, or checksum, and it is never persisted. `set_interest` still
+    /// consumes a rate credit and is audited like every other command.
     fn apply_set_interest(
         &mut self,
         center_x: f64,
         center_z: f64,
         radius_m: f64,
-    ) -> (ServerMessage, &'static str) {
+    ) -> (Vec<ServerMessage>, &'static str) {
         if let Err(rejection) = validate_interest(center_x, center_z, radius_m) {
             return from_rejection(rejection);
         }
         self.interest_center = [center_x as f32, center_z as f32];
         self.interest_radius_m = radius_m as f32;
-        accepted(self.snapshot())
+        let view = self.interest_view();
+        accepted_all(vec![self.snapshot(), view])
     }
 
     /// Reject an exact duplicate or a collinear overlap of more than one cell.
@@ -1209,6 +1261,19 @@ fn sanitize_dt(dt_s: f64) -> f64 {
     }
 }
 
+/// Whether a road's midpoint is inside the inclusive interest circle.
+///
+/// [`ServerWorld::visible_roads`] and [`ServerWorld::interest_view`] share this
+/// predicate so the aggregate count and the detail list can never disagree.
+fn road_in_interest(road: &RoadSegment, center: [f32; 2], radius_m: f32) -> bool {
+    let radius = f64::from(radius_m);
+    let radius_squared = radius * radius;
+    let midpoint = road.center();
+    let dx = f64::from(midpoint[0]) - f64::from(center[0]);
+    let dz = f64::from(midpoint[1]) - f64::from(center[1]);
+    dx * dx + dz * dz <= radius_squared
+}
+
 fn welcome(world: &ServerWorld, resumed: bool) -> ServerMessage {
     ServerMessage::Welcome {
         session_id: world.session_id().to_string(),
@@ -1219,20 +1284,27 @@ fn welcome(world: &ServerWorld, resumed: bool) -> ServerMessage {
     }
 }
 
-fn reject_with(code: &'static str, message: impl Into<String>) -> (ServerMessage, &'static str) {
-    (Rejection::new(code, message).into_message(), code)
+fn reject_with(
+    code: &'static str,
+    message: impl Into<String>,
+) -> (Vec<ServerMessage>, &'static str) {
+    (vec![Rejection::new(code, message).into_message()], code)
 }
 
-fn from_rejection(rejection: Rejection) -> (ServerMessage, &'static str) {
+fn from_rejection(rejection: Rejection) -> (Vec<ServerMessage>, &'static str) {
     let code = rejection.code;
-    (rejection.into_message(), code)
+    (vec![rejection.into_message()], code)
 }
 
-fn accepted(message: ServerMessage) -> (ServerMessage, &'static str) {
-    (message, AUDIT_ACCEPTED)
+fn accepted(message: ServerMessage) -> (Vec<ServerMessage>, &'static str) {
+    (vec![message], AUDIT_ACCEPTED)
 }
 
-fn reject_road_error(error: RoadError) -> (ServerMessage, &'static str) {
+fn accepted_all(messages: Vec<ServerMessage>) -> (Vec<ServerMessage>, &'static str) {
+    (messages, AUDIT_ACCEPTED)
+}
+
+fn reject_road_error(error: RoadError) -> (Vec<ServerMessage>, &'static str) {
     let code = match error {
         RoadError::TooMany => codes::ROAD_STORE_FULL,
         RoadError::IdExhausted => codes::ROAD_ID_EXHAUSTED,
@@ -1478,6 +1550,10 @@ pub struct InterestReport {
     pub radius_m: f32,
     /// Roads whose midpoint was inside the final interest circle.
     pub visible_roads: u32,
+    /// Road details carried by the final `interest_view`.
+    pub view_roads: u32,
+    /// Whether the final `interest_view` was truncated by the 64-road cap.
+    pub view_truncated: bool,
     /// Final authoritative tick (interest commands do not advance it).
     pub tick: u64,
     /// Final world checksum.
@@ -1513,12 +1589,23 @@ fn serve_interest(listener: TcpListener) -> io::Result<InterestReport> {
         ServerWorld::with_role(LOOPBACK_SEED, ClientRole::Mayor),
     )?;
 
+    let ServerMessage::InterestView {
+        roads, truncated, ..
+    } = world.interest_view()
+    else {
+        return Err(io::Error::other(
+            "interest view built an unexpected server message",
+        ));
+    };
+
     Ok(InterestReport {
         commands: stats.commands,
         frames,
         center: world.interest_center(),
         radius_m: world.interest_radius_m(),
         visible_roads: world.visible_roads(),
+        view_roads: u32::try_from(roads.len()).unwrap_or(u32::MAX),
+        view_truncated: truncated,
         tick: world.tick,
         checksum: world.checksum(),
     })
@@ -1561,69 +1648,114 @@ fn run_interest_client(address: SocketAddr) -> io::Result<()> {
         center_z: 0.0,
         radius_m: 2_048.0,
     };
-    match exchange(&mut stream, &mut reference, &full_view)? {
-        ServerMessage::Snapshot {
-            tick: 2,
-            checksum: observed,
-            interest_center,
-            interest_radius_m,
-            visible_roads: 2,
-            ..
-        } if observed == checksum
-            && interest_center == [0.0, 0.0]
-            && (interest_radius_m - 2_048.0).abs() < f32::EPSILON => {}
-        other => return Err(unexpected("full interest snapshot", &other)),
-    }
+    expect_interest_batch(
+        &exchange_all(&mut stream, &mut reference, &full_view)?,
+        &checksum,
+        [0.0, 0.0],
+        2_048.0,
+        2,
+        &[
+            (1, [0, 0], [8, 0], WORLD_ROAD_WIDTH_M),
+            (2, [100, 100], [108, 100], WORLD_ROAD_WIDTH_M),
+        ],
+        false,
+    )?;
 
     let near_origin = ClientCommand::SetInterest {
         center_x: 0.0,
         center_z: 0.0,
         radius_m: 16.0,
     };
-    match exchange(&mut stream, &mut reference, &near_origin)? {
-        ServerMessage::Snapshot {
-            tick: 2,
-            checksum: observed,
-            interest_radius_m: 16.0,
-            visible_roads: 1,
-            ..
-        } if observed == checksum => {}
-        other => return Err(unexpected("origin interest snapshot", &other)),
-    }
+    expect_interest_batch(
+        &exchange_all(&mut stream, &mut reference, &near_origin)?,
+        &checksum,
+        [0.0, 0.0],
+        16.0,
+        1,
+        &[(1, [0, 0], [8, 0], WORLD_ROAD_WIDTH_M)],
+        false,
+    )?;
 
     let near_far_road = ClientCommand::SetInterest {
         center_x: 100.0,
         center_z: 100.0,
         radius_m: 16.0,
     };
-    match exchange(&mut stream, &mut reference, &near_far_road)? {
-        ServerMessage::Snapshot {
-            tick: 2,
-            interest_center: [100.0, 100.0],
-            visible_roads: 1,
-            ..
-        } => {}
-        other => return Err(unexpected("far interest snapshot", &other)),
-    }
+    expect_interest_batch(
+        &exchange_all(&mut stream, &mut reference, &near_far_road)?,
+        &checksum,
+        [100.0, 100.0],
+        16.0,
+        1,
+        &[(2, [100, 100], [108, 100], WORLD_ROAD_WIDTH_M)],
+        false,
+    )?;
 
     // Restore the small origin viewport so the reported line shows filtering.
-    match exchange(&mut stream, &mut reference, &near_origin)? {
-        ServerMessage::Snapshot {
-            tick: 2,
-            checksum: observed,
-            interest_center,
-            interest_radius_m: 16.0,
-            visible_roads: 1,
-            ..
-        } if observed == checksum && interest_center == [0.0, 0.0] => {}
-        other => return Err(unexpected("restored interest snapshot", &other)),
-    }
+    expect_interest_batch(
+        &exchange_all(&mut stream, &mut reference, &near_origin)?,
+        &checksum,
+        [0.0, 0.0],
+        16.0,
+        1,
+        &[(1, [0, 0], [8, 0], WORLD_ROAD_WIDTH_M)],
+        false,
+    )?;
 
     expect_goodbye(&exchange(
         &mut stream,
         &mut reference,
         &ClientCommand::Disconnect,
     )?)
+}
+
+/// Assert one `set_interest` batch: snapshot first, filtered view second.
+#[allow(clippy::too_many_arguments)]
+fn expect_interest_batch(
+    messages: &[ServerMessage],
+    checksum: &str,
+    expected_center: [f32; 2],
+    expected_radius: f32,
+    expected_visible: u32,
+    expected_roads: &[(u64, [i32; 2], [i32; 2], u8)],
+    expected_truncated: bool,
+) -> io::Result<()> {
+    match messages {
+        [ServerMessage::Snapshot {
+            tick: 2,
+            checksum: observed,
+            interest_center,
+            interest_radius_m,
+            visible_roads,
+            ..
+        }, ServerMessage::InterestView {
+            tick: 2,
+            center,
+            radius_m,
+            roads,
+            truncated,
+        }] if observed == checksum
+            && *interest_center == expected_center
+            && (*interest_radius_m - expected_radius).abs() < f32::EPSILON
+            && *visible_roads == expected_visible
+            && *center == expected_center
+            && (*radius_m - expected_radius).abs() < f32::EPSILON
+            && *truncated == expected_truncated
+            && roads.len() == expected_roads.len()
+            && roads.iter().zip(expected_roads).all(|(road, expected)| {
+                road.id == expected.0
+                    && road.start == expected.1
+                    && road.end == expected.2
+                    && road.width_m == expected.3
+            }) =>
+        {
+            Ok(())
+        }
+        other => Err(io::Error::other(format!(
+            "interest loopback expected snapshot + interest_view at {expected_center:?} \
+             radius {expected_radius}, received {other:?}"
+        ))),
+    }
 }
 
 /// Result of one deterministic role/rate-limit loopback run.
@@ -2273,6 +2405,286 @@ mod tests {
     }
 
     #[test]
+    fn interest_view_is_empty_when_no_road_midpoint_matches() {
+        let mut world = world_with_hello();
+        world.apply(&ClientCommand::PlaceRoad {
+            start: [10_000, 10_000],
+            end: [10_008, 10_000],
+        });
+        let tick = world.tick;
+        let checksum = world.checksum();
+
+        assert!(world.interest_roads().is_empty());
+        match world.interest_view() {
+            ServerMessage::InterestView {
+                tick: view_tick,
+                center,
+                radius_m,
+                roads,
+                truncated,
+            } => {
+                assert_eq!(view_tick, tick);
+                assert_eq!(center, [0.0, 0.0]);
+                assert_eq!(radius_m, DEFAULT_INTEREST_RADIUS_M as f32);
+                assert!(roads.is_empty(), "the only road is outside the view");
+                assert!(!truncated);
+            }
+            other => panic!("expected interest view, got {other:?}"),
+        }
+
+        let messages = world.apply_all(&set_interest(0.0, 0.0, 16.0));
+        match messages.as_slice() {
+            [ServerMessage::Snapshot {
+                tick: snapshot_tick,
+                visible_roads: 0,
+                ..
+            }, ServerMessage::InterestView {
+                roads, truncated, ..
+            }] => {
+                assert_eq!(*snapshot_tick, tick);
+                assert!(roads.is_empty());
+                assert!(!truncated);
+            }
+            other => panic!("expected snapshot + empty interest view, got {other:?}"),
+        }
+        assert_eq!(world.checksum(), checksum);
+    }
+
+    #[test]
+    fn interest_view_filters_by_inclusive_midpoint() {
+        let mut world = world_with_hello();
+        for (start, end) in [
+            ([-3, -2], [3, -2]), // centre (0,-2): inside
+            ([8, 0], [12, 0]),   // centre (10,0): exactly on the r=10 boundary
+            ([11, 1], [13, 1]),  // centre (12,1): outside
+        ] {
+            world.apply(&ClientCommand::PlaceRoad { start, end });
+        }
+
+        let messages = world.apply_all(&set_interest(0.0, 0.0, 10.0));
+        match messages.as_slice() {
+            [ServerMessage::Snapshot { .. }, ServerMessage::InterestView {
+                roads, truncated, ..
+            }] => {
+                assert_eq!(
+                    roads.iter().map(|road| road.id).collect::<Vec<_>>(),
+                    vec![1, 2],
+                    "inside plus boundary, ascending id"
+                );
+                assert!(!truncated);
+            }
+            other => panic!("expected snapshot + interest view, got {other:?}"),
+        }
+
+        let messages = world.apply_all(&set_interest(0.0, 0.0, 9.9));
+        match messages.as_slice() {
+            [_, ServerMessage::InterestView { roads, .. }] => {
+                assert_eq!(roads.len(), 1, "boundary is exclusive at 9.9 m");
+            }
+            other => panic!("expected snapshot + interest view, got {other:?}"),
+        }
+
+        // A zero radius still includes a road whose midpoint is the centre.
+        let messages = world.apply_all(&set_interest(10.0, 0.0, 0.0));
+        match messages.as_slice() {
+            [_, ServerMessage::InterestView { roads, .. }] => {
+                assert_eq!(roads.len(), 1);
+                assert_eq!(roads[0].id, 2);
+                assert_eq!(roads[0].start, [8, 0]);
+                assert_eq!(roads[0].end, [12, 0]);
+                assert_eq!(roads[0].width_m, WORLD_ROAD_WIDTH_M);
+            }
+            other => panic!("expected snapshot + interest view, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interest_view_caps_at_64_and_reports_truncation() {
+        let mut world = world_with_hello();
+        for index in 0..70 {
+            let z = index * 4;
+            assert!(matches!(
+                world.apply(&ClientCommand::PlaceRoad {
+                    start: [10, z],
+                    end: [18, z],
+                }),
+                ServerMessage::Snapshot { .. }
+            ));
+        }
+        world.apply(&set_interest(14.0, 0.0, 2_048.0));
+        assert_eq!(world.visible_roads(), 70);
+        assert_eq!(world.interest_roads().len(), MAX_INTEREST_ROADS);
+        assert_eq!(world.interest_roads()[0].id, 1);
+
+        match world.interest_view() {
+            ServerMessage::InterestView {
+                roads, truncated, ..
+            } => {
+                assert_eq!(roads.len(), MAX_INTEREST_ROADS);
+                assert!(truncated, "70 matches must mark the view truncated");
+                assert_eq!(
+                    roads.iter().map(|road| road.id).collect::<Vec<_>>(),
+                    (1..=MAX_INTEREST_ROADS as u64).collect::<Vec<_>>(),
+                    "the cap keeps the lowest ids"
+                );
+            }
+            other => panic!("expected interest view, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interest_view_is_not_truncated_at_exactly_the_cap() {
+        let mut world = world_with_hello();
+        for index in 0..MAX_INTEREST_ROADS {
+            let z = i32::try_from(index).expect("small index") * 4;
+            world.apply(&ClientCommand::PlaceRoad {
+                start: [10, z],
+                end: [18, z],
+            });
+        }
+        world.apply(&set_interest(14.0, 0.0, 2_048.0));
+        assert_eq!(world.visible_roads(), MAX_INTEREST_ROADS as u32);
+
+        match world.interest_view() {
+            ServerMessage::InterestView {
+                roads, truncated, ..
+            } => {
+                assert_eq!(roads.len(), MAX_INTEREST_ROADS);
+                assert!(!truncated, "exactly the cap is not truncated");
+            }
+            other => panic!("expected interest view, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interest_view_orders_roads_by_id_even_when_the_store_is_shuffled() {
+        let mut world = world_with_hello();
+        for index in 0..5 {
+            world.apply(&ClientCommand::PlaceRoad {
+                start: [10, index * 4],
+                end: [18, index * 4],
+            });
+        }
+        world.roads.roads.reverse();
+        world.roads.roads.swap(0, 2);
+        world.apply(&set_interest(14.0, 0.0, 2_048.0));
+
+        match world.interest_view() {
+            ServerMessage::InterestView { roads, .. } => {
+                assert_eq!(
+                    roads.iter().map(|road| road.id).collect::<Vec<_>>(),
+                    vec![1, 2, 3, 4, 5]
+                );
+            }
+            other => panic!("expected interest view, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_interest_returns_snapshot_then_view_without_mutating_simulation() {
+        let mut world = world_with_hello();
+        world.apply(&ClientCommand::PlaceRoad {
+            start: [0, 0],
+            end: [8, 0],
+        });
+        let tick = world.tick;
+        let checksum = world.checksum();
+        let balance = world.economy.balance;
+        let roads = world.roads.roads.len();
+        let commands = world.commands;
+
+        let messages = world.apply_all(&set_interest(4.0, 0.0, 16.0));
+        match messages.as_slice() {
+            [ServerMessage::Snapshot {
+                tick: observed_tick,
+                checksum: observed_checksum,
+                interest_center,
+                interest_radius_m,
+                visible_roads,
+                ..
+            }, ServerMessage::InterestView {
+                tick: view_tick,
+                center,
+                radius_m,
+                roads: view_roads,
+                truncated,
+            }] => {
+                assert_eq!(*observed_tick, tick);
+                assert_eq!(observed_checksum, &checksum);
+                assert_eq!(*interest_center, [4.0, 0.0]);
+                assert_eq!(*interest_radius_m, 16.0);
+                assert_eq!(*visible_roads, 1);
+                assert_eq!(*view_tick, tick);
+                assert_eq!(*center, [4.0, 0.0]);
+                assert_eq!(*radius_m, 16.0);
+                assert_eq!(view_roads.len(), 1);
+                assert!(!truncated);
+            }
+            other => panic!("expected snapshot + interest view, got {other:?}"),
+        }
+
+        assert_eq!(world.tick, tick, "set_interest is view-only");
+        assert_eq!(world.checksum(), checksum);
+        assert_eq!(world.economy.balance, balance);
+        assert_eq!(world.roads.roads.len(), roads);
+        assert_eq!(world.commands, commands + 1);
+        assert_eq!(
+            world.audit_state().last().expect("audit").tag,
+            "set_interest"
+        );
+        assert!(world.audit_state().last().expect("audit").accepted());
+    }
+
+    #[test]
+    fn viewer_set_interest_batch_is_allowed() {
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Viewer);
+        world.apply(&hello());
+        let messages = world.apply_all(&set_interest(6.0, -2.0, 32.0));
+
+        match messages.as_slice() {
+            [ServerMessage::Snapshot { .. }, ServerMessage::InterestView { .. }] => {}
+            other => panic!("expected snapshot + interest view, got {other:?}"),
+        }
+        let audit = world.audit_state();
+        let last = audit.last().expect("audit entry");
+        assert_eq!(last.tag, "set_interest");
+        assert_eq!(last.role, ClientRole::Viewer);
+        assert!(last.accepted());
+    }
+
+    #[test]
+    fn rejected_interest_returns_one_rejection_and_no_view() {
+        let mut world = world_with_hello();
+        let before = world.checksum();
+        let messages = world.apply_all(&set_interest(0.0, 0.0, -1.0));
+
+        match messages.as_slice() {
+            [ServerMessage::Reject { code, .. }] => {
+                assert_eq!(code, protocol_codes::INTEREST_RADIUS_OUT_OF_RANGE);
+            }
+            other => panic!("expected one rejection, got {other:?}"),
+        }
+        assert_eq!(world.interest_radius_m(), DEFAULT_INTEREST_RADIUS_M as f32);
+        assert_eq!(world.checksum(), before);
+        assert_eq!(world.tick, 0);
+    }
+
+    #[test]
+    fn rate_limited_interest_returns_one_rejection_and_no_view() {
+        let mut world = world_with_hello();
+        world.rate.milli_credits = 0;
+        let messages = world.apply_all(&set_interest(0.0, 0.0, 16.0));
+
+        match messages.as_slice() {
+            [ServerMessage::Reject { code, .. }] => {
+                assert_eq!(code, codes::RATE_LIMITED);
+            }
+            other => panic!("expected one rejection, got {other:?}"),
+        }
+        assert_eq!(world.interest_radius_m(), DEFAULT_INTEREST_RADIUS_M as f32);
+    }
+
+    #[test]
     fn set_interest_consumes_a_rate_credit() {
         let mut world = world_with_hello();
         world.rate.milli_credits = 0;
@@ -2291,6 +2703,8 @@ mod tests {
         assert_eq!(first.center, [0.0, 0.0]);
         assert_eq!(first.radius_m, 16.0);
         assert_eq!(first.visible_roads, 1);
+        assert_eq!(first.view_roads, 1);
+        assert!(!first.view_truncated);
         assert_eq!(first.tick, 2);
         assert_eq!(first.checksum.len(), 16);
         assert!(first.checksum.bytes().all(|byte| byte.is_ascii_hexdigit()));

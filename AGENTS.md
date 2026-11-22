@@ -315,7 +315,7 @@ cargo run --release -p townsmith-server -- --loopback-smoke
 # Prints SERVER_PROTOCOL and SERVER_AUTHORITY status lines; deterministic, no sleeps
 cargo test -p townsmith-server
 cargo run --release -p townsmith-server -- --loopback-smoke   # protocol + authority + roles + resume + interest goldens
-cargo run --release -p townsmith-server -- --interest-smoke   # viewport filtering loopback
+cargo run --release -p townsmith-server -- --interest-smoke   # viewport + bounded 64-road interest view loopback
 GODOT=/path/to/godot ./scripts/smoke_mp_client.sh
 GODOT=/path/to/godot ./scripts/smoke_movement_stress.sh
 GODOT=/path/to/godot "${GODOT:-godot}" --headless --path godot res://movement_stress.tscn -- --agents 2000
