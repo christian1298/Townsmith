@@ -33,7 +33,7 @@ In:
 
 Out:
 
-- standalone district or per-settlement panels (the dashboard has one city-level District section with camera/selection focus);
+- player-facing standalone district or per-settlement panels (the dashboard has one city-level District section with camera/selection focus; the developer-only policy editor in §4.2 is a separate scene, not a dashboard panel);
 - clickable advice that selects or centres a building;
 - acknowledged, dismissed, or persisted notifications;
 - charts, history, trend lines, or time-series;
@@ -138,7 +138,7 @@ The grid is square (`cols == rows`), derived as `ceil(2 * radius_m / cell_m)`, b
 
 ### 4.1 District policy registry (data only)
 
-`core_city::policy` provides a `DistrictPolicyStore`; the bridge exposes CRUD over one optional in-memory registry. **This is a data contract only.** No dashboard, advisor, economy, simulation, or world-save path reads or writes it yet, and the store is not part of the world-save envelope. The dashboard does not show policies, and nothing calls these methods from GDScript in this slice.
+`core_city::policy` provides a `DistrictPolicyStore`; the bridge exposes CRUD over one optional in-memory registry. **This remains a data contract, not a player-facing system.** The standalone developer scene in §4.2 is the only GDScript consumer of these methods. No dashboard, advisor, economy, simulation, or world-save path reads or writes the registry yet, and it is not part of the world-save envelope. The dashboard does not show or edit policies.
 
 ```text
 TownsmithCore.district_policy_create(seed, name, center_x, center_z, radius_m,
@@ -172,6 +172,51 @@ Validated bounds:
 | `blueprint_allowlist` | ≤256 namespaced ids, `^[a-z0-9_]+:[a-z0-9_./-]+$` |
 
 Invalid input returns the core error code as `code` (for example `invalid_radius`, `invalid_tax_multiplier`, `invalid_name`, `invalid_allowlist_entry`, `too_many_allowlist_entries`, `full`, `id_exhausted`). The FNV-1a `checksum` covers the format version, seed, next id, and every policy field; it is a deterministic bridge value, not the world-save checksum. The core store validates v1 JSON on load (version, seed, `next_id`, map-key/record-id agreement, and every field) and rejects a registry loaded for a different world seed. Overlapping circles are allowed; `policy_at` returns the smallest containing id. Save composition, overlap priority beyond smallest-id, and the actual tax/funding/construction/allowlist effects remain open design work. `core_city::policy_effect` adds pure `effective_policy` / `effect_at` helpers (smallest-id, clamped bases, unrounded rates, empty allowlist = unrestricted), but no dashboard, bridge, economy, simulation, or save path calls them.
+
+### 4.2 Standalone policy editor (developer scene)
+
+`godot/policy_editor.tscn` (with `godot/policy_editor.gd`) is a developer-only `Control` scene that exercises the §4.1 CRUD over one `TownsmithCore` instance. It runs outside the world scene and the dashboard and is not reachable from either. It is a bridge/validation harness, not a player-facing panel.
+
+- **Toolbar.** Seed field, `Apply seed (new session)`, `Refresh`, `New session`, and a state line (`Seed … · N policies · checksum …`), with an overlap count when any circles overlap. `New session` and `Apply seed` replace the `TownsmithCore` instance, so the bridge's optional registry is dropped with it; nothing is saved or loaded.
+- **Policy list.** One row per policy in ascending id order from `district_policies_state`, showing id, name, centre, radius, tax, funding, construction, and allowlist count. Selecting a row loads it into the form. Overlap is reported with a display-only `overlaps #…` suffix; the bridge accepts overlapping circles, so this is a hint, not validation.
+- **Form.** Name, centre X/Z, radius, tax multiplier, service funding, construction-allowed, and a comma-separated blueprint allowlist. `Create from fields` creates from the form; `Create default` fills a deterministic radius-64 policy at the next slot of a 160 m ring around the origin and creates it; `Save changes` replaces every mutable field of the selected id; `Remove id` removes by id. Ids are assigned by the store and are never edited.
+- **Validation.** The SpinBoxes deliberately allow values below/above their nominal range (`allow_lesser`/`allow_greater`), so the bridge stays authoritative and its stable error codes are testable through the UI. Name and allowlist are free text.
+- **Messages.** The footer shows `Create: ok`, `Save failed: invalid_radius (…)`, and similar results with the bridge code, colour-coded; a bridge error never aborts the tool or exits the scene. A failed update leaves the registry and checksum untouched.
+- **Numbers and strings.** Display numbers use `WorldI18n.format_int`/`format_float` so the tool already follows the EN/DE number rules. Developer labels and console text stay English; policy names, ids, allowlist entries, and bridge error codes stay verbatim.
+
+Run the editor:
+
+```bash
+"${GODOT:-godot}" --path godot res://policy_editor.tscn
+```
+
+Headless smoke:
+
+```bash
+GODOT=/path/to/godot ./scripts/smoke_policy_editor.sh
+```
+
+The script builds the debug extension if it is missing, imports once, runs `res://policy_editor.tscn -- --smoke` twice, and compares every `POLICY_EDITOR*` line between runs. The walkthrough is:
+
+1. A blank-name create returns `empty_name`, leaves no lazy registry behind, and keeps the zero checksum.
+2. It creates `Smoke Riverside` (id 1, radius 64 m) and `Smoke Harbour` (id 2, radius 32 m) with centres 96 m apart, so the circles overlap.
+3. It checks list order, ids, row text, overlap flags, and a non-zero registry checksum.
+4. It updates id 1 and asserts the name, centre, radius, tax, funding, construction flag, two-entry allowlist, unchanged id, and changed checksum.
+5. An invalid radius update returns `invalid_radius` and leaves the record, count, and checksum unchanged.
+6. It removes both policies, checks the remaining counts 1 and 0, and confirms a second remove of the same id returns `not_found`.
+7. It checks the final empty list, cleared selection, `No policy selected`, the zero checksum after removal, and a repeated `district_policies_state` checksum.
+
+Markers (seed 2026, current deterministic walkthrough):
+
+```text
+POLICY_EDITOR_STATE empty=0000000000000000 created=98f0522ba97228e4 updated=c7625bf2a3f16749 final=8cc529a07d1c924f
+POLICY_EDITOR_REJECT code=invalid_radius count=2
+POLICY_EDITOR_OVERLAP touching=yes apart=no
+POLICY_EDITOR status=ok policies=0 checksum=8cc529a07d1c924f
+POLICY_EDITOR_SMOKE OK status=ok policies=0 checksum=8cc529a07d1c924f
+```
+
+The final checksum is the empty-registry checksum after the walkthrough (seed plus the next id), not the world-save checksum. The script requires the exact `POLICY_EDITOR status=ok policies=0 checksum=[0-9a-f]{16}` contract.
 
 ## 5. Dashboard
 
@@ -243,6 +288,15 @@ Final marker:
 WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok trades=ok render=ok structure=ok age=ok research=ok starter=ok named=ok occupancy=ok industry=ok utilities=ok services=ok economy=ok dashboard=ok district_ui=ok district_select=ok heatmap_ui=ok heatmap_modes=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
+`smoke_policy_editor.sh` is a separate smoke for the standalone §4.2 scene; it does not run the world scene. It requires the bridge CRUD walkthrough (invalid create, create two, list, update, reject an invalid radius, remove both, reject a missing id), deterministic `POLICY_EDITOR*` lines across two runs, and these markers:
+
+```text
+POLICY_EDITOR_REJECT code=invalid_radius count=2
+POLICY_EDITOR_OVERLAP touching=yes apart=no
+POLICY_EDITOR status=ok policies=0 checksum=8cc529a07d1c924f
+POLICY_EDITOR_SMOKE OK status=ok policies=0 checksum=8cc529a07d1c924f
+```
+
 ## 7. Tests
 
 - `core_city::advisor`: 9 tests — healthy, service shortages, missing stores, budget/debt, bankruptcy ordering, vacancies/unemployment, disconnected roads/long commutes, empty city, cap/determinism.
@@ -255,7 +309,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 
 - Advisor advice is city-wide; the dashboard District section is read-only and camera- or selection-centred (256 m), not a selectable settlement/district panel. It follows the selected building but does not persist the focus choice or follow a moving citizen. No building drill-down from advice.
 - The heatmap is camera/selection-centred (`_materialization_center`, 512 m), read-only, and does not aggregate cohorts, settlements, or off-screen districts. It renders Population, Jobs, or Happiness (one at a time) and only nonzero cells; food, water, rest, employment, and housing are not heatmap modes. Headless Godot returns default MultiMesh transform/colour readback, so the smoke validates the deterministic payload-derived value/peak and colour helper instead of reading instance colours. The F7 overlay, metric line, status line, legend, and unavailable/empty text are localized and pooled through one `MultiMesh`.
-- District policies are data only: the bridge can create, update, remove, and list them, but no UI, simulation, advisor, treasury, or world save consumes them. There is no policy overlay, selection, priority rule, or effect on tax, funding, construction, or blueprint placement.
+- District policies remain a developer-only data surface. The standalone scene in §4.2 can create, update, remove, and list them, but it is a separate scene from the world and the dashboard; the dashboard does not show or edit policies. No simulation, household, advisor, treasury, economy, or world-save code consumes the registry, and there is no policy overlay, selection, priority rule, or effect on tax, funding, construction, or blueprint placement. The editor holds its registry in memory only: `New session` discards it and nothing is saved or loaded.
 - Thresholds are fixed; no difficulty, policy, or player preference.
 - Advice is not persisted, acknowledged, or suppressed.
 - No click-to-select, camera focus, or one-click policy action.

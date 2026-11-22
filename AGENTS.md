@@ -372,6 +372,10 @@ GODOT=/path/to/godot ./scripts/smoke_world_placement.sh
 GODOT=/path/to/godot ./scripts/smoke_world_scene.sh
 GODOT=/path/to/godot ./scripts/smoke_blueprint.sh
 
+# Standalone district policy CRUD editor (developer scene; not the dashboard)
+"${GODOT:-godot}" --path godot res://policy_editor.tscn
+GODOT=/path/to/godot ./scripts/smoke_policy_editor.sh
+
 # 200 real voxel-hut instances
 VOXEL_INSTANCES=200 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_voxel_instances.json
 GODOT=/path/to/godot ./scripts/smoke_voxel.sh
