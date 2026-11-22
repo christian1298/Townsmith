@@ -79,7 +79,20 @@ Output is deterministic; smoke checksum `a920cf0c4eb9a4f1`.
 
 1. ~~Wire per-kind operating upkeep into `economy_tick`.~~ Done: the bridge passes store totals through `InfrastructureCosts`.
 2. ~~Feed the site upkeep into the bridge economy tick instead of the legacy count path.~~ Done.
-3. Add site replacement/refund rules and service-quality funding.
+3. Add site replacement/refund rules, service-quality funding, and phased utility/service payments with the campaign lead time.
 4. Wire the D-028 building installment schedule through the bridge and construction tick.
+
+### 5.1 Campaign build lead time
+
+When the construction clock is in `CampaignDays`, new utility and service sites are added with a deterministic lead time and are not operational until it elapses. Supply, coverage, research, and operating upkeep count only operational sites; `ready`/`building` and per-site `build_days_remaining` are exposed on the bridge payloads. The developer clock keeps the old immediate behavior, and a zero lead field is omitted from JSON so existing saves/checksums are unchanged.
+
+| Kind | Basic | Improved | Advanced |
+|---|---:|---:|---:|
+| Water / power | 1 day | 1 day | 1 day |
+| School | 2 days | 2.5 days | 3 days |
+| Clinic | 1.5 days | 2 days | 2.5 days |
+| Fire / police | 1 day | 1.5 days | 2 days |
+
+This is a schedule only: the full site cost is still charged on add, there is no per-phase payment or physical construction phase, and replacement/refund rules remain open.
 
 > Construction v0 now has an opt-in campaign clock (`ConstructionTimeScale::CampaignDays`) with D-029 phase durations; the default developer clock and existing checksums are unchanged. The bridge exposes the scale, `city_loop` accepts `--campaign-days`, and the HUD has an F8 developer/campaign toggle. Utility/service site costs still use their separate immediate-charge path.

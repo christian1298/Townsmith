@@ -58,6 +58,19 @@ pub const WATER_UPKEEP_PER_DAY: f64 = 2.0;
 /// Operating upkeep of one power site per game day.
 pub const POWER_UPKEEP_PER_DAY: f64 = 3.0;
 
+/// Campaign lead time before a new utility site is operational, in game days.
+///
+/// Developer mode keeps the instant default; only the opt-in campaign clock
+/// (`ConstructionTimeScale::CampaignDays`) assigns this lead time.
+pub const CAMPAIGN_UTILITY_BUILD_DAYS: f32 = 1.0;
+
+/// Largest accepted site lead time, a guard against malformed saves.
+pub const MAX_UTILITY_BUILD_DAYS: f32 = 365.0;
+
+fn is_zero_f32(value: &f32) -> bool {
+    *value == 0.0
+}
+
 /// One utility kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -79,6 +92,15 @@ impl UtilityKind {
             Self::Water => "water",
             Self::Power => "power",
         }
+    }
+
+    /// Campaign lead time before a new site is operational, in game days.
+    ///
+    /// Both utility kinds take one game day. Developer mode ignores this and
+    /// adds sites immediately operational.
+    #[must_use]
+    pub fn campaign_build_days(self) -> f32 {
+        CAMPAIGN_UTILITY_BUILD_DAYS
     }
 
     /// Parse a stable identifier.
@@ -126,6 +148,13 @@ pub struct UtilitySite {
     pub radius_m: f32,
     /// Installed capacity in demand units.
     pub capacity: f64,
+    /// Game days left before the site is operational.
+    ///
+    /// Zero is the legacy immediate default and is omitted from the save so
+    /// existing checksums stay pinned. Only the opt-in campaign clock assigns
+    /// a positive lead time.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub build_days_remaining: f32,
 }
 
 impl UtilitySite {
@@ -137,13 +166,21 @@ impl UtilitySite {
                 center: [0.0, 0.0, 0.0],
                 radius_m: DEFAULT_WATER_RADIUS_M,
                 capacity: WATER_CAPACITY_PER_SITE,
+                build_days_remaining: 0.0,
             },
             UtilityKind::Power => Self {
                 center: [0.0, 0.0, 0.0],
                 radius_m: DEFAULT_POWER_RADIUS_M,
                 capacity: POWER_CAPACITY_PER_SITE,
+                build_days_remaining: 0.0,
             },
         }
+    }
+
+    /// Whether the site is finished and can supply service.
+    #[must_use]
+    pub fn is_operational(&self) -> bool {
+        self.build_days_remaining <= 0.0
     }
 }
 
@@ -215,6 +252,36 @@ impl UtilityStore {
         self.water_sites.len() + self.power_sites.len()
     }
 
+    /// Sites of one kind that are operational.
+    #[must_use]
+    pub fn operational_site_count(&self, kind: UtilityKind) -> usize {
+        self.sites(kind)
+            .values()
+            .filter(|site| site.is_operational())
+            .count()
+    }
+
+    /// Operational sites across both kinds.
+    #[must_use]
+    pub fn operational_total(&self) -> usize {
+        UtilityKind::ALL
+            .iter()
+            .map(|&kind| self.operational_site_count(kind))
+            .sum()
+    }
+
+    /// Operational sites across both kinds; alias for [`Self::operational_total`].
+    #[must_use]
+    pub fn ready_count(&self) -> usize {
+        self.operational_total()
+    }
+
+    /// Sites still inside their lead time.
+    #[must_use]
+    pub fn building_count(&self) -> usize {
+        self.site_count() - self.ready_count()
+    }
+
     /// Sites of one kind.
     #[must_use]
     pub fn sites(&self, kind: UtilityKind) -> &BTreeMap<u64, UtilitySite> {
@@ -244,10 +311,17 @@ impl UtilityStore {
         self.count_of(kind) as f64 * kind.construction_cost()
     }
 
-    /// Operating upkeep of every site of one kind per game day.
+    /// Operating upkeep of every operational site of one kind per game day.
+    ///
+    /// Sites still inside their campaign lead time are not staffed yet, so
+    /// they do not bill operating upkeep.
     #[must_use]
     pub fn upkeep_per_day_of(&self, kind: UtilityKind) -> f64 {
-        self.count_of(kind) as f64 * kind.upkeep_per_day()
+        self.sites(kind)
+            .values()
+            .filter(|site| site.is_operational())
+            .map(|_| kind.upkeep_per_day())
+            .sum()
     }
 
     /// Construction cost of every water and power site.
@@ -269,12 +343,33 @@ impl UtilityStore {
     }
 
     /// Add or replace a utility site. Replacing keeps other sites.
+    ///
+    /// The site is immediately operational; use
+    /// [`Self::add_site_with_lead_days`] for the campaign lead time.
     pub fn add_site(
         &mut self,
         placement_id: u64,
         kind: UtilityKind,
         center: [f32; 3],
     ) -> Result<(), UtilityError> {
+        self.add_site_with_lead_days(placement_id, kind, center, 0.0)
+    }
+
+    /// Add or replace a utility site with a lead time in game days.
+    ///
+    /// `lead_days` must be finite and within `0.0..=MAX_UTILITY_BUILD_DAYS`.
+    /// A non-zero lead time hides the site from supply, coverage, and
+    /// operating upkeep until [`Self::tick`] clears it.
+    pub fn add_site_with_lead_days(
+        &mut self,
+        placement_id: u64,
+        kind: UtilityKind,
+        center: [f32; 3],
+        lead_days: f32,
+    ) -> Result<(), UtilityError> {
+        if !lead_days.is_finite() || !(0.0..=MAX_UTILITY_BUILD_DAYS).contains(&lead_days) {
+            return Err(UtilityError::Invalid("site lead days"));
+        }
         if placement_id > i64::MAX as u64 {
             return Err(UtilityError::Invalid("site id is above i64::MAX"));
         }
@@ -284,7 +379,27 @@ impl UtilityStore {
         }
         let mut site = UtilitySite::default_for(kind);
         site.center = center;
+        site.build_days_remaining = lead_days;
         sites.insert(placement_id, site);
+        Ok(())
+    }
+
+    /// Advance every site's lead time by `days`, clamping at zero.
+    ///
+    /// Negative or non-finite input is rejected rather than silently ignored.
+    /// A zero step is a valid no-op.
+    pub fn tick(&mut self, days: f32) -> Result<(), UtilityError> {
+        if !days.is_finite() || days < 0.0 {
+            return Err(UtilityError::Invalid("tick days"));
+        }
+        if days == 0.0 {
+            return Ok(());
+        }
+        for sites in [&mut self.water_sites, &mut self.power_sites] {
+            for site in sites.values_mut() {
+                site.build_days_remaining = (site.build_days_remaining - days).max(0.0);
+            }
+        }
         Ok(())
     }
 
@@ -311,27 +426,38 @@ impl UtilityStore {
     /// Recompute service coverage from completed consumers.
     ///
     /// Demand is counted for every consumer. A consumer is covered when at
-    /// least one site of that kind is within its radius. Served demand is
-    /// `min(total capacity, covered demand)`, so uncovered demand also lowers
-    /// the city-wide service share.
+    /// least one operational site of that kind is within its radius. Served
+    /// demand is `min(operational capacity, covered demand)`, so uncovered
+    /// demand also lowers the city-wide service share. Sites still inside
+    /// their campaign lead time contribute no capacity or coverage.
     pub fn refresh(&mut self, consumers: &[UtilityConsumer]) -> UtilityReport {
         let water_demand: f64 = consumers.iter().map(UtilityConsumer::water_demand).sum();
         let power_demand: f64 = consumers.iter().map(UtilityConsumer::power_demand).sum();
-        let water_capacity: f64 = self.water_sites.values().map(|site| site.capacity).sum();
-        let power_capacity: f64 = self.power_sites.values().map(|site| site.capacity).sum();
+        let water_capacity: f64 = self
+            .water_sites
+            .values()
+            .filter(|site| site.is_operational())
+            .map(|site| site.capacity)
+            .sum();
+        let power_capacity: f64 = self
+            .power_sites
+            .values()
+            .filter(|site| site.is_operational())
+            .map(|site| site.capacity)
+            .sum();
         let water_covered = covered_demand(consumers, &self.water_sites, UtilityDemand::Water);
         let power_covered = covered_demand(consumers, &self.power_sites, UtilityDemand::Power);
         let water = supply_share(
             water_demand,
             water_covered,
             water_capacity,
-            self.water_sites.len(),
+            self.operational_site_count(UtilityKind::Water),
         );
         let power = supply_share(
             power_demand,
             power_covered,
             power_capacity,
-            self.power_sites.len(),
+            self.operational_site_count(UtilityKind::Power),
         );
         self.water_supply = water.supply;
         self.power_supply = power.supply;
@@ -415,6 +541,11 @@ impl UtilityStore {
                 {
                     return Err(UtilityError::Invalid("site capacity"));
                 }
+                if !site.build_days_remaining.is_finite()
+                    || !(0.0..=MAX_UTILITY_BUILD_DAYS).contains(&site.build_days_remaining)
+                {
+                    return Err(UtilityError::Invalid("site lead days"));
+                }
             }
         }
         Ok(())
@@ -493,7 +624,9 @@ fn covered(
     demand: UtilityDemand,
 ) -> bool {
     consumer_demand(consumer, demand) > 0.0
-        && sites.values().any(|site| site_covers(site, consumer))
+        && sites
+            .values()
+            .any(|site| site.is_operational() && site_covers(site, consumer))
 }
 
 fn covered_demand(
@@ -735,6 +868,128 @@ mod tests {
             .expect("site");
         store.water_sites.get_mut(&1).expect("site").radius_m = -1.0;
         assert!(store.validate().is_err());
+        let mut store = UtilityStore::new(2026);
+        store
+            .add_site(1, UtilityKind::Water, [0.0, 0.0, 0.0])
+            .expect("site");
+        store
+            .water_sites
+            .get_mut(&1)
+            .expect("site")
+            .build_days_remaining = -0.5;
+        assert!(store.validate().is_err());
+        store
+            .water_sites
+            .get_mut(&1)
+            .expect("site")
+            .build_days_remaining = f32::NAN;
+        assert!(store.validate().is_err());
+    }
+
+    #[test]
+    fn developer_sites_are_operational_and_omit_the_lead_field() {
+        let mut store = UtilityStore::new(2026);
+        store
+            .add_site(1, UtilityKind::Water, [1.0, 2.0, 3.0])
+            .expect("water");
+        store
+            .add_site(2, UtilityKind::Power, [4.0, 5.0, 6.0])
+            .expect("power");
+        assert_eq!(store.site_count(), 2);
+        assert_eq!(store.ready_count(), 2);
+        assert_eq!(store.building_count(), 0);
+        assert_eq!(store.operational_total(), 2);
+        let json = serde_json::to_string(&store).expect("json");
+        assert!(!json.contains("build_days_remaining"));
+        // A legacy save without the field decodes as immediately operational.
+        let legacy: UtilityStore = serde_json::from_str(&json).expect("legacy");
+        assert_eq!(legacy, store);
+        assert!(legacy.water_sites.values().all(UtilitySite::is_operational));
+        assert!(legacy.power_sites.values().all(UtilitySite::is_operational));
+    }
+
+    #[test]
+    fn campaign_lead_time_hides_a_site_until_the_days_pass() {
+        let mut store = UtilityStore::new(2026);
+        store
+            .add_site_with_lead_days(1, UtilityKind::Water, [0.0, 0.0, 0.0], 1.0)
+            .expect("site");
+        assert_eq!(store.site_count(), 1);
+        assert_eq!(store.ready_count(), 0);
+        assert_eq!(store.building_count(), 1);
+        assert_eq!(store.operational_site_count(UtilityKind::Water), 0);
+        assert_eq!(store.total_upkeep_per_day(), 0.0);
+        let report = store.refresh(&[consumer(2, 4, 0, 0.0, 0.0)]);
+        assert_eq!(report.water_supply, 0.0);
+        assert_eq!(report.water_capacity, 0.0);
+        assert_eq!(report.water_covered_buildings, 0);
+
+        store.tick(0.5).expect("tick");
+        assert_eq!(store.ready_count(), 0);
+        assert_eq!(store.total_upkeep_per_day(), 0.0);
+        assert_eq!(
+            store.refresh(&[consumer(2, 4, 0, 0.0, 0.0)]).water_supply,
+            0.0
+        );
+
+        store.tick(0.5).expect("tick");
+        assert_eq!(store.ready_count(), 1);
+        assert_eq!(store.building_count(), 0);
+        assert_eq!(store.total_upkeep_per_day(), 2.0);
+        let report = store.refresh(&[consumer(2, 4, 0, 0.0, 0.0)]);
+        assert_eq!(report.water_supply, 1.0);
+        assert_eq!(report.water_capacity, 300.0);
+    }
+
+    #[test]
+    fn building_sites_add_no_capacity_or_upkeep() {
+        let mut store = UtilityStore::new(2026);
+        store
+            .add_site(1, UtilityKind::Power, [0.0, 0.0, 0.0])
+            .expect("ready");
+        store
+            .add_site_with_lead_days(2, UtilityKind::Power, [0.0, 0.0, 0.0], 2.0)
+            .expect("building");
+        assert_eq!(store.count_of(UtilityKind::Power), 2);
+        assert_eq!(store.operational_site_count(UtilityKind::Power), 1);
+        assert_eq!(store.upkeep_per_day_of(UtilityKind::Power), 3.0);
+        assert_eq!(store.total_upkeep_per_day(), 3.0);
+        // Only the operational site's 300 capacity is installed, even though
+        // both sites cover the consumer.
+        let report = store.refresh(&[consumer(3, 4, 1_200, 0.0, 0.0)]);
+        assert_eq!(report.power_capacity, 300.0);
+        assert_eq!(report.power_served, 300.0);
+        assert!(report.power_supply < 0.25);
+        assert!(report.power_coverage > 0.99);
+        assert_eq!(report.power_sites, 2);
+    }
+
+    #[test]
+    fn tick_rejects_invalid_days() {
+        let mut store = UtilityStore::new(2026);
+        store
+            .add_site_with_lead_days(1, UtilityKind::Water, [0.0, 0.0, 0.0], 1.0)
+            .expect("site");
+        assert!(store.tick(f32::NAN).is_err());
+        assert!(store.tick(f32::INFINITY).is_err());
+        assert!(store.tick(-1.0).is_err());
+        assert!(store.tick(0.0).is_ok());
+        assert_eq!(store.water_sites[&1].build_days_remaining, 1.0);
+    }
+
+    #[test]
+    fn lead_time_and_operational_state_round_trip() {
+        let mut store = UtilityStore::new(2026);
+        store
+            .add_site_with_lead_days(1, UtilityKind::Water, [1.0, 2.0, 3.0], 2.5)
+            .expect("site");
+        store.tick(1.0).expect("tick");
+        assert_eq!(store.water_sites[&1].build_days_remaining, 1.5);
+        let json = store.to_json_pretty().expect("json");
+        let decoded = UtilityStore::from_json(&json).expect("decode");
+        assert_eq!(decoded, store);
+        assert_eq!(decoded.water_sites[&1].build_days_remaining, 1.5);
+        assert_eq!(decoded.checksum(), store.checksum());
     }
 
     #[test]
