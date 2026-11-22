@@ -415,6 +415,31 @@ pub struct LifecycleTick {
     pub died: usize,
 }
 
+/// Result of one lifecycle tick that also names the retired resident slots.
+///
+/// [`NamedCitizens::tick_lifecycle`] keeps the count-only API for existing
+/// callers. This type is for callers that must apply population consequences,
+/// such as `CityRuntime::apply_deaths`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LifecycleOutcome {
+    /// Aging and death counts for the tick.
+    pub tick: LifecycleTick,
+    /// Removed identities as `(placement_id, slot)`, ascending.
+    ///
+    /// The list is sorted by key, contains each removed slot once, and is empty
+    /// for a no-op tick. An entry is the slot that was occupied before the
+    /// removal; callers must apply it against the pre-death household.
+    pub deaths: Vec<(u64, u32)>,
+}
+
+impl LifecycleOutcome {
+    /// Whether the tick retired no identities.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.deaths.is_empty()
+    }
+}
+
 /// Derived named-citizen pool for one city.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamedCitizens {
@@ -551,6 +576,15 @@ impl NamedCitizens {
 
     /// Advance every named citizen by whole simulated days and remove the dead.
     ///
+    /// This is the count-only wrapper around
+    /// [`Self::tick_lifecycle_with_deaths`]; it discards the removed slots.
+    /// Existing callers that only report aging/death use this method.
+    pub fn tick_lifecycle(&mut self, days: f64) -> LifecycleTick {
+        self.tick_lifecycle_with_deaths(days).tick
+    }
+
+    /// Advance every named citizen and report the retired resident slots.
+    ///
     /// The tick is deterministic and uses integer arithmetic only:
     ///
     /// - `days` is truncated toward zero to whole days. A non-positive or
@@ -566,21 +600,27 @@ impl NamedCitizens {
     ///   are removed in `(placement_id, slot)` key order.
     ///
     /// `aged` counts citizens that received the advance, including citizens
-    /// removed in the same tick; `died` counts the removals. The named layer
-    /// does not change household `residents`, `workers`, or needs: applying
-    /// population consequences is a caller concern.
-    pub fn tick_lifecycle(&mut self, days: f64) -> LifecycleTick {
+    /// removed in the same tick; `died` counts the removals, and
+    /// [`LifecycleOutcome::deaths`] lists the same removals as slots. The named
+    /// layer does not change household `residents`, `workers`, or needs:
+    /// applying [`LifecycleOutcome::deaths`] to the aggregate population is a
+    /// caller concern (`CityRuntime::apply_deaths`).
+    ///
+    /// This method does not sync the pool with the households. A caller that
+    /// loads, ticks, and then syncs should expect identities to be added or
+    /// dropped by that sync exactly as for any other pool operation.
+    pub fn tick_lifecycle_with_deaths(&mut self, days: f64) -> LifecycleOutcome {
         if !days.is_finite() || days <= 0.0 {
-            return LifecycleTick::default();
+            return LifecycleOutcome::default();
         }
         // Float-to-int casts saturate, so an absurd `days` becomes `u32::MAX`.
         let whole_days = days.floor() as u32;
         if whole_days == 0 {
-            return LifecycleTick::default();
+            return LifecycleOutcome::default();
         }
 
         let mut tick = LifecycleTick::default();
-        let mut dead: Vec<(u64, u32)> = Vec::new();
+        let mut deaths: Vec<(u64, u32)> = Vec::new();
         for (key, citizen) in &mut self.citizens {
             if citizen.age_days == 0 {
                 citizen.age_days = initial_age_days(citizen.id);
@@ -591,15 +631,12 @@ impl NamedCitizens {
                 .min(MAX_AGE_DAYS);
             tick.aged += 1;
             if citizen.age_days >= MAX_AGE_DAYS {
-                dead.push(*key);
+                deaths.push(*key);
             }
         }
-        for key in dead {
-            if self.citizens.remove(&key).is_some() {
-                tick.died += 1;
-            }
-        }
-        tick
+        deaths.retain(|key| self.citizens.remove(key).is_some());
+        tick.died = deaths.len();
+        LifecycleOutcome { tick, deaths }
     }
 
     /// Oldest persisted age in whole days, or `None` for an empty pool.
@@ -1009,6 +1046,7 @@ impl std::error::Error for NamedError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::population::CityRuntime;
 
     fn household(residents: u32) -> Household {
         Household {
@@ -1902,6 +1940,78 @@ mod tests {
         assert_eq!(named.len(), 1);
         assert!(named.get(1, 0).is_none());
         assert_eq!(named.tick_lifecycle(f64::NAN).aged, 0);
+    }
+
+    #[test]
+    fn lifecycle_outcome_lists_removed_slots_in_key_order() {
+        let mut named = NamedCitizens::new(2026);
+        let mut households = BTreeMap::new();
+        households.insert(2, household(1));
+        households.insert(1, household(3));
+        named.sync(&households);
+        named.get_mut_for_test(citizen_id(2026, 1, 0)).age_days = MAX_AGE_DAYS - 1;
+        named.get_mut_for_test(citizen_id(2026, 1, 2)).age_days = MAX_AGE_DAYS - 1;
+        named.get_mut_for_test(citizen_id(2026, 2, 0)).age_days = 40 * DAYS_PER_YEAR;
+
+        let outcome = named.tick_lifecycle_with_deaths(1.0);
+        assert_eq!(outcome.tick.aged, 4);
+        assert_eq!(outcome.tick.died, 2);
+        assert_eq!(outcome.deaths, vec![(1, 0), (1, 2)]);
+        assert!(!outcome.is_empty());
+        assert_eq!(named.len(), 2);
+        assert!(named.get(1, 0).is_none());
+        assert!(named.get(1, 2).is_none());
+        assert!(named.get(1, 1).is_some());
+        assert!(named.get(2, 0).is_some());
+        assert!(named.validate().is_ok());
+    }
+
+    #[test]
+    fn lifecycle_outcome_is_empty_for_no_op_ticks() {
+        let mut named = NamedCitizens::new(2026);
+        let mut households = BTreeMap::new();
+        households.insert(1, household(2));
+        named.sync(&households);
+        let before = named.clone();
+        for days in [f64::NAN, f64::INFINITY, 0.0, -1.0, 0.5] {
+            let outcome = named.tick_lifecycle_with_deaths(days);
+            assert!(outcome.is_empty(), "days {days} must not retire anyone");
+            assert_eq!(outcome.tick, LifecycleTick::default());
+            assert_eq!(named, before);
+        }
+    }
+
+    #[test]
+    fn lifecycle_deaths_apply_to_household_counts() {
+        let mut runtime = CityRuntime::new(2026);
+        runtime.sync(&[(1, 2)]);
+        {
+            let household = runtime.households.get_mut(&1).expect("household");
+            household.residents = 2;
+            household.workers = 2;
+        }
+        let mut named = NamedCitizens::new(2026);
+        named.sync(&runtime.households);
+        named.get_mut_for_test(citizen_id(2026, 1, 0)).age_days = MAX_AGE_DAYS - 1;
+
+        let outcome = named.tick_lifecycle_with_deaths(1.0);
+        assert_eq!(outcome.tick.died, 1);
+        assert_eq!(outcome.deaths, vec![(1, 0)]);
+        assert_eq!(runtime.apply_deaths(&outcome.deaths), 1);
+        named.sync(&runtime.households);
+
+        let household = &runtime.households[&1];
+        assert_eq!(household.residents, 1);
+        assert_eq!(household.workers, 1);
+        assert_eq!(household.capacity, 2);
+        assert_eq!(runtime.population(), 1);
+        assert_eq!(named.len(), 1);
+        // Sync rebuilds the surviving slot from the reduced household, so the
+        // named identity at slot 0 may be a fresh replacement.
+        assert!(named.get(1, 0).is_some());
+        assert!(named.get(1, 1).is_none());
+        assert!(runtime.validate().is_ok());
+        assert!(named.validate().is_ok());
     }
 
     #[test]
