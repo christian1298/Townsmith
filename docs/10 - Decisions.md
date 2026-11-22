@@ -2,7 +2,7 @@
 title: Decisions
 project: Townsmith
 status: active
-updated: 2026-11-19
+updated: 2026-11-22
 tags:
   - townsmith
   - adr
@@ -45,6 +45,7 @@ tags:
 | D-025 | Basements and sub-ground floors; underground parking later | Accepted | 2026-11-19 | [[17 - Materials and Structure]], [[03 - Voxel and Scale]], [[07 - Simulation and AI]] |
 | D-026 | Workshop-first blueprint authoring; permissioned live editing later | Accepted | 2026-11-19 | [[02 - Game Design]], [[05 - Multiplayer]] |
 | D-027 | `.tsbp` v1 package: zip + JSON + RLE voxels + BLAKE3 hash | Accepted | 2026-11-20 | [[28 - Blueprint Package]], [[03 - Voxel and Scale]] |
+| D-028 | Construction is billed in phase installments; unaffordable work stalls | Proposed | 2026-11-22 | [[53 - Treasury and Taxes]], [[77 - Infrastructure Costs]], [[02 - Game Design]] |
 
 ---
 
@@ -1205,6 +1206,48 @@ The vertical slice needs one persistence unit for a building: voxels, metadata, 
 ### Review trigger
 
 Room detection/stats PR (fills metadata), thumbnail PR, and the first compressed format version.
+
+---
+
+## D-028 — Construction is billed in phase installments; unaffordable work stalls
+
+**Status:** Proposed · **Date:** 2026-11-22 · **Affects:** [[53 - Treasury and Taxes]], [[77 - Infrastructure Costs]], [[02 - Game Design]]
+
+### Context
+
+Placement currently checks and charges the full material price up front, while the site then builds over seven phases. The phased-financing projection shows that the 100,000 starting balance plus the 500,000 debt cap cannot fund an Industrial- or Modern-scale city when every building must be prepaid. It also makes the construction schedule economically invisible: a site that has finished its foundation has already paid for its roof.
+
+### Decision
+
+- The placement price is split across the payable phases using the existing phase weights: Survey 3%, Foundation 17%, Structure 35%, Envelope 20%, Utilities 10%, Finish 12%, Inspection 3%; Complete is 0%.
+- The Survey installment is due at placement. Each later installment becomes due when the previous phase completes.
+- The core `ConstructionStore` tracks `cost_total`, `cost_paid`, and `payment_stalled`; it never touches the treasury. The bridge/economy charges the due amount.
+- If the treasury cannot cover an installment, the site stalls at the phase boundary with `stall_reason = "payment"`, keeps completed work, and resumes after payment.
+- Sites with `cost_total == 0` (legacy or unpriced) remain fully prepaid and are never charged.
+- Removing a site refunds nothing; paid installments are sunk construction cost.
+- This supersedes only the payment timing in D-023; the phased crew/trade process is unchanged.
+
+### Consequences
+
+**Positive**
+- Construction spending follows visible progress and can be funded from completed buildings' taxes.
+- Large cities become financeable without raising the debt cap or inventing a construction loan market.
+- The billing schedule is engine-agnostic and testable without Godot.
+
+**Negative**
+- Players can start a site and later stall it by running out of money.
+- Abandoned sites leave sunk cost and unfinished buildings.
+- The bridge must charge installments and surface the stall reason; this slice only lands the core schedule.
+
+### Alternatives considered
+
+- **Keep full prepayment:** simplest and current behavior, but the projection cannot fund the target cities.
+- **Charge everything on completion:** zero cash risk during construction, but the treasury pays nothing until the building is usable and contractors carry unlimited credit.
+- **Separate construction-loan market:** realistic, but adds a second debt system before the core schedule is proven.
+
+### Review trigger
+
+Bridge/economy wiring, the first playable large-city financing run, and the Q-101 playtest.
 
 ---
 

@@ -2,7 +2,7 @@
 title: Treasury, Loans, and Construction
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-22
 tags:
   - townsmith
   - phase-3
@@ -197,6 +197,10 @@ The world-scene smoke checks:
 - `core_city` total **276**; `core_structure` **19**; bridge **60**; workspace **558 tests + 2 doctests**; 30-day runner 7 tests.
 - `city_loop` bin test asserts construction spending, debt, positive final balance, and no bankruptcy.
 - 30-day city-loop checksum: `623f39c61b71b68a`.
+
+
+> [!note] Phase billing core (D-028)
+> `ConstructionStore` now carries a per-site `cost_total`/`cost_paid` schedule and a payment stall. The bridge still prepays the full price in this slice, so gameplay and checksums are unchanged. The next step is to charge the schedule at placement and phase boundaries.
 
 ## 12. Limits
 

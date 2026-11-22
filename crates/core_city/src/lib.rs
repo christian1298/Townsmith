@@ -61,7 +61,7 @@ pub use advisor::{
 pub use construction::{
     total_seconds_for, ConstructionError, ConstructionPhase, ConstructionSite, ConstructionStore,
     ConstructionTick, CONSTRUCTION_FORMAT_VERSION, MAX_SITES as MAX_CONSTRUCTION_SITES,
-    MAX_TICK_SECONDS,
+    MAX_SITE_COST, MAX_TICK_SECONDS,
 };
 pub use core_structure::{StructuralSystem, StructureError, StructureSpec, StructureSummary};
 pub use economy::{

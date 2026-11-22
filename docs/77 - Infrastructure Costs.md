@@ -2,7 +2,7 @@
 title: Infrastructure Costs
 project: Townsmith
 status: active
-updated: 2026-11-21
+updated: 2026-11-22
 tags:
   - townsmith
   - economy
@@ -69,7 +69,7 @@ Output is deterministic; smoke checksum `a920cf0c4eb9a4f1`.
 
 - Site construction is charged on add; re-adding/replacing a site charges again. Removing a site does not refund.
 - Operating upkeep still uses the aggregate utility/service site counts, not per-kind tables.
-- No construction schedule or phased payment; the full site cost is charged immediately.
+- No phased payment for infrastructure sites; the full site cost is charged immediately. The core construction schedule for buildings is in D-028, but the bridge still prepays it.
 - If no treasury is open, the site is added with `charged=false` (legacy/dev path).
 - Site counts are fixed probe fixtures; real cities may have different coverage/site mixes.
 - No land, road, maintenance, staffing, or replacement cost.
@@ -80,3 +80,4 @@ Output is deterministic; smoke checksum `a920cf0c4eb9a4f1`.
 1. Wire per-kind operating upkeep into `economy_tick` (counts are already available).
 2. Feed the site upkeep into the bridge economy tick instead of the legacy count path.
 3. Add site replacement/refund rules and service-quality funding.
+4. Wire the D-028 building installment schedule through the bridge and construction tick.
