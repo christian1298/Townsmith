@@ -28,19 +28,20 @@ use core_blueprint::{
 };
 use core_city::named::{age_years_from_days, slot_is_employed, MAX_AGE_DAYS};
 use core_city::{
-    advise, diff_selection, evaluate_tutorial, normalize_rotation, starter, summarize,
-    summarize_district, AdvisorInput, AdvisorReport, Age, AgeState, CitizenDeath, CitizenMotion,
-    CitizenPosition, CityLayout, CityRuntime, CitySummary, CityTier, ConstructionPhase,
-    ConstructionSite, ConstructionStore, DistrictSummary, Economy, Home, Household, IndustryKind,
-    IndustryStore, InfrastructureCosts, LifecycleTick, Lot, LotError, LotRequest, LotStore,
-    MaterializationBudget, MaterializationSelection, MaterializedCitizen, MotionLeg, NamedCitizens,
-    NamedSave, Placement, PlacementError, PlacementRequest, PlacementStore, ResearchStore,
-    RoadError, RoadGraph, RoadRequest, RoadSegment, RoadStore, RouteCache, ServiceConsumer,
-    ServiceKind, ServiceReport, ServiceStore, ServiceTier, Settlement, SettlementError,
-    SettlementRequest, SettlementStore, TechTree, Trade, TradePool, TutorialInput, UtilityConsumer,
-    UtilityKind, UtilityReport, UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY,
-    DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY, MAX_LOANS, MAX_TOTAL_DEBT,
-    MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    advise, diff_selection, evaluate_tutorial, heatmap_grid, normalize_rotation, starter,
+    summarize, summarize_district, summarize_heatmap, AdvisorInput, AdvisorReport, Age, AgeState,
+    CitizenDeath, CitizenMotion, CitizenPosition, CityLayout, CityRuntime, CitySummary, CityTier,
+    ConstructionPhase, ConstructionSite, ConstructionStore, DistrictHeatmap, DistrictSummary,
+    Economy, Home, Household, IndustryKind, IndustryStore, InfrastructureCosts, LifecycleTick, Lot,
+    LotError, LotRequest, LotStore, MaterializationBudget, MaterializationSelection,
+    MaterializedCitizen, MotionLeg, NamedCitizens, NamedSave, Placement, PlacementError,
+    PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph, RoadRequest,
+    RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore,
+    ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree, Trade,
+    TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace,
+    Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY,
+    MAX_HEATMAP_CELLS, MAX_HEATMAP_CELL_M, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M,
+    MIN_HEATMAP_CELL_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -2573,6 +2574,105 @@ impl TownsmithCore {
             &GString::from(&format!("{:016x}", summary.checksum())),
         );
         result
+    }
+
+    /// Dense heatmap data for one circular district query.
+    ///
+    /// Read-only derived state: no save field and no checksum change. The
+    /// grid is row-major with at most 4096 cells. Lock order is
+    /// world -> construction -> population, matching `district_summary`.
+    #[func]
+    fn district_heatmap(
+        &self,
+        seed: i64,
+        center_x: f64,
+        center_z: f64,
+        radius_m: f64,
+        cell_m: f64,
+    ) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        let center = [center_x as f32, center_z as f32];
+        if !center.iter().all(|value| value.is_finite()) {
+            return placement_simple_error("invalid_center", "district center must be finite");
+        }
+        let max_radius_m = f64::from(MAX_WORLD_COORD_M);
+        if !radius_m.is_finite() || !(0.0..=max_radius_m).contains(&radius_m) {
+            return placement_simple_error(
+                "invalid_radius",
+                "district radius must be finite and within 0..=1,000,000 m",
+            );
+        }
+        let min_cell_m = f64::from(MIN_HEATMAP_CELL_M);
+        let max_cell_m = f64::from(MAX_HEATMAP_CELL_M);
+        if !cell_m.is_finite() || !(min_cell_m..=max_cell_m).contains(&cell_m) {
+            return placement_simple_error(
+                "invalid_cell_size",
+                format!(
+                    "district heatmap cell size must be finite and within {MIN_HEATMAP_CELL_M}..={MAX_HEATMAP_CELL_M} m"
+                ),
+            );
+        }
+        if heatmap_grid(radius_m as f32, cell_m as f32).is_none() {
+            return placement_simple_error(
+                "invalid_grid",
+                format!(
+                    "district heatmap grid exceeds {MAX_HEATMAP_CELLS} cells; increase cell_m or shrink the radius"
+                ),
+            );
+        }
+
+        let placements = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        if placements.as_ref().is_some_and(|store| store.seed != seed) {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the placement store belongs to a different seed",
+            );
+        }
+        let construction = self
+            .construction
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let population = self
+            .population
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if population
+            .as_ref()
+            .is_some_and(|runtime| runtime.seed != seed)
+        {
+            return placement_simple_error(
+                "seed_mismatch",
+                "the household runtime belongs to a different seed",
+            );
+        }
+
+        let empty_runtime = CityRuntime::new(seed);
+        let runtime = population.as_ref().unwrap_or(&empty_runtime);
+        let heatmap = match placements.as_ref() {
+            Some(store) => summarize_heatmap(
+                store,
+                &construction,
+                runtime,
+                center,
+                radius_m as f32,
+                cell_m as f32,
+            ),
+            None => {
+                let empty_store = PlacementStore::new(seed);
+                summarize_heatmap(
+                    &empty_store,
+                    &construction,
+                    runtime,
+                    center,
+                    radius_m as f32,
+                    cell_m as f32,
+                )
+            }
+        };
+        let payload = district_heatmap_payload(seed, &heatmap);
+        district_heatmap_payload_to_dictionary(&payload)
     }
 
     /// Return household records and the move-in policy.
@@ -8276,6 +8376,53 @@ fn movement_payload_to_dictionary(payload: &MovementPayload) -> VarDictionary {
     result
 }
 
+/// One district heatmap payload, copied from the read-only core grid.
+#[derive(Debug, Clone, PartialEq)]
+struct DistrictHeatmapPayload {
+    seed: u64,
+    heatmap: DistrictHeatmap,
+}
+
+fn district_heatmap_payload(seed: u64, heatmap: &DistrictHeatmap) -> DistrictHeatmapPayload {
+    DistrictHeatmapPayload {
+        seed,
+        heatmap: heatmap.clone(),
+    }
+}
+
+fn district_heatmap_payload_to_dictionary(payload: &DistrictHeatmapPayload) -> VarDictionary {
+    let heatmap = &payload.heatmap;
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set("seed", payload.seed as i64);
+    result.set("cell_m", f64::from(heatmap.cell_m));
+    result.set("cols", heatmap.cols as i64);
+    result.set("rows", heatmap.rows as i64);
+    result.set("center", &PackedFloat32Array::from(heatmap.center));
+    result.set("radius_m", f64::from(heatmap.radius_m));
+    let mut cells: Array<VarDictionary> = Array::new();
+    for cell in &heatmap.cells {
+        let mut item = VarDictionary::new();
+        item.set("x", f64::from(cell.x));
+        item.set("z", f64::from(cell.z));
+        item.set("population", cell.population as i64);
+        item.set("housing_capacity", cell.housing_capacity as i64);
+        item.set("jobs", cell.jobs as i64);
+        item.set("employed", cell.employed as i64);
+        item.set("happiness", f64::from(cell.happiness));
+        item.set("food", f64::from(cell.food));
+        item.set("water", f64::from(cell.water));
+        item.set("rest", f64::from(cell.rest));
+        cells.push(&item);
+    }
+    result.set("cells", &cells.to_variant());
+    result.set(
+        "checksum",
+        &GString::from(&format!("{:016x}", heatmap.checksum)),
+    );
+    result
+}
+
 struct RoadGraphCache {
     seed: u64,
     roads_checksum: u64,
@@ -9093,6 +9240,54 @@ mod tests {
                 PollOutcome::Disconnected => panic!("terrain workers disconnected"),
             }
         }
+    }
+
+    #[test]
+    fn district_heatmap_payload_copies_grid_and_checksum() {
+        let heatmap = DistrictHeatmap {
+            cell_m: 16.0,
+            cols: 2,
+            rows: 2,
+            center: [100.0, 200.0],
+            radius_m: 16.0,
+            cells: vec![
+                core_city::DistrictCell {
+                    x: 92.0,
+                    z: 192.0,
+                    population: 4,
+                    housing_capacity: 5,
+                    jobs: 3,
+                    employed: 2,
+                    happiness: 0.8,
+                    food: 0.9,
+                    water: 0.7,
+                    rest: 0.6,
+                },
+                core_city::DistrictCell {
+                    x: 108.0,
+                    z: 192.0,
+                    population: 0,
+                    housing_capacity: 0,
+                    jobs: 0,
+                    employed: 0,
+                    happiness: 0.0,
+                    food: 0.0,
+                    water: 0.0,
+                    rest: 0.0,
+                },
+            ],
+            checksum: 0x1234_5678_9abc_def0,
+        };
+        let payload = district_heatmap_payload(7, &heatmap);
+        assert_eq!(payload.seed, 7);
+        assert_eq!(payload.heatmap, heatmap);
+        assert_eq!(payload.heatmap.cells.len(), 2);
+        assert_eq!(payload.heatmap.checksum, 0x1234_5678_9abc_def0);
+        let empty = DistrictHeatmap::default();
+        let payload = district_heatmap_payload(7, &empty);
+        assert!(payload.heatmap.cells.is_empty());
+        assert_eq!(payload.heatmap.cols, 0);
+        assert_eq!(payload.heatmap.rows, 0);
     }
 
     #[test]
