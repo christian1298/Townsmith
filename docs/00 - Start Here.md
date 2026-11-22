@@ -47,7 +47,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with real 10 cm building detail is tractable. The box-city MultiMesh path is measured well above target on an RTX 4080; the target 3060-class run and voxel building LOD remain. See [[03 - Voxel and Scale]], [[23 - City Rendering Benchmark]], and [[09 - Open Questions]]. |
-| Next action | Run the Q-101 playtest ([[66 - Playtest Kit]]). Then: district policies and selectable settlement panels, the 1M render gate ([[08 - Roadmap]], [[09 - Open Questions]]), and client render integration for the multiplayer path. |
+| Next action | Run the Q-101 playtest ([[66 - Playtest Kit]]). Then: district policies and selectable settlement panels (the dashboard District section already supports `F6` camera/selection focus), the 1M render gate ([[08 - Roadmap]], [[09 - Open Questions]]), and client render integration for the multiplayer path. |
 
 ## Current capabilities
 
@@ -185,7 +185,7 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 1. Record the 30-minute slice playtest in [[66 - Playtest Kit]] (Q-101).
 2. Utility and service per-phase payment, then reconnect and interest filtering for multiplayer.
-3. District policies and selectable settlement panels.
+3. District policies and selectable settlement panels; the dashboard District section now supports `F6` camera/selection focus.
 4. Close the 1M render gate: real voxel/LOD city, 3060 baseline, fixed fixture, and Phase 5 evidence ([[68 - Metropolis Gate]]).
 5. Keep the runtime content registry and save references as the remaining modding step.
 

@@ -168,7 +168,7 @@ const TABLES := {
 
 		"base.ui.help.move": "WASD pan · Q/E rotate · wheel zoom · R rotate · X raise · Z lower · N found settlement",
 		"base.ui.help.edit": "LMB place · RMB select · Enter: enter selected building",
-		"base.ui.help.tools": "C crew · I industry · U utility · K services · B starter · T tax · L loan · Y research · F1 dashboard · F2 citizens · {follow} · F4 materialization · F7 heatmap · {clock} · V +10k · F5 save · F9 load",
+		"base.ui.help.tools": "C crew · I industry · U utility · K services · B starter · T tax · L loan · Y research · F1 dashboard · F2 citizens · {follow} · F4 materialization · F6 district focus · F7 heatmap · {clock} · V +10k · F5 save · F9 load",
 		"base.ui.help.clock": "F8 clock",
 		"base.ui.help.architect": "First-person view at the selected door · M / Esc returns to Mayor",
 
@@ -196,6 +196,10 @@ const TABLES := {
 		"base.ui.dashboard.body.district_jobs": "{jobs} jobs · {employed} employed",
 		"base.ui.dashboard.body.district_needs": "happiness {happiness} · {needs} · commute {commute} m",
 		"base.ui.dashboard.body.district_hint": "Within {radius} m of the camera target · completed buildings only",
+		"base.ui.dashboard.body.district_focus": "District focus: selected building",
+		"base.ui.dashboard.body.district_focus_hint": "Within {radius} m of the selected building · completed buildings only",
+		"base.ui.dashboard.body.district_focus_action_selection": "F6: focus the selected building",
+		"base.ui.dashboard.body.district_focus_action_camera": "F6: back to camera focus",
 		"base.ui.dashboard.body.district_unavailable": "District data unavailable.",
 		"base.ui.dashboard.body.citizens_near": "Citizens near: {active} active · {detailed} detailed",
 		"base.ui.dashboard.body.age_final": "{age} · final age",
@@ -419,7 +423,7 @@ const TABLES := {
 
 		"base.ui.help.move": "WASD: schwenken · Q/E: drehen · Mausrad: zoomen · R: drehen · X: anheben · Z: absenken · N: Siedlung gründen",
 		"base.ui.help.edit": "LMB: platzieren · RMB: auswählen · Enter: ausgewähltes Gebäude betreten",
-		"base.ui.help.tools": "C: Crew · I: Industrie · U: Versorgung · K: Dienste · B: Startpaket · T: Steuern · L: Kredit · Y: Forschung · F1: Dashboard · F2: Bürger · {follow} · F4: Materialisierung · F7: Heatmap · {clock} · V: +10k · F5: speichern · F9: laden",
+		"base.ui.help.tools": "C: Crew · I: Industrie · U: Versorgung · K: Dienste · B: Startpaket · T: Steuern · L: Kredit · Y: Forschung · F1: Dashboard · F2: Bürger · {follow} · F4: Materialisierung · F6: Stadtteilfokus · F7: Heatmap · {clock} · V: +10k · F5: speichern · F9: laden",
 		"base.ui.help.clock": "F8: Uhr",
 		"base.ui.help.architect": "Ego-Ansicht an der ausgewählten Tür · M / Esc kehrt zum Bürgermeistermodus zurück",
 
@@ -447,6 +451,10 @@ const TABLES := {
 		"base.ui.dashboard.body.district_jobs": "{jobs} Arbeitsplätze · {employed} beschäftigt",
 		"base.ui.dashboard.body.district_needs": "Zufriedenheit {happiness} · {needs} · Arbeitsweg {commute} m",
 		"base.ui.dashboard.body.district_hint": "Im Umkreis von {radius} m um das Kameraziel · nur fertige Gebäude",
+		"base.ui.dashboard.body.district_focus": "Stadtteilfokus: ausgewähltes Gebäude",
+		"base.ui.dashboard.body.district_focus_hint": "Im Umkreis von {radius} m um das ausgewählte Gebäude · nur fertige Gebäude",
+		"base.ui.dashboard.body.district_focus_action_selection": "F6: ausgewähltes Gebäude fokussieren",
+		"base.ui.dashboard.body.district_focus_action_camera": "F6: zurück zum Kamera-Fokus",
 		"base.ui.dashboard.body.district_unavailable": "Stadtteildaten nicht verfügbar.",
 		"base.ui.dashboard.body.citizens_near": "Bürger in der Nähe: {active} aktiv · {detailed} detailliert",
 		"base.ui.dashboard.body.age_final": "{age} · letztes Zeitalter",

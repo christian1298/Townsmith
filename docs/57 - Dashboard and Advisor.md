@@ -24,19 +24,20 @@ In:
 - a pure `core_city::advisor` module with stable message codes, severity, title, detail, and named params;
 - rules for food, water, power, jobs, vacancies, happiness, commute, roads, construction, debt, and bankruptcy;
 - a `City Dashboard` overlay with population, district, work, wellbeing, services, treasury, industry, roads, and construction sections;
-- a District section that queries `district_summary` around the Mayor camera target with a 256 m radius once per dashboard rebuild;
+- a District section that queries `district_summary` around the Mayor camera target or the selected building with a 256 m radius once per dashboard rebuild;
+- an `F6` District focus toggle: camera focus by default, selection focus when a building is selected, with the selected placement's centre as the query centre and an F6 return action;
 - an `F7` district heatmap overlay that queries `district_heatmap` at 512 m / 32 m around the same focus, renders up to 1,024 pooled cells, and shows a localized status/legend line;
 - `F1` toggles the dashboard; `Esc` closes it; entering Architect Mode closes it;
-- a world-scene smoke that checks the advisor warning, dashboard text, district values and labels, localized advisor titles, and the heatmap grid/instance/teardown contract;
-- markers `dashboard=ok`, `district_ui=ok`, and `heatmap_ui=ok`, enforced by `scripts/smoke_world_scene.sh`.
+- a world-scene smoke that checks the advisor warning, dashboard text, district values and labels, the camera/selection focus toggle, localized advisor titles, and the heatmap grid/instance/teardown contract;
+- markers `dashboard=ok`, `district_ui=ok`, `district_select=ok`, and `heatmap_ui=ok`, enforced by `scripts/smoke_world_scene.sh`.
 
 Out:
 
-- standalone district or per-settlement panels (the dashboard has one city-level District section);
+- standalone district or per-settlement panels (the dashboard has one city-level District section with camera/selection focus);
 - clickable advice that selects or centres a building;
 - acknowledged, dismissed, or persisted notifications;
 - charts, history, trend lines, or time-series;
-- new UI strings added after the current 226-key world table and 34-key content table; developer-only debug text stays English;
+- a new dashboard panel or window; the focus controls live inside the existing District section (four strings were added to the 230-key world table); developer-only debug text stays English;
 - automated pause, advisor actions, or policy changes;
 - per-citizen or per-household advice.
 
@@ -158,7 +159,7 @@ Advisor
 ▲ The city is running a deficit — Raise taxes, borrow deliberately, or wait...
 ```
 
-The District section is local, not city-wide: it uses the Mayor camera target as the centre (`_district_center_xz`) and the fixed `DISTRICT_RADIUS_M` of 256 m. It shows resident count, housing capacity and vacancies, jobs and employed residents, population-weighted happiness and food/water/rest needs, and average commute. Counts use `WorldI18n.format_int`; percentages and metres use `format_float`. An empty district renders `—` for happiness and needs instead of a misleading `0%`. When `district_summary` returns `ok=false` (invalid radius, seed mismatch, or a missing store) the section shows the localized `base.ui.dashboard.body.district_unavailable` line; the UI does not log or retry, so a bad query cannot spam the error stream on every 2 Hz refresh.
+The District section is local, not city-wide: by default it uses the Mayor camera target as the centre (`_district_center_xz`) and the fixed `DISTRICT_RADIUS_M` of 256 m. With a building selected, `F6` switches the section to **Selection focus**: the centre becomes that placement's `center` XZ, a localized `District focus: selected building` lineage line is added, the radius hint names the selected building, and `F6: back to camera focus` is shown. A second `F6` returns to camera focus. `F6` with nothing selected does not switch focus; it only shows the existing localized select-a-building hint. Clearing the selection (a right-click miss, load, or clear placements) resets the focus to the camera, and a missing or malformed placement also falls back to the camera instead of querying a stale centre. `Esc` is deliberately unchanged: it keeps its existing precedence (stop follow, close the citizen panel, close the dashboard, cancel lot/road mode, clear the modal) and never toggles District focus. It shows resident count, housing capacity and vacancies, jobs and employed residents, population-weighted happiness and food/water/rest needs, and average commute. Counts use `WorldI18n.format_int`; percentages and metres use `format_float`. An empty district renders `—` for happiness and needs instead of a misleading `0%`. When `district_summary` returns `ok=false` (invalid radius, seed mismatch, or a missing store) the section shows the localized `base.ui.dashboard.body.district_unavailable` line plus the focus action when a building is selected; the UI does not log or retry, so a bad query cannot spam the error stream on every 2 Hz refresh.
 
 Colors: critical red, warning amber, info green. `Esc` closes the panel before other modes; entering Architect Mode closes it. While the panel is visible, `_process` drives a refresh accumulator and rebuilds the panel at most every `0.5` s (2 Hz); opening still refreshes immediately, and closing resets the accumulator so a reopen is never stale. This keeps a world HUD update from triggering the full snapshot plus advisor while the panel is visible. A closed dashboard adds no snapshot cost. The advisor is still computed on demand by `city_advisor` on each refresh and is not cached, so dashboard advice can trail the HUD by up to about `0.5` s.
 
@@ -185,16 +186,19 @@ Colors: critical red, warning amber, info green. `Esc` closes the panel before o
 - `district_summary` around the fixture house at a 256 m radius reports `ok`, population 2, jobs 2, a matching `radius_m`, and finite/non-negative values;
 - the District section renders in EN (`District`, `Within 256 m of the camera target`) and DE (`Stadtteil`, `Im Umkreis von 256 m`), contains the fixture population/jobs values, and falls back to the localized unavailable line;
 - world, population, and construction checksums are unchanged by the district query;
+- `F6` starts in camera focus, switches to selection focus for the fixture building, and the query centre then equals the placement centre with the same population/jobs;
+- the EN and DE focus lineage, selected-building hint, and camera-return action render, and a second `F6` restores the camera centre and camera hint;
+- clearing the selection while in selection focus returns the query to the camera centre, and the world/population/construction checksums still match;
 - `F7` starts hidden (zero `DistrictHeatmap` children), opens with no error, and returns a 32 × 32 grid with 1,024 cells, a 512 m radius, and 32 m cells;
 - the nonzero cell count equals `heatmap_cells`, the peak matches the bridge cells, the single pooled `DistrictHeatmapPool` node reports the same `visible_instance_count`, the pool stays at or below 1,024 instances, and the checksum is 16 hex characters and repeatable;
 - the HUD shows the EN and DE on/off status, the legend, the `F7` help text, and the localized empty line when the fixture has no populated cell;
 - a second `F7` frees the pool and caches and returns the root to zero children;
-- markers include `dashboard=ok`, `district_ui=ok`, and `heatmap_ui=ok`; the script requires all three.
+- markers include `dashboard=ok`, `district_ui=ok`, `district_select=ok`, and `heatmap_ui=ok`; the script requires all four.
 
 Final marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok trades=ok render=ok structure=ok age=ok research=ok starter=ok named=ok occupancy=ok industry=ok utilities=ok services=ok economy=ok dashboard=ok district_ui=ok heatmap_ui=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok trades=ok render=ok structure=ok age=ok research=ok starter=ok named=ok occupancy=ok industry=ok utilities=ok services=ok economy=ok dashboard=ok district_ui=ok district_select=ok heatmap_ui=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
 ## 7. Tests
@@ -207,7 +211,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 
 ## 8. Limits
 
-- Advisor advice is city-wide; the dashboard District section is read-only and camera-centred (256 m), not a selectable settlement/district panel. No building drill-down from advice.
+- Advisor advice is city-wide; the dashboard District section is read-only and camera- or selection-centred (256 m), not a selectable settlement/district panel. It follows the selected building but does not persist the focus choice or follow a moving citizen. No building drill-down from advice.
 - The heatmap is camera/selection-centred (`_materialization_center`, 512 m), read-only, and does not aggregate cohorts, settlements, or off-screen districts. It draws one density metric (population) and only nonzero cells; needs, jobs, and happiness are in the bridge payload but not rendered yet. The F7 overlay, status line, legend, and unavailable/empty text are localized and pooled through one `MultiMesh`.
 - Thresholds are fixed; no difficulty, policy, or player preference.
 - Advice is not persisted, acknowledged, or suppressed.
@@ -224,4 +228,4 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 2. Make advice clickable to select the relevant building or district.
 3. Add persisted acknowledgement and a notification history.
 4. Finish number formatting, remaining content names, and error-code display.
-5. Add selectable district/settlement panels with per-settlement budgets and policies; the current District section is a camera-centred preview and the F7 overlay is a single-metric heatmap.
+5. Add selectable district/settlement panels with per-settlement budgets and policies; the current District section now has camera and selection focus but is not a settlement panel.
