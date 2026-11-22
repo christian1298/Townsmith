@@ -238,6 +238,10 @@ cargo run --release -p townsmith-bench --bin streaming_scale -- --smoke
 # 1M cohort tick microbenchmark
 cargo run --release -p townsmith-bench --bin cohort
 
+# 1M cohort gate harness (cohort_1m_v1: 10k cohorts, 3,600 ticks, 2k agents)
+cargo run --release -p townsmith-bench --bin cohort_1m -- --smoke
+cargo run --release -p townsmith-bench --bin cohort_1m -- --runs 3
+
 # Cohort vs individual / time-step validation
 cargo run --release -p townsmith-bench --bin cohort_validate -- --smoke
 

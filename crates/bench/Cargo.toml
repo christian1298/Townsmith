@@ -42,3 +42,7 @@ core_city.workspace = true
 core_rooms.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[[bin]]
+name = "cohort_1m"
+path = "src/bin/cohort_1m.rs"

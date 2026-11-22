@@ -589,6 +589,59 @@ Checksum **`a00cc463d7cb9e72`** (stable across runs; moved from `f265539bcb8804f
 
 This proves framing, deterministic command responses, dev role gating, atomic single-world persistence, and the bounded 64-road interest view. It does **not** measure 1M server ticks, network latency/loss, authentication, AOI entity streaming, reconnect, delta snapshots, multiple sessions, or content-manifest enforcement, and it is not §8 gate evidence.
 
+### 7.11 1M cohort gate harness (`cohort_1m_v1`)
+
+`cargo run --release -p townsmith-bench --bin cohort_1m -- --runs 3` runs the headless `cohort_1m_v1` scene and prints one §6.3-shaped JSON. It fills the §8.2 #10–#12 fields this scene can measure. It is **not** the render gate.
+
+```bash
+# Two-run determinism smoke: 1,000 cohorts / 100,000 citizens / 60 ticks
+cargo run --release -p townsmith-bench --bin cohort_1m -- --smoke
+
+# Full scene, docs/68 §6.2 three-run protocol (default --runs 3)
+cargo run --release -p townsmith-bench --bin cohort_1m -- --runs 3 > /tmp/cohort_1m_v1.json
+
+# Optional evaluator pass
+python3 scripts/check_metropolis_gate.py --scene cohort_1m_v1 --result /tmp/cohort_1m_v1.json
+```
+
+Fixture: **10,000 cohorts × 100 citizens = 1,000,000 population** across **128 districts** with fixed, seed-derived service profiles; **2,000 active agents** split **1,000 sparse (128 m)** and **1,000 dense (32 m)** with ten 10 Hz agent steps inside every 1 Hz city tick; seed `0x0043_4F48_4F52_5431`; 10 discarded warm-up ticks, then **3,600 measured 1 Hz ticks** with no sleeps and no render work. The checksum covers the seed, scene shape, district services, every cohort, and both agent worlds after the final tick. `--cohorts N`, `--ticks N`, and `--runs N` override the scene size; `--runs` is 1–9.
+
+Measured on a developer machine (**Ryzen 9 7950X, 16c/32t, 30.42 GiB, CachyOS**, release build; **not** the §3.1 8c/16t reference rig), one three-run set:
+
+| Metric | Result |
+|---|---:|
+| Population / employed | 1,000,000 / 865,946 |
+| Districts / active agents | 128 / 2,000 (1,000 sparse + 1,000 dense) |
+| Checksum, all three runs | **`bb42539220e4c6a6`** |
+| Tick p99, selected run | **3.5638 ms** (runs 3.6181 / 3.5244 / 3.5638) |
+| Cohort step p99 | **0.2839 ms** |
+| Active agents p99 | **3.3255 ms** |
+| Tick p95 / max | 3.0365 / 4.2498 ms |
+| Sim CPU per wall-clock second | **3.5638 ms** |
+| Peak RSS | 4.42 MiB |
+| Selected-run wall time | 8,401 ms |
+| Cohort-state round trip | 440,000 B, encode 0.0597 ms / decode 0.0531 ms, exact |
+
+The smoke repeats the scene twice and pins **`0386e0be4d0b7f9b`**; it fails on any checksum or population drift. The 3-run report selects the upper-middle tick p99. Spread for this set was 2.63%; repeat sets on the same shared host measured 0.86–18.97%, so single-set spread is host noise, not a deterministic property, and the evaluator does not gate on it for this scene.
+
+The evaluator passes every recorded simulation check and then reports **`insufficient`**, because the harness has no full world save, pathfinding, traffic, or network loop:
+
+```text
+METROPOLIS_GATE_CHECK ... check=cohort_tick_ms_p99 status=pass value=0.2839 threshold="<=10" source=docs/68:8.2#10
+METROPOLIS_GATE_CHECK ... check=full_tick_ms_p99 status=pass value=3.5638 threshold="<=50" source=docs/68:8.2#10
+METROPOLIS_GATE_CHECK ... check=active_agents_ms_p99 status=pass value=3.3255 threshold="<=10" source=docs/68:8.2#11
+METROPOLIS_GATE_CHECK ... check=sim_cpu_ms_per_s status=pass value=3.5638 threshold="<=250" source=docs/68:8.2#12
+METROPOLIS_GATE_CHECK ... check=server_rss_mb_peak status=pass value=4.42 threshold="<=4096" source=docs/68:5.3
+METROPOLIS_GATE_CHECK ... check=save_ms status=missing value=- detail="required numeric field missing"
+METROPOLIS_GATE_CHECK ... check=save_size status=missing value=- detail="save size in MB or bytes (provenance only)"
+METROPOLIS_GATE status=insufficient scenes=1 checks=17 failed=0 hardware_match=true
+```
+
+Exit status is 2. That is the honest result: §8.2 #13–#15 and the world-save part of #19 are not measured. Temporary local fixtures (not committed) confirm the evaluator still distinguishes all three outcomes: injecting plausible save/load/pathfinding/traffic/network fields yields `status=pass` (24 checks); setting `cohort_tick_ms_p99` to 12 ms yields `status=fail failed=1`; deleting `full_tick_ms_p99` and `save_ms` yields `status=insufficient`.
+
+> [!warning] Not the render gate
+> This measures only the headless cohort + active-agent CPU path. It has no renderer, GPU, world, buildings, construction, economy, traffic, pathfinding, network, or full 1M world save. `full_tick_ms_p99` is the whole 1 Hz tick **this scene** runs (cohort step + ten agent steps), a conservative superset of the cohort step but not the §5.3 district/building/economy pipeline; `server_rss_mb_peak` is this single process's peak RSS, not the `townsmith-server` crate. It does not close G-01, G-03, G-04, G-05, G-07, or G-08, and it is not §8 gate evidence.
+
 ## 8. Pass/fail decision rules
 
 ### 8.1 Validity first
