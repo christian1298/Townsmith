@@ -207,6 +207,9 @@ impl ClientCommand {
 pub enum TimeAction {
     Pause,
     Resume,
+    /// Advance exactly one game day; the authority executor supports this,
+    /// the transport-only session treats it as one command tick.
+    Step,
     #[serde(rename = "speed_1x")]
     Speed1x,
     #[serde(rename = "speed_2x")]
@@ -605,6 +608,7 @@ impl Session {
                         self.paused = false;
                         self.speed = 1;
                     }
+                    TimeAction::Step => {}
                     TimeAction::Speed1x => {
                         self.paused = false;
                         self.speed = 1;
@@ -777,7 +781,7 @@ fn run_loopback_client(address: SocketAddr) -> io::Result<()> {
     Ok(())
 }
 
-fn configure_stream(stream: &TcpStream) -> io::Result<()> {
+pub(crate) fn configure_stream(stream: &TcpStream) -> io::Result<()> {
     stream.set_read_timeout(Some(SESSION_IO_TIMEOUT))?;
     stream.set_write_timeout(Some(SESSION_IO_TIMEOUT))?;
     stream.set_nodelay(true)?;
@@ -788,7 +792,7 @@ fn unexpected(expected: &str, actual: &ServerMessage) -> io::Error {
     io::Error::other(format!("loopback expected {expected}, received {actual:?}"))
 }
 
-fn frame_to_io(error: FrameError) -> io::Error {
+pub(crate) fn frame_to_io(error: FrameError) -> io::Error {
     io::Error::other(error.to_string())
 }
 

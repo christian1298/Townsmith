@@ -304,8 +304,10 @@ cargo run --release -p townsmith-bench --bin rooms
 # Headless server tick harness (no GPU, no socket yet)
 cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
 
-# Protocol v0 loopback smoke (length-prefixed JSON over TCP)
+# Protocol v0 + authoritative executor loopback smoke (length-prefixed JSON over TCP)
 cargo run --release -p townsmith-server -- --loopback-smoke
+# Prints SERVER_PROTOCOL and SERVER_AUTHORITY status lines; deterministic, no sleeps
+cargo test -p townsmith-server
 
 # 3-run core benchmark summary
 ./scripts/bench_core.sh
