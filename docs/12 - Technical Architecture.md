@@ -542,3 +542,5 @@ The `bench` crate loads the scene, applies settings, runs the fixed route, sampl
 - **Q-097–Q-100:** Basement scope/depth/groundwater, underground parking, tunnels.
 
 See [[09 - Open Questions]] and [[10 - Decisions]].
+
+Time-control votes live in `crates/server/src/vote.rs`; the pure state machine is deterministic and the world applies a passed pause/resume once. Protocol framing/authority remain in `protocol.rs`/`world.rs`.

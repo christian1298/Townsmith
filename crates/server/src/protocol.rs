@@ -75,6 +75,10 @@ pub mod codes {
     pub const ROAD_EMPTY: &str = "road.empty";
     pub const ROAD_OUT_OF_BOUNDS: &str = "road.out_of_bounds";
     pub const ROAD_TOO_LONG: &str = "road.too_long";
+
+    // Time votes. The state-machine codes live in `vote::codes`; this one is
+    // specific to the transport-only session, which has no vote state.
+    pub const VOTE_UNAVAILABLE: &str = "vote.unavailable";
 }
 
 /// A framing or JSON failure. `code()` is stable for logs and tests.
@@ -177,6 +181,16 @@ pub enum ClientCommand {
     TimeControl {
         action: TimeAction,
     },
+    /// D-021 multiplayer time vote: call, cast yes/no, or cancel.
+    ///
+    /// `time` is required for [`VoteAction::Call`] and rejected for the other
+    /// actions. `cancel` requires the admin role; `call`/`yes`/`no` are open to
+    /// every role because `time.vote` defaults to all players. The vote rules
+    /// live in [`crate::vote`].
+    TimeVote {
+        action: VoteAction,
+        time: Option<TimeAction>,
+    },
     SetTax {
         resident_rate: u16,
         business_rate: u16,
@@ -194,6 +208,7 @@ impl ClientCommand {
             ClientCommand::Hello { .. } => "hello",
             ClientCommand::Ping { .. } => "ping",
             ClientCommand::TimeControl { .. } => "time_control",
+            ClientCommand::TimeVote { .. } => "time_vote",
             ClientCommand::SetTax { .. } => "set_tax",
             ClientCommand::PlaceRoad { .. } => "place_road",
             ClientCommand::Disconnect => "disconnect",
@@ -218,6 +233,20 @@ pub enum TimeAction {
     Speed4x,
 }
 
+/// Vote actions for [`ClientCommand::TimeVote`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoteAction {
+    /// Start a vote for the `time` target (pause/resume in v0).
+    Call,
+    /// Vote yes.
+    Yes,
+    /// Vote no.
+    No,
+    /// Admin-only cancel.
+    Cancel,
+}
+
 /// Messages the authoritative server sends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -239,6 +268,25 @@ pub enum ServerMessage {
     Reject {
         code: String,
         message: String,
+    },
+    /// Vote snapshot/status, sent after every accepted vote command.
+    ///
+    /// `online` is the roster snapshot at vote start (the denominator), `clock`
+    /// is the server clock in seconds, and `checksum` is the vote-state golden.
+    TimeVoteStatus {
+        vote_id: u64,
+        state: String,
+        action: Option<String>,
+        initiator: String,
+        yes: u32,
+        no: u32,
+        online: u32,
+        started_tick: u64,
+        ends_tick: u64,
+        cooldown_until: u64,
+        paused: bool,
+        clock: u64,
+        checksum: String,
     },
     Goodbye,
 }
@@ -349,6 +397,7 @@ pub fn decode_client_command(payload: &[u8]) -> Result<ClientCommand, Rejection>
         "hello",
         "ping",
         "time_control",
+        "time_vote",
         "set_tax",
         "place_road",
         "disconnect",
@@ -625,6 +674,10 @@ impl Session {
                 self.tick = self.tick.saturating_add(1);
                 vec![self.snapshot()]
             }
+            ClientCommand::TimeVote { .. } => reject(
+                codes::VOTE_UNAVAILABLE,
+                "time votes require the authoritative executor, not the transport-only session",
+            ),
             ClientCommand::SetTax {
                 resident_rate,
                 business_rate,
