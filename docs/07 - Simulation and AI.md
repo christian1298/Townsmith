@@ -128,7 +128,23 @@ A city of 1M people does not need to know that citizen #481,222 is 3% hungrier t
 > | Name | 1–64 trimmed characters, no control characters; trimmed on create/update |
 > | Blueprint allowlist | at most 256 entries matching `^[a-z0-9_]+:[a-z0-9_./-]+$` |
 >
-> Circles include their radius. Overlaps are allowed and reported by a query helper rather than rejected; `policy_at(point)` deterministically returns the smallest containing id. Format v1 JSON validates the version, seed, `next_id`, record ids, and every field, and carries an FNV-1a checksum for bridge payloads and regression tests. Composition into the save, overlap priority, and the actual tax/funding/construction/allowlist effects need a later ADR.
+> Circles include their radius. Overlaps are allowed and reported by a query helper rather than rejected; `policy_at(point)` deterministically returns the smallest containing id. Format v1 JSON validates the version, seed, `next_id`, record ids, and every field, and carries an FNV-1a checksum for bridge payloads and regression tests. Composition into the save, overlap priority beyond smallest-id, and wiring the derived effects into simulation or economy need a later ADR.
+
+> [!info] District policy effects (derived, data only)
+> `core_city::policy_effect` adds a **derived** layer over the registry. `DistrictPolicyStore::effective_policy(point)` names the policy that applies at an XZ point; `effect_at(point, base_resident, base_business)` resolves it into a `DistrictPolicyEffect`. The effect carries the policy id and name, `tax_multiplier`, `service_funding`, `construction_allowed`, a copy of the blueprint allowlist, the clamped base rates, and the two scaled per-day rates.
+>
+> ```text
+> let effect = store.effect_at(point, 8.0, 4.0)?;
+> effect.resident_tax_rate_per_day;      // clamped base * tax_multiplier
+> effect.resident_tax_rate(other_base);  // same rule for another base
+> effect.blueprint_allowed("base:cottage");
+> ```
+>
+> - **Resolution:** the existing smallest-id rule. Overlapping circles use the oldest (smallest) policy id, not the nearest centre or the smallest circle. A point outside every circle, or a non-finite point, returns `None`.
+> - **Base rates:** clamped into `0..=100` per game day, matching `Economy::set_taxes`; a non-finite base becomes `0`, a negative base becomes `0`. `apply_multiplier` and `clamp_base_rate` are public pure helpers.
+> - **Guarantees:** results are finite and non-negative. No rounding, floor, ceil, or quantization is applied; the caller chooses the rounding point (per household, per tick, or per day).
+> - **Allowlist:** an empty set is unrestricted; otherwise only exact, case-sensitive ids match. `construction_allowed` is passed through as data.
+> - **Limits:** this is a pure query layer. No simulation, cohort, household, traffic, construction, treasury, or economy code reads an effect; no UI or bridge call exposes one; effects are not serialized, add no policy or save field, and leave the world-save checksum unchanged. Applying the values to taxes, upkeep, construction gating, or placement still needs a later ADR.
 
 Think of it like traffic: you do not simulate every car's engine to know that a highway is congested. You track how many cars are in each speed band and move them between bands. Cohorts do the same for people and needs.
 
