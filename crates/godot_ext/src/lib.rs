@@ -26,18 +26,18 @@ use core_blueprint::{
     load_tsbp, save_tsbp_with_hash, Blueprint, BlueprintError, BlueprintMetadata, BlueprintStats,
     PropRecord, RoomRecord,
 };
-use core_city::named::{age_years_from_days, slot_is_employed};
+use core_city::named::{age_years_from_days, slot_is_employed, MAX_AGE_DAYS};
 use core_city::{
     advise, diff_selection, evaluate_tutorial, normalize_rotation, starter, summarize,
     AdvisorInput, AdvisorReport, Age, AgeState, CityLayout, CityRuntime, CitySummary, CityTier,
     ConstructionSite, ConstructionStore, Economy, Home, Household, IndustryKind, IndustryStore,
-    Lot, LotError, LotRequest, LotStore, MaterializationBudget, MaterializationSelection,
-    MaterializedCitizen, NamedCitizens, NamedSave, Placement, PlacementError, PlacementRequest,
-    PlacementStore, ResearchStore, RoadError, RoadGraph, RoadRequest, RoadSegment, RoadStore,
-    ServiceConsumer, ServiceKind, ServiceReport, ServiceStore, ServiceTier, Settlement,
-    SettlementError, SettlementRequest, SettlementStore, TechTree, Trade, TradePool, TutorialInput,
-    UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
-    DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT,
+    LifecycleTick, Lot, LotError, LotRequest, LotStore, MaterializationBudget,
+    MaterializationSelection, MaterializedCitizen, NamedCitizens, NamedSave, Placement,
+    PlacementError, PlacementRequest, PlacementStore, ResearchStore, RoadError, RoadGraph,
+    RoadRequest, RoadSegment, RoadStore, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore,
+    ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree, Trade,
+    TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace,
+    Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, MAX_LOANS, MAX_TOTAL_DEBT,
     MAX_WORLD_COORD_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
@@ -2457,6 +2457,62 @@ impl TownsmithCore {
         result.set("placement_id", placement_id as i64);
         result.set("count", citizens.len() as i64);
         result.set("citizens", &citizens.to_variant());
+        result
+    }
+
+    /// Advance the named pool by whole simulated days and report aging/death.
+    ///
+    /// `days` must be finite and within `0..=MAX_AGE_DAYS` (36,500). The core
+    /// floors it to whole days, so a sub-day value is a no-op. Only the named
+    /// pool is touched: households, population, and the save state are
+    /// unchanged, and applying deaths to household residents is a caller
+    /// concern.
+    ///
+    /// Returns `{ok, seed, aged, died, count, average_age_days,
+    /// oldest_age_days, checksum}`. `aged` counts every citizen that received
+    /// the advance, including citizens removed in the same tick; `died` counts
+    /// the removals.
+    #[func]
+    fn named_lifecycle_tick(&self, seed: i64, days: f64) -> VarDictionary {
+        let Ok(seed) = u64::try_from(seed) else {
+            return placement_simple_error("invalid_seed", "world seed must be non-negative");
+        };
+        {
+            let world = self.world.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(store) = world.as_ref() {
+                if store.seed != seed {
+                    return placement_simple_error(
+                        "seed_mismatch",
+                        "the placement store belongs to a different seed",
+                    );
+                }
+            }
+        }
+        let max_days = f64::from(MAX_AGE_DAYS);
+        if !days.is_finite() || !(0.0..=max_days).contains(&days) {
+            return placement_simple_error(
+                "invalid_days",
+                "days must be finite and within 0..=36500",
+            );
+        }
+        let mut named = self.named.lock().unwrap_or_else(|error| error.into_inner());
+        if named.as_ref().is_some_and(|named| named.seed != seed) {
+            *named = None;
+        }
+        let pool = named.get_or_insert_with(|| NamedCitizens::new(seed));
+        let outcome = tick_named_lifecycle(pool, days);
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        result.set("seed", seed as i64);
+        result.set("aged", outcome.tick.aged as i64);
+        result.set("died", outcome.tick.died as i64);
+        result.set("count", outcome.count as i64);
+        result.set("average_age_days", i64::from(outcome.average_age_days));
+        result.set("oldest_age_days", i64::from(outcome.oldest_age_days));
+        result.set(
+            "checksum",
+            &GString::from(&format!("{:016x}", outcome.checksum)),
+        );
         result
     }
 
@@ -7229,6 +7285,25 @@ fn named_pool_for_save(
     Ok(Some(pool))
 }
 
+struct NamedLifecycleOutcome {
+    tick: LifecycleTick,
+    count: usize,
+    average_age_days: u32,
+    oldest_age_days: u32,
+    checksum: u64,
+}
+
+fn tick_named_lifecycle(pool: &mut NamedCitizens, days: f64) -> NamedLifecycleOutcome {
+    let tick = pool.tick_lifecycle(days);
+    NamedLifecycleOutcome {
+        tick,
+        count: pool.len(),
+        average_age_days: pool.average_age_days(),
+        oldest_age_days: pool.oldest_age_days().unwrap_or(0),
+        checksum: pool.checksum(),
+    }
+}
+
 struct MaterializationPayload {
     seed: u64,
     center: [f32; 2],
@@ -8892,6 +8967,36 @@ mod tests {
             core_city::name_for(payload.active[0].id)
         );
         assert_eq!(&payload.detailed[..], &payload.active[..]);
+    }
+
+    #[test]
+    fn named_lifecycle_tick_ages_and_reaps_at_the_limit() {
+        let mut pool = NamedCitizens::new(2026);
+        for slot in 0..2_u32 {
+            let id = core_city::citizen_id(2026, 1, slot);
+            pool.citizens.insert(
+                (1, slot),
+                core_city::NamedCitizen {
+                    id,
+                    placement_id: 1,
+                    slot,
+                    name: core_city::name_for(id),
+                    age_days: if slot == 0 {
+                        core_city::MAX_AGE_DAYS - 5
+                    } else {
+                        40 * 365
+                    },
+                },
+            );
+        }
+        let before = pool.checksum();
+        let outcome = tick_named_lifecycle(&mut pool, 10.0);
+        assert_eq!(outcome.tick.aged, 2);
+        assert_eq!(outcome.tick.died, 1);
+        assert_eq!(outcome.count, 1);
+        assert_eq!(outcome.average_age_days, 40 * 365 + 10);
+        assert_eq!(outcome.oldest_age_days, 40 * 365 + 10);
+        assert_ne!(outcome.checksum, before);
     }
 
     #[test]
