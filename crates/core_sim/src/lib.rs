@@ -9,6 +9,7 @@ pub mod active;
 pub mod cohort;
 pub mod district;
 pub mod sim;
+pub mod summary;
 
 pub use active::{
     ActiveAgent, ActiveAgentSim, NeighborStats, Pcg32, SpatialHash, ARRIVAL_RADIUS,
@@ -18,3 +19,6 @@ pub use active::{
 pub use cohort::{Cohort, Need, NEED_COUNT};
 pub use district::DistrictServices;
 pub use sim::{CohortSimulation, SimError};
+pub use summary::{
+    DistrictCohortSummary, NeedBands, NEED_CONTENT_THRESHOLD, NEED_CRITICAL_THRESHOLD,
+};
