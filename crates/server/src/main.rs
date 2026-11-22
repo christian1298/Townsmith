@@ -15,21 +15,18 @@ use townsmith_server::protocol::{run_loopback_smoke, LOOPBACK_SEED};
 use townsmith_server::save::LoadedWorld;
 use townsmith_server::world::{run_authority_loopback, ServerWorld};
 
-fn parse_arg(name: &str, default: usize) -> usize {
-    let args: Vec<String> = std::env::args().collect();
-    args.iter()
-        .position(|arg| arg == name)
-        .and_then(|index| args.get(index + 1))
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
-}
-
 fn arg_value(name: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
     args.iter()
         .position(|arg| arg == name)
         .and_then(|index| args.get(index + 1))
         .cloned()
+}
+
+fn parse_arg(name: &str, default: usize) -> usize {
+    arg_value(name)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
 }
 
 fn has_flag(name: &str) -> bool {
@@ -44,6 +41,8 @@ fn percentile(samples: &[f64], fraction: f64) -> f64 {
     samples[index]
 }
 
+/// Serve protocol v0 sessions sequentially on the IPv4 loopback interface
+/// until the process is stopped. v0 is single-connection-at-a-time by design.
 fn main() {
     if has_flag("--loopback-smoke") {
         match run_loopback_smoke() {
