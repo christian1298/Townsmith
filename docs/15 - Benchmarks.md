@@ -332,13 +332,59 @@ townsmith-bench --server \
 - Store JSON, CSV, screenshots, and logs as CI artifacts.
 - Nightly run with longer routes and more repetitions.
 
-### Compare tool
+### Benchmark comparator (CI v0)
+
+`scripts/compare_bench.py` compares a committed baseline with a fresh result. It is Python 3 stdlib only and needs no Godot or Rust build. A thin wrapper, `scripts/bench_compare.sh`, runs the default city-loop comparison with no arguments.
+
+```bash
+# Committed city-loop matrix vs a fresh bench_city_loop.sh result
+./scripts/bench_city_loop.sh
+./scripts/compare_bench.py \
+  --baseline benchmarks/baselines/phase3_city_loop.json \
+  --candidate benchmarks/results/phase3_city_loop_matrix.json
+
+# Same comparison, shorter
+./scripts/bench_compare.sh
+```
+
+- **Exact:** strings, booleans, nulls, and `checksum` / `*_checksum` fields.
+- **Numeric:** within 5% by default (`--tolerance PCT`), with an absolute fallback near zero (`--abs-tolerance VALUE`).
+- **Shape:** missing/extra keys, list lengths, and nesting are failures. Lists of result objects are matched by `scenario`, `degraded`, `tier`, or a similar identity key, so reordering is not a regression.
+- **Profiles:** `phase3_city_loop*`, `phase3_industrial_balance`, `phase0_core_summary`, `metropolis_data_1m`, `placements`, and `godot_phase0*` require their expected metrics; unknown JSON compares generically.
+- **Volatile provenance:** `generated_at`, `git_commit`, `git_dirty`, hostnames, and run ids are ignored. Add paths with `--ignore hardware.display_server`; force extra exact keys with `--checksum-key population_checksum`.
+- **Output:** one `MISMATCH ...` line per difference and a final `BENCH_COMPARE pairs=N checks=... mismatches=... status=ok|failed`. Exit status is non-zero on a mismatch.
+- **Self-test:** `./scripts/compare_bench.py --self-test` writes fixtures under the system temp directory and prints `BENCH_COMPARE_SELFTEST cases=... status=ok`.
+
+The city-loop profile treats top-level `format_version`, `suite`, `seed`, `scene`, `days`, and `step_seconds` as optional. The committed baseline and the `--matrix` runner split the same metadata differently; the per-scenario records are still required and compared. Godot summaries compare the `route` field by file name so a different checkout directory is not a false regression; route ids in a route matrix still compare exactly.
+
+Godot summary comparison (save a known-good summary as the baseline first; the committed `rtx4080_1080p_gl_compatibility.json` is a route matrix, not a single summary):
+
+```bash
+GODOT=/path/to/godot CITY_TIER=late ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_city_late.json
+
+./scripts/compare_bench.py \
+  --baseline benchmarks/baselines/godot_phase0_city_late_summary.json \
+  --candidate benchmarks/results/godot_phase0_city_late_summary.json \
+  --tolerance 5
+```
+
+Multiple pairs are supported with `--pair` or by repeating `--baseline`/`--candidate`:
+
+```bash
+./scripts/compare_bench.py \
+  --pair benchmarks/baselines/phase3_city_loop.json benchmarks/results/phase3_city_loop_matrix.json \
+  --pair benchmarks/baselines/phase3_industrial_balance.json benchmarks/results/phase3_industrial_balance.json
+```
+
+The comparator is intentionally **not** wired into `scripts/check.sh`: result files are local and optional, and a missing result must not fail correctness CI. Call it explicitly from the benchmark workflow after a run.
+
+### Compare tool (planned in-game CLI)
 
 ```bash
 townsmith-bench compare baseline.json new.json
 ```
 
-Outputs a table of deltas and highlights regressions. This is the main tool for “did this optimization actually help?”.
+Outputs a table of deltas and highlights regressions. This is the main planned tool for “did this optimization actually help?”; the script above is the current CI-usable implementation.
 
 ## 9. Implementation architecture
 
