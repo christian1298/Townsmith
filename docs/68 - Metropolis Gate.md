@@ -787,13 +787,13 @@ cargo run --release -p townsmith-bench --bin streaming_scale > /tmp/streaming_sc
   --save /tmp/save_1m.json \
   --streaming /tmp/streaming_scale.json \
   --out benchmarks/results/gate/late_metropolis_v1.json
-# GATE_RESULT_ASSEMBLE scene=late_metropolis_v1 fields=8 missing=21 \
+# GATE_RESULT_ASSEMBLE scene=late_metropolis_v1 fields=11 missing=19 \
 #   out=... status=insufficient checksum=sha256:...
 
-# A real late render capture adds the render half. A committed multi-route
-# RTX 4080 summary can be read too: the one `late` route is selected, its
-# hardware is copied as recorded, and missing reference fields keep the
-# result insufficient.
+# A real late render capture adds the render half: evaluator scene
+# late_metropolis_v1 and documented route late_flyover_v1. A multi-route
+# summary contributes only that gate route; a dev `late_*` route is recorded
+# for provenance but keeps the result insufficient.
 ./scripts/assemble_gate_result.sh --render /tmp/late_render.json \
   --cohort /tmp/cohort_1m_v1.json --save /tmp/save_1m.json \
   --streaming /tmp/streaming_scale.json \
@@ -809,17 +809,19 @@ cargo run --release -p townsmith-bench --bin streaming_scale > /tmp/streaming_sc
 | `save_ms`, `load_ms`, `save_size_mb` | `--save` (`save_1m`); a render capture is the fallback |
 | `streaming_stalls_100ms`, `dropped_chunks` | `--streaming` when recorded; the current data harness records no frame stalls, so they stay `null` |
 | FPS, frame times, hitches, draw calls, triangles, VRAM, client RSS, overhead, spread | `--render` only |
-| `route`, `settings`, `duration_s`, `warmup_s`, `runs`, `headless`, `hardware` | `--render` only |
+| `route`, `settings`, `duration_s`, `warmup_s`, `runs`, `headless`, `hardware` | `--render` only; the route must be the documented gate route |
 
 - A field with no evidence is `null` and, when required, appears in `missing`. `results` mirrors the flat fields under the §6.3 evaluator names, `provenance.fields` gives the exact source path for every value, and `thresholds` copies the §5/§8.2 budgets unchanged.
-- `status=complete` requires every required late field, plus 90 s+ duration, 15 s+ warm-up, 3+ runs, and `headless=false`. Missing render evidence makes it `insufficient`.
+- `status=complete` requires every required late field, the evaluator scene `late_metropolis_v1`, the documented gate route `late_flyover_v1`, plus 90 s+ duration, 15 s+ warm-up, 3+ runs, and `headless=false`. Missing render evidence, a missing shape field, or a non-gate scene/route keeps it `insufficient`.
 - The JSON is sorted and timestamp-free; `checksum` is SHA-256 over the canonical document without the checksum field. Same inputs produce the same bytes and checksum.
 - `--seed` sets the top-level seed (the render seed is the default); `--hardware-note` is provenance text, not a hardware metric.
-- A multi-route summary is accepted only when exactly one route name/id contains `late`; the selected route is recorded in `provenance.inputs.render.selected_route`. Ambiguous summaries are rejected.
-- `--self-test` builds temp fixtures only (all present, missing/partial/multi-route render, bad JSON/schema, wrong scene, no inputs, provenance, round-trip, CLI marker) and prints `GATE_RESULT_ASSEMBLE_SELFTEST cases=N status=ok`.
+- A multi-route summary is accepted only when it contains the documented gate route id `late_flyover_v1`; the selected route is recorded in `provenance.inputs.render.selected_route`. A wrapper with no gate route, or one whose only `late_*` route is a dev route, keeps its recorded evidence but is `insufficient` with `render.route` in `missing` and a warning. Ambiguous summaries with multiple gate/late routes are rejected.
+- For a multi-route summary, wrapper-level metric, `results`, `route`, and run-shape keys are discarded before the selected route is merged. Only the route's own evidence can satisfy the gate fields.
+- `--out` under `benchmarks/results/gate/` with a non-complete status prints a warning: `check_metropolis_gate.sh` picks the newest file, so an insufficient artifact can shadow a complete one.
+- `--self-test` builds temp fixtures only (18 cases: all present, missing/partial/multi-route render, bad JSON/schema, wrong scene, no inputs, provenance, round-trip, CLI marker, missing shape fields, no gate route, malformed routes, non-gate `late_*` route, and one complete fixture that the evaluator accepts) and prints `GATE_RESULT_ASSEMBLE_SELFTEST cases=N status=ok`.
 
 > [!warning] This only assembles evidence; it cannot create a pass
-> The assembler does not render, run C1/C2, verify a hash, or decide pass/fail. It cannot turn a missing render into a pass, and `status=complete` means "the required fields are present for the evaluator to judge", not "M5 is met". A copied RTX 4080 or short phase-0 route is still non-reference/dev evidence; the evaluator reports `insufficient` or fails the thresholds, and the signed report in §10.2 is still required.
+> The assembler does not render, run C1/C2, verify a hash, or decide pass/fail. It cannot turn a missing render into a pass, and `status=complete` means "the required fields are present for the evaluator to judge", not "M5 is met". A copied RTX 4080 or short phase-0 route is still non-reference/dev evidence; a phase-0 route is not the documented gate route, so the assembler keeps that artifact `insufficient`. The evaluator still reports `insufficient` or fails the thresholds, and the signed report in §10.2 is still required.
 
 > [!info] Read-only card in the benchmark screen (2026-11-23)
 > `godot/bench_screen.tscn` renders a **Reference gate** card over the same two files ([[15 - Benchmarks]] §7). It runs this evaluator on a recorded file and copies the final `METROPOLIS_GATE status=...` line verbatim; it does not encode thresholds, run C1/C2, or write a result. States are `missing` (no file, `insufficient` with `no_recorded_file`), `insufficient` (unreadable/incomplete file, or no Python/evaluator), and the evaluator's `fail`/`pass`. `--gate-dir PATH` targets another directory; `./scripts/smoke_bench_screen.sh` uses it to cover missing, present/pass, present/fail, python-only fallback, and no-interpreter fixtures and asserts `BENCH_SCREEN_GATE_EVAL render=... cohort=...`. The exported `reference_gate` block records the state, key metric, evaluator verdict, and a note that the host may not match the reference rig. The card is a convenience view of a recorded result, not gate evidence; the §10.2 sign-off still requires the C1 and C2 runs. Recorded results are optional and not committed, and both this evaluator and the card are read-only: a card `pass` cannot turn an F1–F4 fallback (§9) into a gate pass.
@@ -853,7 +855,7 @@ Order of application:
 > A dedicated server helps a CPU-bound client. If the late route is GPU-bound at 25 FPS, moving the simulation to another machine changes nothing. Measure the bottleneck before choosing a tier.
 
 > [!warning] Fallback tiers are not an automated pass
-> `scripts/check_metropolis_gate.py` can only evaluate a recorded result. It cannot turn an F1–F4 conditional result into a gate pass, and it never edits a report. A fallback still needs the matching ADR and a fresh full-gate run; only an F0 run with no content change can pass on its own. The assembler in §8.4 has the same limit: it cannot create render evidence, and its `status=complete` is evidence completeness, not a gate verdict.
+> `scripts/check_metropolis_gate.py` can only evaluate a recorded result. It cannot turn an F1–F4 conditional result into a gate pass, and it never edits a report. A fallback still needs the matching ADR and a fresh full-gate run; only an F0 run with no content change can pass on its own. The assembler in §8.4 has the same limit: it cannot create render evidence, and its `status=complete` is evidence completeness, not a gate verdict. It fails closed: a missing §5.5 shape field or a render record that is not the `late_metropolis_v1` scene on the documented `late_flyover_v1` route is `insufficient`, even when the other metrics look complete.
 
 ## 10. Staged plan to the gate
 

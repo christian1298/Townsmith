@@ -32,7 +32,8 @@
 //! chunk heights, and mesh output, and a separate building checksum over the
 //! configured grid, resident records, and per-step building counters.
 //! `--smoke` uses a 25-chunk resident set and 25,000 buildings and fails on
-//! checksum, count, or peak drift.
+//! checksum, count, peak drift, a per-step resident-byte accounting mismatch,
+//! or a building entry/eviction imbalance.
 //!
 //! No renderer, GPU, frame pacing, simulation, or save/load is involved. This
 //! does not replace the 1M / 30 FPS metropolis gate or its streaming check
@@ -428,6 +429,8 @@ struct Outcome {
     building_bytes_peak: usize,
     building_bytes_total: usize,
     total_resident_bytes_peak: usize,
+    accounting_mismatches: usize,
+    accounting_error_bytes: usize,
     building_entries: usize,
     building_evictions: usize,
     building_grid_side: usize,
@@ -560,11 +563,24 @@ fn run_smoke() {
     let peak_ok = first.peak_resident == expected_resident;
     let pinned = first.checksum == SMOKE_CHECKSUM;
     let building_pinned = first.building_checksum == SMOKE_BUILDING_CHECKSUM;
+    // Per-step accounting: `total_resident_bytes` is the independent one-pass
+    // sum of chunk memory + mesh bytes + resident building records, so it must
+    // equal the resident and building component sums with no double counting.
+    let accounting_ok = first.accounting_mismatches == 0 && first.accounting_error_bytes == 0;
+    // Final building balance: every resident building entered with its chunk
+    // and left only through a chunk eviction.
+    let building_balance_ok = first.building_entries >= first.building_evictions
+        && first.building_entries - first.building_evictions == first.resident_buildings;
     let buildings_ok = first.config.buildings == SMOKE_BUILDINGS
         && first.resident_buildings_peak > 0
         && first.resident_buildings_peak <= first.config.buildings
+        // Derivable identity: every building record is 8 bytes, so peak
+        // building bytes are the peak resident building count times 8.
         && first.building_bytes_peak == first.resident_buildings_peak * BUILDING_RECORD_BYTES
-        && first.total_resident_bytes_peak >= first.resident_bytes_peak;
+        && first.total_resident_bytes_peak
+            <= first.resident_bytes_peak + first.building_bytes_peak
+        && accounting_ok
+        && building_balance_ok;
     let ok = deterministic
         && peak_ok
         && pinned
@@ -577,7 +593,8 @@ fn run_smoke() {
          buildings={} resident_buildings_peak={} building_bytes_peak={} \
          generate_ms_mean={:.2} mesh_ms_mean={:.2} checksum={:016x} \
          building_checksum={:016x} deterministic={} peak_ok={} pinned={} \
-         building_pinned={} buildings_ok={} status={}",
+         building_pinned={} buildings_ok={} accounting_ok={} \
+         building_balance_ok={} status={}",
         first.chunks_visited,
         first.peak_resident,
         first.mesh_bytes_peak,
@@ -593,6 +610,8 @@ fn run_smoke() {
         pinned,
         building_pinned,
         buildings_ok,
+        accounting_ok,
+        building_balance_ok,
         if ok { "ok" } else { "failed" }
     );
     if !ok {
@@ -658,6 +677,8 @@ fn simulate(config: Config) -> Outcome {
     let mut resident_buildings_peak = 0usize;
     let mut building_bytes_peak = 0usize;
     let mut total_resident_bytes_peak = 0usize;
+    let mut accounting_mismatches = 0usize;
+    let mut accounting_error_bytes = 0usize;
     let mut building_entries = 0usize;
     let mut building_evictions = 0usize;
     let mut mesh_bytes_total = 0u64;
@@ -805,7 +826,7 @@ fn simulate(config: Config) -> Outcome {
         }
 
         let resident_mesh_bytes: usize = resident.values().map(|entry| entry.stats.bytes).sum();
-        let resident_terrain_bytes: usize = resident
+        let resident_bytes: usize = resident
             .values()
             .map(|entry| entry.chunk.memory_bytes() + entry.stats.bytes)
             .sum();
@@ -814,11 +835,26 @@ fn simulate(config: Config) -> Outcome {
             .map(|entry| entry.buildings.len())
             .sum::<usize>();
         let resident_building_bytes = resident_buildings * BUILDING_RECORD_BYTES;
-        let resident_total_bytes = resident_terrain_bytes + resident_building_bytes;
+        // Independent per-step total: one pass over every resident entry. If
+        // the component sums double-count a chunk or a building record, this
+        // differs from `resident_bytes + resident_building_bytes`.
+        let resident_total_bytes: usize = resident
+            .values()
+            .map(|entry| {
+                entry.chunk.memory_bytes()
+                    + entry.stats.bytes
+                    + entry.buildings.len() * BUILDING_RECORD_BYTES
+            })
+            .sum();
+        if resident_total_bytes != resident_bytes + resident_building_bytes {
+            accounting_mismatches += 1;
+            accounting_error_bytes = accounting_error_bytes
+                .max(resident_total_bytes.abs_diff(resident_bytes + resident_building_bytes));
+        }
 
         peak_resident = peak_resident.max(resident.len());
         mesh_bytes_peak = mesh_bytes_peak.max(resident_mesh_bytes);
-        resident_bytes_peak = resident_bytes_peak.max(resident_terrain_bytes);
+        resident_bytes_peak = resident_bytes_peak.max(resident_bytes);
         resident_buildings_peak = resident_buildings_peak.max(resident_buildings);
         building_bytes_peak = building_bytes_peak.max(resident_building_bytes);
         total_resident_bytes_peak = total_resident_bytes_peak.max(resident_total_bytes);
@@ -883,6 +919,8 @@ fn simulate(config: Config) -> Outcome {
         building_bytes_peak,
         building_bytes_total: building_entries * BUILDING_RECORD_BYTES,
         total_resident_bytes_peak,
+        accounting_mismatches,
+        accounting_error_bytes,
         building_entries,
         building_evictions,
         building_grid_side: area.grid_side,
@@ -1179,6 +1217,35 @@ mod tests {
             ..Config::smoke()
         });
         assert_ne!(first.building_checksum, other.building_checksum);
+    }
+
+    #[test]
+    fn smoke_accounts_resident_bytes_once_per_step() {
+        let outcome = simulate(Config::smoke());
+        assert_eq!(
+            outcome.accounting_mismatches, 0,
+            "per-step total resident bytes must equal resident + building bytes"
+        );
+        assert_eq!(outcome.accounting_error_bytes, 0);
+        assert!(
+            outcome.total_resident_bytes_peak
+                <= outcome.resident_bytes_peak + outcome.building_bytes_peak,
+            "a total that double-counts resident bytes can exceed the component peaks"
+        );
+        assert_eq!(
+            outcome.building_bytes_peak,
+            outcome.resident_buildings_peak * BUILDING_RECORD_BYTES,
+            "peak building bytes are derivable from the 8-byte record"
+        );
+        assert!(
+            outcome.building_entries >= outcome.building_evictions,
+            "evictions cannot exceed entries"
+        );
+        assert_eq!(
+            outcome.building_entries - outcome.building_evictions,
+            outcome.resident_buildings,
+            "every resident building entered once and left only on eviction"
+        );
     }
 
     #[test]
