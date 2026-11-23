@@ -14073,8 +14073,6 @@ mod tests {
         );
     }
 
-    const CONTENT_TEST_ROOT: &str = "/tmp/opencode/townsmith-content-runtime";
-
     const BASE_MATERIALS: usize = 8;
     const BASE_ROOMS: usize = 7;
     const BASE_PROPS: usize = 8;
@@ -14092,7 +14090,7 @@ mod tests {
     const EXAMPLE_MERGED_TOTAL: usize = 31;
     const EXAMPLE_MERGED_CHECKSUM: u64 = 0x330a_538d_0780_5b50;
 
-    /// Self-cleaning mod directory under `/tmp/opencode`.
+    /// Self-cleaning mod directory under the OS temp directory.
     struct TempContentDir {
         path: PathBuf,
     }
@@ -14101,8 +14099,10 @@ mod tests {
         fn new(label: &str) -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let unique = NEXT.fetch_add(1, Ordering::Relaxed);
-            let path = PathBuf::from(CONTENT_TEST_ROOT)
-                .join(format!("{}-{unique}-{label}", std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "townsmith-content-{}-{unique}-{label}",
+                std::process::id()
+            ));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).expect("create temp content directory");
             Self { path }
@@ -14326,9 +14326,10 @@ mod tests {
     fn content_load_dir_rejects_relative_and_traversal_paths() {
         let mut content = RuntimeContent::base();
         assert_content_load_fails(&mut content, "mods/example", "invalid_content_path");
+        let traversal = std::env::temp_dir().join("..").join("townsmith-content");
         assert_content_load_fails(
             &mut content,
-            "/tmp/opencode/../townsmith-content",
+            traversal.to_str().expect("traversal path is UTF-8"),
             "invalid_content_path",
         );
         assert_content_load_fails(&mut content, "   ", "invalid_content_path");
