@@ -5920,6 +5920,31 @@ impl TownsmithCore {
     /// Write the placement store as JSON.
     #[func]
     fn world_save(&self, path: GString) -> VarDictionary {
+        self.world_save_impl(path, None)
+    }
+
+    /// Write the placement store and copy its packages into a local library.
+    ///
+    /// `library_root` must be an absolute existing directory without `.` or
+    /// `..` (conventionally a `blueprints/` directory beside the save). Every
+    /// unique placement package is validated and copied by content hash before
+    /// the save is written. The world JSON is exactly the same as
+    /// [`Self::world_save`]; only the result adds package counts.
+    ///
+    /// On failure, returns `{ ok: false, error_code, error }` and does not
+    /// write the save. Missing sources report `blueprint_library_missing_file`,
+    /// invalid sources `blueprint_library_invalid_package`, and mismatched
+    /// packages keep `blueprint_hash_mismatch` / `blueprint_metadata_mismatch`.
+    #[func]
+    fn world_save_with_library(&self, path: GString, library_root: GString) -> VarDictionary {
+        let library = match blueprint_library_open(&library_root.to_string()) {
+            Ok(library) => library,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        self.world_save_impl(path, Some(&library))
+    }
+
+    fn world_save_impl(&self, path: GString, library: Option<&BlueprintLibrary>) -> VarDictionary {
         let path = match world_save_path_from_arg(&path.to_string()) {
             Ok(path) => path,
             Err(error) => return placement_simple_error("invalid_save_path", error),
@@ -6254,6 +6279,13 @@ impl TownsmithCore {
                 ),
             );
         }
+        let library_sync = match library {
+            Some(library) => match sync_world_blueprints(&store, library) {
+                Ok(sync) => Some(sync),
+                Err((code, message)) => return placement_simple_error(code, message),
+            },
+            None => None,
+        };
         let backup_rotated = match write_text_atomic(&path, &json) {
             Ok(rotated) => rotated,
             Err(error) => return placement_simple_error("save_failed", error.to_string()),
@@ -6446,12 +6478,48 @@ impl TownsmithCore {
             "terrain_checksum",
             &GString::from(&format!("{deltas_checksum:016x}")),
         );
+        if let Some(sync) = library_sync {
+            result.set("blueprint_packages", sync.unique as i64);
+            result.set("blueprint_packages_inserted", sync.inserted as i64);
+            result.set("blueprint_packages_existing", sync.existing as i64);
+            result.set("blueprint_library_packages", sync.library_count as i64);
+        }
         result
     }
 
     /// Read a world placement save for `expected_seed` and verify its packages.
     #[func]
     fn world_load(&self, path: GString, expected_seed: i64) -> VarDictionary {
+        self.world_load_impl(path, expected_seed, None)
+    }
+
+    /// Read a world save, resolving missing packages from a local library.
+    ///
+    /// Load semantics are identical to [`Self::world_load`]. A placement whose
+    /// recorded `blueprint_path` is missing or unreadable is resolved by its
+    /// `blueprint_hash` in `library_root`; the stored package is fully
+    /// validated and metadata-checked before it is trusted. The save JSON is
+    /// never rewritten.
+    #[func]
+    fn world_load_with_library(
+        &self,
+        path: GString,
+        expected_seed: i64,
+        library_root: GString,
+    ) -> VarDictionary {
+        let library = match blueprint_library_open(&library_root.to_string()) {
+            Ok(library) => library,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        self.world_load_impl(path, expected_seed, Some(&library))
+    }
+
+    fn world_load_impl(
+        &self,
+        path: GString,
+        expected_seed: i64,
+        library: Option<&BlueprintLibrary>,
+    ) -> VarDictionary {
         let expected_seed = match u64::try_from(expected_seed) {
             Ok(seed) => seed,
             Err(_) => {
@@ -6637,57 +6705,10 @@ impl TownsmithCore {
                 ),
             );
         }
-        let mut solid_by_id: BTreeMap<u64, u64> = BTreeMap::new();
-        for placement in &store.placements {
-            let package_path = match blueprint_path_from_arg(&placement.blueprint_path) {
-                Ok(path) => path,
-                Err(error) => {
-                    return placement_simple_error(
-                        "invalid_blueprint_path",
-                        format!("{}: {error}", placement.blueprint_path),
-                    )
-                }
-            };
-            let package = match load_tsbp(&package_path) {
-                Ok(package) => package,
-                Err(error) => {
-                    return placement_simple_error(
-                        blueprint_error_code(&error),
-                        format!("{}: {error}", placement.blueprint_path),
-                    )
-                }
-            };
-            if package.metadata.content_hash != placement.blueprint_hash {
-                return placement_simple_error(
-                    "blueprint_hash_mismatch",
-                    format!(
-                        "{} expected {} but the package is {}",
-                        placement.blueprint_path,
-                        placement.blueprint_hash,
-                        package.metadata.content_hash
-                    ),
-                );
-            }
-            solid_by_id.insert(placement.id, package.metadata.solid_voxels);
-            let package_structure = structure_spec_for_blueprint(&package);
-            if package.metadata.id != placement.blueprint_id
-                || package.metadata.name != placement.name
-                || package.metadata.bounds_m != placement.bounds_m
-                || package.metadata.stats.resident_capacity != placement.resident_capacity
-                || package.metadata.stats.job_slots != placement.job_slots
-                || placement
-                    .structure
-                    .is_some_and(|structure| package_structure != Some(structure))
-            {
-                return placement_simple_error(
-                    "blueprint_metadata_mismatch",
-                    format!(
-                        "{} metadata does not match the placement record",
-                        placement.blueprint_path
-                    ),
-                );
-            }
-        }
+        let solid_by_id = match load_world_placement_packages(&store, library) {
+            Ok(solid_by_id) => solid_by_id,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
         let placement_ids: BTreeSet<u64> = store
             .placements
             .iter()
@@ -8194,6 +8215,214 @@ fn blueprint_library_summary_dictionary(summary: &LibrarySummary) -> VarDictiona
         &GString::from(&format!("{:016x}", summary.checksum)),
     );
     result
+}
+
+/// Outcome of copying a world's unique packages into a blueprint library.
+#[derive(Debug)]
+struct WorldBlueprintSync {
+    unique: usize,
+    inserted: usize,
+    existing: usize,
+    library_count: u64,
+}
+
+/// Compare one loaded package with its placement record.
+fn placement_package_error(
+    package: &Blueprint,
+    placement: &Placement,
+) -> Option<(&'static str, String)> {
+    if package.metadata.content_hash != placement.blueprint_hash {
+        return Some((
+            "blueprint_hash_mismatch",
+            format!(
+                "{} expected {} but the package is {}",
+                placement.blueprint_path, placement.blueprint_hash, package.metadata.content_hash
+            ),
+        ));
+    }
+    let package_structure = structure_spec_for_blueprint(package);
+    if package.metadata.id != placement.blueprint_id
+        || package.metadata.name != placement.name
+        || package.metadata.bounds_m != placement.bounds_m
+        || package.metadata.stats.resident_capacity != placement.resident_capacity
+        || package.metadata.stats.job_slots != placement.job_slots
+        || placement
+            .structure
+            .is_some_and(|structure| package_structure != Some(structure))
+    {
+        return Some((
+            "blueprint_metadata_mismatch",
+            format!(
+                "{} metadata does not match the placement record",
+                placement.blueprint_path
+            ),
+        ));
+    }
+    None
+}
+
+fn world_save_package_error(path: &Path, error: &BlueprintError) -> (&'static str, String) {
+    let code = match error {
+        BlueprintError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            "blueprint_library_missing_file"
+        }
+        BlueprintError::HashMismatch { .. } => "blueprint_hash_mismatch",
+        _ => "blueprint_library_invalid_package",
+    };
+    (code, format!("{}: {error}", path.display()))
+}
+
+/// Copy every unique placement package into `library`, validating first.
+///
+/// All unique sources are loaded and checked against every placement record
+/// before the first insert, so a missing, corrupt, or mismatched package leaves
+/// the library unchanged. Repeated packages and repeat saves are no-ops.
+fn sync_world_blueprints(
+    store: &PlacementStore,
+    library: &BlueprintLibrary,
+) -> Result<WorldBlueprintSync, (&'static str, String)> {
+    let mut packages: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for placement in &store.placements {
+        let path = blueprint_path_from_arg(&placement.blueprint_path).map_err(|error| {
+            (
+                "invalid_blueprint_path",
+                format!("{}: {error}", placement.blueprint_path),
+            )
+        })?;
+        packages
+            .entry(placement.blueprint_hash.clone())
+            .or_insert(path);
+    }
+    let summary = library
+        .summary()
+        .map_err(|error| blueprint_library_error_pair(&error))?;
+    if packages.is_empty() {
+        return Ok(WorldBlueprintSync {
+            unique: 0,
+            inserted: 0,
+            existing: 0,
+            library_count: summary.count,
+        });
+    }
+    let mut loaded: BTreeMap<String, Blueprint> = BTreeMap::new();
+    for (hash, path) in &packages {
+        let package = load_tsbp(path).map_err(|error| world_save_package_error(path, &error))?;
+        if package.metadata.content_hash.as_str() != hash.as_str() {
+            return Err((
+                "blueprint_hash_mismatch",
+                format!(
+                    "{} expected {hash} but the package is {}",
+                    path.display(),
+                    package.metadata.content_hash
+                ),
+            ));
+        }
+        loaded.insert(hash.clone(), package);
+    }
+    for placement in &store.placements {
+        let package = loaded
+            .get(placement.blueprint_hash.as_str())
+            .expect("every placement package was loaded");
+        if let Some((code, message)) = placement_package_error(package, placement) {
+            return Err((code, message));
+        }
+    }
+    let mut inserted = 0_usize;
+    let mut existing = 0_usize;
+    for (hash, path) in &packages {
+        let insert = library
+            .insert_file(path)
+            .map_err(|error| blueprint_library_error_pair(&error))?;
+        if insert.hash.as_str() != hash.as_str() {
+            return Err((
+                "blueprint_hash_mismatch",
+                format!(
+                    "{} resolved to {} but the save records {hash}",
+                    path.display(),
+                    insert.hash
+                ),
+            ));
+        }
+        if insert.inserted {
+            inserted += 1;
+        } else {
+            existing += 1;
+        }
+    }
+    let summary = library
+        .summary()
+        .map_err(|error| blueprint_library_error_pair(&error))?;
+    Ok(WorldBlueprintSync {
+        unique: packages.len(),
+        inserted,
+        existing,
+        library_count: summary.count,
+    })
+}
+
+/// Load one placement package from its recorded path or a library fallback.
+fn load_world_placement_package(
+    placement: &Placement,
+    library: Option<&BlueprintLibrary>,
+) -> Result<Blueprint, (&'static str, String)> {
+    let recorded_error = match blueprint_path_from_arg(&placement.blueprint_path) {
+        Ok(path) => match load_tsbp(&path) {
+            Ok(package) => {
+                if let Some((code, message)) = placement_package_error(&package, placement) {
+                    return Err((code, message));
+                }
+                return Ok(package);
+            }
+            Err(error) => (
+                blueprint_error_code(&error),
+                format!("{}: {error}", placement.blueprint_path),
+            ),
+        },
+        Err(error) => (
+            "invalid_blueprint_path",
+            format!("{}: {error}", placement.blueprint_path),
+        ),
+    };
+    let Some(library) = library else {
+        return Err(recorded_error);
+    };
+    let resolved = library
+        .resolve_checked(&placement.blueprint_hash)
+        .map_err(|error| blueprint_library_error_pair(&error))?;
+    let Some(path) = resolved else {
+        return Err((
+            "blueprint_library_missing_file",
+            format!(
+                "{}: blueprint {} is not in the library at {}",
+                placement.blueprint_path,
+                placement.blueprint_hash,
+                library.root().display()
+            ),
+        ));
+    };
+    let package = load_tsbp(&path).map_err(|error| {
+        (
+            "blueprint_library_invalid_package",
+            format!("{}: {error}", path.display()),
+        )
+    })?;
+    if let Some((code, message)) = placement_package_error(&package, placement) {
+        return Err((code, message));
+    }
+    Ok(package)
+}
+
+/// Load every placement package and return the recorded solid voxel counts.
+fn load_world_placement_packages(
+    store: &PlacementStore,
+    library: Option<&BlueprintLibrary>,
+) -> Result<BTreeMap<u64, u64>, (&'static str, String)> {
+    let mut solid_by_id = BTreeMap::new();
+    for placement in &store.placements {
+        let package = load_world_placement_package(placement, library)?;
+        solid_by_id.insert(placement.id, package.metadata.solid_voxels);
+    }
+    Ok(solid_by_id)
 }
 
 fn placement_error_result(error: &PlacementError) -> VarDictionary {
@@ -15160,5 +15389,465 @@ mod tests {
         let summary_b = blueprint_library_summary_from_arg(&second.root_str()).expect("b");
         assert_eq!(summary_a, summary_b);
         assert_eq!(summary_a.count, 2);
+    }
+
+    fn write_world_package(path: &Path, id: &str, name: &str, fill: u16) -> String {
+        let mut volume =
+            VoxelVolume::new(VolumeConfig::new(1, 1, 1).expect("config")).expect("volume");
+        volume
+            .fill_box(VolumePos::new(0, 0, 0), VolumePos::new(4, 1, 4), fill)
+            .expect("fill floor");
+        let blueprint = Blueprint::new(BlueprintMetadata::new(id, name), volume);
+        save_tsbp_with_hash(path, &blueprint).expect("save package")
+    }
+
+    fn place_world_house(
+        store: &mut PlacementStore,
+        path: &Path,
+        hash: &str,
+        id: &str,
+        name: &str,
+        x: f32,
+    ) -> Placement {
+        let request = PlacementRequest {
+            blueprint_id: id.to_string(),
+            blueprint_hash: hash.to_string(),
+            blueprint_path: path.to_string_lossy().into_owned(),
+            name: name.to_string(),
+            bounds_m: [3.2, 3.2, 3.2],
+            center_x: x,
+            center_z: 100.0,
+            rotation_deg: 0,
+            material_cost: 100.0,
+            resident_capacity: 0,
+            job_slots: 0,
+            solid_voxels: 16,
+            structure: None,
+        };
+        store.place(&request, |_, _| 40).expect("placement")
+    }
+
+    #[test]
+    fn world_save_library_copies_unique_packages_with_counts() {
+        let dir = TempBlueprintLibrary::new("world-save-copy");
+        dir.create_root();
+        let first = dir.package("first.tsbp");
+        let second = dir.package("second.tsbp");
+        let first_hash =
+            write_world_package(&first, "local:first", "World Library House", EDITOR_FLOOR);
+        let second_hash =
+            write_world_package(&second, "local:second", "World Library House", EDITOR_WALL);
+        let mut store = PlacementStore::new(2026);
+        place_world_house(
+            &mut store,
+            &first,
+            &first_hash,
+            "local:first",
+            "World Library House",
+            100.0,
+        );
+        place_world_house(
+            &mut store,
+            &first,
+            &first_hash,
+            "local:first",
+            "World Library House",
+            200.0,
+        );
+        place_world_house(
+            &mut store,
+            &second,
+            &second_hash,
+            "local:second",
+            "World Library House",
+            300.0,
+        );
+        let before = store.to_json_pretty().expect("save json");
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        let sync = sync_world_blueprints(&store, &library).expect("sync");
+        assert_eq!(sync.unique, 2);
+        assert_eq!(sync.inserted, 2);
+        assert_eq!(sync.existing, 0);
+        assert_eq!(sync.library_count, 2);
+        assert_eq!(library.summary().expect("summary").count, 2);
+        assert_eq!(store.to_json_pretty().expect("save json"), before);
+    }
+
+    #[test]
+    fn world_save_library_keeps_the_default_save_json_byte_identical() {
+        let dir = TempBlueprintLibrary::new("world-save-identical");
+        dir.create_root();
+        let package = dir.package("house.tsbp");
+        let hash =
+            write_world_package(&package, "local:house", "World Library House", EDITOR_FLOOR);
+        let mut store = PlacementStore::new(2026);
+        place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:house",
+            "World Library House",
+            100.0,
+        );
+        let before_json = store.to_json_pretty().expect("save json");
+        let before_checksum = store.checksum();
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        sync_world_blueprints(&store, &library).expect("sync");
+        assert_eq!(store.to_json_pretty().expect("save json"), before_json);
+        assert_eq!(store.checksum(), before_checksum);
+    }
+
+    #[test]
+    fn world_save_library_repeat_save_reuses_existing_packages() {
+        let dir = TempBlueprintLibrary::new("world-save-repeat");
+        dir.create_root();
+        let package = dir.package("house.tsbp");
+        let hash =
+            write_world_package(&package, "local:house", "World Library House", EDITOR_FLOOR);
+        let mut store = PlacementStore::new(2026);
+        place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:house",
+            "World Library House",
+            100.0,
+        );
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        let first = sync_world_blueprints(&store, &library).expect("first sync");
+        assert_eq!(first.inserted, 1);
+        assert_eq!(first.existing, 0);
+        let summary = library.summary().expect("summary");
+        let second = sync_world_blueprints(&store, &library).expect("second sync");
+        assert_eq!(second.inserted, 0);
+        assert_eq!(second.existing, 1);
+        assert_eq!(second.library_count, 1);
+        assert_eq!(library.summary().expect("summary"), summary);
+    }
+
+    #[test]
+    fn world_save_library_keeps_an_empty_world_unchanged() {
+        let dir = TempBlueprintLibrary::new("world-save-empty");
+        let root = dir.create_root();
+        let store = PlacementStore::new(2026);
+        let before = store.to_json_pretty().expect("save json");
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        let sync = sync_world_blueprints(&store, &library).expect("sync");
+        assert_eq!(sync.unique, 0);
+        assert_eq!(sync.inserted, 0);
+        assert_eq!(sync.existing, 0);
+        assert_eq!(sync.library_count, 0);
+        assert!(std::fs::read_dir(&root).expect("root").next().is_none());
+        assert_eq!(store.to_json_pretty().expect("save json"), before);
+    }
+
+    #[test]
+    fn world_load_library_resolves_a_deleted_package() {
+        let dir = TempBlueprintLibrary::new("world-load-deleted");
+        dir.create_root();
+        let package = dir.package("house.tsbp");
+        let hash =
+            write_world_package(&package, "local:house", "World Library House", EDITOR_FLOOR);
+        let mut store = PlacementStore::new(2026);
+        let placement = place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:house",
+            "World Library House",
+            100.0,
+        );
+        let before = store.to_json_pretty().expect("save json");
+        let checksum = store.checksum();
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        sync_world_blueprints(&store, &library).expect("sync");
+        std::fs::remove_file(&package).expect("remove source");
+
+        let loaded =
+            load_world_placement_package(&placement, Some(&library)).expect("library load");
+        assert_eq!(loaded.metadata.content_hash, placement.blueprint_hash);
+        assert_eq!(loaded.metadata.solid_voxels, 16);
+        let solid_by_id =
+            load_world_placement_packages(&store, Some(&library)).expect("library load all");
+        assert_eq!(solid_by_id.get(&placement.id), Some(&16));
+        assert_eq!(store.checksum(), checksum);
+        assert_eq!(store.to_json_pretty().expect("save json"), before);
+    }
+
+    #[test]
+    fn world_load_without_library_keeps_the_original_missing_code() {
+        let dir = TempBlueprintLibrary::new("world-load-no-library");
+        dir.create_root();
+        let package = dir.package("house.tsbp");
+        let hash =
+            write_world_package(&package, "local:house", "World Library House", EDITOR_FLOOR);
+        let mut store = PlacementStore::new(2026);
+        let placement = place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:house",
+            "World Library House",
+            100.0,
+        );
+        std::fs::remove_file(&package).expect("remove source");
+        let (code, message) =
+            load_world_placement_package(&placement, None).expect_err("missing package");
+        assert_eq!(code, "missing_blueprint");
+        assert!(message.contains("house.tsbp"), "{message}");
+    }
+
+    #[test]
+    fn world_load_library_reports_an_unresolved_reference() {
+        let dir = TempBlueprintLibrary::new("world-load-unresolved");
+        dir.create_root();
+        let package = dir.package("house.tsbp");
+        let hash =
+            write_world_package(&package, "local:house", "World Library House", EDITOR_FLOOR);
+        let mut store = PlacementStore::new(2026);
+        let placement = place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:house",
+            "World Library House",
+            100.0,
+        );
+        std::fs::remove_file(&package).expect("remove source");
+        let before = store.to_json_pretty().expect("save json");
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        let (code, message) = load_world_placement_package(&placement, Some(&library))
+            .expect_err("unresolved reference");
+        assert_eq!(code, "blueprint_library_missing_file");
+        assert!(message.contains(&hash), "{message}");
+        assert_eq!(store.to_json_pretty().expect("save json"), before);
+    }
+
+    #[test]
+    fn world_library_missing_root_reports_a_stable_code() {
+        let dir = TempBlueprintLibrary::new("world-library-missing-root");
+        assert!(!dir.root().exists());
+        let (code, _) = blueprint_library_open(&dir.root_str()).expect_err("missing root");
+        assert_eq!(code, "blueprint_library_root_missing");
+    }
+
+    #[test]
+    fn world_library_invalid_root_reports_a_stable_code() {
+        let (code, message) =
+            blueprint_library_open("relative/library").expect_err("relative root");
+        assert_eq!(code, "invalid_blueprint_library_root");
+        assert!(message.contains("absolute"), "{message}");
+        let traversal = std::env::temp_dir().join("one").join("..").join("two");
+        let (code, _) =
+            blueprint_library_open(&traversal.to_string_lossy()).expect_err("traversal root");
+        assert_eq!(code, "invalid_blueprint_library_root");
+    }
+
+    #[test]
+    fn world_save_library_rejects_a_missing_package_without_writing() {
+        let dir = TempBlueprintLibrary::new("world-save-missing-package");
+        dir.create_root();
+        let package = dir.package("house.tsbp");
+        let hash =
+            write_world_package(&package, "local:house", "World Library House", EDITOR_FLOOR);
+        let mut store = PlacementStore::new(2026);
+        place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:house",
+            "World Library House",
+            100.0,
+        );
+        let before = store.to_json_pretty().expect("save json");
+        std::fs::remove_file(&package).expect("remove source");
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        let (code, _) = sync_world_blueprints(&store, &library).expect_err("missing package");
+        assert_eq!(code, "blueprint_library_missing_file");
+        assert_eq!(library.summary().expect("summary").count, 0);
+        assert_eq!(store.to_json_pretty().expect("save json"), before);
+    }
+
+    #[test]
+    fn world_save_library_rejects_a_hash_mismatch_without_copying() {
+        let dir = TempBlueprintLibrary::new("world-save-hash");
+        dir.create_root();
+        let package = dir.package("house.tsbp");
+        write_world_package(&package, "local:house", "World Library House", EDITOR_FLOOR);
+        let recorded_hash = format!("blake3:{}", "0".repeat(64));
+        let mut store = PlacementStore::new(2026);
+        place_world_house(
+            &mut store,
+            &package,
+            &recorded_hash,
+            "local:house",
+            "World Library House",
+            100.0,
+        );
+        let before = store.to_json_pretty().expect("save json");
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        let (code, message) = sync_world_blueprints(&store, &library).expect_err("hash mismatch");
+        assert_eq!(code, "blueprint_hash_mismatch");
+        assert!(message.contains(&recorded_hash), "{message}");
+        assert_eq!(library.summary().expect("summary").count, 0);
+        assert_eq!(store.to_json_pretty().expect("save json"), before);
+    }
+
+    #[test]
+    fn world_save_library_rejects_a_metadata_mismatch_without_copying() {
+        let dir = TempBlueprintLibrary::new("world-save-metadata");
+        dir.create_root();
+        let package = dir.package("house.tsbp");
+        let hash = write_world_package(
+            &package,
+            "local:actual",
+            "World Library House",
+            EDITOR_FLOOR,
+        );
+        let mut store = PlacementStore::new(2026);
+        place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:recorded",
+            "World Library House",
+            100.0,
+        );
+        let before = store.to_json_pretty().expect("save json");
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        let (code, _) = sync_world_blueprints(&store, &library).expect_err("metadata mismatch");
+        assert_eq!(code, "blueprint_metadata_mismatch");
+        assert_eq!(library.summary().expect("summary").count, 0);
+        assert_eq!(store.to_json_pretty().expect("save json"), before);
+    }
+
+    #[test]
+    fn world_save_library_rejects_a_corrupt_package_without_copying() {
+        let dir = TempBlueprintLibrary::new("world-save-corrupt");
+        dir.create_root();
+        let package = dir.package("house.tsbp");
+        let hash =
+            write_world_package(&package, "local:house", "World Library House", EDITOR_FLOOR);
+        let mut store = PlacementStore::new(2026);
+        place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:house",
+            "World Library House",
+            100.0,
+        );
+        let before = store.to_json_pretty().expect("save json");
+        std::fs::write(&package, b"not a zip").expect("corrupt source");
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        let (code, _) = sync_world_blueprints(&store, &library).expect_err("corrupt package");
+        assert_eq!(code, "blueprint_library_invalid_package");
+        assert_eq!(library.summary().expect("summary").count, 0);
+        assert_eq!(store.to_json_pretty().expect("save json"), before);
+    }
+
+    #[test]
+    fn world_load_library_rejects_a_corrupt_stored_package() {
+        let dir = TempBlueprintLibrary::new("world-load-corrupt");
+        let root = dir.create_root();
+        let package = dir.package("house.tsbp");
+        let hash =
+            write_world_package(&package, "local:house", "World Library House", EDITOR_FLOOR);
+        let mut store = PlacementStore::new(2026);
+        let placement = place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:house",
+            "World Library House",
+            100.0,
+        );
+        std::fs::remove_file(&package).expect("remove source");
+        let hex = &hash["blake3:".len()..];
+        let shard = root.join(&hex[..2]);
+        std::fs::create_dir_all(&shard).expect("shard");
+        std::fs::write(shard.join(format!("{hex}.tsbp")), b"not a zip").expect("corrupt entry");
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        let (code, _) = load_world_placement_package(&placement, Some(&library))
+            .expect_err("corrupt library entry");
+        assert_eq!(code, "blueprint_library_invalid_package");
+    }
+
+    #[test]
+    fn world_load_library_rejects_a_foreign_stored_package() {
+        let dir = TempBlueprintLibrary::new("world-load-foreign");
+        let root = dir.create_root();
+        let first = dir.package("first.tsbp");
+        let second = dir.package("second.tsbp");
+        let first_hash =
+            write_world_package(&first, "local:first", "World Library House", EDITOR_FLOOR);
+        write_world_package(&second, "local:second", "World Library House", EDITOR_WALL);
+        let mut store = PlacementStore::new(2026);
+        let placement = place_world_house(
+            &mut store,
+            &first,
+            &first_hash,
+            "local:first",
+            "World Library House",
+            100.0,
+        );
+        std::fs::remove_file(&first).expect("remove source");
+        let hex = &first_hash["blake3:".len()..];
+        let shard = root.join(&hex[..2]);
+        std::fs::create_dir_all(&shard).expect("shard");
+        std::fs::copy(&second, shard.join(format!("{hex}.tsbp"))).expect("foreign entry");
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        let (code, _) =
+            load_world_placement_package(&placement, Some(&library)).expect_err("foreign package");
+        assert_eq!(code, "blueprint_hash_mismatch");
+    }
+
+    #[test]
+    fn world_load_library_rejects_a_metadata_mismatch() {
+        let dir = TempBlueprintLibrary::new("world-load-metadata");
+        dir.create_root();
+        let package = dir.package("house.tsbp");
+        let hash =
+            write_world_package(&package, "local:house", "World Library House", EDITOR_FLOOR);
+        let mut store = PlacementStore::new(2026);
+        let placement = place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:house",
+            "Recorded House",
+            100.0,
+        );
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        library.insert_file(&package).expect("insert package");
+        std::fs::remove_file(&package).expect("remove source");
+        let (code, _) = load_world_placement_package(&placement, Some(&library))
+            .expect_err("metadata mismatch");
+        assert_eq!(code, "blueprint_metadata_mismatch");
+    }
+
+    #[test]
+    fn world_save_library_keeps_the_store_seed_and_checksum() {
+        let dir = TempBlueprintLibrary::new("world-save-seed");
+        dir.create_root();
+        let package = dir.package("house.tsbp");
+        let hash =
+            write_world_package(&package, "local:house", "World Library House", EDITOR_FLOOR);
+        let mut store = PlacementStore::new(2027);
+        place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:house",
+            "World Library House",
+            100.0,
+        );
+        let before_checksum = store.checksum();
+        let before_json = store.to_json_pretty().expect("save json");
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        sync_world_blueprints(&store, &library).expect("sync");
+        assert_eq!(store.seed, 2027);
+        assert_eq!(store.checksum(), before_checksum);
+        assert_eq!(store.to_json_pretty().expect("save json"), before_json);
     }
 }
