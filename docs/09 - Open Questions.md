@@ -186,6 +186,17 @@ These must be answered before or during Phase 0. They change the architecture, t
 | **Q-032** | Steam networking/lobbies, or direct IP first? | Direct IP + invite codes first; Steam later | Normal |
 | **Q-078** | Time-vote tuning: duration, cooldown, and quorum? | 60 s vote, 5 min failed-vote cooldown, 2 min success cooldown; simple majority of online players; tune in playtests | Normal |
 
+## Server placement questions
+
+These support D-032 (Proposed). None is answered yet; the ADR keeps placement off the server until each has a v1 default.
+
+| ID | Question | Current assumption / recommendation | Priority |
+|---|---|---|---|
+| **Q-107** | How does a `.tsbp` package reach the authoritative server? | Pre-seeded content-addressed library first; an upload or fetch path later. Never accept a client filesystem path. Provenance, quotas, and transit integrity need their own decision. | High |
+| **Q-108** | How are modded blueprints and dependencies resolved when the server lacks the mod? | Resolve against the server content manifest before placement; reject with a stable code; never auto-download mods. Existing placements degrade to a placeholder or refuse to load. | High |
+| **Q-109** | Placement rate limits, quotas, idempotency, and audit? | Per-connection token bucket, per-player placement quota, request id for retries, and an audit entry for every accepted and rejected placement. | Normal |
+| **Q-110** | Server placement save migration and rollback/history? | Additive versioned `ServerSave` placement object; migrate existing worlds in order; keep a rollback snapshot before destructive admin actions. | High |
+
 ## Modding questions
 
 | ID | Question | Current assumption / recommendation | Priority |
@@ -347,3 +358,4 @@ These must be answered before or during Phase 0. They change the architecture, t
 | Q-079–Q-082 | Localization |
 | Q-083–Q-089 | Construction |
 | Q-090–Q-100 | Materials, structure, and basements |
+| Q-107–Q-110 | Server-authoritative blueprint placement |

@@ -49,6 +49,7 @@ tags:
 | D-029 | Construction uses a mode-selected clock; campaign builds take game days | Proposed | 2026-11-22 | [[02 - Game Design]], [[09 - Open Questions]], [[53 - Treasury and Taxes]] |
 | D-030 | District policy tax multipliers weight city tax income by home and workplace | Proposed | 2026-11-23 | [[07 - Simulation and AI]], [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]] |
 | D-031 | District policy service funding weights civic service upkeep by completed site | Proposed | 2026-11-23 | [[07 - Simulation and AI]], [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]] |
+| D-032 | Server-authoritative blueprint placement | Proposed | 2026-11-23 | [[05 - Multiplayer]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[42 - World Placement Bridge]], [[53 - Treasury and Taxes]] |
 
 ---
 
@@ -1385,6 +1386,93 @@ Construction currently finishes in 8–120 real seconds (`total_seconds_for`), w
 ### Review trigger
 
 Human sign-off on the campaign default, then a measured financing run using the live construction clock (Q-102). Until both land, D-028's projection remains a placeholder.
+
+---
+
+## D-032 — Server-authoritative blueprint placement
+
+**Status:** Proposed · **Date:** 2026-11-23 · **Affects:** [[05 - Multiplayer]], [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[28 - Blueprint Package]], [[53 - Treasury and Taxes]], [[09 - Open Questions]]
+
+### Context
+
+`world_place_blueprint(seed, path, x, z, rotation)` in `crates/godot_ext` is the only blueprint placement path. It loads and validates the local `.tsbp`, applies the district construction/allowlist gate, checks seed, age, structure, terrain, and overlap, appends to the client-side `PlacementStore`, creates the construction site, and charges the first D-028 installment from the local treasury. The authoritative server (`ServerWorld` in `crates/server`) models roads, taxes and the economy, pause/time votes, sessions, save/load, and interest viewports. Its command set is `hello`, `resume`, `ping`, `time_control`, `time_vote`, `set_tax`, `place_road`, `set_interest`, and `disconnect`; it has **no blueprint placement command and no placement store**. `interest_view.buildings` is a deterministic fixture, not placement data.
+
+The result is a split placement model in multiplayer: a client can run the bridge and change only its local world, while the server's treasury, district policy enforcement, construction state, save, and checksum never see the placement. `construction_allowed`, the blueprint allowlist, and the D-028 charge are therefore enforced only against the single-player/dev local stores. D-004 says the server is authoritative, and D-023/D-028 make construction server-owned in multiplayer; the placement command is the missing piece. This is a post-audit product gap, not an open finding in [[78 - Code Audit Findings]].
+
+### Decision
+
+- Add a server command `place_blueprint` to the authoritative protocol in the next protocol version. The proposed wire shape is content-addressed:
+
+  ```text
+  place_blueprint { blueprint_hash, x, z, rotation }
+  ```
+
+  `blueprint_hash` is the BLAKE3 content hash from `.tsbp` (D-027). The package path never crosses the wire; the server resolves the hash in its own content-addressed package library. A path form remains local/dev-only for the in-process bridge and must not be accepted from a remote client.
+- The server validates, in this order, before any mutation:
+  1. session/hello and role authorization for placement (Mayor/Admin by default; the permission is configurable, see [[05 - Multiplayer]] §3);
+  2. rate limit and audit tag;
+  3. package availability and integrity: the hash matches the requested id, `.tsbp` v1 limits hold (1 MiB metadata, 64 MiB voxel stream, 8M solid voxels), and dependencies/mods resolve against the server content manifest; no auto-download;
+  4. package metadata consistency (id, bounds, footprint, cost, capacity, jobs), matching the checks `world_load` already performs;
+  5. **district policy** at the placement centre: `policy_at` (smallest containing id, inclusive circle), `construction_allowed`, and the blueprint allowlist; neutral when there is no registry, the registry seed differs, or the centre is outside every circle;
+  6. seed, age, structure, terrain (water/slope/foundation), coordinates (±1,000,000 m), rotation (multiple of 90°, normalized), footprint/height, and overlap against authoritative terrain and placements;
+  7. treasury affordability of the first D-028 installment, then the charge through the authoritative ledger;
+  8. append the authoritative placement record, create the construction site, and update the world checksum/save in one transaction.
+- The server owns the record: id, blueprint hash, centre, rotation, footprint/bounds/foundation, material cost, resident capacity/jobs, and owner/settlement when those exist. The record is saved with the world, included in the world checksum, and returned to the placing client:
+
+  ```text
+  place_blueprint_result { tick, placement_id, blueprint_hash, placement_checksum, world_checksum, placement }
+  ```
+
+  Other clients receive the placement through the normal event/snapshot path. Replacing the synthetic `interest_view.buildings` fixtures with placement-backed records is part of the read path, but it is not required for the command itself to be authoritative.
+- Clients may predict a ghost preview with the same rules, but prediction is advisory: the client never appends an authoritative record, never charges the treasury, and discards a predicted placement that the server rejects. `world_validate_placement` stays the preview path and must mirror the server rule order and outcomes, so a passing ghost cannot fail later on a deterministic rule.
+- Rejections use stable codes, never mutate state, never charge, and never leave a partial construction site. Repeating the same request should be idempotent within a session (request id or placement identity); the exact key is open in Q-109.
+
+### Scope for v1
+
+- **In scope:** blueprint placement through the server command, package validation, authorization, the policy gate, the D-028 charge, the authoritative record/save/checksum, and the result to the placing client.
+- **Out of scope:** utility, civic-service, and road placement commands (they keep their current paths); package upload/transfer; mod auto-download; live-city voxel editing; demolition and refunds; offline/dormant progression.
+- The single-player/dev bridge remains the local implementation until the in-process server path lands; this ADR does not remove `world_place_blueprint`.
+
+### Consequences
+
+**Positive**
+- Blueprint placement becomes server-authoritative and consistent with D-004/D-023/D-028: a client cannot invent a building, skip the policy gate, or spend money it does not have.
+- Save, checksum, interest view, construction sites, and the ledger share one placement record.
+- District policy and construction charges become testable headlessly, without Godot.
+- Multiplayer clients converge on the same city after reconnect or restart.
+
+**Negative**
+- The server must have the `.tsbp` package; transfer, provenance, and quotas are new work (Q-107).
+- Modded blueprints need server-side content resolution before they can be placed (Q-108).
+- Client preview can disagree with the server under latency; the UI must reconcile rejected predictions.
+- `ServerSave`, the world checksum, and the protocol version change; old clients and saves need a version gate and migration.
+- Untrusted packages become a server-side validation and DoS surface; caps, rate limits, and audits are mandatory (Q-109).
+- Placement ownership/lot claims, rollback, and package garbage collection are not solved by the command alone (Q-110).
+
+**Neutral**
+- Single-player keeps the same command path through the in-process server; the bridge becomes a client of the command rather than its owner.
+- The editor/dev `world_place_blueprint` shortcut can remain behind a local flag while parity is proven.
+
+### Alternatives considered
+
+- **Keep client placement and trust the client:** rejected. It contradicts D-004 and leaves policy, charges, save, and checksum client-controlled.
+- **Server validates a client-supplied hash only:** insufficient. A hash proves package identity only if the server already has the bytes; it does not bind the transform, policy, terrain, or treasury, and a client can lie about metadata or cost.
+- **Full package upload in the same slice:** out of scope. It needs size limits, quotas, provenance, transit integrity, and content-manifest rules before a server should accept arbitrary bytes (Q-107).
+- **Wait for live-city voxel editing:** leaves the multiplayer gap open and makes the first authoritative placement wait on a larger, riskier feature.
+- **Server re-runs the editor/structural validator from voxels:** more expensive and not needed for v1; the validated package metadata plus hash is the contract (D-027), with structural and age checks on the metadata.
+
+### Open questions
+
+| ID | Question |
+|---|---|
+| Q-107 | How does a `.tsbp` package reach the server: pre-seeded library, upload with the command, or content-addressed fetch? What provenance and authorization apply? |
+| Q-108 | How are modded blueprints and dependencies resolved on a server that does not have the mod, and what happens to existing placements when a mod is removed? |
+| Q-109 | What are the placement rate limits, quotas, idempotency key, and audit requirements for `place_blueprint`? |
+| Q-110 | How are server placement records migrated into `ServerSave`, and what rollback/history is required for griefing or bad packages? |
+
+### Review trigger
+
+The next protocol version that adds `place_blueprint`, the first multiplayer placement test, or the first `ServerSave` migration that carries placement records. Revisit package transfer, mod resolution, and rollback when Q-107–Q-110 are answered. If the in-process server path cannot reuse the bridge rule set without divergence, split the shared validation into `core_city` before accepting the ADR.
 
 ---
 
