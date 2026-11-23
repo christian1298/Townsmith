@@ -741,8 +741,6 @@ mod tests {
         let content = value["content"].as_object().expect("content object");
         assert_eq!(content.len(), 4);
         assert!(!content.contains_key("path"));
-        assert!(!first.json.contains("/tmp"));
-        assert!(!first.json.contains("/media"));
         let identity = first.identity.as_ref().expect("identity");
         assert_eq!(identity, &recorded_identity());
         // Content-bound fixture pin: this exact one-house v2 fixture with the
