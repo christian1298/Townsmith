@@ -102,6 +102,12 @@ A removed building does not refund construction spending. Clearing all placement
 
 Utility and civic sites also charge their catalog construction cost when added through `utility_add_site`/`service_add_site`. With no open treasury, the bridge opens a seed treasury at the 100,000 starting balance (the same policy as `world_place_blueprint`), checks affordability, and charges the initial installment; the call reports `charged=true` with the paid amount in `cost_paid`. An unaffordable or bankrupt treasury returns `insufficient_funds` and leaves no site. A failed add or charge rolls back a treasury opened by that call, so a rejected infrastructure add leaves no treasury and cannot pin the world to that seed; a pre-existing treasury is never removed. Re-adding a site charges the amount still due; removal does not refund.
 
+### 4.1 Server ledger
+
+The authoritative server now charges the same first D-028 installment through its own treasury. `place_blueprint` computes the installment with the shared `core_city::construction::first_construction_payment`, checks `Economy::can_afford` against the server balance, adds the priced construction site, and settles the charge with the shared `settle_first_installment` (`try_charge_construction` then `ConstructionSite::mark_paid`, refunding if the site rejects). A rejected affordability check returns `PLACEMENT_INSUFFICIENT_FUNDS`; a settlement failure rolls the placement and site back and restores the treasury. The server does not recompute material cost from the slice price table: it uses the package's stored `stats.material_cost`, so a package written with a zero cost is placed for zero.
+
+The server world checksum covers the placement and construction stores only when they exist. A server that never places a blueprint keeps the pre-D-032 checksum and save bytes; after a placement the record stores `tsbp:blake3:<hex>` in its `blueprint_path` field, so the placement checksum and the `SERVER_PLACEMENT` marker are root-independent: two servers with identical package bytes and state match even under different library roots. See [[42 - World Placement Bridge]] §2.1.
+
 ## 5. Loans
 
 `Economy::take_loan(amount, rate_per_day, term_days)`:

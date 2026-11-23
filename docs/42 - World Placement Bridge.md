@@ -17,7 +17,7 @@ tags:
 > The GDExtension API that stores placed blueprints, validates a site against terrain, and saves/loads the placement layer. The rules and data model are in [[41 - Phase 2 Slice Plan]]; this note records the bridge and headless smoke.
 
 > [!warning] Multiplayer authority
-> This bridge is the **single-player/developer placement path**. The authoritative server does not yet accept a blueprint placement command and has no placement store, so `world_place_blueprint` cannot enforce district policy or treasury charges in multiplayer. D-032 (Proposed) defines the server command; this note keeps documenting the bridge until that lands and does not claim server enforcement.
+> This bridge is the **single-player/developer placement path**. The authoritative server now implements the D-032 v1 command (`place_blueprint`) with its own placement/construction stores, package library, district policy gate, and treasury charge; the ADR status is still owned by the decision slice. Use this bridge for local authoring and preview; use `place_blueprint` for multiplayer placement. Do not treat a bridge placement as accepted by a server.
 
 ## 1. API
 
@@ -109,7 +109,81 @@ Both errors use the usual `{ ok: false, error_code, error }` shape and the messa
 The in-game dashboard is now a second CRUD consumer of the same registry through the compact editor in [[57 - Dashboard and Advisor]] §5.3. It creates, updates, and removes only the smallest-id policy containing the dashboard centre with `district_policy_create`, `district_policy_update`, and `district_policy_remove`, always re-sending the full record read from `district_policies_state`. Persistence is unchanged: `world_save` and `world_load` remain the only file path, the optional `policies` object and its validation are untouched, and the dashboard never saves or loads directly. A foreign-seed or rejected dashboard call leaves the registry, placement, population, and construction checksums unchanged.
 
 > [!warning] Scope of enforcement
-> This gate runs in the client process. It is authoritative only for the local single-player/dev world; the multiplayer server does not run it until D-032 (Proposed) adds `place_blueprint`. Do not describe the district policy gate or the D-028 charge as server-enforced.
+> This bridge gate runs in the client process. It is authoritative only for the local single-player/dev world. Multiplayer placement enforcement is the server `place_blueprint` command in §2.1; the bridge and server share the policy helper and the age/payment helpers, but the bridge does not call the server and the server does not accept a package path. Do not describe the bridge preview as server-enforced.
+
+## 2.1 Server-authoritative placement (D-032 v1)
+
+`crates/server` implements the first server-owned placement slice. The wire shape is content-addressed:
+
+```text
+place_blueprint { blueprint_hash, x, z, rotation }
+place_blueprint_result { tick, placement_id, blueprint_hash, placement_checksum, world_checksum, placement }
+```
+
+`placement` is a `PlacementView`: id, blueprint id, canonical hash, name, centre `[x, y, z]`, normalized rotation, rotated footprint, bounds, foundation, material cost, resident capacity, job slots, and solid voxels. It never carries `blueprint_path`: a remote client never receives a server filesystem path. The authoritative record uses `tsbp:blake3:<hex>` as its content-addressed package reference, not a resolved path. The command requires the **Mayor** role and consumes the same deterministic rate credit and audit tag as every executor command. The transport-only protocol `Session` has no library and rejects the command with `PLACEMENT_UNAVAILABLE`.
+
+### Library and policy configuration
+
+Both are opt-in process configuration, never save data:
+
+| Flag | Meaning |
+|---|---|
+| `--blueprint-library <absolute-dir>` | Open an existing content-addressed `.tsbp` library. The server resolves `blueprint_hash` there; no upload, download, or path from the client. |
+| `--policies <json>` | Load a `DistrictPolicyStore` JSON that must belong to the world seed. A foreign-seed or invalid registry exits before the listener binds. |
+
+`ServerWorld::set_blueprint_library(root)` and `set_policy_registry(store)` are the in-process equivalents; `clear_blueprint_library()` drops the library. A world without a library rejects placement with `PLACEMENT_LIBRARY_UNAVAILABLE`; a world without a registry treats policy as neutral. A world loaded from a save starts with both unset and must be reconfigured.
+
+### Validation order
+
+`ServerWorld::apply_place_blueprint` validates everything before the first mutation:
+
+1. Payload: the hash is `blake3:` + 64 lowercase hex (bare 64 lowercase hex is accepted and normalized); `x`/`z` are finite, fit `f32`, and stay within ±1,000,000 m; the rotation is a multiple of 90°.
+2. Library: configured, the hash resolves, the stored package loads with `load_tsbp`, and its metadata is consistent with the library address and the placement record (non-empty id/name, finite positive bounds, solid voxels, finite non-negative cost).
+3. Idempotency: an exact existing placement with the same canonical hash, centre rounded to the millimetre, and rotation returns its existing result without a second charge or tick. This check sits before policy, age, terrain, and overlap.
+4. District policy: when a same-seed registry is configured and a policy circle contains the centre, `policy_placement_denial` applies the same construction switch and allowlist as the bridge. A foreign-seed registry, a missing registry, or a centre outside every circle is neutral.
+5. Age: `AgeState::from_population(world population).age` and the shared structural age rule for the blueprint's declared `structure`.
+6. Terrain/geometry: the deterministic flat placeholder sampler at `PLACEHOLDER_GROUND_M` (40 m, the road sampler) and the `PlacementStore` rules for bounds, footprint, height, rotation, and overlap.
+7. Treasury: the shared `first_construction_payment` (Survey installment), then `Economy::can_afford`.
+
+Only after all seven pass does the command append the placement, create the priced construction site, charge the installment through `try_charge_construction` + `mark_paid`, advance the tick, and refresh the checksum. Every rejection leaves the placement store, construction store, treasury, tick, and checksum unchanged; a store created by the call is cleared back to `None`.
+
+### Stable rejection codes
+
+| Code | Meaning |
+|---|---|
+| `PLACEMENT_UNAVAILABLE` | Transport-only session, no authoritative placement state |
+| `PLACEMENT_LIBRARY_UNAVAILABLE` | Server has no configured library |
+| `PLACEMENT_HASH_INVALID` | Hash shape is not a library address |
+| `PLACEMENT_PACKAGE_MISSING` | Valid hash not stored on the server |
+| `PLACEMENT_PACKAGE_INVALID` | Stored package failed validation or metadata consistency |
+| `PLACEMENT_POLICY_DENIED` | District policy blocks the placement; the bridge code (`policy_construction_disabled` / `policy_blueprint_not_allowed`) is in the message |
+| `PLACEMENT_OUT_OF_RANGE` | Non-finite or out-of-range coordinate |
+| `PLACEMENT_ROTATION_INVALID` | Rotation is not a multiple of 90° |
+| `PLACEMENT_OVERLAP` | Rotated footprint overlaps an existing placement |
+| `PLACEMENT_AGE_LOCKED` | Settlement age has not unlocked the structure |
+| `PLACEMENT_INSUFFICIENT_FUNDS` | Treasury cannot afford the first installment |
+| `PLACEMENT_STORE_FULL` | Placement or construction store reached its limit |
+| `PLACEMENT_REJECTED` | A placement/construction error not covered by a narrower code |
+
+The denial uses `PLACEMENT_POLICY_DENIED` rather than forwarding the bridge code as `code`, so the wire has one stable placement code family; the bridge code stays in the message for logs and tests.
+
+### Checksum and save
+
+`ServerWorld::checksum` appends the placement-store checksum and the construction-store checksum **only when the fields are `Some`**. A world that never placed a blueprint therefore hashes exactly as before D-032. A server placement record stores the stable content-addressed reference `tsbp:blake3:<hex>` in its `blueprint_path` field (the `PlacementStore` shape is unchanged); the hash identifies the package, so the library root and other process configuration never enter the record, placement checksum, or world checksum. Two servers with the same package bytes under different roots therefore produce identical checksums.
+
+`ServerSave` gains optional `placements` and `construction` objects, each skipped when `None`. Existing saves stay byte-identical and load with the stores closed. A present store is seed-checked and validated with `PlacementStore::validate_loaded` / `ConstructionStore::validate`; the library and policy registry are never saved. `ServerWorld::restore` restores both optional stores and leaves the library/policies `None`.
+
+### Smoke
+
+```bash
+cargo run --release -p townsmith-server -- --placement-smoke
+```
+
+The process builds a tiny valid `.tsbp` in a temporary library, configures a two-policy registry, and drives one world through accepted placement, exact repeat, policy denial, overlap, insufficient funds, save, and reload. Marker:
+
+```text
+SERVER_PLACEMENT placed=1 duplicate=1 policy=1 funds=1 overlap=1 save=1 reload=1 checksum=<hex> status=ok
+```
 
 ## 3. Save format
 
@@ -233,28 +307,30 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 
 ## 6. Limits
 
-- The world save still references **absolute package paths** in the JSON. Portability is opt-in: `world_save_with_library` copies the packages into a sidecar library and `world_load_with_library` resolves a missing/unreadable path by content hash. A world loaded that way renders and selects from `resolved_blueprint_path`, so the world scene no longer needs the original package files until the next plain load. The JSON itself has no library reference, the library root is not discovered automatically, and a plain `world_load` remains non-portable.
+- The **bridge** world save still references **absolute package paths** in the JSON. Portability is opt-in: `world_save_with_library` copies the packages into a sidecar library and `world_load_with_library` resolves a missing/unreadable path by content hash. A world loaded that way renders and selects from `resolved_blueprint_path`, so the world scene no longer needs the original package files until the next plain load. The JSON itself has no library reference, the library root is not discovered automatically, and a plain `world_load` remains non-portable. The server uses the content-addressed `tsbp:blake3:<hex>` reference instead (§2.1).
 - Placement creates a phased construction site; the v0 state machine and visuals are in [[45 - Construction Sites]].
 - Terrain edits use the 2B delta fields in the same JSON; see [[43 - Terrain Edits]].
 - `world_load` re-verifies package hashes and metadata (id, name, bounds, capacity, jobs, structure) but does not re-run slope/water sampling. Terrain edits can invalidate an old site; the gameplay layer will revalidate before construction.
 - No collision, road access, utility access, or lot ownership yet.
 - The acceptance house's bounds are the whole 16 × 9.6 × 16 m volume, not a tight mesh bound, so its placed footprint is 16 × 16 m.
 - The world-placement scene is a developer shell. Its HUD is English-only until the Phase 2 HUD localization pass; D-022's key-based EN/DE requirement still applies to shipping UI.
-- **Multiplayer:** placement is not server-authoritative. The server has no `place_blueprint` command or placement store, so district policy and construction charges are enforced only in this local bridge. D-032 (Proposed) is the follow-up; until it lands, do not treat a bridge placement as accepted by a multiplayer server.
+- **Multiplayer:** placement is now server-authoritative through `place_blueprint` (§2.1). The bridge remains local preview/authoring. Server v1 limits: the package library and policy registry are operator configuration, not save data; there is no package upload, fetch, or auto-download; material cost comes from the package's stored `stats.material_cost` (the server has no slice price-table recomputation); a blueprint without declared `structure` metadata is not age-gated (the bridge derives a conservative fallback); `interest_view.buildings` still uses the synthetic fixture, not placement-backed records; there is no demolition, refund, terrain streaming, per-settlement permission, or client UI in this slice.
 
 ## 7. Tests
 
-- `core_city`: placement persistence, construction, roads, lots, settlements, households, treasury/loans, industry, utilities, traffic, the advisor, structural placement limits, research, age gates, civic services, and district policies; **535 tests**.
+- `core_city`: placement persistence, construction, roads, lots, settlements, households, treasury/loans, industry, utilities, traffic, the advisor, structural placement limits, research, age gates, civic services, and district policies; **539 tests**, including the shared structural age and first-installment helpers.
 - `core_structure`: **22 tests + 1 doctest** for system tiers, story/height/span/foundation rules, and composite grounds.
 - `core_blueprint`: **40 tests** (37 integration + 3 unit), including package validation and the local content-addressed library.
 - `godot_ext`: **193 tests** total, including runtime content loading, blueprint-library insert/resolve/error mapping, portable save/load copy-and-resolve semantics, package deduplication, missing/corrupt/hash/metadata failure codes, save-path validation, resolved-path exposure and lifetime, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
-- Workspace: **1226 tests** (1221 unit/integration + 5 doctests). Verified on 2026-11-23 at master `a6b9641`.
+- `townsmith-server`: **153 tests**, including protocol v1 decode/result roundtrips, Mayor authorization, rate limit/audit, library/hash/package/policy/age/terrain/overlap/funds rejections without mutation, accepted charge/site, idempotent repeats, two placements, checksum movement, old/new save roundtrips, restore without configuration, and the deterministic placement smoke.
+- Workspace: **1259 tests**, all green. Verified on 2026-11-23 on `feat/server-placement` based on master `771a9f1`.
 - Godot headless: `WORLD_PLACEMENT ... status=ok`, `WORLD_SCENE ... status=ok`, and `WORLD_LIBRARY ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 
 ## 8. Next
 
-1. Implement D-032 (Proposed): server-authoritative `place_blueprint`, with the bridge preview calling the same rule set. This is the prerequisite for claiming multiplayer placement enforcement.
-2. Add an optional content-addressed library reference to the placement record so a save can resolve without the sidecar pair; keep the absolute path and the `world_save_with_library` / `world_load_with_library` compatibility path.
-3. Add settlement boundaries and ownership (2E.4).
-4. Replace global construction pools with settlement crews and delivery trips.
+1. Make the bridge ghost preview call the same server rule set (or a shared rule module) so a passing ghost cannot fail later on policy, age, or terrain. The shared policy/age/payment helpers are in place; the orchestration is still separate.
+2. Replace the synthetic `interest_view.buildings` fixture with placement-backed records and events/snapshots for other clients.
+3. Add an optional content-addressed library reference to the placement record so a save can resolve without the sidecar pair; keep the absolute path and the `world_save_with_library` / `world_load_with_library` compatibility path.
+4. Add settlement boundaries and ownership (2E.4).
+5. Add demolition/refunds and replacement of global construction pools with settlement crews and delivery trips.

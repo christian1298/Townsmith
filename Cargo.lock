@@ -456,8 +456,10 @@ dependencies = [
 name = "townsmith-server"
 version = "0.1.0"
 dependencies = [
+ "core_blueprint",
  "core_city",
  "core_sim",
+ "core_voxel",
  "serde",
  "serde_json",
 ]

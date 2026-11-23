@@ -18,7 +18,9 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use core_city::construction::{ConstructionError, ConstructionStore};
 use core_city::economy::{Economy, EconomyError};
+use core_city::placement::{PlacementError, PlacementStore};
 use core_city::road::{RoadError, RoadStore};
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +51,10 @@ pub mod codes {
     pub const INVALID_ROADS: &str = "save.invalid_roads";
     /// The economy failed validation.
     pub const INVALID_ECONOMY: &str = "save.invalid_economy";
+    /// The placement store failed validation.
+    pub const INVALID_PLACEMENTS: &str = "save.invalid_placements";
+    /// The construction store failed validation.
+    pub const INVALID_CONSTRUCTION: &str = "save.invalid_construction";
     /// Neither the primary save nor its backup exists.
     pub const NOT_FOUND: &str = "save.not_found";
     /// The primary and its backup are both unusable.
@@ -80,6 +86,17 @@ pub struct ServerSave {
     pub economy: Economy,
     /// Serialized road network.
     pub roads: RoadStore,
+    /// Authoritative blueprint placements (D-032).
+    ///
+    /// Omitted when the world has no placement store, so a world that never
+    /// placed a blueprint writes byte-identical JSON to a pre-D-032 save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placements: Option<PlacementStore>,
+    /// Authoritative construction sites (D-023/D-028).
+    ///
+    /// Omitted when the world has no construction store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub construction: Option<ConstructionStore>,
 }
 
 impl ServerSave {
@@ -117,6 +134,23 @@ impl ServerSave {
             .validate_loaded()
             .map_err(SaveError::InvalidRoads)?;
         self.economy.validate().map_err(SaveError::InvalidEconomy)?;
+        if let Some(placements) = &self.placements {
+            if placements.seed != self.seed {
+                return Err(SaveError::SeedMismatch {
+                    field: "placements",
+                    expected: self.seed,
+                    found: placements.seed,
+                });
+            }
+            placements
+                .validate_loaded()
+                .map_err(SaveError::InvalidPlacements)?;
+        }
+        if let Some(construction) = &self.construction {
+            construction
+                .validate()
+                .map_err(SaveError::InvalidConstruction)?;
+        }
         Ok(())
     }
 }
@@ -165,6 +199,10 @@ pub enum SaveError {
     InvalidRoads(RoadError),
     /// The economy failed validation.
     InvalidEconomy(EconomyError),
+    /// The placement store failed validation.
+    InvalidPlacements(PlacementError),
+    /// The construction store failed validation.
+    InvalidConstruction(ConstructionError),
     /// Neither the primary nor the backup exists.
     NotFound(PathBuf),
     /// The primary and its backup are both unusable.
@@ -188,6 +226,8 @@ impl SaveError {
             Self::InvalidCounts(_) => codes::INVALID_COUNTS,
             Self::InvalidRoads(_) => codes::INVALID_ROADS,
             Self::InvalidEconomy(_) => codes::INVALID_ECONOMY,
+            Self::InvalidPlacements(_) => codes::INVALID_PLACEMENTS,
+            Self::InvalidConstruction(_) => codes::INVALID_CONSTRUCTION,
             Self::NotFound(_) => codes::NOT_FOUND,
             Self::Corrupt { .. } => codes::CORRUPT,
         }
@@ -218,6 +258,10 @@ impl std::fmt::Display for SaveError {
             Self::InvalidCounts(message) => write!(formatter, "invalid save counts: {message}"),
             Self::InvalidRoads(error) => write!(formatter, "invalid saved roads: {error}"),
             Self::InvalidEconomy(error) => write!(formatter, "invalid saved economy: {error}"),
+            Self::InvalidPlacements(error) => write!(formatter, "invalid saved placements: {error}"),
+            Self::InvalidConstruction(error) => {
+                write!(formatter, "invalid saved construction: {error}")
+            }
             Self::NotFound(path) => {
                 write!(formatter, "no save or backup at {}", path.display())
             }
@@ -234,6 +278,8 @@ impl std::error::Error for SaveError {
             Self::Io(error) => Some(error),
             Self::InvalidRoads(error) => Some(error),
             Self::InvalidEconomy(error) => Some(error),
+            Self::InvalidPlacements(error) => Some(error),
+            Self::InvalidConstruction(error) => Some(error),
             _ => None,
         }
     }
@@ -265,6 +311,8 @@ impl ServerWorld {
             paused: self.paused,
             economy: self.economy.clone(),
             roads: self.roads.clone(),
+            placements: self.placements.clone(),
+            construction: self.construction.clone(),
         }
     }
 
@@ -452,6 +500,7 @@ fn sync_parent(path: &Path) {
 mod tests {
     use super::*;
     use core_city::economy::DAY_SECONDS;
+    use core_city::placement::PlacementRequest;
 
     use crate::protocol::{ClientCommand, ServerMessage, TimeAction, LOOPBACK_SEED};
 
@@ -788,5 +837,140 @@ mod tests {
         let loaded = ServerWorld::from_save_json(&json).expect("load");
         assert!(loaded.paused);
         assert_eq!(loaded.checksum(), world.checksum());
+    }
+
+    fn world_with_placement_and_site() -> ServerWorld {
+        let hash = format!("blake3:{}", "ab".repeat(32));
+        let request = PlacementRequest {
+            blueprint_id: "townsmith:save_house".to_string(),
+            blueprint_hash: hash.clone(),
+            blueprint_path: format!("tsbp:blake3:{}", "ab".repeat(32)),
+            name: "Save House".to_string(),
+            bounds_m: [3.2, 3.2, 3.2],
+            center_x: 0.0,
+            center_z: 0.0,
+            rotation_deg: 0,
+            material_cost: 100.0,
+            resident_capacity: 2,
+            job_slots: 1,
+            solid_voxels: 10,
+            structure: None,
+        };
+        let mut placements = PlacementStore::new(LOOPBACK_SEED);
+        placements
+            .place(&request, |_, _| 40)
+            .expect("placement record");
+        let mut construction = ConstructionStore::default();
+        construction
+            .add_priced_site(1, 10, 100.0)
+            .expect("construction site");
+
+        let mut world = ServerWorld::new(LOOPBACK_SEED);
+        world.placements = Some(placements);
+        world.construction = Some(construction);
+        world
+    }
+
+    #[test]
+    fn save_omits_placement_stores_when_absent() {
+        let json = ServerWorld::new(LOOPBACK_SEED)
+            .to_save_json_pretty()
+            .expect("json");
+        assert!(!json.contains("\"placements\""));
+        assert!(!json.contains("\"construction\""));
+        let loaded = ServerWorld::from_save_json(&json).expect("load");
+        assert!(loaded.placements.is_none());
+        assert!(loaded.construction.is_none());
+        assert!(loaded.blueprint_library.is_none());
+        assert!(loaded.policies.is_none());
+    }
+
+    #[test]
+    fn placement_and_construction_round_trip() {
+        let world = world_with_placement_and_site();
+        let json = world.to_save_json_pretty().expect("json");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("value");
+        assert!(value["placements"].is_object());
+        assert!(value["construction"].is_object());
+        assert!(!json.contains("/tmp"));
+        assert!(!json.contains("/media"));
+        let stored = value["placements"]["placements"][0]["blueprint_path"]
+            .as_str()
+            .expect("stored reference");
+        assert!(stored.starts_with("tsbp:blake3:"));
+        assert!(!stored.contains('/'));
+
+        let loaded = ServerWorld::from_save_json(&json).expect("load");
+        assert_eq!(loaded.checksum(), world.checksum());
+        assert_eq!(loaded.placements, world.placements);
+        assert_eq!(loaded.construction, world.construction);
+        assert!(loaded.blueprint_library.is_none());
+        assert!(loaded.policies.is_none());
+    }
+
+    #[test]
+    fn placement_and_construction_file_round_trip() {
+        let dir = TempDir::new();
+        let path = dir.join("world.json");
+        let world = world_with_placement_and_site();
+        world.save_to(&path).expect("save");
+        let loaded = ServerWorld::load_from(&path).expect("load");
+        assert_eq!(loaded.world.checksum(), world.checksum());
+        assert_eq!(
+            loaded
+                .world
+                .placements
+                .as_ref()
+                .map(|store| store.placements.len()),
+            Some(1)
+        );
+        assert_eq!(
+            loaded
+                .world
+                .construction
+                .as_ref()
+                .map(|store| store.site_count()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn placement_seed_mismatch_is_rejected() {
+        let mut value: serde_json::Value = serde_json::from_str(
+            &world_with_placement_and_site()
+                .to_save_json_pretty()
+                .unwrap(),
+        )
+        .unwrap();
+        value["placements"]["seed"] = (LOOPBACK_SEED + 1).into();
+        let error = ServerWorld::from_save_json(&save_json(&value)).expect_err("placement seed");
+        assert_eq!(error.code(), codes::SEED_MISMATCH);
+    }
+
+    #[test]
+    fn invalid_placement_store_is_rejected() {
+        let mut value: serde_json::Value = serde_json::from_str(
+            &world_with_placement_and_site()
+                .to_save_json_pretty()
+                .unwrap(),
+        )
+        .unwrap();
+        value["placements"]["next_id"] = 1.into();
+        let error = ServerWorld::from_save_json(&save_json(&value)).expect_err("placement store");
+        assert_eq!(error.code(), codes::INVALID_PLACEMENTS);
+    }
+
+    #[test]
+    fn invalid_construction_store_is_rejected() {
+        let mut value: serde_json::Value = serde_json::from_str(
+            &world_with_placement_and_site()
+                .to_save_json_pretty()
+                .unwrap(),
+        )
+        .unwrap();
+        value["construction"]["crew_capacity"] = 65.into();
+        let error =
+            ServerWorld::from_save_json(&save_json(&value)).expect_err("construction store");
+        assert_eq!(error.code(), codes::INVALID_CONSTRUCTION);
     }
 }

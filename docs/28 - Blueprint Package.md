@@ -197,6 +197,22 @@ Stable bridge error codes:
 
 A failed save-with-library validates all unique packages before the first insert, so a missing, corrupt, or mismatched source leaves the library unchanged; the save is not written. A failed load leaves placements, construction, population, and every other world store unchanged, as before.
 
+### 6.6 Server pre-seeded library (D-032 v1)
+
+The authoritative server resolves placement packages by content hash from an operator-supplied library root. There is no upload, fetch, download, or client-supplied path:
+
+```bash
+townsmith-server --listen 47015 --blueprint-library /srv/townsmith/blueprints
+```
+
+- The root is an existing absolute directory; `BlueprintLibrary::new` validates it and `--blueprint-library` is process configuration, never a save field.
+- The client sends only `place_blueprint { blueprint_hash, x, z, rotation }`. The canonical hash is `blake3:` + 64 lowercase hex; bare 64 lowercase hex is normalized to that form.
+- The server resolves the hash with `resolve_checked`, loads the stored package with `load_tsbp`, verifies its content hash matches the library address, and checks the package metadata before placement.
+- `place_blueprint_result` returns a `PlacementView` with no `blueprint_path`. The authoritative record stores the stable content-addressed reference `tsbp:blake3:<hex>` in its `blueprint_path` field, not the resolved library path; the server library root is process configuration and never enters the save/checksum, and a remote client never sees a filesystem path.
+- Missing or invalid packages use the stable placement codes `PLACEMENT_PACKAGE_MISSING` / `PLACEMENT_PACKAGE_INVALID`; a bad hash shape uses `PLACEMENT_HASH_INVALID`. The server never writes to or discovers into the library while serving.
+
+This does not change the `.tsbp` format, public library API, existing package hashes, or bridge save bytes. Mod dependencies still fail `load_tsbp` (`MissingDependency`), and there is no mod auto-download.
+
 ## 7. API
 
 ```rust
@@ -237,10 +253,11 @@ The bridge-side portable save tests (unique-package copy, repeat-save dedup, del
 - No mod/resource-pack resolver yet.
 - No savegame-format migration yet; `format_version` is the hook.
 - The world save still stores absolute `blueprint_path` values. The opt-in `world_save_with_library` / `world_load_with_library` bridge path can travel with a sidecar library, but the JSON has no library reference field and no automatic root discovery. A portable load makes the resolved packages renderable through bridge-only `resolved_blueprint_path`; the JSON is not rewritten and the recorded path remains authoritative for the next plain load.
+- The server library is pre-seeded and read-only at serve time. There is no package upload, remote fetch, content manifest negotiation, or mod auto-download; the server cannot resolve a package the operator did not install. The server save still records the resolved absolute path.
 
 ## 10. Next
 
-1. Add an optional content-addressed library reference to the placement record, resolving through `BlueprintLibrary` and keeping legacy absolute paths loadable (the bridge-side copy/resolve path in §6.5 is the compatibility layer).
+1. Add an optional content-addressed library reference to the placement record, resolving through `BlueprintLibrary` and keeping legacy absolute paths loadable (the bridge-side copy/resolve path in §6.5 is the compatibility layer; the server-side hash-only wire is in §6.6).
 2. Room detection + stats to fill `rooms`, `materials`, and `stats`.
 3. Thumbnail rendering at save time.
 4. Content registry keys and dependency resolution.

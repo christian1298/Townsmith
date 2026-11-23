@@ -345,6 +345,28 @@ townsmith-bench --server \
 - The server benchmark measures cohort ticks, building aggregates, economy, pathfinding, memory, and save/load.
 - No GPU or rendering; it is a pure simulation benchmark.
 
+#### Authoritative placement smoke (D-032)
+
+```bash
+cargo run --release -p townsmith-server -- --placement-smoke
+```
+
+The in-process smoke creates a tiny valid `.tsbp` in a temporary content-addressed library, configures a two-policy registry, and drives one world through an accepted placement, an exact idempotent repeat, a policy denial, an overlap, insufficient funds, save, and reload. It requires no socket, display, or pre-existing save.
+
+Marker:
+
+```text
+SERVER_PLACEMENT placed=1 duplicate=1 policy=1 funds=1 overlap=1 save=1 reload=1 checksum=<hex> status=ok
+```
+
+Pin the seven booleans and the 16-hex checksum `d26569ec3dc6b464`. The checksum is root-independent: the authoritative placement record stores the content-addressed reference `tsbp:blake3:<hex>`, not the resolved library path, so two runs in different temp library roots report the same hex. The save JSON and wire message contain no `/tmp`, `/media`, or library-root path.
+
+Server pins that must stay exact for this slice:
+
+- city-loop matrix mid: city checksum `623f39c61b71b68a`, treasury checksum `1c213cc40278a13b`;
+- campaign clock (`--campaign-days --days 30`): city checksum `015eb7cee1357bf4`, treasury checksum `343447b8b960a0b0`;
+- `SERVER_PROTOCOL`, `SERVER_AUTHORITY`, `SERVER_ROLES`, `SERVER_INTEREST`, `SERVER_TIME_VOTE`, `SERVER_RESUME`, and `SERVER_SAVE` marker checksums do not move from the protocol version bump; the `hello`/`welcome` payloads carry protocol version `1`.
+
 ### CI
 
 - Run the Phase 0 matrix through `.github/workflows/phase0-benchmark.yml` on the **self-hosted Linux runner first** (`self-hosted`, `Linux`, `X64`). It is the machine with the display/GPU used for real frame-time measurements. The workflow is manually dispatched, accepts runs/duration/headless inputs, and uploads the combined `phase0_target_*.json` plus route summaries as artifacts.
