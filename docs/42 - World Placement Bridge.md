@@ -17,7 +17,7 @@ tags:
 > The GDExtension API that stores placed blueprints, validates a site against terrain, and saves/loads the placement layer. The rules and data model are in [[41 - Phase 2 Slice Plan]]; this note records the bridge and headless smoke.
 
 > [!warning] Multiplayer authority
-> This bridge is the **single-player/developer placement path**. The authoritative server now implements the D-032 v1 command (`place_blueprint`) with its own placement/construction stores, package library, district policy gate, and treasury charge; the ADR status is still owned by the decision slice. Use this bridge for local authoring and preview; use `place_blueprint` for multiplayer placement. Do not treat a bridge placement as accepted by a server.
+> This bridge is the **single-player/developer placement path**. The authoritative server implements the D-032 v1 command (`place_blueprint`, **Accepted** 2026-11-23 and implemented by #306) with its own placement/construction stores, package library, district policy gate, and treasury charge. Use this bridge for local authoring and preview; use `place_blueprint` for multiplayer placement. Do not treat a bridge placement as accepted by a server.
 
 ## 1. API
 
@@ -182,7 +182,7 @@ cargo run --release -p townsmith-server -- --placement-smoke
 The process builds a tiny valid `.tsbp` in a temporary library, configures a two-policy registry, and drives one world through accepted placement, exact repeat, policy denial, overlap, insufficient funds, save, and reload. Marker:
 
 ```text
-SERVER_PLACEMENT placed=1 duplicate=1 policy=1 funds=1 overlap=1 save=1 reload=1 checksum=<hex> status=ok
+SERVER_PLACEMENT placed=1 duplicate=1 policy=1 funds=1 overlap=1 save=1 reload=1 checksum=d26569ec3dc6b464 status=ok
 ```
 
 ## 3. Save format
@@ -323,7 +323,7 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 - `core_blueprint`: **40 tests** (37 integration + 3 unit), including package validation and the local content-addressed library.
 - `godot_ext`: **193 tests** total, including runtime content loading, blueprint-library insert/resolve/error mapping, portable save/load copy-and-resolve semantics, package deduplication, missing/corrupt/hash/metadata failure codes, save-path validation, resolved-path exposure and lifetime, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
 - `townsmith-server`: **153 tests**, including protocol v1 decode/result roundtrips, Mayor authorization, rate limit/audit, library/hash/package/policy/age/terrain/overlap/funds rejections without mutation, accepted charge/site, idempotent repeats, two placements, checksum movement, old/new save roundtrips, restore without configuration, and the deterministic placement smoke.
-- Workspace: **1259 tests**, all green. Verified on 2026-11-23 on `feat/server-placement` based on master `771a9f1`.
+- Workspace: **1259 tests**, all green (**1254 unit/integration + 5 doctests**). Verified on 2026-11-23 at master `61449ce`.
 - Godot headless: `WORLD_PLACEMENT ... status=ok`, `WORLD_SCENE ... status=ok`, and `WORLD_LIBRARY ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 

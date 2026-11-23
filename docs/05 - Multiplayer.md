@@ -73,8 +73,8 @@ The client never simulates the authoritative city. It predicts local movement an
 
 ⚙️ = configurable; admin-only by default. All players can start a time vote by default (`time.vote`). The **Builder** role is a player permission role, not the NPC construction trade; construction crews are simulation jobs.
 
-> [!warning] Blueprint placement: D-032 accepted, server implementation in progress
-> D-032 (**Accepted 2026-11-23**) makes `place_blueprint` the v1 server authority. The command carries only `{ blueprint_hash, x, z, rotation }`; the package path never crosses the wire, and the server resolves the hash in its own pre-seeded content-addressed `.tsbp` library. Placement is authorized by the global Mayor/Admin placement role (configurable) in v1; per-settlement `build` permissions are D-033 (Proposed) and **not v1**. Package upload/fetch, transfer, and auto-download are also **not v1**. Protocol v0 is unchanged until the command lands; until then `world_place_blueprint` in `crates/godot_ext` is the single-player/developer path: it applies the district gate and first installment to local stores only, and a multiplayer client cannot rely on the server to enforce placement, policy, or cost. The **Place buildings** column still describes intended policy, not protocol-v0 enforcement, and blueprint editing has the same gap.
+> [!success] Blueprint placement: D-032 accepted and implemented (protocol v1)
+> D-032 (**Accepted 2026-11-23**, implemented by #306 at master `61449ce`) makes `place_blueprint` the v1 server authority. The command carries only `{ blueprint_hash, x, z, rotation }`; the package path never crosses the wire, and the server resolves the hash in its own pre-seeded content-addressed `.tsbp` library. Placement is authorized by the global **Mayor** role (Admin inherits it); per-settlement `build` permissions are D-033 (Proposed) and **not v1**. Package upload/fetch, transfer, mod auto-download, and a client placement UI are also **not v1**. `world_place_blueprint` in `crates/godot_ext` remains the single-player/developer path: it applies the district gate and first installment to local stores only, and a multiplayer client must use the server command to commit a placement. The **Place buildings** column still describes intended policy beyond placement; v1 enforces the global placement role and the placement rules, not per-settlement permissions, and blueprint editing has the same gap.
 
 - Permissions are configurable per player and per role.
 - The server owner can disable roles entirely for a "everyone is mayor" casual server.
@@ -86,7 +86,7 @@ The client never simulates the authoritative city. It predicts local movement an
 ### Settlement ownership
 
 > [!warning] Proposed — not implemented (D-033)
-> Settlement ownership is currently an **unenforced display string**. `Settlement.owner` accepts any 1–48 character value from the caller, the bridge and dashboard never check it, the authoritative `ServerWorld` has no settlement store, and protocol v0 has no settlement command. The only roles are global dev roles assigned by the server process (`viewer`/`mayor`/`admin`). The bullets below are the intended model; D-033 (Proposed) defines membership, the `build`/`manage`/`tax`/`members` permissions, claims, transfer, and save migration. None of it is enforced today.
+> Settlement ownership is currently an **unenforced display string**. `Settlement.owner` accepts any 1–48 character value from the caller, the bridge and dashboard never check it, the authoritative `ServerWorld` has no settlement store, and protocol v1 has no settlement command. The only roles are global dev roles assigned by the server process (`viewer`/`mayor`/`admin`). The bullets below are the intended model; D-033 (Proposed) defines membership, the `build`/`manage`/`tax`/`members` permissions, claims, transfer, and save migration. None of it is enforced today.
 
 - Every settlement has an **owner**: a player, a group, or the server (shared).
 - The owner can set local policies, taxes, building permissions, and blueprint allowlists.
@@ -184,27 +184,27 @@ The server validates every command:
 
 Accepted commands produce **events** (construction site created, phase changed, building completed, tax changed, blueprint updated) that are broadcast to interested clients. Rejected commands return a reason for UI feedback.
 
-> [!note] Accepted command: server-authoritative blueprint placement (D-032, staged v1)
-> **Not implemented yet.** Protocol v0 has no placement command, and the authoritative executor has no placement store. D-032 (**Accepted 2026-11-23**) defines the protocol v1 command:
+> [!success] Implemented command: server-authoritative blueprint placement (D-032, staged v1)
+> **Implemented by #306 at master `61449ce`.** Protocol v1 adds the placement command to the authoritative executor:
 >
 > ```text
 > place_blueprint { blueprint_hash, x, z, rotation }
 > ```
 >
-> The server resolves the hash in its own pre-seeded content-addressed `.tsbp` library; the path and package bytes never cross the wire, and v1 has no upload, fetch, or auto-download. It validates the global placement role, package hash/size, seed/age, the deterministic placeholder ground, overlap, and the district policy gate (`construction_allowed` + allowlist, smallest containing id; the registry is server-config JSON at startup), then charges the D-028 installment through the authoritative ledger and returns `place_blueprint_result { tick, placement_id, blueprint_hash, placement_checksum, world_checksum, placement }`. Idempotency is exact placement identity (hash + centre + rotation), reusing the existing per-session token bucket and audit ring. Placements and construction are optional `ServerSave` fields; older saves load unchanged. Clients may predict a preview but never commit.
+> The server resolves the hash in its own pre-seeded content-addressed `.tsbp` library; the path and package bytes never cross the wire, and v1 has no upload, fetch, or auto-download. It validates the global **Mayor** role, package hash/size, seed/age, the deterministic placeholder ground, overlap, and the district policy gate (`construction_allowed` + allowlist, smallest containing id; the registry is server-config JSON at startup), then charges the D-028 installment through the authoritative ledger and returns `place_blueprint_result { tick, placement_id, blueprint_hash, placement_checksum, world_checksum, placement }`. Idempotency is exact placement identity (hash + centre + rotation), reusing the existing per-session token bucket and audit ring. Placements and construction are optional `ServerSave` fields; older saves load unchanged. Clients may predict a preview but never commit. The transport-only `protocol::Session` rejects the command with `PLACEMENT_UNAVAILABLE`.
 >
-> Upload/fetch, mod auto-download, rollback/history, and per-settlement permissions are **not v1**. Until the command lands, `world_place_blueprint` remains a client-side single-player/dev path and the server does not enforce placement, policy, or construction charges.
+> Upload/fetch, mod auto-download, rollback/history, demolition/refunds, per-settlement permissions, and a Godot placement UI are **not v1**. `world_place_blueprint` remains the client-side single-player/dev path and does not call the server; a bridge placement is not a server-accepted placement.
 
-### Protocol v0 (Phase 6 foundation)
+### Protocol v1 (Phase 6 foundation)
 
-The first runnable protocol lives in `crates/server/src/protocol.rs`. It is **transport only**: it freezes framing, validation codes, and the handshake before simulation messages are added. It does not change or drive the city simulation.
+The first runnable protocol lives in `crates/server/src/protocol.rs`. Protocol v1 freezes framing, validation codes, and the handshake, and adds the first authoritative placement command; the stateful simulation commands live in `world.rs`. It does not replace the city simulation.
 
 **Framing**
 
 - A 4-byte big-endian payload length followed by UTF-8 JSON.
 - Maximum payload: 1 MiB.
 - Zero-length, oversized, truncated, non-UTF-8, and malformed JSON frames are rejected with stable codes: `frame.zero_length`, `frame.oversized`, `frame.truncated`, `frame.invalid_utf8`, `frame.invalid_json`, `frame.io`.
-- JSON is deliberate for v0 so loopback transcripts are inspectable. The production transport/encoding decision remains Q-055.
+- JSON is deliberate for v1 so loopback transcripts are inspectable. The production transport/encoding decision remains Q-055.
 
 **Client commands**
 
@@ -216,6 +216,7 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. It is **tr
 | `time_control` | `action`: `pause`, `resume`, `step`, `speed_1x`, `speed_2x`, `speed_4x` |
 | `set_tax` | `resident_rate`, `business_rate` (percent, 0–100) |
 | `place_road` | `start: [x, y]`, `end: [x, y]` |
+| `place_blueprint` | `blueprint_hash` (`blake3:` + 64 hex, or bare 64 hex), `x`, `z`, `rotation` (multiple of 90°) |
 | `set_interest` | `center_x`, `center_z`, `radius_m` |
 | `disconnect` | — |
 
@@ -227,14 +228,15 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. It is **tr
 | `pong` | `nonce` |
 | `snapshot` | `tick`, `population`, `balance`, `checksum`, `interest_center`, `interest_radius_m`, `visible_roads` |
 | `interest_view` | `tick`, `center`, `radius_m`, `roads` (≤64 × `{id, start, end, width_m}`), `truncated`, `buildings` (≤64 × `{id, center, radius_m}`), `buildings_truncated` |
+| `place_blueprint_result` | `tick`, `placement_id`, `blueprint_hash`, `placement_checksum`, `world_checksum`, `placement` (a `PlacementView` with no path) |
 | `reject` | `code`, `message` |
 | `goodbye` | — |
 
-**Validation rules (v0)**
+**Validation rules (v1)**
 
 | Rule | Code |
 |---|---|
-| Protocol version must match `0` | `protocol.version_mismatch` |
+| Protocol version must match `1` | `protocol.version_mismatch` |
 | Player name non-empty, ≤ 32 characters, no control characters | `player_name.empty`, `player_name.too_long`, `player_name.invalid` |
 | Content hash is 64 lowercase hex characters | `content_hash.invalid` |
 | Tax rates are 0–100 percent | `tax.rate_out_of_range` |
@@ -243,12 +245,25 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. It is **tr
 | Road length ≤ 1,024 cells (Chebyshev) | `road.too_long` |
 | Interest centre finite and representable as `f32` | `interest.invalid_center` |
 | Interest radius finite and `0..=2,048` m | `interest.radius_out_of_range` |
+| Placement hash is canonical `blake3:` + 64 lowercase hex (bare 64 hex is normalized) | `PLACEMENT_HASH_INVALID` |
+| Placement coordinates finite and inside ±1,000,000 | `PLACEMENT_OUT_OF_RANGE` |
+| Placement rotation is a multiple of 90° | `PLACEMENT_ROTATION_INVALID` |
+| World has no configured package library | `PLACEMENT_LIBRARY_UNAVAILABLE` |
+| Package hash is absent from the library | `PLACEMENT_PACKAGE_MISSING` |
+| Package fails `.tsbp` validation or metadata consistency | `PLACEMENT_PACKAGE_INVALID` |
+| District policy denies the placement | `PLACEMENT_POLICY_DENIED` |
+| Settlement age has not unlocked the structure | `PLACEMENT_AGE_LOCKED` |
+| Rotated footprint overlaps a placement | `PLACEMENT_OVERLAP` |
+| Treasury cannot afford the first installment | `PLACEMENT_INSUFFICIENT_FUNDS` |
+| Placement or construction store is full | `PLACEMENT_STORE_FULL` |
+| Transport-only session has no placement state | `PLACEMENT_UNAVAILABLE` |
+| Any other placement/construction failure | `PLACEMENT_REJECTED` |
 | Second `hello` | `hello.duplicate` |
 | Any other command before `hello` | `hello.required` |
 | Unknown command tag | `command.unknown_tag` |
 | Session already closed | `session.closed` |
 
-`disconnect` is accepted before `hello` so a client can close cleanly. Roles, permissions, content-manifest checks, costs, and spatial rules are deferred to later protocol revisions.
+`disconnect` is accepted before `hello` so a client can close cleanly. The global Mayor/Admin placement role, package checks, the district policy gate, and the placement geometry rules are implemented for `place_blueprint`; content-manifest enforcement, per-settlement permissions, and the remaining simulation rules are deferred.
 
 **Loopback smoke**
 
@@ -259,9 +274,9 @@ cargo run --release -p townsmith-server -- --loopback-smoke
 
 The harness binds `127.0.0.1:0`, runs `hello → welcome`, `ping → pong`, `set_tax → snapshot`, `disconnect → goodbye`, and derives the session id and snapshot checksum deterministically from a fixed seed. It uses socket timeouts rather than sleeps, so it is safe for CI.
 
-**Client v0**
+**Client v1**
 
-`godot/mp_client.gd` + `mp_client.tscn` speak the same framing over `StreamPeerTCP` (big-endian length prefix, JSON, 1 MiB cap). In the normal path the client sends `hello`, `ping`, a valid and an invalid `set_tax`, a `place_road`, a `set_interest`, then `disconnect`, and asserts `welcome`, `pong`, three snapshots, a rejection, one `interest_view`, and `goodbye`. Seven command frames and eight response frames cross the socket.
+`godot/mp_client.gd` + `mp_client.tscn` speak the same framing over `StreamPeerTCP` (big-endian length prefix, JSON, 1 MiB cap) and announce protocol version `1`. In the normal path the client sends `hello`, `ping`, a valid and an invalid `set_tax`, a `place_road`, a `set_interest`, then `disconnect`, and asserts `welcome`, `pong`, three snapshots, a rejection, one `interest_view`, and `goodbye`. Seven command frames and eight response frames cross the socket. It does not yet send `place_blueprint`; there is no Godot placement UI in this slice.
 
 `--reconnect` runs the session-resume path instead: the first connection sends `hello`, `ping`, and `place_road`, captures `session_token` and the last snapshot tick, then disconnects. A second connection sends `resume {session_id, last_tick}` and asserts `welcome {resumed:true}` with the same token, a snapshot at or past `last_tick`, a resumed `pong`, and `goodbye`. Both connections together exchange seven command and eight response frames (four each on the first, three/four on the resumed one). The two connections must reach the same server process; `--listen PORT --sessions N` caps a run at N accepted sessions, and `--once` remains the `--sessions 1` shorthand. Without `--sessions`, the listener serves until stopped. The `--listen` accept loop serves one socket at a time and keeps the world in memory, so the resume window lives in the same process. Concurrent per-connection sessions exist in the shared `ServerWorld` model used by the time-vote harness; `--listen` remains sequential.
 
@@ -280,9 +295,9 @@ The smoke starts a fresh server per block, waits for the `SERVER_LISTEN status=o
 
 Limits: loopback only; the resume token is the seed-derived session id and is **not** authentication; no production/gameplay render integration (the debug 3D world client in §Interest view 3D world client only draws the bounded `interest_view` payload), remote roles, entity/terrain streaming, delta compression, or persistent server state. Resume state is process-local, is not written to `ServerSave`, and cannot survive a server restart. The listener still serves one session at a time (sequentially, not concurrently). The client is a protocol/smoke harness, not the multiplayer UI.
 
-### Authoritative executor (v0.1)
+### Authoritative executor (v1)
 
-The first stateful executor lives in `crates/server/src/world.rs` and is exported as `townsmith_server::world`. It replaces the transport-only `Session` accounting for the new smoke path, while `protocol::Session` remains the framing/validation reference.
+The first stateful executor lives in `crates/server/src/world.rs` and is exported as `townsmith_server::world`. It replaces the transport-only `Session` accounting for the new smoke path, while `protocol::Session` remains the framing/validation reference and rejects placement with `PLACEMENT_UNAVAILABLE`.
 
 **State**
 
@@ -291,6 +306,7 @@ ServerWorld {
     // Shared by every connection.
     seed, tick, population, employed, buildings,
     economy: Economy, roads: RoadStore,
+    placements, construction, blueprint_library, policies,
     paused, vote: TimeVote, online: BTreeSet<String>,
 
     // Active per-connection slot. The code keeps these fields flat on
@@ -304,7 +320,7 @@ ServerWorld {
 }
 ```
 
-Population, employment, and building counts are static for v0. `employed` is 60% of the population and `buildings` is one per 25 citizens (at least one), derived deterministically from the seed-derived population. The treasury starts at `Economy::STARTING_BALANCE` (100,000).
+Population, employment, and building counts are static for v1. `employed` is 60% of the population and `buildings` is one per 25 citizens (at least one), derived deterministically from the seed-derived population. The treasury starts at `Economy::STARTING_BALANCE` (100,000).
 
 **API**
 
@@ -317,6 +333,8 @@ Population, employment, and building counts are static for v0. `employed` is 60%
 | `apply_session(connection_id, &ClientCommand) -> Vec<ServerMessage>` | Swap in that connection's session state, apply the command, and leave it active for the next command |
 | `close_connection(connection_id)` | Release a dropped connection: remove its player from `online` and open its resume window |
 | `set_session_role(connection_id, role)` | Dev-only per-connection role; not authentication |
+| `set_blueprint_library(root)` / `clear_blueprint_library()` | Configure or drop the pre-seeded content-addressed `.tsbp` library used by `place_blueprint`; process config, not save data |
+| `set_policy_registry(store)` / `clear_policy_registry()` | Configure or drop the same-seed JSON district policy registry used by the placement gate |
 | `snapshot() -> ServerMessage` | Current `tick`, `population`, `balance`, `checksum`, plus the session viewport (`interest_center`, `interest_radius_m`, `visible_roads`) |
 | `interest_roads() -> Vec<RoadView>` | At most 64 matching roads, ascending id; the bounded detail list without the envelope |
 | `interest_view() -> ServerMessage` | `InterestView` with the viewport, the bounded road list, and `truncated` |
@@ -336,16 +354,17 @@ Population, employment, and building counts are static for v0. `employed` is 60%
 | `ping` | Echoes the nonce | `not_hello` before hello |
 | `time_control` pause/resume | Admin only; freezes/unfreezes `advance_day`; returns a snapshot; does not advance the tick | `not_hello`, `role.forbidden` |
 | `time_control` step | Admin only; advances exactly one game day and one tick, even while paused | `not_hello`, `role.forbidden` |
-| `time_control` speed | Rejected; v0 has no real-time loop | `time.invalid_action` |
+| `time_control` speed | Rejected; v1 has no real-time loop | `time.invalid_action` |
 | `set_tax` | Validates 0–100 and writes the treasury per-day rates; increments tick | `tax.rate_out_of_range`, `not_hello` |
 | `place_road` | Adds a 6 m wide, axis-aligned segment; increments tick | `road.empty`, `road.not_axis_aligned`, `road.out_of_bounds`, `road.too_long` (>512 cells), `road.duplicate`, `road.overlap`, `road.store_full`, `road.id_exhausted` |
+| `place_blueprint` | Mayor-only; resolves the hash in the configured library, validates package/policy/age/placeholder terrain/overlap/funds, appends the placement and priced site, charges the Survey installment, increments tick; an exact repeat returns the existing record without a second charge | `PLACEMENT_HASH_INVALID`, `PLACEMENT_LIBRARY_UNAVAILABLE`, `PLACEMENT_PACKAGE_MISSING`, `PLACEMENT_PACKAGE_INVALID`, `PLACEMENT_POLICY_DENIED`, `PLACEMENT_OUT_OF_RANGE`, `PLACEMENT_ROTATION_INVALID`, `PLACEMENT_OVERLAP`, `PLACEMENT_AGE_LOCKED`, `PLACEMENT_INSUFFICIENT_FUNDS`, `PLACEMENT_STORE_FULL`, `PLACEMENT_REJECTED`, `not_hello` |
 | `set_interest` | View-only: stores the connection viewport (`center_x`, `center_z`, `radius_m`) and returns a snapshot plus a bounded `interest_view`; does not advance the tick or move the checksum | `not_hello`, `interest.invalid_center`, `interest.radius_out_of_range` |
 | `time_vote` | Per-connection ballot on the shared vote: call (initiator auto-yes), yes, no; admin cancel; returns `TimeVoteStatus` | `vote.open`, `vote.cooldown`, `vote.min_online`, `vote.unknown_player`, `vote.duplicate`, `vote.closed`, `vote.action_required`, `vote.action_unsupported`, `role.forbidden` |
 | `disconnect` | Closes this connection; returns `goodbye` | `session.closed` |
 
 `hello` and `disconnect` are accepted before `hello`; every other command is rejected with `not_hello`. Rejections never mutate state.
 
-**Road rules.** Endpoints must be integer cells inside ±1,000,000. Segments must be horizontal or vertical, 1–512 cells long, and are always 6 m wide in v0. The server has no terrain yet, so road validation samples a constant 40 m placeholder ground; water and slope checks are deferred. An exact duplicate (either direction) is `road.duplicate`. A collinear segment sharing two or more cells is `road.overlap`. Roads that share exactly one endpoint cell (T-junction) or cross perpendicularly are allowed. Costs, permissions, and lot/building rules are not implemented.
+**Road rules.** Endpoints must be integer cells inside ±1,000,000. Segments must be horizontal or vertical, 1–512 cells long, and are always 6 m wide in v1. The server has no terrain yet, so road validation samples a constant 40 m placeholder ground; water and slope checks are deferred. An exact duplicate (either direction) is `road.duplicate`. A collinear segment sharing two or more cells is `road.overlap`. Roads that share exactly one endpoint cell (T-junction) or cross perpendicularly are allowed. Costs, permissions, and lot/building rules are not implemented.
 
 **Determinism.** The snapshot checksum is a pure function of the listed state; it excludes the wall clock, seed, and paused flag. `advance_day` never sleeps. `dt_s` is clamped to `0..=DAY_SECONDS`; non-finite and negative values become zero. A paused `advance_day` returns the current ledger without changing the tick.
 
@@ -357,16 +376,17 @@ Population, employment, and building counts are static for v0. `employed` is 60%
 
 | Capability | State | Evidence |
 |---|---|---|
-| Framing/validation | Protocol v0, 4-byte length + JSON, 1 MiB cap, stable codes | `SERVER_PROTOCOL status=ok frames=8 checksum=e2f15a193149bb86` |
-| Authority | Stateful executor; hello, ping, time, tax, road, disconnect | `SERVER_AUTHORITY status=ok commands=6 checksum=70e25aff45867b94` |
+| Framing/validation | Protocol v1, 4-byte length + JSON, 1 MiB cap, stable codes | `SERVER_PROTOCOL status=ok frames=8 checksum=e2f15a193149bb86` |
+| Authority | Stateful executor; hello, ping, time, tax, road, placement, disconnect | `SERVER_AUTHORITY status=ok commands=6 checksum=70e25aff45867b94` |
 | Save/load | `ServerSave` v1, atomic tmp/fsync/rename, one-step `.bak` recovery | `SERVER_SAVE status=ok bytes=744 tick=2 checksum=70e25aff45867b94`; `--listen PORT --save PATH --load PATH` |
 | Roles | Dev-only viewer/mayor/admin, token bucket, 256-entry audit ring | `SERVER_ROLES ... checksum=b6ab299531341226` |
 | Interest | Per-session viewport; snapshot reports `visible_roads`, plus a ≤64-road and ≤64-building `InterestView` | `SERVER_INTEREST status=ok center=0.0,0.0 radius=16.0 visible=1 roads=1 truncated=false buildings=1 buildings_truncated=false tick=2 checksum=6d92be74bdbc11f5` |
 | Time vote | Shared D-021 state machine; one ballot per player across concurrent connections | `SERVER_TIME_VOTE sessions=7 votes=3 passed=1 failed=1 cancelled=1 paused=false checksum=ec840a35bac5065a status=ok` |
+| Placement | Server-owned `place_blueprint`: content-addressed library, policy gate, D-028 charge, optional save fields; no upload/fetch, client UI, or per-settlement permissions | `SERVER_PLACEMENT placed=1 duplicate=1 policy=1 funds=1 overlap=1 save=1 reload=1 checksum=d26569ec3dc6b464 status=ok` |
 | Godot client | Loopback `hello`/`ping`/tax/road/interest/disconnect; `--reconnect` resumes a session with the token from `welcome` | `MP_CLIENT ... interest=ok roads=1 truncated=false ... frames=15`; `MP_CLIENT_RECONNECT status=ok resumed=true ... frames=15` |
 | 3D world client | Loopback `hello`, six deterministic roads, `set_interest`, 3D road/building render, HUD, zero-view probe | `MP_WORLD_CLIENT status=ok tick=6 population=3277 balance=100000 roads=6 buildings=4 truncated=false buildings_truncated=false checksum=6a238e448b0d0d76` |
 
-**Limits.** In-memory world; the `--listen` accept loop still serves one socket at a time, while the shared world model supports concurrent per-connection sessions for the vote loopback. Reconnect/resume works only inside the same server process (300-tick window), is not persisted, and its token is not authentication. A new connection has its own session and resume window; only the legacy single-slot path keeps the `hello.resumable` attempt limit. No content-manifest enforcement, entity/agent/terrain streaming, delta snapshots, rollback, terrain sampling, or cost/material checks. Interest v0 is a per-session viewport that filters aggregate snapshot counts and bounded 64-road and 64-building detail lists (building records are synthetic fixtures); it does not stream other entity kinds or activate, deactivate, or hide simulation state. Persistence is one file per world; no journal, compression, or remote storage. Roles are assigned by the server process, not authenticated. Direct mutation of public fields does not refresh `session_checksum`; call `checksum()` for live state.
+**Limits.** In-memory world; the `--listen` accept loop still serves one socket at a time, while the shared world model supports concurrent per-connection sessions for the vote loopback. Reconnect/resume works only inside the same server process (300-tick window), is not persisted, and its token is not authentication. A new connection has its own session and resume window; only the legacy single-slot path keeps the `hello.resumable` attempt limit. No content-manifest enforcement, entity/agent/terrain streaming, delta snapshots, rollback, or terrain sampling. `place_blueprint` has no package upload/fetch, client placement UI, per-settlement permissions, demolition/refunds, or placement-backed interest buildings; the server uses the package's stored material cost rather than recomputing the price table. Interest v1 is a per-session viewport that filters aggregate snapshot counts and bounded 64-road and 64-building detail lists (building records are synthetic fixtures); it does not stream other entity kinds or activate, deactivate, or hide simulation state. Persistence is one file per world; no journal, compression, or remote storage. Roles are assigned by the server process, not authenticated. Direct mutation of public fields does not refresh `session_checksum`; call `checksum()` for live state.
 
 **Loopback smoke**
 
@@ -382,6 +402,8 @@ cargo run --release -p townsmith-server -- --vote-smoke
 # SERVER_TIME_VOTE sessions=7 votes=3 passed=1 failed=1 cancelled=1 paused=false checksum=ec840a35bac5065a status=ok
 cargo run --release -p townsmith-server -- --save-load-smoke
 # SERVER_SAVE status=ok action=loopback bytes=744 tick=2 checksum=70e25aff45867b94
+cargo run --release -p townsmith-server -- --placement-smoke
+# SERVER_PLACEMENT placed=1 duplicate=1 policy=1 funds=1 overlap=1 save=1 reload=1 checksum=d26569ec3dc6b464 status=ok
 ```
 
 The authority path binds `127.0.0.1:0` and runs `hello → welcome`, `set_tax → snapshot`, `place_road → snapshot`, `ping → pong`, `resume → snapshot`, `disconnect → goodbye`. The client replays the same commands on a local reference world and requires byte-for-byte identical responses; it also asserts the exact tick (1, 2), balance (100,000), and seed-derived population. Socket timeouts replace sleeps.
@@ -430,8 +452,8 @@ Open-world multiplayer is mostly a **chunk streaming** problem, not an entity re
 - **Quantization:** positions and rotations are quantized; animations are driven by state, not per-frame transforms.
 - **Delta compression:** snapshots are diffs against the last acknowledged state.
 
-> [!info] Interest filtering v0
-> `set_interest {center_x, center_z, radius_m}` stores a per-session viewport on `ServerWorld` and answers with a snapshot plus an `interest_view`. `radius_m` must be finite and within **0–2,048 m**; the centre must be finite. Out-of-range values are rejected (`interest.radius_out_of_range`, `interest.invalid_center`), never clamped. `visible_roads` counts every road whose midpoint is inside the circle (inclusive); `interest_view.roads` carries at most **64** of them, ascending by id, with `truncated` when more matched. `interest_view.buildings` carries at most **64** `BuildingView { id, center, radius_m }` records for the same circle, ascending by id, with `buildings_truncated` when more matched; v0 has no per-building placement store, so these are deterministic synthetic fixtures derived from the static completed-building count, not authoritative footprints. The command is view-only: it does not advance the tick, does not change the world checksum, and is excluded from `ServerSave`. Viewer may set its own viewport; the transport-only `Session` rejects it with `interest.unavailable`. **Limits:** no entity, agent, terrain, or blueprint streaming yet; no delta snapshots, prioritization, or server-side region activation tied to the viewport.
+> [!info] Interest filtering v1
+> `set_interest {center_x, center_z, radius_m}` stores a per-session viewport on `ServerWorld` and answers with a snapshot plus an `interest_view`. `radius_m` must be finite and within **0–2,048 m**; the centre must be finite. Out-of-range values are rejected (`interest.radius_out_of_range`, `interest.invalid_center`), never clamped. `visible_roads` counts every road whose midpoint is inside the circle (inclusive); `interest_view.roads` carries at most **64** of them, ascending by id, with `truncated` when more matched. `interest_view.buildings` carries at most **64** `BuildingView { id, center, radius_m }` records for the same circle, ascending by id, with `buildings_truncated` when more matched; the interest view is not placement-backed, so these remain deterministic synthetic fixtures derived from the static completed-building count, not authoritative footprints. The command is view-only: it does not advance the tick, does not change the world checksum, and is excluded from `ServerSave`. Viewer may set its own viewport; the transport-only `Session` rejects it with `interest.unavailable`. **Limits:** no entity, agent, terrain, or blueprint streaming yet; no delta snapshots, prioritization, or server-side region activation tied to the viewport.
 
 ### Bandwidth target
 
@@ -448,7 +470,7 @@ These are planning targets. The Phase 0 spike and a network test must measure th
 
 ## 8. Persistence and reconnect
 
-> [!info] Server save v0
+> [!info] Server save v1
 > `crates/server/src/save.rs` implements the first server-world save: a deterministic `ServerSave` v1 JSON containing seed, tick, population/employment/building counts, paused state, economy, and roads. `save_to` writes `<path>.tmp`, fsyncs, renames, syncs the parent directory on Unix, and rotates a valid primary to `<path>.bak`. `load_from` falls back to the backup when the primary is missing/corrupt and rejects when both are corrupt. `crates/server/src/listen.rs` saves on disconnect/EOF/reset/idle timeout and optionally autosaves every N ticks. CLI: `--listen PORT --save PATH --load PATH [--autosave-ticks N] [--sessions N]` and `--save-load-smoke`; `--once` is the `--sessions 1` shorthand. Limits: one world file, no journal, compression, remote storage, or authentication. Resume windows and tokens are process-local and are **not** part of `ServerSave`, so a restarted server always needs a fresh `hello`.
 
 - **Save format:** world seed + terrain/resource deltas + SQLite for world state + binary blueprint files (see [[03 - Voxel and Scale]] and [[12 - Technical Architecture]]).
@@ -532,7 +554,7 @@ Multiplayer + modding is a trust problem. The server is the authority.
 - **Q-114:** Per-settlement member and per-player settlement limits?
 - **Q-115:** Settlement-level blueprint/mod permissions?
 
-See [[09 - Open Questions]] and [[10 - Decisions]]. D-032 (Accepted) is the server-authoritative blueprint placement ADR; D-033 (Proposed) is the settlement ownership, membership, and permissions ADR.
+See [[09 - Open Questions]] and [[10 - Decisions]]. D-032 (Accepted 2026-11-23, implemented by #306) is the server-authoritative blueprint placement ADR; D-033 (Proposed) is the settlement ownership, membership, and permissions ADR.
 
 ### Session resume v0
 
@@ -549,13 +571,13 @@ The Godot client covers the same path with `--reconnect`: it captures the token 
 
 Limits: no persistence of vote state, proxies, weighted votes, or UI. Q-078 tuning remains open.
 
-### Interest filtering v0
+### Interest filtering v1
 
 `set_interest {center_x, center_z, radius_m}` is a per-session viewport. The executor stores `interest_center: [f32; 2]` (default `[0, 0]`) and `interest_radius_m` (default **2,048 m**, the cap). A successful command answers with **two** messages: the current `snapshot`, then an `interest_view`. The snapshot reports `interest_center`, `interest_radius_m`, and `visible_roads`; the view carries `tick`, `center`, `radius_m`, up to **64** `RoadView { id, start, end, width_m }` entries with `truncated`, and up to **64** `BuildingView { id, center, radius_m }` entries with `buildings_truncated`.
 
 Roads match when their midpoint is inside the circle, including the exact boundary (`distance <= radius`). The detail list is sorted by ascending id, so the order is stable even if a loaded store is not; `truncated` is true only when more than 64 roads matched, and the cap keeps the lowest ids. `visible_roads` is the full aggregate count and may exceed `roads.len()`. Both fields derive from the same predicate, so the count and the view cannot disagree.
 
-Buildings use the same inclusive circle over their centres. v0 has no per-building placement store, so the records are deterministic fixtures synthesized from the static completed-building count on a fixed 16-column, 64 m grid anchored at the origin: id 1 at `[0, 0]`, id 2 at `[64, 0]`, id 17 at `[0, 64]`, and so on, with an 8 m render-hint radius. They are ascending by id, capped at `MAX_INTEREST_BUILDINGS` (64), and `buildings_truncated` is true only when more matched. The records are not authoritative placements, footprints, ownership, blueprint, or simulation state; they carry no checksum weight and are a payload fixture for client/AOI plumbing.
+Buildings use the same inclusive circle over their centres. The placement store exists (D-032), but the interest view is not placement-backed, so the records remain deterministic fixtures synthesized from the static completed-building count on a fixed 16-column, 64 m grid anchored at the origin: id 1 at `[0, 0]`, id 2 at `[64, 0]`, id 17 at `[0, 64]`, and so on, with an 8 m render-hint radius. They are ascending by id, capped at `MAX_INTEREST_BUILDINGS` (64), and `buildings_truncated` is true only when more matched. The records are not authoritative placements, footprints, ownership, blueprint, or simulation state; they carry no checksum weight and are a payload fixture for client/AOI plumbing.
 
 The viewport is **view-only**: `set_interest` does not advance the tick, does not mutate roads or the treasury, and is excluded from `checksum()`, so the protocol/authority/roles/resume goldens stay pinned. It is also not saved; a loaded world starts at the default viewport. Viewer may set its own interest; mayor/admin also may, and the command consumes a rate credit and is audited (`tag=set_interest`, `code=ok`) like any other command. It adds no command beyond `set_interest`.
 
@@ -563,7 +585,7 @@ Validation: the centre must be finite (and representable as `f32`), otherwise `i
 
 `cargo run --release -p townsmith-server -- --interest-smoke` prints `SERVER_INTEREST status=ok center=0.0,0.0 radius=16.0 visible=1 roads=1 truncated=false buildings=1 buildings_truncated=false tick=2 checksum=6d92be74bdbc11f5`. The loopback places one road inside and one outside, narrows the viewport, moves it to the far road, and restores it; every batch must be `snapshot` + `interest_view` and match a local reference world. The 2,048 m batch asserts 64 building records with `buildings_truncated=true`; the narrow batches assert 1 and 0 records with `buildings_truncated=false`. The final restored viewport is the one printed.
 
-Limits: v0 streams only static road geometry plus synthetic building fixtures. There is no authoritative per-building placement store, no entity, agent, terrain, or blueprint streaming, no delta compression, no prioritization, no server-side region activation, and no per-client `ServerSave` state.
+Limits: v1 streams only static road geometry plus synthetic building fixtures. The authoritative placement store is not used for interest buildings, and there is no entity, agent, terrain, or blueprint streaming, no delta compression, no prioritization, no server-side region activation, and no per-client `ServerSave` state.
 
 ### Interest road preview
 
@@ -579,7 +601,7 @@ The Godot client draws the `interest_view` road list in a flat top-down `Control
 
 `godot/mp_world_client.tscn` (+ `mp_world_client.gd`) is the first **client render integration** for the live multiplayer path: a debug `Node3D` scene that connects to `townsmith-server --listen PORT --sessions 1`, consumes the authoritative `welcome`, road snapshots, viewport `snapshot`, and `interest_view`, and draws the bounded payload in 3D world space at **1 unit = 1 m**. It does not add a server command, message, or simulation rule.
 
-**Flow.** The client sends `hello` with a deterministic name (`mp-world-client`), then six deterministic `place_road` commands (a 128 m square with a cross, all legal v0 segments), then `set_interest {center_x: 0, center_z: 0, radius_m: 96}`. The server answers with `welcome`, one snapshot per road, then the viewport snapshot and `interest_view`; `set_interest` remains view-only, so the tick is 6 and the server checksum does not move. The scene reuses `godot/mp_interest_render.gd` for road parsing, the 64-road cap, and the 16-hex road checksum. Building records are parsed defensively here, capped at 64, sorted by ascending id, and given a separate 16-hex checksum; a missing list is treated as empty.
+**Flow.** The client sends `hello` with a deterministic name (`mp-world-client`), then six deterministic `place_road` commands (a 128 m square with a cross, all legal v1 segments), then `set_interest {center_x: 0, center_z: 0, radius_m: 96}`. The server answers with `welcome`, one snapshot per road, then the viewport snapshot and `interest_view`; `set_interest` remains view-only, so the tick is 6 and the server checksum does not move. The scene reuses `godot/mp_interest_render.gd` for road parsing, the 64-road cap, and the 16-hex road checksum. Building records are parsed defensively here, capped at 64, sorted by ascending id, and given a separate 16-hex checksum; a missing list is treated as empty.
 
 **Render.** A ground plane, a world-aligned 16 m grid, X/Y/Z axis lines through the world origin, the interest ring, and a centre marker make the frame legible. Roads become one flat `MultiMesh` box each at the segment midpoint (width from `width_m`, length from the endpoint distance); building records become one box each at their centre with a footprint of `2 * radius_m` and a height derived from that render hint. The HUD reports tick, population, balance, road/building counts, both truncation flags, the server checksum, the road and building checksums, and the rendered instance counts. Out-of-view roads or buildings are still drawn in warning colours, so a filter regression is visible instead of hidden.
 
