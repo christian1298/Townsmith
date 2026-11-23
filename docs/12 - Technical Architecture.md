@@ -283,7 +283,7 @@ flowchart LR
 save_001/
 ├── world.db            # SQLite: settlements, districts, roads, buildings, citizens, economy
 ├── world.db-wal        # write-ahead log
-├── world.json          # seed, worldgen version, game version; content identity when a pack is active (proposed, D-034)
+├── world.json          # seed, worldgen version, game version; content identity when a pack is active (D-034)
 ├── deltas/
 │   ├── terrain/        # per-chunk height/edit deltas
 │   ├── resources/      # harvested trees, deposits, wildlife changes
@@ -342,9 +342,9 @@ D-032 is accepted and implemented (#306, master `61449ce`). Persistence follows 
 - **Policy and terrain.** The district policy registry is server-configured JSON loaded at startup and is not persisted in `ServerSave`; a missing or foreign-seed registry is neutral. Terrain validation uses the deterministic placeholder ground (the road constant) until the server streams terrain; the local preview keeps full terrain sampling.
 - **Bridge.** The local `world_place_blueprint` remains the single-player/dev path and is not removed. There is no full Godot placement UI, per-settlement permission, package upload/fetch, demolition, or refund in v1; the #309 debug 3D world client has an opt-in single-hash `place_blueprint` path (no ghost preview, prediction, or rollback). `interest_view.buildings` is placement-backed whenever a non-empty placement store exists and falls back to the synthetic fixture otherwise, with no completion-aware filtering (in-progress sites are included).
 
-### Content identity (proposed, D-034)
+### Content identity (D-034, accepted; bridge v1)
 
-Not implemented. The current `world.json` has no pack identity, and `world_load` accepts whatever registry is live. D-034 (Proposed) would add one optional top-level object:
+Implemented at the bridge level (2026-11-23). `world.json` stays base-only and outer `format_version: 1` unless one `content_load_dir` pack is live; then it is outer `format_version: 2` with one optional top-level object:
 
 ```json
 "content": {
@@ -355,14 +355,14 @@ Not implemented. The current `world.json` has no pack identity, and `world_load`
 }
 ```
 
-- **Base-only saves omit it** and stay outer `format_version: 1` and byte-identical. A save written with a live pack uses outer `format_version: 2` and the object; an older reader rejects v2 with its existing unsupported-version error instead of silently loading base content.
-- **Load verification runs before store construction or any `.tsbp` load**, immediately after the save JSON is read. The active pack ID, pack checksum, and merged registry checksum must match; missing or changed packs return a stable `content_*` code and leave live state untouched.
-- **One pack only.** The object describes the single `content_load_dir` pack merged after base, not a list or load order. Multi-pack saves need a new identity format version. `content_multiple_packs_unsupported` blocks a save if the registry ever reports more than one.
-- **Identity survives a load/save cycle.** A content-bound world cannot be saved without its pack or with a different pack; unpinning is an explicit content migration (Q-118), not a normal save.
-- **No auto-download, no substitution.** `--accept-missing-content`/the bridge opt-out is reserved for a future read-only inspector that preserves unknown IDs and refuses saves (Q-117). It is not implemented.
+- **Base-only saves omit it** and stay outer `format_version: 1` and byte-identical. A save written with a live pack uses outer `format_version: 2`; an older reader rejects v2 with its unsupported-version error instead of silently loading base content.
+- **Load verification runs before store construction or any `.tsbp` load**, immediately after the save JSON is read. The active pack ID, pack checksum, and merged registry checksum must match; missing or changed packs return a stable `content_*` code and leave live state untouched. A v2 match is normalized to v1 in memory (remove `content`, set `format_version: 1`) for the existing parsers; the file is not rewritten.
+- **One pack only.** The object describes the single `content_load_dir` pack merged after base, not a list or load order. `content_multiple_packs_unsupported` blocks save/load if the registry ever reports more than one.
+- **Identity survives a load/save cycle.** A content-bound world cannot be saved without its pack or with a different pack; unpinning is an explicit content migration (Q-118), not a normal save. A legacy v1 save loaded with a pack is allowed as `legacy_unbound` and pinned on its next save.
+- **No auto-download, no substitution.** `--accept-missing-content` is not implemented; the reserved bridge `world_load_content_checked(..., true)` returns `content_degraded_unsupported` (Q-117).
 - Per-blueprint hashes and `dependencies.mods` remain separate; the world object is the coarse pack gate, not a per-ID reference list.
 
-The same object should be reused by `ServerSave`, which now carries placements (D-032) but still has no content-manifest enforcement.
+`ServerSave` still has no content-manifest enforcement; when the server carries content-bound placements, it should reuse this object instead of inventing a second identity.
 
 ### Migrations
 
@@ -397,7 +397,7 @@ Details: [[05 - Multiplayer]].
 - The base game uses the `base:` namespace; mods use their own.
 - **Resource packs** are applied at the shell/render layer by material ID; the core never sees texture paths.
 - **Scripts** run through a sandbox with a capability API; simulation-affecting scripts run on the server.
-- **Content hash** is computed after loading and stored in the save/manifest. D-034 (Proposed) would store the active pack ID and checksums in `world.json`; the save/load contract is in §7 and remains unimplemented.
+- **Content hash** is computed after loading and stored in the save/manifest. D-034 stores the active pack ID and checksums in `world.json` when one pack is live; the save/load contract is in §7 and is implemented at the bridge level.
 
 Details: [[06 - Modding and Resource Packs]].
 

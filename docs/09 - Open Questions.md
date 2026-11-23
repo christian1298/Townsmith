@@ -212,7 +212,7 @@ These support D-033 (Proposed). None is answered yet; the ADR keeps ownership an
 
 ## Content identity questions
 
-These support D-034 (Proposed). None is answered yet; content-pack identity in world saves is **unimplemented**. Today `content_load_dir` merges one pack into the live registry, but `world_save` writes no pack identity and `world_load` verifies no pack.
+These support D-034 (accepted 2026-11-23). The bridge v1 is implemented: a base-only save stays v1 and byte-identical, a save made with one live pack writes outer v2 and the `content` object, and load verifies it before any store or `.tsbp`. The server and `ServerSave` are unchanged, and the reserved degraded mode still returns `content_degraded_unsupported`. The three questions remain open for pack-version compatibility, missing-pack read-only inspection, and content-ID migration.
 
 | ID | Question | Current assumption / recommendation | Priority |
 |---|---|---|---|
@@ -375,4 +375,4 @@ These support D-034 (Proposed). None is answered yet; content-pack identity in w
 | Q-090–Q-100 | Materials, structure, and basements |
 | Q-107–Q-110 | Server-authoritative blueprint placement |
 | Q-111–Q-115 | Settlement ownership, membership, and permissions |
-| Q-116–Q-118 | Content-pack identity in world saves |
+| Q-116–Q-118 | Content-pack identity in world saves (D-034 accepted; bridge v1 implemented) |

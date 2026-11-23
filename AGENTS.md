@@ -59,6 +59,7 @@ Read the docs that match your task. The index in `00 - Start Here` has a reading
 - Construction uses a mode-selected clock; campaign builds take game days (D-029, proposed).
 - District policy tax multipliers weight city tax income by home and workplace (D-030, proposed).
 - District policy service funding scales civic service upkeep by the mean funding of completed service sites (D-031, proposed).
+- Content-pack identity in world saves: base-only saves stay outer v1 and byte-identical; one live pack writes outer v2 plus a top-level `content` identity, and load verifies it before any store or `.tsbp` (D-034, accepted; bridge v1 implemented).
 
 ## Agent workflow
 
