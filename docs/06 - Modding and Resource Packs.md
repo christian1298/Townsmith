@@ -262,7 +262,7 @@ A world save carries one optional top-level object when a pack is live:
 }
 ```
 
-- **Base-only saves omit the key** and keep outer `format_version: 1`, so their bytes, goldens, and checksums do not change. A save with a pack uses outer `format_version: 2`; a pre-D-034 reader rejects v2 instead of ignoring the identity.
+- **Base-only saves omit the key** and keep outer `format_version: 1`, so their bytes, goldens, and checksums do not change. A save with a pack uses outer `format_version: 2`; a pre-D-034 reader rejects v2 instead of ignoring the identity. `pack_id` is the manifest ID in either form (`mymod` or `mymod:pack`); `base` is never recorded.
 - On load, the pack ID and both checksums must match the live registry before any store or placement is mutated. The v2 object is removed and `format_version` is set back to `1` in memory for the existing parsers; the file is not rewritten, and the same records produce the same placement/store checksums.
 - A content-bound world keeps its identity across a load/save cycle. Saving without the pack, or with a different pack, is refused rather than silently unpinned. `world_clear_placements` also clears the remembered identity.
 - **Packs remain one at a time.** The save object describes the single `content_load_dir` pack merged after base; it is not a multi-pack list or load order. `content_multiple_packs_unsupported` blocks save/load if the registry ever reports more than one.

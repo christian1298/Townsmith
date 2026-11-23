@@ -1714,7 +1714,7 @@ A world save may carry one optional top-level `content` object:
 | Field | Type | Rule |
 |---|---|---|
 | `format_version` | integer | Identity format version; `1` is the only supported value. A higher value returns `content_identity_unsupported` |
-| `pack_id` | string | The manifest ID, a namespaced ID such as `example:copper_age`; `base` is never recorded as a pack |
+| `pack_id` | string | The manifest ID, either `mymod` or `mymod:pack` such as `example:copper_age`; `base` is never recorded as a pack |
 | `pack_checksum` | string | `ContentPack::checksum()`, 16 lowercase hex digits; identifies the pack's semantic manifest + content, not a raw-byte hash |
 | `registry_checksum` | string | Merged `ContentRegistry::checksum()`, 16 lowercase hex digits; identifies base + pack after the merge |
 

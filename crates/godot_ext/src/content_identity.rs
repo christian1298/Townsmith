@@ -527,7 +527,10 @@ fn parse_content_identity(value: &Value) -> Result<WorldContentIdentity, Content
     Ok(identity)
 }
 
-/// Reject an empty, base, or malformed pack ID.
+/// Reject an empty, base, or malformed manifest ID.
+///
+/// A manifest ID is `mymod` or `mymod:pack` (the forms accepted by
+/// `ModManifest`); both are valid pack identities. `base` is never a pack.
 fn validate_pack_id(pack_id: &str) -> Result<(), ContentIdentityError> {
     if pack_id == "base" {
         return Err(identity_error(
@@ -535,10 +538,10 @@ fn validate_pack_id(pack_id: &str) -> Result<(), ContentIdentityError> {
             "the base registry is never recorded as a pack",
         ));
     }
-    if !is_namespaced_id(pack_id) {
+    if !is_manifest_id(pack_id) {
         return Err(identity_error(
             "content_identity_invalid",
-            format!("pack ID {pack_id:?} is not a valid namespaced ID"),
+            format!("pack ID {pack_id:?} is not a valid manifest ID"),
         ));
     }
     Ok(())
@@ -555,22 +558,25 @@ fn validate_active_pack(active: &ActiveContentIdentity) -> Result<(), ContentIde
     validate_pack_id(&active.pack_id)
 }
 
-/// Whether `id` matches `^[a-z0-9_]+:[a-z0-9_./-]+$`.
-fn is_namespaced_id(id: &str) -> bool {
-    let Some((namespace, path)) = id.split_once(':') else {
+/// Whether `id` matches the manifest ID forms `mymod` or `mymod:pack`.
+fn is_manifest_id(id: &str) -> bool {
+    let mut parts = id.split(':');
+    let Some(namespace) = parts.next() else {
         return false;
     };
-    if namespace.is_empty() || path.is_empty() || path.contains(':') {
+    if namespace.is_empty() || !namespace.bytes().all(is_manifest_id_byte) {
         return false;
     }
-    namespace
-        .bytes()
-        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-        && path.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'_' | b'.' | b'/' | b'-')
-        })
+    match parts.next() {
+        None => true,
+        Some(pack) => {
+            !pack.is_empty() && pack.bytes().all(is_manifest_id_byte) && parts.next().is_none()
+        }
+    }
+}
+
+fn is_manifest_id_byte(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
 }
 
 /// 16 lowercase hex digits on the wire, `u64` in memory.
@@ -693,6 +699,20 @@ mod tests {
                 "{label} content must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn bare_manifest_ids_are_valid_pack_bindings() {
+        let active =
+            ActiveContentIdentity::pack("example", PACK_CHECKSUM, REGISTRY_CHECKSUM, BASE_CHECKSUM);
+        let saved = stamp_world_content(&base_world_json(), &active, None).expect("bare pack save");
+        assert_eq!(
+            saved.identity.as_ref().expect("identity").pack_id,
+            "example"
+        );
+        let verified = verify_world_content(&saved.json, &active).expect("bare pack load");
+        assert_eq!(verified.status, ContentIdentityStatus::Match);
+        assert_eq!(verified.identity.expect("identity").pack_id, "example");
     }
 
     #[test]
