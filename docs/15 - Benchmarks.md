@@ -361,6 +361,28 @@ SERVER_PLACEMENT placed=1 duplicate=1 policy=1 funds=1 overlap=1 save=1 reload=1
 
 Pin the seven booleans and the 16-hex checksum `d26569ec3dc6b464`. The checksum is root-independent: the authoritative placement record stores the content-addressed reference `tsbp:blake3:<hex>`, not the resolved library path, so two runs in different temp library roots report the same hex. The save JSON and wire message contain no `/tmp`, `/media`, or library-root path.
 
+#### 3D client placement smoke (D-032)
+
+```bash
+GODOT=/path/to/godot ./scripts/smoke_mp_placement.sh
+```
+
+The smoke writes a visible `local:client_smoke_house` fixture (32 × 16 × 32 voxels in a 3.2 m volume) into a temporary content-addressed library with `townsmith-server --placement-fixture <abs-dir>`, starts a fresh `--listen PORT --sessions 1 --role mayor --blueprint-library` server per run, and runs `godot/mp_world_client.tscn --smoke --place-hash <hash> --place-x 32 --place-z 32` twice. Each run must print:
+
+```text
+SERVER_PLACEMENT_FIXTURE hash=blake3:<64 hex> status=ok
+MP_PLACEMENT status=ok id=1 hash=blake3:<64 hex> placement_checksum=<16 hex> world_checksum=<16 hex> center=32.0,32.0 footprint=3.2,3.2 tick=7
+MP_WORLD_CLIENT_DONE status=ok session=session-<16 hex> tick=7 frames_sent=11 frames_received=13
+```
+
+The pinned placement results are `placement_checksum=b93c2d35e4408a21` and `world_checksum=98b682969cf93fd7`; the server must report `SERVER_LISTEN status=ok sessions=1 commands=11` and exit. The two runs must produce identical placement/done lines and checksums, the client output must contain no `/tmp` or `/media` path, and the final line is:
+
+```text
+MP_PLACEMENT_SMOKE status=ok runs=2 id=1 placement_checksum=b93c2d35e4408a21 world_checksum=98b682969cf93fd7 commands=11
+```
+
+This is a debug client integration, not a placement UI, prediction/upload path, benchmark, or the 1M render gate. It does not change the server or protocol; the pre-existing `--placement-smoke` pin stays `d26569ec3dc6b464`, and the default `smoke_mp_world_client.sh` flow stays ten commands/twelve responses with unchanged markers.
+
 Server pins that must stay exact for this slice:
 
 - city-loop matrix mid: city checksum `623f39c61b71b68a`, treasury checksum `1c213cc40278a13b`;

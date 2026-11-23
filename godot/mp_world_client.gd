@@ -16,6 +16,8 @@ extends Node3D
 ##   build the 3D scene from the received view
 ##   --smoke only: set_interest {center 32,32 radius 16 m} -> snapshot +
 ##     interest_view with zero roads/buildings, proving the render clears
+##   optional --place-hash: place_blueprint {blueprint_hash, x, z, rotation} ->
+##     place_blueprint_result; render the authoritative placement box
 ##   disconnect -> goodbye
 ##
 ## The scene draws a ground plane, a world-aligned grid with world axes, the
@@ -24,6 +26,13 @@ extends Node3D
 ## boxes use the server's `radius_m` render hint as a footprint diameter (not an
 ## authoritative footprint). A HUD shows tick, population, balance, road and
 ## building counts, both truncation flags, and the server checksum.
+##
+## Placement is opt-in: only `--place-hash <blake3:…|64 hex>` sends the D-032
+## command after the zero-view probe. The box uses the authoritative
+## `placement.center`, `placement.footprint_m`, and `placement.bounds_m` on the
+## client ground (bottom at y=0); the server ground placeholder is 40 m, so the
+## Y value is a render hint, never a server height. Without the flag the flow,
+## markers, and frame counts are unchanged.
 ##
 ## `godot/mp_interest_render.gd` is reused for road parsing, the 64-road wire
 ## cap, and the deterministic 16-hex road checksum. Buildings are parsed
@@ -39,10 +48,14 @@ extends Node3D
 ## Run:
 ##   godot --path godot res://mp_world_client.tscn -- --port 47015
 ##   godot --headless --path godot res://mp_world_client.tscn -- --smoke --port 47015
+##   godot --headless --path godot res://mp_world_client.tscn -- --smoke --port 47015 \
+##     --place-hash blake3:<64 hex> --place-x 32 --place-z 32 --place-rotation 0
 ##
 ## `scripts/smoke_mp_world_client.sh` starts a fresh `--sessions 1` server per
 ## run and asserts identical `MP_WORLD_CLIENT` / `MP_WORLD_CLIENT_ZERO` markers
-## across two runs.
+## across two runs. `scripts/smoke_mp_placement.sh` seeds a client fixture
+## library, runs the same scene with `--place-hash`, and asserts the
+## `MP_PLACEMENT` result plus 11/13 frame counts across two runs.
 ##
 ## See docs/05 - Multiplayer.md §Interest view 3D world client.
 
@@ -56,6 +69,7 @@ enum Phase {
 	INTEREST_VIEW_WAIT,
 	ZERO_INTEREST_SENT,
 	ZERO_VIEW_WAIT,
+	PLACE_SENT,
 	DISCONNECT_SENT,
 }
 
@@ -76,6 +90,13 @@ const DEFAULT_RADIUS_M := 96.0
 const ZERO_CENTER := Vector2(32.0, 32.0)
 const ZERO_RADIUS_M := 16.0
 const MAX_RADIUS_M := 2048.0
+
+# Optional D-032 placement. The hash must be a canonical `blake3:` + 64
+# lowercase hex, or bare 64 lowercase hex normalized to that form.
+const BLUEPRINT_HASH_PREFIX := "blake3:"
+const DEFAULT_PLACE_X := 32.0
+const DEFAULT_PLACE_Z := 32.0
+const DEFAULT_PLACE_ROTATION := 0
 
 # Six axis-aligned roads forming a square with a cross. Every midpoint is
 # inside the 96 m interest circle and each segment is a legal 128-cell road.
@@ -118,6 +139,7 @@ const COLOR_INSIDE := Color(0.96, 0.78, 0.32)
 const COLOR_OUTSIDE := Color(0.92, 0.28, 0.22)
 const COLOR_BUILDING_INSIDE := Color(0.30, 0.82, 0.92)
 const COLOR_BUILDING_OUTSIDE := Color(0.86, 0.36, 0.94)
+const COLOR_PLACEMENT := Color(0.98, 0.64, 0.24)
 
 var _peer: StreamPeerTCP
 var _phase: int = Phase.CONNECTING
@@ -171,6 +193,22 @@ var _grid_lines := 0
 var _main_marker := ""
 var _zero_marker := ""
 
+var _place_hash := ""
+var _place_x := DEFAULT_PLACE_X
+var _place_z := DEFAULT_PLACE_Z
+var _place_rotation := DEFAULT_PLACE_ROTATION
+var _has_placement := false
+var _placement_id := 0
+var _placement_hash := ""
+var _placement_checksum := ""
+var _placement_world_checksum := ""
+var _placement_center := Vector2.ZERO
+var _placement_footprint := Vector2.ZERO
+var _placement_bounds := Vector3.ZERO
+var _placement_transform := Transform3D.IDENTITY
+var _placement_size := Vector3.ZERO
+var _placement_marker := ""
+
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
 	_smoke = args.has("--smoke")
@@ -182,6 +220,11 @@ func _ready() -> void:
 		_float_arg(args, "--center-z", DEFAULT_CENTER.y)
 	)
 	_radius_m = _float_arg(args, "--radius-m", DEFAULT_RADIUS_M)
+	var place_hash_text := _arg(args, "--place-hash", "")
+	_place_hash = _canonical_place_hash(place_hash_text)
+	_place_x = _float_arg(args, "--place-x", DEFAULT_PLACE_X)
+	_place_z = _float_arg(args, "--place-z", DEFAULT_PLACE_Z)
+	_place_rotation = _int_arg(args, "--place-rotation", DEFAULT_PLACE_ROTATION)
 
 	_container = Node3D.new()
 	_container.name = "WorldClientRoot"
@@ -198,6 +241,14 @@ func _ready() -> void:
 		return
 	if _player_name.strip_edges().is_empty() or _player_name.length() > 32:
 		_fail("invalid_player_name")
+		return
+	if not place_hash_text.is_empty() and _place_hash.is_empty():
+		_fail("invalid_place_hash")
+		return
+	if not _place_hash.is_empty() and (
+		not is_finite(_place_x) or not is_finite(_place_z) or _place_rotation % 90 != 0
+	):
+		_fail("invalid_placement")
 		return
 	if not _is_valid_view(_center, _radius_m):
 		_fail("invalid_interest")
@@ -290,6 +341,8 @@ func _handle_message(message: Dictionary) -> void:
 			_on_snapshot(message)
 		"interest_view":
 			_on_interest_view(message)
+		"place_blueprint_result":
+			_on_place_blueprint_result(message)
 		"reject":
 			_on_reject(message)
 		"goodbye":
@@ -491,7 +544,88 @@ func _on_interest_view(message: Dictionary) -> void:
 		return
 	_zero_marker = _marker_text("MP_WORLD_CLIENT_ZERO", true)
 	print(_zero_marker)
+	if not _place_hash.is_empty():
+		_set_status("Zero viewport rendered; placing the authoritative blueprint.")
+		if not _send({
+			"type": "place_blueprint",
+			"blueprint_hash": _place_hash,
+			"x": _place_x,
+			"z": _place_z,
+			"rotation": _place_rotation,
+		}):
+			return
+		_phase = Phase.PLACE_SENT
+		_arm_deadline(_timeout_ms)
+		return
 	_set_status("Zero viewport rendered; disconnecting.")
+	if not _send({"type": "disconnect"}):
+		return
+	_phase = Phase.DISCONNECT_SENT
+	_arm_deadline(_timeout_ms)
+
+## Accept the authoritative D-032 result, render its box, and close the session.
+## Rejects are handled by `_on_reject` with the server code in the failure
+## marker. This is the only place the client consumes `place_blueprint`.
+func _on_place_blueprint_result(message: Dictionary) -> void:
+	if _phase != Phase.PLACE_SENT:
+		_fail("place_result_in_%s" % _phase_name())
+		return
+	var tick := int(message.get("tick", -1))
+	if tick != _last_tick + 1:
+		_fail("place_tick_%d_after_%d" % [tick, _last_tick])
+		return
+	var placement_id := int(message.get("placement_id", 0))
+	if placement_id < 1:
+		_fail("place_id_%d" % placement_id)
+		return
+	if str(message.get("blueprint_hash", "")) != _place_hash:
+		_fail("place_hash_mismatch")
+		return
+	var placement_checksum := str(message.get("placement_checksum", ""))
+	var world_checksum := str(message.get("world_checksum", ""))
+	if not _is_hex16(placement_checksum) or not _is_hex16(world_checksum):
+		_fail("place_checksums")
+		return
+	var view_raw: Variant = message.get("placement", null)
+	if typeof(view_raw) != TYPE_DICTIONARY:
+		_fail("place_view")
+		return
+	var view: Dictionary = view_raw
+	if int(view.get("id", 0)) != placement_id:
+		_fail("place_view_id")
+		return
+	if str(view.get("blueprint_hash", "")) != _place_hash:
+		_fail("place_view_hash")
+		return
+	var center := _finite_array(view.get("center", null), 3)
+	var footprint := _finite_array(view.get("footprint_m", null), 2)
+	var bounds := _finite_array(view.get("bounds_m", null), 3)
+	if center.is_empty() or footprint.is_empty() or bounds.is_empty():
+		_fail("place_view_geometry")
+		return
+	if float(footprint[0]) <= 0.0 or float(footprint[1]) <= 0.0 or float(bounds[1]) <= 0.0:
+		_fail("place_view_geometry_size")
+		return
+
+	_placement_id = placement_id
+	_placement_hash = _place_hash
+	_placement_checksum = placement_checksum
+	_placement_world_checksum = world_checksum
+	_placement_center = Vector2(float(center[0]), float(center[2]))
+	_placement_footprint = Vector2(float(footprint[0]), float(footprint[1]))
+	_placement_bounds = Vector3(float(bounds[0]), float(bounds[1]), float(bounds[2]))
+	_has_placement = true
+	# The result carries the new authoritative tick and world checksum, but not
+	# a population/balance snapshot; keep the last zero-view values for the HUD.
+	_store_snapshot(tick, _last_population, _last_balance, world_checksum)
+	_refresh_hud()
+	if not _render_placement():
+		return
+	if not _assert_placement():
+		return
+	_placement_marker = _placement_marker_text()
+	print(_placement_marker)
+	_set_status("Authoritative placement rendered; disconnecting.")
 	if not _send({"type": "disconnect"}):
 		return
 	_phase = Phase.DISCONNECT_SENT
@@ -893,6 +1027,36 @@ func _add_buildings() -> void:
 	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_container.add_child(node)
 
+## One authoritative placement box on the client ground. The server's placement
+## Y (40 m placeholder ground) is not used; the box sits with its bottom at y=0.
+## `_placement_transform` is the CPU-side mirror the smoke asserts.
+func _render_placement() -> bool:
+	if _container == null:
+		_fail("placement_container_missing")
+		return false
+	_placement_size = Vector3(
+		_placement_footprint.x, _placement_bounds.y, _placement_footprint.y
+	)
+	_placement_transform = Transform3D(
+		Basis.from_scale(_placement_size),
+		Vector3(_placement_center.x, _placement_size.y * 0.5, _placement_center.y)
+	)
+
+	var box := BoxMesh.new()
+	box.size = Vector3.ONE
+	var material := StandardMaterial3D.new()
+	material.albedo_color = COLOR_PLACEMENT
+	material.roughness = 0.65
+	box.material = material
+
+	var node := MeshInstance3D.new()
+	node.name = "WorldClientPlacement"
+	node.mesh = box
+	node.transform = _placement_transform
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_container.add_child(node)
+	return true
+
 func _add_camera() -> void:
 	var framed_radius := maxf(_view_radius_m, 8.0)
 	_camera = Camera3D.new()
@@ -1070,6 +1234,71 @@ func _assert_zero_view() -> bool:
 		return false
 	return true
 
+## Smoke assertions for the authoritative placement. Every check reads the
+## CPU-side mirror; the `MeshInstance3D` node is verified by identity and mirror,
+## never by a GPU readback.
+func _assert_placement() -> bool:
+	if not _has_placement:
+		_fail("assert_placement_missing")
+		return false
+	if _placement_id < 1:
+		_fail("assert_placement_id")
+		return false
+	if _placement_hash != _place_hash:
+		_fail("assert_placement_hash")
+		return false
+	if not _is_hex16(_placement_checksum) or not _is_hex16(_placement_world_checksum):
+		_fail("assert_placement_checksums")
+		return false
+	if not _placement_center.is_equal_approx(Vector2(_place_x, _place_z)):
+		_fail("assert_placement_center")
+		return false
+	if not (_placement_footprint.x > 0.0 and _placement_footprint.y > 0.0):
+		_fail("assert_placement_footprint")
+		return false
+	if not (_placement_bounds.x > 0.0 and _placement_bounds.y > 0.0 and _placement_bounds.z > 0.0):
+		_fail("assert_placement_bounds")
+		return false
+	var expected_size := Vector3(
+		_placement_footprint.x, _placement_bounds.y, _placement_footprint.y
+	)
+	if not _placement_size.is_equal_approx(expected_size):
+		_fail("assert_placement_size")
+		return false
+	var expected_origin := Vector3(
+		_placement_center.x, expected_size.y * 0.5, _placement_center.y
+	)
+	if not _placement_transform.origin.is_equal_approx(expected_origin):
+		_fail("assert_placement_origin")
+		return false
+	if not _placement_transform.basis.get_scale().is_equal_approx(expected_size):
+		_fail("assert_placement_scale")
+		return false
+	var node := _container.get_node_or_null("WorldClientPlacement") as MeshInstance3D
+	if node == null:
+		_fail("assert_placement_node")
+		return false
+	if not node.transform.is_equal_approx(_placement_transform):
+		_fail("assert_placement_node_transform")
+		return false
+	if not _assert_placement_hud():
+		return false
+	return true
+
+func _assert_placement_hud() -> bool:
+	if _hud_label == null:
+		_fail("assert_placement_hud_missing")
+		return false
+	for field in [
+		"placement_id=%d" % _placement_id,
+		"placement_checksum=%s" % _placement_checksum,
+		"world_checksum=%s" % _placement_world_checksum,
+	]:
+		if not _hud_label.text.contains(field):
+			_fail("assert_placement_hud_%s" % field)
+			return false
+	return true
+
 func _assert_hud_fields() -> bool:
 	if _hud_label == null:
 		_fail("assert_hud_missing")
@@ -1141,6 +1370,22 @@ func _marker_text(prefix: String, zero: bool) -> String:
 		_session_id,
 	]
 
+func _placement_marker_text() -> String:
+	return (
+		"MP_PLACEMENT status=ok id=%d hash=%s placement_checksum=%s"
+		+ " world_checksum=%s center=%.1f,%.1f footprint=%.1f,%.1f tick=%d"
+	) % [
+		_placement_id,
+		_placement_hash,
+		_placement_checksum,
+		_placement_world_checksum,
+		_placement_center.x,
+		_placement_center.y,
+		_placement_footprint.x,
+		_placement_footprint.y,
+		_last_tick,
+	]
+
 func _build_hud() -> void:
 	_hud_layer = CanvasLayer.new()
 	_hud_layer.name = "WorldClientHud"
@@ -1173,7 +1418,7 @@ func _refresh_hud() -> void:
 	var truncated_text := str(_truncated) if _has_view else "-"
 	var buildings_truncated_text := str(_buildings_truncated) if _has_view else "-"
 	var checksum_text := _last_checksum if not _last_checksum.is_empty() else "-"
-	_hud_label.text = (
+	var text := (
 		"3D multiplayer world client (debug)\n"
 		+ "status: %s\n"
 		+ "session: %s\n"
@@ -1204,6 +1449,17 @@ func _refresh_hud() -> void:
 		_road_checksum if not _road_checksum.is_empty() else "-",
 		_building_checksum if not _building_checksum.is_empty() else "-",
 	]
+	if _has_placement:
+		text += (
+			"\nplacement_id=%d hash=%s placement_checksum=%s world_checksum=%s"
+			% [
+				_placement_id,
+				_placement_hash,
+				_placement_checksum,
+				_placement_world_checksum,
+			]
+		)
+	_hud_label.text = text
 
 func _set_status(text: String) -> void:
 	_status_text = text
@@ -1238,6 +1494,38 @@ func _is_hex16(value: String) -> bool:
 			return false
 	return true
 
+## Return a finite numeric array of exactly `size` entries, or `[]` when the
+## payload is missing, the wrong length, or carries a non-numeric/non-finite
+## entry. Placement geometry is validated before it reaches the renderer.
+func _finite_array(value: Variant, size: int) -> Array:
+	if typeof(value) != TYPE_ARRAY or value.size() != size:
+		return []
+	for item in value:
+		if typeof(item) != TYPE_INT and typeof(item) != TYPE_FLOAT:
+			return []
+		if not is_finite(float(item)):
+			return []
+	return value
+
+## Canonicalize `--place-hash`: accept `blake3:` + 64 lowercase hex or bare 64
+## lowercase hex. Anything else returns an empty string.
+func _canonical_place_hash(value: String) -> String:
+	if value.is_empty():
+		return ""
+	var hex := value
+	if hex.begins_with(BLUEPRINT_HASH_PREFIX):
+		hex = hex.substr(BLUEPRINT_HASH_PREFIX.length())
+	if hex.length() != 64:
+		return ""
+	for index in range(hex.length()):
+		var character := hex[index]
+		if not (
+			(character >= "0" and character <= "9")
+			or (character >= "a" and character <= "f")
+		):
+			return ""
+	return BLUEPRINT_HASH_PREFIX + hex
+
 func _phase_name() -> String:
 	match _phase:
 		Phase.CONNECTING:
@@ -1254,6 +1542,8 @@ func _phase_name() -> String:
 			return "zero_interest_sent"
 		Phase.ZERO_VIEW_WAIT:
 			return "zero_view_wait"
+		Phase.PLACE_SENT:
+			return "place_sent"
 		Phase.DISCONNECT_SENT:
 			return "disconnect_sent"
 		_:
@@ -1274,6 +1564,12 @@ func _float_arg(args: PackedStringArray, name: String, fallback: float) -> float
 		return fallback
 	var value := text.to_float()
 	return value if is_finite(value) else fallback
+
+func _int_arg(args: PackedStringArray, name: String, fallback: int) -> int:
+	var text := _arg(args, name, "")
+	if text.is_empty() or not text.is_valid_int():
+		return fallback
+	return text.to_int()
 
 func _positive_int(value: String, fallback: int) -> int:
 	if not value.is_valid_int():

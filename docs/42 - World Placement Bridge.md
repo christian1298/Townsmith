@@ -189,6 +189,37 @@ The process builds a tiny valid `.tsbp` in a temporary library, configures a two
 SERVER_PLACEMENT placed=1 duplicate=1 policy=1 funds=1 overlap=1 save=1 reload=1 checksum=d26569ec3dc6b464 status=ok
 ```
 
+### 3D client integration
+
+`godot/mp_world_client.tscn` (+ `mp_world_client.gd`) can send the D-032 command with an operator-configured package hash and render the authoritative result. It is a **debug client integration**, not a placement UI:
+
+```bash
+# 1. Seed a temporary content-addressed library with a visible fixture package.
+cargo run --release -p townsmith-server -- --placement-fixture /abs/client-library
+# SERVER_PLACEMENT_FIXTURE hash=blake3:<64 hex> status=ok
+
+# 2. Serve the world with that library and point the client at the hash.
+cargo run --release -p townsmith-server -- --listen 47015 --sessions 1 \
+  --role mayor --blueprint-library /abs/client-library
+GODOT=/path/to/godot ./scripts/smoke_mp_placement.sh
+```
+
+The fixture helper writes `local:client_smoke_house` (32 × 16 × 32 voxels in a 3.2 m volume, material cost 1000, capacity 2, one job slot, no declared structure) and returns its canonical hash. `--placement-fixture <absolute-dir>` creates the directory when missing, inserts the package, prints exactly `SERVER_PLACEMENT_FIXTURE hash=blake3:<64 hex> status=ok`, and exits 0; a relative root or I/O failure prints `SERVER_PLACEMENT_FIXTURE status=error …` and exits 2. The existing `seed_library` and `--placement-smoke` fixture/checksum are unchanged.
+
+Client args: `--place-hash <blake3:…|64 hex>` (opt-in; absent keeps the original ten-command/twelve-response flow byte-identical), `--place-x` (default 32), `--place-z` (default 32), and `--place-rotation` (default 0). After the zero-view probe the client sends `place_blueprint`, validates the result (tick, id, echoed hash, both 16-hex checksums, and the `PlacementView` id/hash plus finite centre/footprint/bounds), renders one `MeshInstance3D` named `WorldClientPlacement` from `placement.center`/`footprint_m`/`bounds_m` on the client ground (bottom at y=0; the server's 40 m placeholder is not drawn, so Y is a render hint), and prints:
+
+```text
+MP_PLACEMENT status=ok id=1 hash=blake3:<64 hex> placement_checksum=<16 hex> world_checksum=<16 hex> center=32.0,32.0 footprint=3.2,3.2 tick=7
+```
+
+`scripts/smoke_mp_placement.sh` starts a fresh `--sessions 1 --role mayor --blueprint-library` server per run, asserts eleven commands/thirteen responses (`frames_sent=11 frames_received=13`), rejects any `/tmp`/`/media` path in client output, and requires two identical runs:
+
+```text
+MP_PLACEMENT_SMOKE status=ok runs=2 id=1 placement_checksum=b93c2d35e4408a21 world_checksum=98b682969cf93fd7 commands=11
+```
+
+Limits: a single configured hash, no ghost preview, prediction, rollback, package upload/fetch, mod auto-download, server path on the wire, per-settlement permissions, or placement UI. The server library must be pre-seeded, and the command is authorized by the global Mayor role. The client HUD keeps the last authoritative snapshot balance because `place_blueprint_result` carries no balance.
+
 ## 3. Save format
 
 `world_save` writes the `PlacementStore` as pretty JSON:
