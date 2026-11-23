@@ -176,7 +176,7 @@ This is a scripted recovery, not a balanced default. The standard 8/4 policy los
 - `city_loop` bin: the early profile completes, fills, and reaches full service.
 - `city_loop` bin: the balance report has a stable shape and produces identical JSON on repeated runs.
 - `scripts/bench_city_loop.sh` compares the early/mid/late checksums with `benchmarks/baselines/phase3_city_loop.json`.
-- Workspace: **1019 tests** (1014 unit/integration + 5 doctests, all passing).
+- Workspace: **1154 tests** (1149 unit/integration + 5 doctests, all passing). Verified on 2026-11-23 at master `a39a6bd`.
 
 ## 6b. Degraded matrix
 

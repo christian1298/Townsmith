@@ -180,8 +180,8 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 ## 9. Tests
 
 - `core_city::construction`: 11 tests covering phase start, completion, crew stall, material stall, no material drain while crew-stalled, large-step crew enforcement, shared crew, monotonic progress, duplicate ids, JSON/checksum, and malformed state.
-- `core_city`: **482 tests**.
-- Workspace: **1019 tests** (1014 unit/integration + 5 doctests, all passing).
+- `core_city`: **535 tests**.
+- Workspace: **1154 tests** (1149 unit/integration + 5 doctests, all passing). Verified on 2026-11-23 at master `a39a6bd`.
 - Godot headless: `WORLD_SCENE ... build=ok done=ok ... status=ok`.
 
 ## 10. Next

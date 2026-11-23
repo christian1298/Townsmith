@@ -30,7 +30,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 
 | Item | State |
 |---|---|
-| Phase | **Phase 3 and Phase 4 slices implemented; post-audit product and tooling slices landed.** The Phase 5 1M/3060 render gate is open; the Q-101 human playtest is still pending (the capture form, summarizer, and gate evaluator are ready). |
+| Phase | **Phase 3 and Phase 4 slices implemented; post-audit product and tooling slices landed.** At master `a39a6bd` (2026-11-23): district policies now reach three consumers — the placement gate with validation-preview parity (#277/#286), tax weighting (D-030, Proposed, #278), and service funding (D-031, Proposed, #285) — with #289 point-query indexing; #279 100 km² streaming + 250k building records, #280/#290 fail-closed gate-result assembler, #283 dashboard settlement selector, #284/#288 interest-view building records and preview boxes, and #287 multi-connection sessions (F-003 fixed) are merged. The remaining open gates are the Q-101 human playtest and the Phase 5 1M/RTX 3060 render gate. |
 | Code | Rust workspace plus a Godot 4 shell. City, world, server, and benchmark paths are implemented; see [Code inventory](#code-inventory). |
 | Engine | **Accepted:** Godot 4 shell + Rust core via GDExtension. The Phase 0 spike passed; the 3060-class 1M 30 FPS gate remains open for Phase 5. See [[04 - Engine and Stack]] and [[10 - Decisions]]. |
 | Team | **Accepted:** 2–3 full-time generalists; Rust/Godot experience or willingness to learn. |
@@ -47,37 +47,37 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Authoring | **Accepted:** workshop/creative editor first; build-anywhere placement; permissioned live editing later. See D-026. |
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with real 10 cm building detail is tractable. The box-city MultiMesh path is measured well above target on an RTX 4080; the target 3060-class run and voxel building LOD remain. See [[03 - Voxel and Scale]], [[23 - City Rendering Benchmark]], and [[09 - Open Questions]]. |
-| Next action | Run the Q-101 playtest with [[66 - Playtest Kit]] or the standalone `playtest_capture.tscn` form ([[66 - Playtest Kit]] §9), then summarize the exports with `./scripts/check_playtest_report.sh` (`PLAYTEST_SUMMARY …`). The summarizer counts recorded captures; it does not run the session or answer Q-101. Then: integrate policy effects and add policy editing plus selectable settlement panels (the registry, `F6` focus, world-save persistence, and the dashboard's read-only Policies section have landed), close the 1M cohort gate and reference gate card evidence, add client render integration for the multiplayer path (interest and reconnect are loopback-only), and close the 1M/RTX 3060 render gate with recorded runs (`./scripts/check_metropolis_gate.py`, [[08 - Roadmap]], [[09 - Open Questions]]). |
+| Next action | Run the Q-101 playtest with [[66 - Playtest Kit]] or the standalone `playtest_capture.tscn` form ([[66 - Playtest Kit]] §9), then summarize the exports with `./scripts/check_playtest_report.sh` (`PLAYTEST_SUMMARY …`). The summarizer counts recorded captures; it does not run the session or answer Q-101. Then: extend the dashboard's read-only settlement selector into per-settlement panels, add client render integration for the multiplayer path (interest and reconnect are loopback-only), record the 1M cohort gate and reference gate card with the #273 harness and #280/#290 assembler (assembly is not a pass), and close the 1M/RTX 3060 render gate with recorded runs (`./scripts/check_metropolis_gate.py`, [[08 - Roadmap]], [[09 - Open Questions]]). The remaining human/hardware blockers are Q-101 and the 1M/RTX 3060 render gate; F-003 is fixed by #287 ([[78 - Code Audit Findings]]). |
 
 ## Current capabilities
 
-- **World and save:** full-world 1M core save/load envelope (182.8 MB JSON, **232.5 ms save / 694.7 ms load**) and atomic `.tmp`/`.bak` bridge writes; 100 km² streaming data harness (525 chunks, ~281 MB peak mesh bytes). See [[68 - Metropolis Gate]] and [[75 - Save Load Stress]].
-- **City and economy:** live phase-driven financing and campaign construction clock (D-028/D-029 still proposed), utility/service build lead time, infrastructure costs, district summary, the F7 heatmap with #263 metric modes (**Shift+F7** cycles Population → Jobs → Happiness; F7 opens Population; world localization keys 252), and #260/#265/#268 district policy registry, pure `DistrictPolicyEffect` resolution, standalone `policy_editor.tscn`, a read-only dashboard Policies section, and a selectable dashboard Settlements section that drives the 256 m district and F7 heatmap centre. Policies persist through #271's optional world-save `policies` object; no simulation/economy path consumes the effects yet. `F6` provides camera/selection district focus. See [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]], and [[77 - Infrastructure Costs]].
-- **Multiplayer/server:** protocol v0, authoritative executor, atomic world save/load, dev roles/rate limits/audit, viewport interest filtering with #262 `InterestView` (at most 64 roads whose midpoints fall inside the circle, plus at most 64 deterministic synthetic building fixtures) and the #266 Godot interest preview (`interest_render=ok roads=1 checksum=88903a371d42b367`), and #269 reconnect (`--reconnect`; server `--listen PORT --sessions N`; resumed `welcome`). The Godot MP client loopback smoke covers the normal, interest, and reconnect blocks. Resume and interest are process-local/debug paths: no client render integration, authentication, or restart persistence. See [[05 - Multiplayer]].
-- **Scale and rendering evidence:** 250k voxel-proxy setup, crowd LOD, 2k movement-marker stress, and #261 frame-time graphs in the benchmark screen. #258 adds the 1M gate-result evaluator (`./scripts/check_metropolis_gate.py`, PASS/FAIL/insufficient, optional `--require-hardware`), which evaluates recorded results but does not create reference-hardware evidence. The 1M/RTX 3060 gate remains open. See [[68 - Metropolis Gate]] and [[73 - Materialization Core]].
+- **World and save:** full-world 1M core save/load envelope (182.8 MB JSON, **232.5 ms save / 694.7 ms load**) and atomic `.tmp`/`.bak` bridge writes; a 100 km² streaming data harness (525 chunks, ~281 MB peak mesh bytes), extended by #279 with 250,000 deterministic 8-byte building records (data only; no meshes, LOD, or render path). See [[68 - Metropolis Gate]] and [[75 - Save Load Stress]].
+- **City and economy:** live phase-driven financing and campaign construction clock (D-028/D-029 still proposed), utility/service build lead time, infrastructure costs, district summary, the F7 heatmap with #263 metric modes (**Shift+F7** cycles Population → Jobs → Happiness; F7 opens Population; world localization keys 252), and #260/#265/#268 district policy registry, pure `DistrictPolicyEffect` resolution, standalone `policy_editor.tscn`, a read-only dashboard Policies section, and a selectable dashboard Settlements section that drives the 256 m district and F7 heatmap centre. Policies persist through #271's optional world-save `policies` object; #277/#286 enforce `construction_allowed` and the blueprint allowlist at `world_place_blueprint` and `world_validate_placement` previews (smallest containing id), the treasury applies home/workplace tax weights (D-030, Proposed) and a completed-site service-funding weight (D-031, Proposed), and #289 indexes policy circles for point queries. Utility upkeep and every other policy field stay inert. `F6` provides camera/selection district focus. See [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]], and [[77 - Infrastructure Costs]].
+- **Multiplayer/server:** protocol v0, authoritative executor, atomic world save/load, dev roles/rate limits/audit, viewport interest filtering with #262 `InterestView` (at most 64 roads whose midpoints fall inside the circle, plus at most 64 deterministic synthetic building records), the #266 Godot interest preview (`interest_render=ok roads=1 checksum=88903a371d42b367`) with #288 building boxes, #269 reconnect (`--reconnect`; server `--listen PORT --sessions N`; resumed `welcome`), and #287 multi-connection session state plus the `--vote-smoke` loopback (F-003 fixed). The Godot MP client loopback smoke covers the normal, interest, and reconnect blocks. Resume and interest are process-local/debug paths: no client render integration, authentication, or restart persistence. See [[05 - Multiplayer]].
+- **Scale and rendering evidence:** 250k voxel-proxy setup, crowd LOD, 2k movement-marker stress, and #261 frame-time graphs in the benchmark screen. #258 adds the 1M gate-result evaluator (`./scripts/check_metropolis_gate.py`, PASS/FAIL/insufficient, optional `--require-hardware`), which evaluates recorded results but does not create reference-hardware evidence. #280 adds `./scripts/assemble_gate_result.sh`, which composes recorded cohort/save/streaming JSON into a `late_metropolis_v1` result and leaves render fields null (status `insufficient`) without a recorded render run; #290 makes the assembler fail closed on a missing run shape or route. The 1M/RTX 3060 gate remains open. See [[68 - Metropolis Gate]] and [[73 - Materialization Core]].
 - **Playtest tooling:** #259 adds the standalone Q-101 capture form (`playtest_capture.tscn`) and #267 the capture summarizer (`./scripts/check_playtest_report.sh`, `PLAYTEST_SUMMARY`). Both are observer aids; the human session and the Q-101 verdict remain open. See [[66 - Playtest Kit]].
-- **Content:** in-memory mod content pack v0; 4 content schema files with 32 entries. See [[06 - Modding and Resource Packs]].
+- **Content:** in-memory mod content pack v0; 4 content schema files with 32 entries (verified 2026-11-23). See [[06 - Modding and Resource Packs]].
 
 ## Code inventory
 
-`cargo test --workspace`: **1019 tests**, all passing (**1014 unit/integration + 5 doctests**); fmt and clippy clean.
+`cargo test --workspace`: **1154 tests**, all passing (**1149 unit/integration + 5 doctests**); fmt and clippy clean. Verified on 2026-11-23 at master `a39a6bd`.
 
 | Area | Tests |
 |---|---:|
-| `core_city` | 482 |
-| `godot_ext` (bridge) | 102 |
+| `core_city` | 535 |
+| `godot_ext` (bridge) | 142 |
+| `townsmith-server` | 124 |
+| `townsmith-bench` (25 bins; 18 with tests + lib) | 108 |
 | `core_world` | 78 |
-| `townsmith-server` | 97 |
 | `core_voxel` | 55 |
 | `core_sim` | 53 |
 | `core_structure` | 22 |
 | `core_blueprint` | 19 |
 | `core_rooms` | 13 |
-| `townsmith-bench` (18 bins) | 93 |
 | doctests (`core_city` 3, `core_rooms` 1, `core_structure` 1) | 5 |
-| **Total** | **1019** |
+| **Total** | **1154** |
 
-Bench bins: `city_loop` 9, `cohort_validate` 9, `dormant` 5, `financing` 8, `industrial` 4, `infra_cost` 2, `materialization` 2, `metropolis` 4, `metropolis_balance` 4, `modern` 5, `movement` 6, `placements` 2, `save_1m` 6, `save_stress` 11, `streaming_scale` 7, `traffic` 4, `worldgen` 3, bench lib 2.
+Bench bins: `city_loop` 9, `cohort_1m` 9, `cohort_validate` 9, `dormant` 5, `financing` 8, `industrial` 4, `infra_cost` 2, `materialization` 2, `metropolis` 4, `metropolis_balance` 4, `modern` 5, `movement` 6, `placements` 2, `save_1m` 6, `save_stress` 11, `streaming_scale` 13, `traffic` 4, `worldgen` 3, bench lib 2.
 
 > [!warning] This is a plan, not a commitment
 > Numbers in these docs are **planning targets**, not measured results. Anything marked *Assumption* or *Proposed* must be validated before it becomes an accepted decision.
@@ -184,13 +184,12 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 ## Next actions
 
-1. Finish district policy save composition and the policy panel. The registry, effect helpers, and standalone editor are data-only; the dashboard remains read-only.
-2. Finish the 1M cohort gate and the benchmark reference gate card. The #258 evaluator can grade recorded results, but it cannot substitute for reference-hardware runs.
-3. Integrate policy effects and add selectable settlement panels; keep `F6` as the current camera/selection focus.
-4. Add client render integration for multiplayer. Interest views and reconnect are loopback/debug paths today.
-5. Close the 1M/RTX 3060 render gate: real voxel/LOD city, 3060 baseline, fixed fixture, and Phase 5 evidence ([[68 - Metropolis Gate]]).
-6. Run the 30-minute slice playtest in [[66 - Playtest Kit]] (Q-101); use the standalone capture form in §9, then summarize the exports with `./scripts/check_playtest_report.sh`. The tool does not replace the observer or answer the question by itself.
-7. Keep the runtime content registry and save references as the remaining modding step.
+1. Run the 30-minute slice playtest in [[66 - Playtest Kit]] (Q-101); use the standalone capture form in §9, then summarize the exports with `./scripts/check_playtest_report.sh`. The tool does not replace the observer or answer the question by itself.
+2. Extend the dashboard's read-only settlement selector into per-settlement panels. Policy tax weighting (D-030) and service funding (D-031) are wired, and the placement gate covers `world_validate_placement` previews (#277/#286); every other policy field remains inert.
+3. Add client render integration for multiplayer. Interest roads/buildings and reconnect are loopback/debug paths today.
+4. Record the 1M cohort gate and benchmark reference gate card with the #273 harness and #280/#290 assembler. The assembler cannot substitute for reference-hardware runs, leaves render fields null without a recorded render result, and fails closed on a missing run shape or route.
+5. Close the 1M/RTX 3060 render gate: real voxel/LOD city, 3060 baseline, fixed fixture, and Phase 5 evidence ([[68 - Metropolis Gate]]). Q-101 and this render gate are the remaining human/hardware blockers; F-003 is fixed by #287 ([[78 - Code Audit Findings]]).
+6. Keep the runtime content registry and save references as the remaining modding step.
 
 ## Document map
 

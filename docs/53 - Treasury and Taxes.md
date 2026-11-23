@@ -205,9 +205,9 @@ The world-scene smoke checks:
 
 ## 11. Tests
 
-- `core_city::economy`: 18 tests — starting balance, income/expenses, clamped rates, bankruptcy, construction affordability, loan cash/interest/repayment, payoff, bankruptcy borrowing block, payment underflow, debt limit, daily net, JSON/checksum, old-save debt default, invalid balance, infrastructure defaults/cost/legacy equivalence/roundtrip.
-- `godot_ext`: 87 tests, including economy JSON/loan roundtrip, old-save loans default, and invalid balance.
-- `core_city` total **482**; `core_structure` **19**; bridge **87**; workspace **1019 tests** (1014 unit/integration + 5 doctests); 30-day runner 8 tests.
+- `core_city::economy`: 35 tests, including starting balance, income/expenses, clamped rates, bankruptcy, construction affordability, loan cash/interest/repayment, payoff, bankruptcy borrowing block, payment underflow, debt limit, daily net, JSON/checksum, old-save debt default, invalid balance, infrastructure defaults/cost/legacy equivalence/roundtrip, and the policy tax/service weights.
+- `godot_ext`: 142 tests, including economy JSON/loan roundtrip, old-save loans default, and invalid balance.
+- `core_city` total **535**; `core_structure` **22**; bridge **142**; workspace **1154 tests** (1149 unit/integration + 5 doctests); 30-day runner 9 tests. Verified on 2026-11-23 at master `a39a6bd`.
 - `city_loop` bin test asserts construction spending, debt, positive final balance, and no bankruptcy.
 - 30-day city-loop checksum: `623f39c61b71b68a`.
 
