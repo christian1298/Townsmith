@@ -16439,6 +16439,43 @@ mod tests {
         (package, hash, store)
     }
 
+    fn bridge_json(json: &str) -> serde_json::Value {
+        serde_json::from_str(json).expect("world json")
+    }
+
+    fn collect_json_strings<'a>(value: &'a serde_json::Value, strings: &mut Vec<&'a str>) {
+        match value {
+            serde_json::Value::String(text) => strings.push(text),
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    collect_json_strings(item, strings);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for item in fields.values() {
+                    collect_json_strings(item, strings);
+                }
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            }
+        }
+    }
+
+    /// Compare parsed strings, not raw JSON: Windows paths contain backslashes
+    /// that serde escapes inside the serialized document.
+    fn assert_no_library_root(json: &str, roots: &[&Path]) {
+        let value = bridge_json(json);
+        let mut strings = Vec::new();
+        collect_json_strings(&value, &mut strings);
+        for root in roots {
+            let root = root.to_string_lossy();
+            assert!(
+                strings.iter().all(|text| !text.contains(root.as_ref())),
+                "the library root {root} must not enter the save"
+            );
+        }
+    }
+
     #[test]
     fn stamping_adds_only_a_content_address_and_keeps_the_legacy_path() {
         let dir = TempBlueprintLibrary::new("bridge-refs-stamp");
@@ -16450,15 +16487,18 @@ mod tests {
 
         stamp_world_blueprint_references(&mut store);
         let json = store.to_json_pretty().expect("stamped json");
-        assert!(
-            json.contains(&format!("\"blueprint_ref\": \"tsbp:{hash}\"")),
-            "{json}"
+        let value = bridge_json(&json);
+        let reference = format!("tsbp:{hash}");
+        assert_eq!(
+            value["placements"][0]["blueprint_ref"].as_str(),
+            Some(reference.as_str())
         );
-        assert!(
-            json.contains(&recorded),
+        assert_eq!(
+            value["placements"][0]["blueprint_path"].as_str(),
+            Some(recorded.as_str()),
             "the legacy path stays as a fallback"
         );
-        assert!(!json.contains(&dir.root().to_string_lossy().into_owned()));
+        assert_no_library_root(&json, &[dir.root().as_path()]);
         assert_ne!(store.checksum(), before_checksum);
         assert_eq!(store.placements[0].blueprint_path, recorded);
         let reloaded = PlacementStore::from_json(&json).expect("stamped save loads");
@@ -16494,7 +16534,7 @@ mod tests {
             store.placements[0].blueprint_ref.as_deref(),
             Some(format!("tsbp:{hash}").as_str())
         );
-        assert!(!json_before.contains(&dir.root().to_string_lossy().into_owned()));
+        assert_no_library_root(&json_before, &[dir.root().as_path()]);
     }
 
     #[test]
@@ -16757,8 +16797,7 @@ mod tests {
             Some(format!("tsbp:{hash}").as_str())
         );
         let json = first_saved.to_json_pretty().expect("json");
-        assert!(!json.contains(&first.root().to_string_lossy().into_owned()));
-        assert!(!json.contains(&second.root().to_string_lossy().into_owned()));
+        assert_no_library_root(&json, &[first.root().as_path(), second.root().as_path()]);
         assert_eq!(
             std::fs::read(first_library.resolve(&hash).expect("first entry")).expect("first bytes"),
             std::fs::read(second_library.resolve(&hash).expect("second entry"))
@@ -16778,7 +16817,11 @@ mod tests {
 
         let plain_json = store.to_json_pretty().expect("plain json");
         assert_eq!(plain_json, library_json);
-        assert!(plain_json.contains(&format!("tsbp:{hash}")));
+        let reference = format!("tsbp:{hash}");
+        assert_eq!(
+            bridge_json(&plain_json)["placements"][0]["blueprint_ref"].as_str(),
+            Some(reference.as_str())
+        );
         assert_eq!(
             PlacementStore::from_json(&plain_json)
                 .expect("plain load")

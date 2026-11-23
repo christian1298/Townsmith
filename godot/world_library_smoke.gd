@@ -32,6 +32,28 @@ func _remove_tree(path: String) -> void:
 	dir.list_dir_end()
 	DirAccess.remove_absolute(path)
 
+func _collect_json_strings(value, out: Array) -> void:
+	match typeof(value):
+		TYPE_STRING:
+			out.append(value)
+		TYPE_ARRAY:
+			for item in value:
+				_collect_json_strings(item, out)
+		TYPE_DICTIONARY:
+			for key in value:
+				_collect_json_strings(value[key], out)
+
+func _json_has_no_library_root(text: String, root: String) -> bool:
+	var value = JSON.parse_string(text)
+	if typeof(value) != TYPE_DICTIONARY:
+		return false
+	var strings: Array = []
+	_collect_json_strings(value, strings)
+	for item in strings:
+		if str(item).contains(root):
+			return false
+	return true
+
 func _plain_load_has_no_resolved_field(core, save_path: String) -> bool:
 	var result: Dictionary = core.world_load(save_path, SEED)
 	if bool(result.get("ok", false)):
@@ -81,10 +103,15 @@ func _init() -> void:
 		_fail("save_reference_count")
 		return
 	var saved_text := FileAccess.get_file_as_string(save_path)
-	if not saved_text.contains("\"blueprint_ref\""):
+	var saved_value = JSON.parse_string(saved_text)
+	if typeof(saved_value) != TYPE_DICTIONARY:
+		_fail("save_invalid_json")
+		return
+	var saved_placements: Array = saved_value.get("placements", [])
+	if saved_placements.is_empty() or str(saved_placements[0].get("blueprint_ref", "")) == "":
 		_fail("save_missing_reference")
 		return
-	if saved_text.contains(library):
+	if not _json_has_no_library_root(saved_text, library):
 		_fail("save_contains_library_root")
 		return
 	var stamped: Dictionary = core.world_placements()
