@@ -377,6 +377,16 @@ GODOT=/path/to/godot ./scripts/bench_metropolis_voxel_gate.sh --setup-only --bui
 ./scripts/check_metropolis_gate.py --result benchmarks/results/gate/cohort_1m_v1.json
 ./scripts/check_metropolis_gate.sh
 ./scripts/check_metropolis_gate.py --self-test
+# Assemble recorded 1M harness output into a late gate result.
+# No render input -> FPS/VRAM/draw-call fields stay null; status=insufficient.
+./scripts/assemble_gate_result.sh --cohort /tmp/cohort_1m_v1.json \
+  --save /tmp/save_1m.json --streaming /tmp/streaming_scale.json \
+  --out benchmarks/results/gate/late_metropolis_v1.json
+./scripts/assemble_gate_result.sh --cohort /tmp/cohort_1m_v1.json \
+  --save /tmp/save_1m.json --streaming /tmp/streaming_scale.json \
+  --render /tmp/late_render.json \
+  --out benchmarks/results/gate/late_metropolis_v1.json
+./scripts/assemble_gate_result.sh --self-test
 GODOT=/path/to/godot ./scripts/smoke_volume.sh
 GODOT=/path/to/godot ./scripts/smoke_editor.sh
 GODOT=/path/to/godot ./scripts/smoke_locale.sh

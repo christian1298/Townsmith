@@ -171,3 +171,23 @@ passed:
 
 The authoritative record is the signed report and the committed baseline in
 `benchmarks/baselines/<rig>/`, not this directory.
+
+## Assembling a result from recorded evidence
+
+`scripts/assemble_gate_result.py` builds this schema from reports that already
+exist. It copies numbers; it never measures or invents one:
+
+```bash
+./scripts/assemble_gate_result.py \
+  --cohort benchmarks/results/cohort_1m.json \
+  --save benchmarks/results/save_1m.json \
+  --streaming benchmarks/results/streaming_scale.json \
+  --render benchmarks/results/late_render_summary.json \
+  --out benchmarks/results/gate/late_metropolis_v1.json
+```
+
+Fields without recorded evidence are `null` and appear in `missing`.
+`status=complete` only means the required fields and the §5.5 run shape exist;
+`check_metropolis_gate.py` still decides pass/fail, and the signed report and
+committed baseline remain authoritative. Self-test:
+`./scripts/assemble_gate_result.py --self-test`.
