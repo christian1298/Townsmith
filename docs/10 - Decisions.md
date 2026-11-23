@@ -50,6 +50,7 @@ tags:
 | D-030 | District policy tax multipliers weight city tax income by home and workplace | Proposed | 2026-11-23 | [[07 - Simulation and AI]], [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]] |
 | D-031 | District policy service funding weights civic service upkeep by completed site | Proposed | 2026-11-23 | [[07 - Simulation and AI]], [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]] |
 | D-032 | Server-authoritative blueprint placement | Proposed | 2026-11-23 | [[05 - Multiplayer]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[42 - World Placement Bridge]], [[53 - Treasury and Taxes]] |
+| D-033 | Settlement ownership, membership, and permissions | Proposed | 2026-11-23 | [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[48 - Settlement Boundaries]], [[57 - Dashboard and Advisor]] |
 
 ---
 
@@ -1473,6 +1474,179 @@ The result is a split placement model in multiplayer: a client can run the bridg
 ### Review trigger
 
 The next protocol version that adds `place_blueprint`, the first multiplayer placement test, or the first `ServerSave` migration that carries placement records. Revisit package transfer, mod resolution, and rollback when Q-107–Q-110 are answered. If the in-process server path cannot reuse the bridge rule set without divergence, split the shared validation into `core_city` before accepting the ADR.
+
+---
+
+## D-033 — Settlement ownership, membership, and permissions
+
+**Status:** Proposed · **Date:** 2026-11-23 · **Affects:** [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[48 - Settlement Boundaries]], [[57 - Dashboard and Advisor]]
+
+### Context
+
+D-019 accepts settlements as soft simulation units, says each player may manage their own settlement(s), and says ownership and permissions are configurable. The Phase 2E implementation is **identity-only**. `core_city::settlement::Settlement` carries `owner: String` (1–48 trimmed characters), `center`, and `radius_m`. `SettlementStore::found` accepts the owner string from the caller and `settlement_remove` removes a record by id. The bridge exposes `settlement_found`, `settlements`, `settlement_remove`, `settlement_clear`, and `settlement_at`; `settlement_found` takes the owner as a free-form `GString`. Nothing checks that string. `owner_at` is a nearest-containing-centre lookup used for display and district queries, not authorization.
+
+There is no membership, role, permission, transfer, claim, or audit model, and no save field for any of them. The dashboard Settlements section is a read-only selector with a read-only detail block; the standalone district overview is also read-only. Multiplayer has global dev roles only (`viewer`, `mayor`, `admin`) assigned by the server process, and the authoritative `ServerWorld` has no settlement store at all. Protocol v0 has no settlement command. D-032 (Proposed) adds server-authoritative blueprint placement and says the server record carries "owner/settlement when those exist", but it defines neither.
+
+The result: a multiplayer client can write any owner label it likes, a Mayor can place and (once policies are editable) edit inside any settlement, and no player can invite a collaborator, transfer a settlement, or claim an unowned one. This ADR defines the missing contract. It does not implement it.
+
+### Decision
+
+**Ownership and membership**
+
+- Each settlement has exactly one **owner** and zero or more **members**. The founder becomes the owner with every permission. A settlement has no owner only when it was migrated from a legacy save or explicitly released by an admin.
+- A member is `{ player, role }`, where `player` is a stable server-issued player id (Q-111), not a display name.
+- Roles are presets over permission bits. The owner cannot be removed, demoted, or outvoted; ownership changes only by an accepted transfer or an admin override.
+- Membership is per settlement, not per district, lot, or building. A building inside the soft radius belongs to the settlement that the existing boundary rule resolves for its centre (nearest centre, lower id on a tie).
+
+**Permission set**
+
+| Bit | Permission | Allows |
+|---|---|---|
+| `build` | Build | Place/remove blueprints and construction sites inside the settlement (D-032); live voxel editing when it exists (D-026) |
+| `manage` | Manage | Rename the settlement, edit its metadata, and initiate a transfer |
+| `tax` | Tax | Create, update, and remove district policies and set settlement tax rates |
+| `members` | Members | Invite, remove, and change the role of members |
+
+| Role | Bits | Notes |
+|---|---|---|
+| Owner | all | Exactly one; implicit all bits |
+| Manager | `build`, `manage`, `tax`, `members` | May initiate but not complete a transfer without the owner or an admin |
+| Builder | `build` | Construction and placement only |
+| Member | none | Read-only participation; no settlement mutation |
+| Custom | explicit bits | Later option; not in v1 |
+
+The effective permission set is derived from the role; the runtime represents it as a bitflags value. The save stores the role, not a second copy of the bits, so the two cannot drift. A per-member override would add `Custom(bits)` later and is not part of this proposal.
+
+**Server checks**
+
+- The authoritative server is the only enforcement point. Client UI may hide or disable an action, but a client-side check is never trusted.
+- The server resolves the settlement for a world position with the same rule as `SettlementStore::owner_at` (inclusive radius, nearest centre, lower id on a tie). A point outside every settlement is wilderness and only the global role applies.
+- A global role is a **ceiling**: `viewer` never mutates; `mayor` may use the settlement permissions it holds; `admin` bypasses settlement checks. A settlement permission never grants a global capability.
+- Single-player and local dev use an **implicit owner**: the local player is treated as the owner of every settlement and every check passes, preserving current behavior. Tests exercise the explicit-identity path.
+- Rejections use stable codes, mutate nothing, and are audited: `settlement.unknown`, `settlement.unowned`, `settlement.forbidden`, `settlement.not_member`, `settlement.already_owned`, `settlement.owner_required`, and `settlement.revision_conflict`. Exact wire names belong to the future protocol version, not this docs slice.
+
+| Action | Today | Proposed check |
+|---|---|---|
+| `place_blueprint` (D-032) | Global role only; the bridge path is local | `build` on the containing settlement; wilderness uses the global placement role; an unowned settlement denies non-admin |
+| Policy create / update / remove | Bridge CRUD with no caller identity | `tax` on the settlement containing the policy centre for create; `tax` on the containing settlement of the stored policy for update/remove; admin override |
+| Tax commands (`set_tax` is city-wide today) | Mayor role only | `tax` on the affected settlement; a global city tax stays mayor/admin |
+| Settlement rename / metadata edit | Bridge accepts any caller | `manage`; a transfer additionally needs the owner/admin rule |
+| Settlement remove / clear | Bridge accepts any caller | Owner or admin; removal deletes the record, not the buildings |
+| Settlement claim | No concept | Only an unowned settlement; claimant becomes owner; see claim rules |
+| Member invite / remove / role change | No concept | `members`; the owner cannot be removed or demoted |
+| Dashboard edit controls | None; the panels are read-only | The same server checks once edit paths exist; the UI reads an effective-permission payload to hide actions |
+
+**Claim rules (proposed)**
+
+- A settlement is **unowned** when it has no owner id: a legacy save that could not be mapped, an explicit admin release, or a future abandonment rule (Q-112). Founding always creates an owned settlement.
+- Only an unowned settlement can be claimed. Claiming an owned settlement is always rejected, even by a Manager.
+- The claimant must hold the global Mayor or Admin role and must name a settlement id; there is no automatic claim by entering the radius.
+- A successful claim sets the claimant as owner with all bits, increments the membership revision, writes an audit entry, and updates the save/checksum.
+- The claim is rejected on an unknown id, an owned settlement, a stale `expected_revision`, or a missing global role.
+- Proximity, cooldown, and abandonment are open (Q-112). v1 does not require the claimant to stand in the settlement because protocol v0 carries no player position.
+
+**Transfer rules (proposed)**
+
+- The current owner may transfer to a known player id. The request names the settlement, the recipient, and the expected membership revision.
+- A Manager may initiate a transfer request but cannot complete it; the current owner must confirm, or an admin may force it.
+- The recipient must be a known player for the save/world (Q-111). Recipient acceptance and offline transfer are open (Q-113).
+- A completed transfer moves ownership, sets the new owner's role to Owner, demotes the previous owner to Manager unless removal is requested, increments the revision, and is audited.
+- An admin can transfer or release any settlement; the action is logged and included in the save.
+
+### Data model proposal
+
+```rust
+pub struct PlayerId(u64); // server-issued, stable within a save
+
+pub enum SettlementRole {
+    Owner,
+    Manager,
+    Builder,
+    Member,
+}
+
+pub struct SettlementMember {
+    pub player: PlayerId,
+    pub role: SettlementRole,
+}
+
+pub struct Settlement {
+    pub id: u64,
+    pub name: String,
+    pub owner: String,             // legacy/display label, kept for compatibility
+    pub owner_id: Option<PlayerId>, // authority
+    pub center: [i32; 2],
+    pub radius_m: u32,
+    pub members: Vec<SettlementMember>, // ascending player id, owner included
+    pub membership_revision: u32,
+}
+```
+
+- `owner` keeps the existing UI/save label working; `owner_id` is authoritative and is never inferred from the label. The bridge's `settlements()` payload keeps `owner` as the display string and adds `owner_id`, `members`, and `membership_checksum`.
+- Membership edits use optimistic concurrency: the command carries `expected_revision` (or `membership_checksum`), and a mismatch returns `settlement.revision_conflict` without mutation.
+- `membership_checksum` is a derived FNV-1a over settlement id, sorted member ids/roles, and revision. It is exposed for UI/smoke diffing, not as a security hash.
+- Provisional limits: ≤ 64 members per settlement and ≤ 16 settlements owned per player (Q-114).
+
+**Save and migration**
+
+- Bump the settlement format to **v2**. v2 adds `owner_id`, `members`, and `membership_revision`; it keeps `name`, `center`, `radius_m`, and the legacy `owner` display string.
+- A v2 save omits the new optional objects when a settlement has no membership data, so a world that never uses membership serializes as before apart from the version.
+- A v1 save loads as v1, then migrates: `owner` maps to `owner_id` only when the server's player registry contains exactly one non-ambiguous player with that display name; otherwise the settlement is unowned and kept for admin assignment (Q-111, Q-112). The legacy string stays in `owner` as the display label.
+- `world_load` rejects a v2 record with a duplicate member, an unknown role, an owner not present in `members`, more than one owner, a member count over the limit, or members with a zero revision.
+- Single-player keeps its implicit owner, so a migrated/unowned settlement does not block the local player.
+- Checksums: an empty membership set adds nothing; any member or revision change changes the settlement checksum and therefore the world checksum. That is expected under a new save version; existing no-membership goldens stay stable.
+
+### Scope for v1
+
+- **In scope:** the membership model, the permission set, server check points for placement/policy/tax/settlement management once those commands exist, claim/transfer/remove rules, the save v2 migration, and stable rejection codes.
+- **Out of scope:** authentication (Q-111), the protocol command set itself, a membership UI, per-district permissions, per-lot claims, settlement splitting/merging, and live in-world editing permissions beyond the bit definition.
+- **Not implemented today.** `owner` remains an unenforced display string and no permission check exists in the bridge, dashboard, or server. This ADR does not change code, protocol, or saves.
+
+### Consequences
+
+**Positive**
+
+- D-019's "ownership and permissions are configurable" gets a concrete, testable contract.
+- A multiplayer server can host several players' settlements without giving every Mayor access to everyone's.
+- Save, checksum, and audit follow the D-032 pattern instead of inventing a second authority model.
+- The dashboard can later show a role and disable actions without inventing a second rule set.
+
+**Negative**
+
+- Authentication is unresolved; a name-keyed v0 player registry is spoofable, so enforcement is only as strong as Q-111.
+- The nearest-centre rule can assign a building to a settlement the player did not intend, especially with overlap.
+- Every placement and policy command gains a settlement lookup and a membership check.
+- Migration from a free-form owner string is ambiguous and may leave old worlds unowned, which is admin work.
+- Offline owners can block a transfer; succession is unresolved (Q-113).
+- Membership is another save schema and UI surface before the core loop is proven.
+
+**Neutral**
+
+- Single-player and local dev are unchanged through the implicit owner.
+- Global roles remain and act as a ceiling; this ADR does not replace them.
+- Roads, utilities, and civic placement are not gated in v1.
+
+### Alternatives considered
+
+- **Keep global roles only:** simplest and honest to today's code, but any Mayor can edit any settlement; it does not deliver D-019's per-player ownership. Rejected for multiplayer.
+- **Per-district permissions:** finer-grained, but districts are derived, can overlap, and are not the unit a player names or founds. Defer until districts have stable ids.
+- **Free-for-all claiming:** the first player to enter or click claims land. Simple, but exploitable and ambiguous with overlapping radii; settlements are founded in this design, not discovered.
+- **Keep the free-form owner string:** no schema bump, but no stable identity, rename spoofing, and no way to check membership. Rejected as an enforcement model.
+- **Per-lot claims only:** handles building-level griefing but not policy/tax control, and D-019's unit is the settlement.
+
+### Open questions
+
+| ID | Question |
+|---|---|
+| Q-111 | What is the stable player identity source: a server-issued per-save id, Steam ID, account/password, or the current display name? How does it survive reconnect and a server restart? |
+| Q-112 | When is a settlement unowned, who may claim it, is proximity or presence required, and when does an inactive owner lose it? |
+| Q-113 | How does ownership transfer work when the owner is offline or gone (recipient acceptance, admin override, succession, dead-owner servers)? |
+| Q-114 | What are the per-settlement member, per-player settlement, manager, and membership-edit rate limits? |
+| Q-115 | Can a settlement restrict blueprints or mod content beyond the district allowlist, and how do modded placements interact with settlement permissions? |
+
+### Review trigger
+
+The first authoritative settlement or placement command, the first multiplayer world that needs per-player settlements, or the first save migration that carries membership. Revisit identity (Q-111) before accepting; without a stable id the checks are advisory. If membership and the D-032 placement check cannot share one resolution rule in `core_city`, split it out before accepting the ADR.
 
 ---
 

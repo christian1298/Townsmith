@@ -197,6 +197,18 @@ These support D-032 (Proposed). None is answered yet; the ADR keeps placement of
 | **Q-109** | Placement rate limits, quotas, idempotency, and audit? | Per-connection token bucket, per-player placement quota, request id for retries, and an audit entry for every accepted and rejected placement. | Normal |
 | **Q-110** | Server placement save migration and rollback/history? | Additive versioned `ServerSave` placement object; migrate existing worlds in order; keep a rollback snapshot before destructive admin actions. | High |
 
+## Settlement ownership questions
+
+These support D-033 (Proposed). None is answered yet; the ADR keeps ownership and permissions **unimplemented** until each has a v1 default. Today `Settlement.owner` is an unenforced display string, `ServerWorld` has no settlement store, and the only roles are global dev roles.
+
+| ID | Question | Current assumption / recommendation | Priority |
+|---|---|---|---|
+| **Q-111** | What is the stable player identity source — a server-issued per-save id, Steam ID, account/password, or the current display name? | Server-issued per-save player id, with the display name as a mutable label; Steam/account auth later. A free-form owner string is never identity. | High |
+| **Q-112** | When is a settlement unowned, who may claim it, is proximity or presence required, and when does an inactive owner lose it? | Only migrated or admin-released settlements are unowned; an explicit claim by id with the Mayor/Admin role. No automatic claim by entering the radius; abandonment rules deferred. | High |
+| **Q-113** | How does ownership transfer work when the owner is offline or gone (recipient acceptance, admin override, succession, dead-owner servers)? | Owner-initiated transfer to a known player; admin force/release for dead-owner servers; recipient acceptance deferred until identity exists. | Normal |
+| **Q-114** | What are the per-settlement member, per-player settlement, manager, and membership-edit rate limits? | Provisional: 64 members per settlement, 16 settlements owned per player, same command bucket as placement; tune with playtests. | Normal |
+| **Q-115** | Can a settlement restrict blueprints or mod content beyond the district allowlist, and how do modded placements interact with settlement permissions? | Keep v1 on the existing district blueprint allowlist; a settlement-level allowlist is later and must not bypass the server content manifest. | Normal |
+
 ## Modding questions
 
 | ID | Question | Current assumption / recommendation | Priority |
@@ -359,3 +371,4 @@ These support D-032 (Proposed). None is answered yet; the ADR keeps placement of
 | Q-083–Q-089 | Construction |
 | Q-090–Q-100 | Materials, structure, and basements |
 | Q-107–Q-110 | Server-authoritative blueprint placement |
+| Q-111–Q-115 | Settlement ownership, membership, and permissions |
