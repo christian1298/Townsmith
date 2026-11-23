@@ -773,6 +773,46 @@ fn content_load_dictionary(
     result
 }
 
+/// Bridge-only content hash → package path map from the last portable load.
+///
+/// The map is populated only when `world_load_with_library` had to use a
+/// library package because the recorded `blueprint_path` failed. It is never
+/// serialized and does not participate in any placement or world checksum.
+#[derive(Debug, Default)]
+struct ResolvedBlueprintPaths {
+    paths: BTreeMap<String, String>,
+}
+
+impl ResolvedBlueprintPaths {
+    fn replace(&mut self, paths: BTreeMap<String, String>) {
+        self.paths = paths;
+    }
+
+    fn clear(&mut self) {
+        self.paths.clear();
+    }
+
+    /// Keep only hashes still referenced by the store.
+    fn prune(&mut self, store: &PlacementStore) {
+        let live: BTreeSet<&str> = store
+            .placements
+            .iter()
+            .map(|placement| placement.blueprint_hash.as_str())
+            .collect();
+        self.paths.retain(|hash, _| live.contains(hash.as_str()));
+    }
+
+    /// The library path to expose for a placement, if it differs from the
+    /// recorded path. A stale path (the file was deleted after loading) is
+    /// returned as-is.
+    fn path_for(&self, placement: &Placement) -> Option<&str> {
+        self.paths
+            .get(&placement.blueprint_hash)
+            .map(String::as_str)
+            .filter(|path| *path != placement.blueprint_path)
+    }
+}
+
 /// Coarse bridge object used by the Godot shell.
 #[derive(GodotClass)]
 #[class(init, base=RefCounted)]
@@ -781,6 +821,9 @@ struct TownsmithCore {
     terrain: Mutex<Option<TerrainBridge>>,
     editor: Mutex<Option<EditorState>>,
     world: Mutex<Option<PlacementStore>>,
+    /// Content hash → library package path resolved during the last portable
+    /// load. Bridge-only: never serialized and not part of any checksum.
+    resolved_blueprint_paths: Mutex<ResolvedBlueprintPaths>,
     construction: Mutex<ConstructionStore>,
     roads: Mutex<Option<RoadStore>>,
     lots: Mutex<Option<LotStore>>,
@@ -808,6 +851,7 @@ impl Default for TownsmithCore {
             terrain: Mutex::new(None),
             editor: Mutex::new(None),
             world: Mutex::new(None),
+            resolved_blueprint_paths: Mutex::new(ResolvedBlueprintPaths::default()),
             construction: Mutex::new(ConstructionStore::default()),
             roads: Mutex::new(None),
             lots: Mutex::new(None),
@@ -1621,9 +1665,18 @@ impl TownsmithCore {
     }
 
     /// Return the active placement store.
+    ///
+    /// A placement whose package was resolved from the local library during
+    /// the last [`Self::world_load_with_library`] also carries
+    /// `resolved_blueprint_path`. The recorded `blueprint_path` is unchanged
+    /// and remains the save value.
     #[func]
     fn world_placements(&self) -> VarDictionary {
         let guard = self.world.lock().unwrap_or_else(|error| error.into_inner());
+        let resolved = self
+            .resolved_blueprint_paths
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut result = VarDictionary::new();
         result.set("ok", true);
         match guard.as_ref() {
@@ -1631,7 +1684,10 @@ impl TownsmithCore {
                 result.set("open", true);
                 let mut placements: Array<VarDictionary> = Array::new();
                 for placement in &store.placements {
-                    placements.push(&placement_to_dictionary(placement));
+                    placements.push(&placement_to_dictionary_with_resolved(
+                        placement,
+                        resolved.path_for(placement),
+                    ));
                 }
                 result.set("seed", store.seed as i64);
                 result.set("next_id", store.next_id as i64);
@@ -2563,6 +2619,10 @@ impl TownsmithCore {
         if let Some(store) = guard.as_mut() {
             store.clear();
         }
+        self.resolved_blueprint_paths
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
         self.construction
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -2634,6 +2694,12 @@ impl TownsmithCore {
                 .as_mut()
             {
                 services.remove_placement(id);
+            }
+            if let Some(store) = guard.as_ref() {
+                self.resolved_blueprint_paths
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .prune(store);
             }
         }
         removed
@@ -6705,8 +6771,11 @@ impl TownsmithCore {
                 ),
             );
         }
-        let solid_by_id = match load_world_placement_packages(&store, library) {
-            Ok(solid_by_id) => solid_by_id,
+        let LoadedWorldPlacements {
+            solid_by_id,
+            resolved_paths: resolved_blueprint_paths,
+        } = match load_world_placement_packages(&store, library) {
+            Ok(loaded) => loaded,
             Err((code, message)) => return placement_simple_error(code, message),
         };
         let placement_ids: BTreeSet<u64> = store
@@ -6879,6 +6948,10 @@ impl TownsmithCore {
                 );
             }
         }
+        let mut resolved_guard = self
+            .resolved_blueprint_paths
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut construction_guard = self
             .construction
             .lock()
@@ -6927,6 +7000,10 @@ impl TownsmithCore {
         *lots_guard = lots;
         *settlements_guard = settlements;
         *guard = Some(store);
+        // Plain `world_load` installs an empty map; a portable load installs
+        // the fallback entries collected above. The map changes only after
+        // every store and package check has passed.
+        resolved_guard.replace(resolved_blueprint_paths);
         *population_guard = Some(population);
         *named_guard = Some(named);
         *economy_guard = economy;
@@ -8361,17 +8438,20 @@ fn sync_world_blueprints(
 }
 
 /// Load one placement package from its recorded path or a library fallback.
+///
+/// The second tuple item is the library path only when the recorded path
+/// failed and the library package was used.
 fn load_world_placement_package(
     placement: &Placement,
     library: Option<&BlueprintLibrary>,
-) -> Result<Blueprint, (&'static str, String)> {
+) -> Result<(Blueprint, Option<PathBuf>), (&'static str, String)> {
     let recorded_error = match blueprint_path_from_arg(&placement.blueprint_path) {
         Ok(path) => match load_tsbp(&path) {
             Ok(package) => {
                 if let Some((code, message)) = placement_package_error(&package, placement) {
                     return Err((code, message));
                 }
-                return Ok(package);
+                return Ok((package, None));
             }
             Err(error) => (
                 blueprint_error_code(&error),
@@ -8409,20 +8489,37 @@ fn load_world_placement_package(
     if let Some((code, message)) = placement_package_error(&package, placement) {
         return Err((code, message));
     }
-    Ok(package)
+    Ok((package, Some(path)))
 }
 
-/// Load every placement package and return the recorded solid voxel counts.
+/// Loaded package facts for the placements in a world save.
+#[derive(Debug)]
+struct LoadedWorldPlacements {
+    solid_by_id: BTreeMap<u64, u64>,
+    resolved_paths: BTreeMap<String, String>,
+}
+
+/// Load every placement package and return the recorded solid voxel counts
+/// plus the content-hash keyed library paths used as fallbacks.
 fn load_world_placement_packages(
     store: &PlacementStore,
     library: Option<&BlueprintLibrary>,
-) -> Result<BTreeMap<u64, u64>, (&'static str, String)> {
+) -> Result<LoadedWorldPlacements, (&'static str, String)> {
     let mut solid_by_id = BTreeMap::new();
+    let mut resolved_paths = BTreeMap::new();
     for placement in &store.placements {
-        let package = load_world_placement_package(placement, library)?;
+        let (package, resolved) = load_world_placement_package(placement, library)?;
         solid_by_id.insert(placement.id, package.metadata.solid_voxels);
+        if let Some(path) = resolved {
+            resolved_paths
+                .entry(placement.blueprint_hash.clone())
+                .or_insert_with(|| path.to_string_lossy().into_owned());
+        }
     }
-    Ok(solid_by_id)
+    Ok(LoadedWorldPlacements {
+        solid_by_id,
+        resolved_paths,
+    })
 }
 
 fn placement_error_result(error: &PlacementError) -> VarDictionary {
@@ -8471,6 +8568,22 @@ fn placement_to_dictionary(placement: &Placement) -> VarDictionary {
             .map_or_else(VarDictionary::new, structure_payload)
             .to_variant(),
     );
+    result
+}
+
+/// Placement dictionary plus the bridge-only library resolution, when any.
+///
+/// `resolved` is the content-hash keyed path from the last portable load. It
+/// is attached only when it differs from the recorded path; the recorded
+/// `blueprint_path` stays authoritative for the save format.
+fn placement_to_dictionary_with_resolved(
+    placement: &Placement,
+    resolved: Option<&str>,
+) -> VarDictionary {
+    let mut result = placement_to_dictionary(placement);
+    if let Some(path) = resolved {
+        result.set("resolved_blueprint_path", &GString::from(path));
+    }
     result
 }
 
@@ -15563,13 +15676,29 @@ mod tests {
         sync_world_blueprints(&store, &library).expect("sync");
         std::fs::remove_file(&package).expect("remove source");
 
-        let loaded =
+        let (loaded, resolved_path) =
             load_world_placement_package(&placement, Some(&library)).expect("library load");
         assert_eq!(loaded.metadata.content_hash, placement.blueprint_hash);
         assert_eq!(loaded.metadata.solid_voxels, 16);
-        let solid_by_id =
-            load_world_placement_packages(&store, Some(&library)).expect("library load all");
+        assert_eq!(
+            resolved_path.as_deref(),
+            library.resolve(&placement.blueprint_hash).as_deref()
+        );
+        let LoadedWorldPlacements {
+            solid_by_id,
+            resolved_paths,
+        } = load_world_placement_packages(&store, Some(&library)).expect("library load all");
         assert_eq!(solid_by_id.get(&placement.id), Some(&16));
+        assert_eq!(
+            resolved_paths.get(&placement.blueprint_hash),
+            Some(
+                &library
+                    .resolve(&placement.blueprint_hash)
+                    .expect("resolved")
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        );
         assert_eq!(store.checksum(), checksum);
         assert_eq!(store.to_json_pretty().expect("save json"), before);
     }
@@ -15849,5 +15978,285 @@ mod tests {
         assert_eq!(store.seed, 2027);
         assert_eq!(store.checksum(), before_checksum);
         assert_eq!(store.to_json_pretty().expect("save json"), before_json);
+    }
+
+    fn world_library_package(
+        dir: &TempBlueprintLibrary,
+        name: &str,
+        id: &str,
+        label: &str,
+    ) -> (PathBuf, String) {
+        let package = dir.package(name);
+        let hash = write_world_package(&package, id, label, EDITOR_FLOOR);
+        (package, hash)
+    }
+
+    fn library_resolved_path(dir: &TempBlueprintLibrary, hash: &str) -> String {
+        BlueprintLibrary::new(dir.root())
+            .expect("library")
+            .resolve(hash)
+            .expect("resolved entry")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn world_load_library_exposes_the_resolved_path_to_placements() {
+        let dir = TempBlueprintLibrary::new("world-render-resolved");
+        dir.create_root();
+        let (package, hash) = world_library_package(
+            &dir,
+            "unique_library_house.tsbp",
+            "local:library_house",
+            "Library House",
+        );
+        let mut store = PlacementStore::new(2026);
+        let placed = place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:library_house",
+            "Library House",
+            100.0,
+        );
+        let before_checksum = store.checksum();
+        let before_json = store.to_json_pretty().expect("save json");
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        sync_world_blueprints(&store, &library).expect("save with library");
+        std::fs::remove_file(&package).expect("remove source package");
+
+        let LoadedWorldPlacements {
+            solid_by_id,
+            resolved_paths: paths,
+        } = load_world_placement_packages(&store, Some(&library)).expect("portable load");
+        assert_eq!(solid_by_id.get(&placed.id), Some(&placed.solid_voxels));
+        let mut resolved = ResolvedBlueprintPaths::default();
+        resolved.replace(paths);
+        assert_eq!(resolved.paths.len(), 1);
+        assert_eq!(
+            resolved.path_for(&placed),
+            Some(library_resolved_path(&dir, &hash).as_str())
+        );
+        assert_eq!(store.placements[0].blueprint_path, placed.blueprint_path);
+        assert_eq!(store.checksum(), before_checksum);
+        assert_eq!(store.to_json_pretty().expect("save json"), before_json);
+    }
+
+    #[test]
+    fn world_load_without_library_has_no_resolved_path() {
+        let dir = TempBlueprintLibrary::new("world-render-plain");
+        dir.create_root();
+        let (package, hash) =
+            world_library_package(&dir, "plain_house.tsbp", "local:plain_house", "Plain House");
+        let mut store = PlacementStore::new(2026);
+        place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:plain_house",
+            "Plain House",
+            100.0,
+        );
+        let before_json = store.to_json_pretty().expect("save json");
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        sync_world_blueprints(&store, &library).expect("save with library");
+        std::fs::remove_file(&package).expect("remove source package");
+
+        let (code, message) = load_world_placement_packages(&store, None).expect_err("plain load");
+        assert_eq!(code, "missing_blueprint");
+        assert!(message.contains("plain_house.tsbp"), "{message}");
+        let resolved = ResolvedBlueprintPaths::default();
+        assert_eq!(resolved.path_for(&store.placements[0]), None);
+        assert_eq!(store.to_json_pretty().expect("save json"), before_json);
+    }
+
+    #[test]
+    fn failed_library_load_keeps_the_previous_resolved_map() {
+        let dir = TempBlueprintLibrary::new("world-render-failed");
+        dir.create_root();
+        let (package, hash) = world_library_package(
+            &dir,
+            "failed_house.tsbp",
+            "local:failed_house",
+            "Failed House",
+        );
+        let mut store = PlacementStore::new(2026);
+        place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:failed_house",
+            "Failed House",
+            100.0,
+        );
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        sync_world_blueprints(&store, &library).expect("save with library");
+        std::fs::remove_file(&package).expect("remove source package");
+        let LoadedWorldPlacements {
+            resolved_paths: paths,
+            ..
+        } = load_world_placement_packages(&store, Some(&library)).expect("portable load");
+        let mut resolved = ResolvedBlueprintPaths::default();
+        resolved.replace(paths);
+        let before = resolved.path_for(&store.placements[0]).map(str::to_owned);
+        let checksum = store.checksum();
+
+        let entry = library.resolve(&hash).expect("library entry");
+        std::fs::remove_file(&entry).expect("remove library entry");
+        // A stale entry is reported as-is, not silently dropped.
+        assert_eq!(resolved.path_for(&store.placements[0]), before.as_deref());
+
+        let (code, _) =
+            load_world_placement_packages(&store, Some(&library)).expect_err("missing entry");
+        assert_eq!(code, "blueprint_library_missing_file");
+        assert_eq!(resolved.paths.len(), 1);
+        assert_eq!(resolved.path_for(&store.placements[0]), before.as_deref());
+        assert_eq!(store.checksum(), checksum);
+    }
+
+    #[test]
+    fn shared_library_hash_resolves_once_and_removal_prunes_the_map() {
+        let dir = TempBlueprintLibrary::new("world-render-shared");
+        dir.create_root();
+        let (package, hash) = world_library_package(
+            &dir,
+            "shared_house.tsbp",
+            "local:shared_house",
+            "Shared House",
+        );
+        let mut store = PlacementStore::new(2026);
+        let first = place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:shared_house",
+            "Shared House",
+            100.0,
+        );
+        let second = place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:shared_house",
+            "Shared House",
+            200.0,
+        );
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        sync_world_blueprints(&store, &library).expect("save with library");
+        std::fs::remove_file(&package).expect("remove source package");
+        let LoadedWorldPlacements {
+            resolved_paths: paths,
+            ..
+        } = load_world_placement_packages(&store, Some(&library)).expect("portable load");
+        let mut resolved = ResolvedBlueprintPaths::default();
+        resolved.replace(paths);
+        assert_eq!(resolved.paths.len(), 1);
+        assert_eq!(resolved.path_for(&first), resolved.path_for(&second));
+
+        assert!(store.remove(first.id));
+        resolved.prune(&store);
+        assert_eq!(resolved.paths.len(), 1);
+        assert!(store.remove(second.id));
+        resolved.prune(&store);
+        assert!(resolved.paths.is_empty());
+    }
+
+    #[test]
+    fn a_valid_recorded_path_has_no_resolved_override() {
+        let dir = TempBlueprintLibrary::new("world-render-valid");
+        dir.create_root();
+        let (package, hash) =
+            world_library_package(&dir, "valid_house.tsbp", "local:valid_house", "Valid House");
+        let mut store = PlacementStore::new(2026);
+        place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:valid_house",
+            "Valid House",
+            100.0,
+        );
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        sync_world_blueprints(&store, &library).expect("save with library");
+        let LoadedWorldPlacements {
+            resolved_paths: paths,
+            ..
+        } = load_world_placement_packages(&store, Some(&library)).expect("portable load");
+        let mut resolved = ResolvedBlueprintPaths::default();
+        resolved.replace(paths);
+        assert!(resolved.paths.is_empty());
+        assert_eq!(resolved.path_for(&store.placements[0]), None);
+    }
+
+    #[test]
+    fn plain_load_after_a_portable_load_clears_the_map() {
+        let dir = TempBlueprintLibrary::new("world-render-plain-clear");
+        dir.create_root();
+        let (package, hash) = world_library_package(
+            &dir,
+            "plain_clear_house.tsbp",
+            "local:plain_clear_house",
+            "Plain Clear House",
+        );
+        let mut store = PlacementStore::new(2026);
+        place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:plain_clear_house",
+            "Plain Clear House",
+            100.0,
+        );
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        sync_world_blueprints(&store, &library).expect("save with library");
+        std::fs::remove_file(&package).expect("remove source package");
+        let LoadedWorldPlacements {
+            resolved_paths: paths,
+            ..
+        } = load_world_placement_packages(&store, Some(&library)).expect("portable load");
+        let mut resolved = ResolvedBlueprintPaths::default();
+        resolved.replace(paths);
+        assert_eq!(resolved.paths.len(), 1);
+
+        let entry = library.resolve(&hash).expect("library entry");
+        std::fs::copy(entry, &package).expect("restore source package");
+        let LoadedWorldPlacements {
+            resolved_paths: plain_paths,
+            ..
+        } = load_world_placement_packages(&store, None).expect("plain load");
+        resolved.replace(plain_paths);
+        assert!(resolved.paths.is_empty());
+        assert_eq!(resolved.path_for(&store.placements[0]), None);
+    }
+
+    #[test]
+    fn world_clear_placements_clears_the_resolved_map() {
+        let dir = TempBlueprintLibrary::new("world-render-clear");
+        dir.create_root();
+        let (package, hash) =
+            world_library_package(&dir, "clear_house.tsbp", "local:clear_house", "Clear House");
+        let mut store = PlacementStore::new(2026);
+        place_world_house(
+            &mut store,
+            &package,
+            &hash,
+            "local:clear_house",
+            "Clear House",
+            100.0,
+        );
+        let library = BlueprintLibrary::new(dir.root()).expect("library");
+        sync_world_blueprints(&store, &library).expect("save with library");
+        std::fs::remove_file(&package).expect("remove source package");
+        let LoadedWorldPlacements {
+            resolved_paths: paths,
+            ..
+        } = load_world_placement_packages(&store, Some(&library)).expect("portable load");
+        let mut resolved = ResolvedBlueprintPaths::default();
+        resolved.replace(paths);
+        assert_eq!(resolved.paths.len(), 1);
+
+        resolved.clear();
+        assert!(resolved.paths.is_empty());
+        assert_eq!(resolved.path_for(&store.placements[0]), None);
     }
 }

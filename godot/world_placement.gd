@@ -2694,7 +2694,7 @@ func _update_hud() -> void:
 	var selected := _selected_placement()
 	var selected_line: String = i18n.t("base.ui.hud.selected_none")
 	if not selected.is_empty():
-		var selected_info := _info_for_path(str(selected.get("blueprint_path", "")))
+		var selected_info := _info_for_path(_placement_blueprint_path(selected))
 		var footprint: PackedFloat32Array = selected.get("footprint", PackedFloat32Array())
 		var footprint_text := "? × ? m"
 		if footprint.size() == 2:
@@ -3803,6 +3803,16 @@ func _info_for_path(path: String) -> Dictionary:
 	blueprint_info_cache[path] = info
 	return info
 
+## Package path a placement should render/query from.
+##
+## A world loaded with `world_load_with_library` can carry a bridge-only
+## `resolved_blueprint_path` when the recorded package file is gone. The
+## recorded `blueprint_path` stays authoritative for saves.
+func _placement_blueprint_path(placement: Dictionary, fallback := "") -> String:
+	var path := str(placement.get("blueprint_path", fallback))
+	var resolved := str(placement.get("resolved_blueprint_path", ""))
+	return resolved if resolved != "" else path
+
 func _selected_placement() -> Dictionary:
 	if selected_id < 0:
 		return {}
@@ -4180,7 +4190,7 @@ func _create_placement_pivot(
 	var id := int(placement.get("id", -1))
 	if id < 0 or placed_nodes.has(id):
 		return null
-	var path := str(placement.get("blueprint_path", blueprint_path))
+	var path := _placement_blueprint_path(placement, blueprint_path)
 	var mesh: ArrayMesh = mesh_cache.get(path)
 	if mesh == null:
 		mesh = core.build_blueprint_mesh(path)
@@ -4799,7 +4809,7 @@ func _run_scene_smoke() -> void:
 		select_ok = miss_ok and _select_at_screen(screen) and selected_id >= 0 and selection_box.visible
 		if select_ok:
 			var selected := _selected_placement()
-			var selected_info := _info_for_path(str(selected.get("blueprint_path", "")))
+			var selected_info := _info_for_path(_placement_blueprint_path(selected))
 			select_ok = int(selected_info.get("rooms", -1)) == 4
 		if select_ok:
 			var selected := _selected_placement()
