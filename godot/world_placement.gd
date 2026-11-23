@@ -52,6 +52,22 @@ const HEATMAP_RADIUS_M := 512.0
 const HEATMAP_CELL_M := 32.0
 const HEATMAP_MAX_CELLS := 1024
 const HEATMAP_LIFT_M := 0.15
+# Colorblind-safe, perceptually ordered ramp for the F7 overlay. The six stops
+# run dark purple -> blue -> teal -> green -> yellow, and sRGB luminance
+# (0.2126 R + 0.7152 G + 0.0722 B) rises monotonically from the first stop to
+# the last, so low/high magnitude survives red-green deficiency, blue-yellow
+# deficiency, and monochrome viewing instead of relying on a red/green hue
+# pair. Alpha rises 0.62 -> 0.74 but stays below 0.75 so terrain and
+# buildings remain readable under the overlay. The legend names Low -> High
+# and the active metric, so the scale is also explicit in text.
+const HEATMAP_RAMP_STOPS: Array[Color] = [
+	Color(0.267, 0.004, 0.329, 0.62),
+	Color(0.255, 0.267, 0.529, 0.644),
+	Color(0.165, 0.471, 0.557, 0.668),
+	Color(0.133, 0.659, 0.518, 0.692),
+	Color(0.478, 0.820, 0.318, 0.716),
+	Color(0.992, 0.906, 0.145, 0.74),
+]
 # F7 opens on population; Shift+F7 cycles these in order while the overlay is
 # visible. Jobs and population normalise against their own integer peak;
 # happiness uses the bridge's 0..1 fraction and normalises against the happiest
@@ -1172,15 +1188,21 @@ func _ensure_heatmap_pool() -> void:
 	heatmap_root.add_child(heatmap_multimesh_instance)
 
 func _heatmap_color(ratio: float) -> Color:
-	# Blue (sparse) -> yellow (mid) -> red (peak). Alpha stays translucent so
-	# the terrain and buildings remain readable under the overlay.
-	var low := Color(0.16, 0.38, 1.0, 0.62)
-	var mid := Color(1.0, 0.85, 0.16, 0.68)
-	var high := Color(1.0, 0.2, 0.1, 0.74)
+	# Interpolate the ordered ramp by position, never by hue alone: dark purple
+	# is the low end, bright yellow is the high end, and each stop adds light.
+	# The peak cell is therefore the brightest, not merely the "reddest".
 	var value := clampf(ratio, 0.0, 1.0)
-	if value <= 0.5:
-		return low.lerp(mid, value * 2.0)
-	return mid.lerp(high, (value - 0.5) * 2.0)
+	var last := HEATMAP_RAMP_STOPS.size() - 1
+	var scaled := value * float(last)
+	var index := clampi(floori(scaled), 0, last - 1)
+	return HEATMAP_RAMP_STOPS[index].lerp(
+		HEATMAP_RAMP_STOPS[index + 1], scaled - float(index))
+
+## sRGB luminance of a ramp colour. The stops are chosen so this value never
+## decreases as `ratio` rises, which is what keeps the ramp readable without
+## red/green hue discrimination.
+func _heatmap_ramp_luminance(color: Color) -> float:
+	return 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b
 
 func _heatmap_metric_value(cell: Dictionary) -> float:
 	if heatmap_metric == "jobs":
@@ -2934,7 +2956,9 @@ func _update_hud() -> void:
 			"metric": i18n.t(HEATMAP_METRIC_KEYS.get(heatmap_metric, "base.ui.heatmap.metric.population")),
 			"peak": _heatmap_peak_text(),
 		})
-		status_label.text += "\n" + i18n.t("base.ui.heatmap.legend")
+		status_label.text += "\n" + i18n.t("base.ui.heatmap.legend", {
+			"metric": i18n.t(HEATMAP_METRIC_KEYS.get(heatmap_metric, "base.ui.heatmap.metric.population")),
+		})
 		if heatmap_error != "":
 			status_label.text += "\n" + i18n.t("base.ui.heatmap.unavailable", {"code": heatmap_error})
 		elif heatmap_peak <= 0.0:
@@ -6024,7 +6048,9 @@ func _run_scene_smoke() -> void:
 				heatmap_ui_ok = heatmap_ui_ok and settlement_heatmap_checksum != camera_heatmap_checksum
 				settlement_select_ok = settlement_select_ok and _select_settlement(-1)
 				heatmap_ui_ok = heatmap_ui_ok and str(heatmap_last_state.get("checksum", "")) == camera_heatmap_checksum
-				heatmap_ui_ok = heatmap_ui_ok and status_label.text.contains(i18n.t("base.ui.heatmap.legend"))
+				heatmap_ui_ok = heatmap_ui_ok and status_label.text.contains(i18n.t("base.ui.heatmap.legend", {
+					"metric": i18n.t("base.ui.heatmap.metric.population"),
+				}))
 				if heatmap_nonzero > 0:
 					heatmap_ui_ok = heatmap_ui_ok and not status_label.text.contains(i18n.t("base.ui.heatmap.empty"))
 				else:
@@ -6140,6 +6166,57 @@ func _run_scene_smoke() -> void:
 				heatmap_modes_ok = heatmap_modes_ok and status_label.text.contains("Metric: Happiness")
 				heatmap_modes_ok = heatmap_modes_ok and status_label.text.contains("Shift+F7")
 				heatmap_modes_ok = heatmap_modes_ok and not status_label.text.contains("!base.ui.")
+				# Colorblind-safe ramp contract: at least five ordered stops,
+				# distinct endpoints and neighbours, alpha inside the
+				# 0.62..0.74 readability window, and non-decreasing luminance
+				# across 0..1. The legend names the active metric and spells
+				# out Low/High in both locales, so the scale never depends on
+				# hue alone.
+				var heatmap_ramp_adjacent_ok := true
+				for heatmap_ramp_index in range(HEATMAP_RAMP_STOPS.size() - 1):
+					if HEATMAP_RAMP_STOPS[heatmap_ramp_index] == HEATMAP_RAMP_STOPS[heatmap_ramp_index + 1]:
+						heatmap_ramp_adjacent_ok = false
+				var heatmap_ramp_alpha_ok := true
+				for heatmap_ramp_stop in HEATMAP_RAMP_STOPS:
+					# Color stores float32, so 0.74 reads back a hair above
+					# 0.74; keep a small tolerance on the documented window.
+					heatmap_ramp_alpha_ok = heatmap_ramp_alpha_ok \
+						and (heatmap_ramp_stop.a >= 0.62 - 0.0005 and heatmap_ramp_stop.a <= 0.74 + 0.0005)
+				var heatmap_ramp_luminance_ok := true
+				var heatmap_ramp_previous_luminance := -1.0
+				for heatmap_ramp_sample in range(17):
+					var heatmap_ramp_sample_luminance := _heatmap_ramp_luminance(
+						_heatmap_color(float(heatmap_ramp_sample) / 16.0))
+					if heatmap_ramp_sample_luminance < heatmap_ramp_previous_luminance:
+						heatmap_ramp_luminance_ok = false
+					heatmap_ramp_previous_luminance = heatmap_ramp_sample_luminance
+				var heatmap_legend_en_ok: bool = status_label.text.contains("Low") \
+					and status_label.text.contains("High") \
+					and status_label.text.contains("Happiness")
+				i18n.set_locale("de")
+				_update_hud()
+				var heatmap_legend_de_ok: bool = status_label.text.contains("Niedrig") \
+					and status_label.text.contains("Hoch") \
+					and status_label.text.contains("Zufriedenheit") \
+					and not status_label.text.contains("!base.ui.")
+				i18n.set_locale("en")
+				_update_hud()
+				var heatmap_ramp_ok: bool = HEATMAP_RAMP_STOPS.size() >= 5 \
+					and heatmap_ramp_adjacent_ok and heatmap_ramp_alpha_ok \
+					and heatmap_ramp_luminance_ok and heatmap_legend_en_ok \
+					and heatmap_legend_de_ok \
+					and _heatmap_color(0.0) != _heatmap_color(1.0)
+				heatmap_modes_ok = heatmap_modes_ok and heatmap_ramp_ok
+				print("HEATMAP_RAMP stops=%d low_high=%s adjacent=%s alpha=%s luminance=%s legend_en=%s legend_de=%s status=%s" % [
+					HEATMAP_RAMP_STOPS.size(),
+					"diff" if _heatmap_color(0.0) != _heatmap_color(1.0) else "same",
+					"diff" if heatmap_ramp_adjacent_ok else "same",
+					"ok" if heatmap_ramp_alpha_ok else "fail",
+					"ok" if heatmap_ramp_luminance_ok else "fail",
+					"ok" if heatmap_legend_en_ok else "fail",
+					"ok" if heatmap_legend_de_ok else "fail",
+					"ok" if heatmap_ramp_ok else "fail",
+				])
 				# Wrap back to population so the off-state check stays the
 				# same numeric contract as the pre-modes smoke.
 				var heatmap_wrapped: String = _cycle_heatmap_metric()
