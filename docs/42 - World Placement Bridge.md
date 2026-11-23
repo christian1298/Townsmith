@@ -218,7 +218,7 @@ MP_PLACEMENT status=ok id=1 hash=blake3:<64 hex> placement_checksum=<16 hex> wor
 MP_PLACEMENT_SMOKE status=ok runs=2 id=1 placement_checksum=b93c2d35e4408a21 world_checksum=98b682969cf93fd7 commands=11
 ```
 
-Limits: a single configured hash, no ghost preview, prediction, rollback, package upload/fetch, mod auto-download, server path on the wire, per-settlement permissions, or placement UI. The server library must be pre-seeded, and the command is authorized by the global Mayor role. The client HUD keeps the last authoritative snapshot balance because `place_blueprint_result` carries no balance.
+Limits: a single configured hash, no ghost preview, prediction, rollback, package upload/fetch, mod auto-download, server path on the wire, per-settlement permissions, or full placement UI. The server library must be pre-seeded, and the command is authorized by the global Mayor role. The client HUD keeps the last authoritative snapshot balance because `place_blueprint_result` carries no balance.
 
 ## 3. Save format
 
@@ -357,8 +357,8 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 - `core_structure`: **22 tests + 1 doctest** for system tiers, story/height/span/foundation rules, and composite grounds.
 - `core_blueprint`: **40 tests** (37 integration + 3 unit), including package validation and the local content-addressed library.
 - `godot_ext`: **193 tests** total, including runtime content loading, blueprint-library insert/resolve/error mapping, portable save/load copy-and-resolve semantics, package deduplication, missing/corrupt/hash/metadata failure codes, save-path validation, resolved-path exposure and lifetime, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
-- `townsmith-server`: **160 tests**, including protocol v1 decode/result roundtrips, Mayor authorization, rate limit/audit, library/hash/package/policy/age/terrain/overlap/funds rejections without mutation, accepted charge/site, idempotent repeats, two placements, checksum movement, old/new save roundtrips, restore without configuration, placement-backed interest buildings, and the deterministic placement smoke.
-- Workspace: **1266 tests**, all green (**1261 unit/integration + 5 doctests**). Verified on 2026-11-23 at master `be70940`.
+- `townsmith-server`: **161 tests**, including protocol v1 decode/result roundtrips, Mayor authorization, rate limit/audit, library/hash/package/policy/age/terrain/overlap/funds rejections without mutation, accepted charge/site, idempotent repeats, two placements, checksum movement, old/new save roundtrips, restore without configuration, placement-backed interest buildings, the deterministic client-placement fixture, and the deterministic placement smoke.
+- Workspace: **1267 tests**, all green (**1262 unit/integration + 5 doctests**). Verified on 2026-11-23 at master `44af02b`.
 - Godot headless: `WORLD_PLACEMENT ... status=ok`, `WORLD_SCENE ... status=ok`, and `WORLD_LIBRARY ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 
