@@ -1667,7 +1667,7 @@ The first authoritative settlement or placement command, the first multiplayer w
 
 **Status:** Accepted (2026-11-23) · **Date:** 2026-11-23 · **Affects:** [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[42 - World Placement Bridge]]
 
-> [!success] Accepted 2026-11-23 — bridge-level v1 implemented
+> [!success] Accepted 2026-11-23 — bridge-level v1 implemented (#313)
 > This ADR is accepted for the bridge world save. A base-only save keeps outer `format_version: 1` and no `content` member and stays byte-identical; one live `content_load_dir` pack writes outer `format_version: 2` and the top-level `content` object. `world_load` verifies the identity immediately after reading and before terrain, stores, or any `.tsbp`, and normalizes a match to the v1 shape in memory without rewriting the file. Failure is fail-closed with the stable `content_*` codes below. There is no server/protocol/`ServerSave`/`PlacementStore` change, no path substitution, and no auto-download. Q-116 (pack-version compatibility), Q-117 (missing-pack read-only mode), and Q-118 (content-ID migration) remain open; the reserved bridge opt-out returns `content_degraded_unsupported` until Q-117 defines a safe mode.
 
 ### Context
