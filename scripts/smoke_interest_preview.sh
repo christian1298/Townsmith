@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Headless smoke for the standalone 3D interest-view road preview.
+# Headless smoke for the standalone 3D interest-view road + building preview.
 #
 # Runs `godot/interest_preview.tscn --smoke` twice. Each run writes and reloads
 # a deterministic fixture (60 in-view + 4 out-of-view roads at the 64-road wire
-# cap, plus malformed entries), builds the scene, checks counts/centreline
-# bounds/camera/checksum, tears down, rebuilds, and prints the same
-# `INTEREST_PREVIEW status=ok …` marker twice. This script compares those
-# markers and every `INTEREST_PREVIEW*` line between the two processes.
+# cap, plus malformed entries and no building list), builds the scene, checks
+# counts/centreline bounds/camera/checksum, tears down, rebuilds, and prints the
+# same `INTEREST_PREVIEW status=ok …` and `INTEREST_PREVIEW_BUILDINGS …` markers
+# twice. It also probes missing/empty/wrong-typed and malformed building
+# payloads, a 5-building synthetic view checked against CPU-side transform
+# mirrors, and an 80-record over-cap payload that must clamp to 64 boxes and set
+# `truncated=true`. This script compares those markers and every
+# `INTEREST_PREVIEW*` line between the two processes.
 #
 # This is a visualization harness, not client render integration and not a
 # benchmark gate. No display is required.
@@ -76,6 +80,26 @@ run_preview() {
 
 	if ! grep -Eq '^INTEREST_PREVIEW_CAP raw=80 parsed=64$' <<<"$output"; then
 		echo "Interest preview smoke failed: over-cap probe marker missing" >&2
+		exit 1
+	fi
+	if ! grep -Eq '^INTEREST_PREVIEW_BUILDINGS status=ok buildings=0 boxes=0 truncated=false checksum=[0-9a-f]{16}$' <<<"$output"; then
+		echo "Interest preview smoke failed: zero-building marker missing or mismatched" >&2
+		exit 1
+	fi
+	if ! grep -Eq '^INTEREST_PREVIEW_BUILDINGS_TOLERANT missing=0 empty=0 wrong_type=0 malformed=4 parsed=1$' <<<"$output"; then
+		echo "Interest preview smoke failed: building tolerance marker missing or mismatched" >&2
+		exit 1
+	fi
+	if ! grep -Eq '^INTEREST_PREVIEW_BUILDINGS_VIEW status=ok buildings=5 boxes=5 truncated=false checksum=[0-9a-f]{16}$' <<<"$output"; then
+		echo "Interest preview smoke failed: synthetic building view marker missing or mismatched" >&2
+		exit 1
+	fi
+	if ! grep -Eq '^INTEREST_PREVIEW_BUILDINGS_CAP status=ok raw=80 buildings=64 boxes=64 truncated=true checksum=[0-9a-f]{16}$' <<<"$output"; then
+		echo "Interest preview smoke failed: over-cap building marker missing or mismatched" >&2
+		exit 1
+	fi
+	if ! grep -Eq '^INTEREST_PREVIEW_BUILDINGS_FLAG status=ok buildings=1 boxes=1 truncated=true$' <<<"$output"; then
+		echo "Interest preview smoke failed: server truncation flag marker missing or mismatched" >&2
 		exit 1
 	fi
 	if ! grep -Eq '^INTEREST_PREVIEW_TEARDOWN instances=0 nodes=0$' <<<"$output"; then
