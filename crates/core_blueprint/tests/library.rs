@@ -144,7 +144,8 @@ fn insert_valid_package_resolves_lists_and_summarizes() {
     let hex = hash.strip_prefix("blake3:").expect("prefix");
     assert_eq!(
         insert.path,
-        library_root.join(&hex[..2]).join(format!("{hex}.tsbp"))
+        fs::canonicalize(library_root.join(&hex[..2]).join(format!("{hex}.tsbp")))
+            .expect("canonical stored entry")
     );
     assert!(insert.path.is_file());
 
@@ -264,7 +265,10 @@ fn same_hash_with_different_bytes_is_a_collision() {
     assert_eq!(library.summary().expect("after"), before);
     assert_eq!(library.resolve(&hash), Some(first.path.clone()));
     assert_eq!(before.count, 1);
-    let stored = files_under(&library_root);
+    let stored: Vec<PathBuf> = files_under(&library_root)
+        .into_iter()
+        .map(|path| fs::canonicalize(path).expect("canonical stored entry"))
+        .collect();
     assert_eq!(stored, vec![first.path]);
 }
 

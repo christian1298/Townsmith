@@ -14965,7 +14965,8 @@ mod tests {
         assert_eq!(insert.hash, hash);
         assert_eq!(
             insert.path,
-            root.join(&hash[7..9]).join(format!("{}.tsbp", &hash[7..]))
+            std::fs::canonicalize(root.join(&hash[7..9]).join(format!("{}.tsbp", &hash[7..])))
+                .expect("canonical stored entry")
         );
         assert!(insert.path.is_file());
         assert_eq!(summary.count, 1);
