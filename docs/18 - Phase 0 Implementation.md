@@ -19,19 +19,19 @@ tags:
 
 | Path | Purpose | Status |
 |---|---|---|
-| `crates/core_voxel` | 32³ chunk, palette/RLE, greedy mesher, chunked volume + cross-chunk meshing | Working, 52 tests |
-| `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming, terrain mesh + LOD + seam skirts | Working, 62 tests |
-| `crates/core_sim` | 1M-scale cohort simulation plus deterministic 2,000 active agents | Working, 40 tests |
-| `crates/core_city` | Deterministic synthetic city layouts, placement, construction, roads, lots, settlements, households, treasury/loans, primary industries, water/power utilities, traffic, the city advisor, population-driven ages, structural placement limits, research, age gates, civic services, the starter catalog, construction trades, the tutorial checklist, and a derived named-citizen identity layer | Working, 482 tests |
-| `crates/core_blueprint` | `.tsbp` v1 package: zip, metadata, optional structure block, RLE voxel stream, BLAKE3 hash | Working, 15 tests |
-| `crates/core_rooms` | Room detection, props, capacity/jobs, material stats, shared acceptance fixture, room bounds | Working, 12 tests + 1 doctest |
-| `crates/core_structure` | Structural systems, story/height/span/foundation rules, age requirements, composite ground checks | Working, 19 tests + 1 doctest |
-| `crates/server` | Headless server: cohort tick, protocol v0, authoritative executor, atomic save/load, dev roles | Working, 83 tests |
-| `crates/bench` | Voxel, volume, worldgen, terrain, cohort, active-agent, city-layout, rooms, city-loop, traffic, streaming, save, and financing harnesses (16 bins) | Working, 79 tests |
+| `crates/core_voxel` | 32³ chunk, palette/RLE, greedy mesher, chunked volume + cross-chunk meshing | Working, 55 tests |
+| `crates/core_world` | Deterministic 1 m terrain worldgen, 256 m chunks, edit deltas, streaming, terrain mesh + LOD + seam skirts | Working, 78 tests |
+| `crates/core_sim` | 1M-scale cohort simulation plus deterministic 2,000 active agents | Working, 53 tests |
+| `crates/core_city` | Deterministic synthetic city layouts, placement, construction, roads, lots, settlements, households, treasury/loans, primary industries, water/power utilities, traffic, the city advisor, population-driven ages, structural placement limits, research, age gates, civic services, the starter catalog, construction trades, the tutorial checklist, district policies, and a derived named-citizen identity layer | Working, 535 tests |
+| `crates/core_blueprint` | `.tsbp` v1 package: zip, metadata, optional structure block, RLE voxel stream, BLAKE3 hash | Working, 19 tests |
+| `crates/core_rooms` | Room detection, props, capacity/jobs, material stats, shared acceptance fixture, room bounds | Working, 13 tests + 1 doctest |
+| `crates/core_structure` | Structural systems, story/height/span/foundation rules, age requirements, composite ground checks | Working, 22 tests + 1 doctest |
+| `crates/server` | Headless server: cohort tick, protocol v0, authoritative executor, atomic save/load, dev roles | Working, 124 tests |
+| `crates/bench` | Voxel, volume, worldgen, terrain, cohort, active-agent, city-layout, rooms, city-loop, traffic, streaming, save, and financing harnesses (25 bins; 18 with tests) | Working, 108 tests |
 | `benchmarks/` | Route JSON, results, and benchmark notes | Harness v0 |
 | `scripts/bench_core.sh` | 3-run core benchmark aggregation | Working |
 | `scripts/bench_godot.sh` | 3-run Godot flyover aggregation | Working; headless frame times are not representative |
-| `crates/godot_ext` | Godot 4.7 GDExtension bridge with terrain workers, city layout, editable volume, blueprint, room, copy-mesh, acceptance, world-placement, construction, road, lot, settlement, household, treasury, industry, utility, traffic, advisor, structure, research, civic-service, materialization, server-save, and locale APIs | Working, 87 tests + headless smoke |
+| `crates/godot_ext` | Godot 4.7 GDExtension bridge with terrain workers, city layout, editable volume, blueprint, room, copy-mesh, acceptance, world-placement, construction, road, lot, settlement, household, treasury, industry, utility, traffic, advisor, structure, research, civic-service, materialization, server-save, policy, and locale APIs | Working, 142 tests + headless smoke |
 | `godot/` | Terrain/city previews plus the first-person editor, blueprint save/load, room overlay, EN/DE UI, and slice acceptance | Working |
 | `scripts/` | Build, check, run, smoke, and acceptance commands | Working |
 
@@ -57,7 +57,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 
 - `VoxelVolume` default is 5 × 3 × 5 chunks = 16 m × 9.6 m × 16 m.
 - Lazy chunk allocation; cross-chunk face culling and greedy merging into one mesh.
-- 52 core_voxel tests; 2-story shell benchmark ~75 ms / 293 quads / 266k solid voxels.
+- 55 core_voxel tests; 2-story shell benchmark ~75 ms / 293 quads / 266k solid voxels.
 - Whole-volume meshing is for load/save and room detection, not per-click remeshing. See [[27 - Voxel Volume]].
 
 ### Godot bridge
@@ -164,7 +164,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,675 quads | ~0.11 ms |
 | Traffic graph, 32 × 32 grid | 64 roads | 1,024 nodes | 1,984 edges | ~0.44 ms build; 1.3 ms / 1,000 flow queries |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, agent, and traffic paths and a baseline for regressions. The terrain counts are for the skirt-free `terrain_mesh_lod` path, which has no neighbor sampler and therefore suppresses chunk-boundary walls (F-047): step 1/2/4 lose exactly 1,024/512/256 perimeter quads versus the old "wall down to height 0" behavior. Streamed chunks pass the generator sampler and add up to 1,024 skirt quads at LOD 1 (see [[21 - LOD Seams]]). The workspace has **1019 tests** (1014 unit/integration + 5 doctests): 55 voxel, 78 world, 53 simulation, 482 city, 19 blueprint, 13 rooms, 102 bridge, 22 structure, 97 server, and 93 bench-bin tests (city_loop 9, cohort_validate 9, dormant 5, financing 8, industrial 4, infra_cost 2, materialization 2, metropolis 4, metropolis_balance 4, modern 5, movement 6, placements 2, save_1m 6, save_stress 11, streaming_scale 7, traffic 4).
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, agent, and traffic paths and a baseline for regressions. The terrain counts are for the skirt-free `terrain_mesh_lod` path, which has no neighbor sampler and therefore suppresses chunk-boundary walls (F-047): step 1/2/4 lose exactly 1,024/512/256 perimeter quads versus the old "wall down to height 0" behavior. Streamed chunks pass the generator sampler and add up to 1,024 skirt quads at LOD 1 (see [[21 - LOD Seams]]). The workspace has **1154 tests** (1149 unit/integration + 5 doctests), verified on 2026-11-23 at master `a39a6bd`: 55 voxel, 78 world, 53 simulation, 535 city, 19 blueprint, 13 rooms, 142 bridge, 22 structure, 124 server, and 108 bench tests (18 bins with tests + bench lib: city_loop 9, cohort_1m 9, cohort_validate 9, dormant 5, financing 8, industrial 4, infra_cost 2, materialization 2, metropolis 4, metropolis_balance 4, modern 5, movement 6, placements 2, save_1m 6, save_stress 11, streaming_scale 13, traffic 4, worldgen 3, bench lib 2).
 
 ### Vertical slice acceptance
 
@@ -184,16 +184,16 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 - Blueprint packages use `.tsbp` v1 (zip + RLE + BLAKE3). Terrain deltas still use the phase 0 blob; a world save format is later.
 - The Godot benchmark has terrain, streaming, and Early/Mid/Late box-city routes plus a 200-voxel-hut route; a real voxel city scene is later, and headless frame times are not render measurements.
 - Async chunk completion is staged in a ready map and committed in ring/distance/coordinate order with a 4-chunk frame budget; a fixed-center staged route is deterministic and gated by `smoke_stream_order.sh` (`STREAM_ORDER_SMOKE status=ok stream_order=ok`). The free-flight route can still change commit order when the camera crosses rings on different frames.
-- The headless server has no networking, persistence, or commands yet; it only proves the CPU tick path.
+- The headless server has protocol v0, an authoritative executor, dev roles, and atomic save/load; client render integration, authentication, and restart persistence remain open.
 - Windows CI validates compile, clippy, and tests only. The Godot headless smoke, benchmark routes, and packaging stay Linux-only, and `godot/townsmith_core.gdextension` still declares only `linux.*` library paths, so a Windows Godot run needs `windows.*` entries before it can be added.
 - The engine choice is **accepted** (D-003); the 3060-class 1M 30 FPS gate remains a Phase 5 performance gate.
 
 ## 4. Next steps
 
 1. Record the 30-minute human playtest and top three usability issues (Q-101).
-2. Carry the slice baseline into Phase 2: open-world streaming, build-anywhere placement, and Mayor Mode.
-3. Deferred Phase 2 editor work: paint/pick, brushes, selection/copy/rotate/mirror, structural v0, thumbnails, AO/texture arrays.
-4. Keep the 3060-class 1M performance gate open for Phase 5.
+2. Record reference-hardware evidence for the 1M/RTX 3060 gate. The #273 cohort harness, #279 100 km² streaming + 250k building-record layer, and #280/#290 gate-result assembler are in place; assembly without a render run stays `insufficient`, and the assembler fails closed on a missing run shape or route.
+3. Extend the dashboard's read-only settlement selector (#283) into per-settlement panels. Policy tax weighting (D-030) and service funding (D-031) are wired, and the placement gate covers `world_validate_placement` previews (#277/#286); every other policy field stays inert. F-003 is fixed by #287.
+4. Deferred Phase 2 editor work: paint/pick, brushes, selection/copy/rotate/mirror, structural v0, thumbnails, AO/texture arrays.
 
 ## 5. Commands
 

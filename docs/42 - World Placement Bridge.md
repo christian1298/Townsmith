@@ -205,10 +205,10 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 
 ## 7. Tests
 
-- `core_city`: placement persistence, construction, roads, lots, settlements, households, treasury/loans, industry, utilities, traffic, the advisor, structural placement limits, research, age gates, and civic services; **482 tests**.
-- `core_structure`: **19 tests + 1 doctest** for system tiers, story/height/span/foundation rules, and composite grounds.
-- `godot_ext`: **87 tests** total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
-- Workspace: **1019 tests** (1014 unit/integration + 5 doctests).
+- `core_city`: placement persistence, construction, roads, lots, settlements, households, treasury/loans, industry, utilities, traffic, the advisor, structural placement limits, research, age gates, civic services, and district policies; **535 tests**.
+- `core_structure`: **22 tests + 1 doctest** for system tiers, story/height/span/foundation rules, and composite grounds.
+- `godot_ext`: **142 tests** total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
+- Workspace: **1154 tests** (1149 unit/integration + 5 doctests). Verified on 2026-11-23 at master `a39a6bd`.
 - Godot headless: `WORLD_PLACEMENT ... status=ok` and `WORLD_SCENE ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 

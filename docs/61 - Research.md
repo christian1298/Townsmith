@@ -166,9 +166,9 @@ The scene smoke:
 
 - `core_city::research`: 17 tests — default tree and ages, starting pool, generation, unlock/spend, duplicate/unknown, age/prerequisite gates, insufficient points, availability flags, JSON/checksum, duplicate node ids in map and array form, array input with canonical map output, invalid state, prerequisite closure and spend consistency, invalid/cyclic trees, invalid costs.
 - `core_city::progression`: 6 tests including age id aliases.
-- `core_structure`: 19 tests + 1 doctest, including minimum-age mapping.
-- `godot_ext`: 87 tests, including research JSON roundtrip/old save, unknown completed nodes, and structure age helpers.
-- Workspace: **946 tests** (941 unit/integration + 5 doctests, all passing).
+- `core_structure`: 22 tests + 1 doctest, including minimum-age mapping.
+- `godot_ext`: 142 tests, including research JSON roundtrip/old save, unknown completed nodes, and structure age helpers.
+- Workspace: **1154 tests** (1149 unit/integration + 5 doctests, all passing). Verified on 2026-11-23 at master `a39a6bd`.
 
 ## 9. Limits
 

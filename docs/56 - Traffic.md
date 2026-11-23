@@ -227,9 +227,9 @@ The world scene draws routed citizens through two pooled `MultiMeshInstance3D` n
 - `core_city::traffic`: 57 tests — graph construction, flow fields, route polylines, walking legs, invalid/disconnected pairs, deterministic turn tie-break, 9 nearest-node index-vs-linear equivalence cases, 10 incremental append/extend cases, 6 graph-version/flow-cache invalidation cases, and 10 congestion cases.
 - `core_city::route_cache`: 5 tests — hit/reuse, LRU eviction, disconnected/invalid pairs not cached, checksums, capacity bounds.
 - `core_city::population`: road commute and disconnected fallback.
-- `townsmith-bench`: 8 city-loop tests (small city and a multi-row commute) and 4 traffic-grid tests.
+- `townsmith-bench`: 9 city-loop tests (small city and a multi-row commute) and 4 traffic-grid tests.
 - World scene smoke: `traffic=ok`, graph stats, one car, movement, save/load rebuild.
-- Workspace on this branch: **1019 tests** (1014 unit/integration + 5 doctests, all passing); core_city **482**, bridge **87**.
+- Workspace: **1154 tests** (1149 unit/integration + 5 doctests, all passing); core_city **535**, bridge **142**. Verified on 2026-11-23 at master `a39a6bd`.
 
 ## 8. Limits
 

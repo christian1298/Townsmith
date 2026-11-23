@@ -182,12 +182,12 @@ The palette shows `structure: timber frame (3/3 stories)`. Loading a package res
 ## 8. Tests and smoke
 
 - `core_structure`: **22 tests + 1 doctest** for each limit, composite bonus/weak ground, span, foundation depth cap, aliases, derivation, and derivation clamping at every system height limit.
-- `core_city::placement`: 6 tests — a four-story timber request fails with `structure_stories`; a four-story brick request and a stone-ground/timber request pass; legacy requests without metadata pass; loaded placements revalidate. Core city total **482**.
-- `core_blueprint`: **15 tests** — default metadata omits the field; a valid structure roundtrips; an over-limit structure saves as a draft; a height mismatch is rejected on save.
-- `godot_ext`: **87 tests**; blueprint info and placement payloads include the structure summary, with a bridge roundtrip test plus the world-scene and editor smoke coverage.
+- `core_city::placement`: 6 tests — a four-story timber request fails with `structure_stories`; a four-story brick request and a stone-ground/timber request pass; legacy requests without metadata pass; loaded placements revalidate. Core city total **535**.
+- `core_blueprint`: **19 tests** — default metadata omits the field; a valid structure roundtrips; an over-limit structure saves as a draft; a height mismatch is rejected on save.
+- `godot_ext`: **142 tests**; blueprint info and placement payloads include the structure summary, with a bridge roundtrip test plus the world-scene and editor smoke coverage.
 - `smoke_world_scene.sh`: the acceptance house derives timber frame, two stories, and a three-story limit; the marker includes `structure=ok`.
 - The editor blueprint smoke checks the saved/loaded timber structure block.
-- Workspace: **1019 tests** (1014 unit/integration + 5 doctests, all passing).
+- Workspace: **1154 tests** (1149 unit/integration + 5 doctests, all passing). Verified on 2026-11-23 at master `a39a6bd`.
 
 ## 9. Limits
 
