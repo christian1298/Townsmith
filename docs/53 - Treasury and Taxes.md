@@ -64,6 +64,9 @@ For `dt` seconds:
 ```text
 days = dt / 86,400
 income = (population × resident_tax + employed × business_tax) × days
+
+> [!info] District tax multipliers (D-030, Proposed)
+> `economy_tick` may scale the two income terms by `PolicyTaxWeights { resident, business }`. The bridge weights residents by the policy at their home centre and staffed jobs by the policy at their workplace centre, then passes the weighted means into `Economy::tick_with_policy_taxes`. Neutral weights (no registry, no covering policy, foreign seed, non-finite, or zero denominator) run the legacy arithmetic verbatim, so default checksums and save JSON do not move. Only the tax multiplier is wired; service funding, upkeep, and construction gating remain unwired.
 operating = (employed × 20 + completed_buildings × upkeep
              + utility_sites × 2 + service_sites × 5) × days
 loan_interest = Σ(outstanding_balance × rate_per_day) × days

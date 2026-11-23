@@ -56,6 +56,7 @@ Read the docs that match your task. The index in `00 - Start Here` has a reading
 - Blueprint package: `.tsbp` v1 zip + JSON + RLE voxels + BLAKE3 hash (D-027, accepted).
 - Construction is billed in phase installments; unaffordable work stalls (D-028, proposed).
 - Construction uses a mode-selected clock; campaign builds take game days (D-029, proposed).
+- District policy tax multipliers weight city tax income by home and workplace (D-030, proposed).
 
 ## Agent workflow
 

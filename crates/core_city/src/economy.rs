@@ -37,6 +37,16 @@ pub const DEFAULT_SERVICE_UPKEEP_PER_SITE_PER_DAY: f64 = 5.0;
 /// Upper bound for one infrastructure site's daily upkeep.
 pub const MAX_INFRASTRUCTURE_UPKEEP_PER_SITE_PER_DAY: f64 = 1_000.0;
 
+/// Smallest accepted district-policy tax weight.
+///
+/// This matches the smallest stored district tax multiplier.
+pub const MIN_POLICY_TAX_WEIGHT: f64 = 0.25;
+
+/// Largest accepted district-policy tax weight.
+///
+/// This matches the largest stored district tax multiplier.
+pub const MAX_POLICY_TAX_WEIGHT: f64 = 4.0;
+
 /// Balance at or below which the city is flagged bankrupt.
 pub const BANKRUPTCY_THRESHOLD: f64 = -50_000.0;
 
@@ -176,6 +186,71 @@ impl InfrastructureCosts {
     #[must_use]
     pub fn total_per_day(self) -> f64 {
         self.utility_per_day + self.service_per_day
+    }
+}
+
+/// Weighted resident and business tax multipliers derived from district
+/// policies.
+///
+/// The bridge computes a residents-weighted average of the district tax
+/// multipliers that apply to completed homes and a staffing-weighted average
+/// for completed workplaces, then passes the result to
+/// [`Economy::tick_with_policy_taxes`]. [`Self::ONE`] is the neutral weight and
+/// keeps the legacy income expression exact.
+///
+/// Weights are derived data: they add no field to [`Economy`] and are never
+/// persisted, so the economy save format and checksum do not move.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PolicyTaxWeights {
+    resident: f64,
+    business: f64,
+}
+
+impl PolicyTaxWeights {
+    /// Neutral weights that leave both tax sides unchanged.
+    pub const ONE: Self = Self {
+        resident: 1.0,
+        business: 1.0,
+    };
+
+    /// Validate resident and business tax weights.
+    ///
+    /// Both values must be finite and inside `0.25..=4.0`, matching the stored
+    /// district tax-multiplier range. Invalid values are rejected so a corrupt
+    /// bridge payload cannot zero taxes or mint income.
+    pub fn new(resident: f64, business: f64) -> Result<Self, EconomyError> {
+        if !resident.is_finite()
+            || !(MIN_POLICY_TAX_WEIGHT..=MAX_POLICY_TAX_WEIGHT).contains(&resident)
+        {
+            return Err(EconomyError::Invalid("resident policy tax weight"));
+        }
+        if !business.is_finite()
+            || !(MIN_POLICY_TAX_WEIGHT..=MAX_POLICY_TAX_WEIGHT).contains(&business)
+        {
+            return Err(EconomyError::Invalid("business policy tax weight"));
+        }
+        Ok(Self { resident, business })
+    }
+
+    /// Weight applied to resident tax income.
+    #[must_use]
+    pub fn resident(self) -> f64 {
+        self.resident
+    }
+
+    /// Weight applied to business tax income.
+    #[must_use]
+    pub fn business(self) -> f64 {
+        self.business
+    }
+
+    /// Whether both weights are exactly neutral.
+    ///
+    /// A neutral tick runs the legacy income expression instead of the
+    /// weighted one, so the pinned city-loop checksums stay byte-identical.
+    #[must_use]
+    pub fn is_neutral(self) -> bool {
+        self.resident == 1.0 && self.business == 1.0
     }
 }
 
@@ -396,7 +471,9 @@ impl Economy {
     ///
     /// `costs` carries the validated daily utility and civic service upkeep
     /// from the stores, so per-kind and per-tier catalog costs are charged
-    /// instead of one aggregate rate per site.
+    /// instead of one aggregate rate per site. This is the neutral policy-tax
+    /// path; use [`Self::tick_with_policy_taxes`] when the bridge has resolved
+    /// district tax weights.
     pub fn tick_with_infrastructure_costs(
         &mut self,
         dt_s: f64,
@@ -405,15 +482,47 @@ impl Economy {
         completed_buildings: u64,
         costs: InfrastructureCosts,
     ) -> EconomyTick {
+        self.tick_with_policy_taxes(
+            dt_s,
+            population,
+            employed,
+            completed_buildings,
+            costs,
+            PolicyTaxWeights::ONE,
+        )
+    }
+
+    /// Advance taxes, wages, building upkeep, explicit infrastructure costs,
+    /// and loan service by `dt_s` seconds with district policy tax weights.
+    ///
+    /// `weights` scales the resident and business tax sides separately. Neutral
+    /// weights execute the legacy income expression verbatim, so a city with no
+    /// district policies keeps its existing checksums. Expenses are unaffected:
+    /// district policies do not fund services or construction in this slice.
+    pub fn tick_with_policy_taxes(
+        &mut self,
+        dt_s: f64,
+        population: u64,
+        employed: u64,
+        completed_buildings: u64,
+        costs: InfrastructureCosts,
+        weights: PolicyTaxWeights,
+    ) -> EconomyTick {
         let dt = if dt_s.is_finite() {
             dt_s.clamp(0.0, MAX_ECONOMY_TICK_SECONDS)
         } else {
             0.0
         };
         let days = dt / DAY_SECONDS;
-        let income = (population as f64 * self.tax_per_resident_per_day
-            + employed as f64 * self.business_tax_per_job_per_day)
-            * days;
+        let income = if weights.is_neutral() {
+            (population as f64 * self.tax_per_resident_per_day
+                + employed as f64 * self.business_tax_per_job_per_day)
+                * days
+        } else {
+            ((population as f64 * self.tax_per_resident_per_day) * weights.resident()
+                + (employed as f64 * self.business_tax_per_job_per_day) * weights.business())
+                * days
+        };
         let infrastructure = costs.total_per_day() * days;
         let operating = (employed as f64 * WAGE_PER_WORKER_PER_DAY
             + completed_buildings as f64 * self.upkeep_per_building_per_day)
@@ -756,6 +865,90 @@ mod tests {
         assert!(InfrastructureCosts::new(0.0, f64::NAN).is_err());
         assert!(InfrastructureCosts::new(f64::INFINITY, 0.0).is_err());
         assert!(InfrastructureCosts::new(0.0, f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn neutral_policy_weights_match_the_legacy_tick() {
+        let costs = InfrastructureCosts::new(386.0, 493.0).expect("costs");
+        let mut legacy = Economy::new(2026);
+        let mut weighted = Economy::new(2026);
+        let left = legacy.tick_with_infrastructure_costs(DAY_SECONDS, 100, 80, 20, costs);
+        let right =
+            weighted.tick_with_policy_taxes(DAY_SECONDS, 100, 80, 20, costs, PolicyTaxWeights::ONE);
+        assert_eq!(left, right);
+        assert_eq!(PolicyTaxWeights::ONE.resident(), 1.0);
+        assert_eq!(PolicyTaxWeights::ONE.business(), 1.0);
+        assert!(PolicyTaxWeights::ONE.is_neutral());
+        assert_eq!(
+            legacy.to_json_pretty().expect("json"),
+            weighted.to_json_pretty().expect("json")
+        );
+        assert_eq!(legacy.checksum(), weighted.checksum());
+    }
+
+    #[test]
+    fn a_doubled_policy_doubles_tax_income_only() {
+        let costs = InfrastructureCosts::new(386.0, 493.0).expect("costs");
+        let mut neutral = Economy::new(2026);
+        let base =
+            neutral.tick_with_policy_taxes(DAY_SECONDS, 100, 80, 20, costs, PolicyTaxWeights::ONE);
+
+        let weights = PolicyTaxWeights::new(2.0, 2.0).expect("weights");
+        let mut doubled = Economy::new(2026);
+        let tick = doubled.tick_with_policy_taxes(DAY_SECONDS, 100, 80, 20, costs, weights);
+        assert!((tick.income - base.income * 2.0).abs() < 0.001);
+        assert!((tick.income - 2240.0).abs() < 0.001);
+        assert!((tick.expenses - base.expenses).abs() < 0.001);
+        assert!((tick.infrastructure - base.infrastructure).abs() < 0.001);
+        assert!((tick.balance - (base.balance + base.income)).abs() < 0.001);
+        assert!((tick.days_elapsed - base.days_elapsed).abs() < 0.001);
+        assert_eq!(tick.bankrupt, base.bankrupt);
+    }
+
+    #[test]
+    fn invalid_policy_weights_are_rejected() {
+        for value in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            MIN_POLICY_TAX_WEIGHT - 0.01,
+            MAX_POLICY_TAX_WEIGHT + 0.01,
+            -1.0,
+            0.0,
+        ] {
+            assert!(
+                PolicyTaxWeights::new(value, 1.0).is_err(),
+                "resident weight {value} was accepted"
+            );
+            assert!(
+                PolicyTaxWeights::new(1.0, value).is_err(),
+                "business weight {value} was accepted"
+            );
+        }
+        assert!(PolicyTaxWeights::new(0.25, 4.0).is_ok());
+        assert!(PolicyTaxWeights::new(0.24, 1.0).is_err());
+        assert!(PolicyTaxWeights::new(1.0, 4.01).is_err());
+    }
+
+    #[test]
+    fn policy_weights_leave_save_data_and_checksum_unchanged() {
+        let mut economy = Economy::new(2026);
+        economy.tick_with_infrastructure_costs(
+            3600.0,
+            50,
+            40,
+            10,
+            InfrastructureCosts::new(12.0, 34.0).expect("costs"),
+        );
+        let json = economy.to_json_pretty().expect("json");
+        // Weights are derived data: no policy multiplier is serialized.
+        assert!(!json.contains("policy"));
+        let decoded = Economy::from_json(&json).expect("decode");
+        assert_eq!(
+            serde_json::to_string(&decoded).expect("decoded json"),
+            serde_json::to_string(&economy).expect("live json")
+        );
+        assert_eq!(decoded.checksum(), economy.checksum());
     }
 
     #[test]

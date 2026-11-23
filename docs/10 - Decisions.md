@@ -47,6 +47,7 @@ tags:
 | D-027 | `.tsbp` v1 package: zip + JSON + RLE voxels + BLAKE3 hash | Accepted | 2026-11-20 | [[28 - Blueprint Package]], [[03 - Voxel and Scale]] |
 | D-028 | Construction is billed in phase installments; unaffordable work stalls | Proposed | 2026-11-22 | [[53 - Treasury and Taxes]], [[77 - Infrastructure Costs]], [[02 - Game Design]] |
 | D-029 | Construction uses a mode-selected clock; campaign builds take game days | Proposed | 2026-11-22 | [[02 - Game Design]], [[09 - Open Questions]], [[53 - Treasury and Taxes]] |
+| D-030 | District policy tax multipliers weight city tax income by home and workplace | Proposed | 2026-11-23 | [[07 - Simulation and AI]], [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]] |
 
 ---
 
@@ -1249,6 +1250,44 @@ Placement currently checks and charges the full material price up front, while t
 ### Review trigger
 
 Bridge/economy wiring, the first playable large-city financing run, and the Q-101 playtest.
+
+---
+
+## D-030 — District policy tax multipliers weight city tax income by home and workplace
+
+**Status:** Proposed · **Date:** 2026-11-23 · **Affects:** [[07 - Simulation and AI]], [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]]
+
+### Context
+
+`DistrictPolicy` carries a `tax_multiplier` (0.25–4.0) and the derived `DistrictPolicyEffect` exposes it, but no ledger consumer read it: city taxes stayed global and every resident and job paid the same base rate. The first simulation consumer is the treasury.
+
+### Decision
+
+- Add an explicit `PolicyTaxWeights { resident, business }` value object to the economy. Neutral weights are exactly `1.0`; a non-neutral weight must be finite and within the policy bounds `0.25..=4.0`.
+- `Economy::tick_with_policy_taxes(...)` scales the resident and business income terms separately. With neutral weights it executes the existing income arithmetic verbatim, so the default ledger, save JSON, and checksums do not move.
+- The bridge derives the weights from completed homes and workplaces: residents are weighted by the policy at their home centre, staffed jobs by the policy at their workplace centre, and each side is a population- or staffing-weighted mean. A household split across workplaces still contributes to each workplace's jobs (the aggregate staffing map is the source).
+- Missing, empty, or foreign-seed policy registries, foreign placement/population seeds, non-finite values, and zero denominators all fall back to neutral weights rather than guessing.
+- The bridge exposes the resolved multipliers as `policy_tax_multiplier_resident` and `policy_tax_multiplier_business` on the economy tick payload. No other tax, upkeep, funding, construction, or placement rule consumes a policy effect in this slice.
+
+### Consequences
+
+**Positive**
+- District tax policy now has one real, testable simulation consumer while the neutral path stays checksum-identical.
+- The weighting is explainable: home for residents, workplace for jobs, weighted means at policy boundaries.
+
+**Negative**
+- The aggregate model attributes all of a household's workers to the workplace majority when splitting, so weights are an approximation at mixed-workplace homes.
+- The multiplier is applied to income only; service funding, upkeep, construction gating, and placement rules remain unwired.
+
+### Alternatives considered
+
+- **Apply a single city-wide policy multiplier:** simpler, but ignores overlapping districts and defeats the point of district policy.
+- **Per-household tax collection:** more accurate, but the ledger is city-level and the extra row cost is not justified at 1M scale yet.
+- **Wait for full policy effects:** leaves the registry inert and untestable in simulation.
+
+### Review trigger
+
+A balance pass on district tax competition, then a decision on whether service funding and construction gating follow the same weighting pattern.
 
 ---
 
