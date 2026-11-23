@@ -322,8 +322,9 @@ cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
 cargo run --release -p townsmith-server -- --loopback-smoke
 # Prints SERVER_PROTOCOL and SERVER_AUTHORITY status lines; deterministic, no sleeps
 cargo test -p townsmith-server
-cargo run --release -p townsmith-server -- --loopback-smoke   # protocol + authority + roles + resume + interest goldens
+cargo run --release -p townsmith-server -- --loopback-smoke   # protocol + authority + roles + resume + interest + time-vote goldens
 cargo run --release -p townsmith-server -- --interest-smoke   # viewport + bounded 64-road / 64-building interest view loopback
+cargo run --release -p townsmith-server -- --vote-smoke   # 7-connection D-021 vote pass/fail/cancel loopback
 GODOT=/path/to/godot ./scripts/smoke_interest_preview.sh   # headless 3D interest-view road preview, two runs, same checksum
 GODOT=/path/to/godot ./scripts/smoke_mp_client.sh   # normal path (frames 7/8) + reconnect resume via --sessions 2
 GODOT=/path/to/godot ./scripts/smoke_movement_stress.sh

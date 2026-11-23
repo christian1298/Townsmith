@@ -45,8 +45,9 @@
 //! - No broadcast fan-out: the responding session gets the status message.
 //!
 //! The loopback harness at the bottom of this module exercises the state
-//! machine through the real protocol over TCP with two sessions sharing one
-//! world.
+//! machine through the real protocol over TCP with several connections
+//! sharing one world. Each connection owns its handshake, role, and ballot
+//! identity; the vote, online roster, pause flag, and checksum are shared.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -658,7 +659,8 @@ pub struct TimeVoteReport {
 /// Run the deterministic time-vote loopback over TCP.
 ///
 /// Three independent worlds (each with its own listener accept batch) exercise
-/// the D-021 rules through the real protocol:
+/// the D-021 rules through the real protocol with one session per TCP
+/// connection:
 ///
 /// 1. **pass**: two players, call + yes; a viewer's `cancel` is forbidden, the
 ///    vote passes, the world pauses, and the follow-up call is on cooldown;
@@ -668,7 +670,6 @@ pub struct TimeVoteReport {
 ///    fewer than two online and cancels the vote.
 ///
 /// No wall-clock sleeps: every ordering point is a request/response pair.
-#[allow(dead_code)]
 pub fn run_time_vote_loopback() -> io::Result<TimeVoteReport> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let address = listener.local_addr()?;
@@ -703,11 +704,15 @@ fn serve_time_vote(listener: TcpListener) -> io::Result<TimeVoteReport> {
             crate::world::ClientRole::Viewer,
         )));
         let mut handles = Vec::with_capacity(connections);
+        let mut connection_id = 0u64;
 
         for _ in 0..connections {
             let (stream, _peer) = listener.accept()?;
+            connection_id = connection_id.saturating_add(1);
             let shared = Arc::clone(&world);
-            handles.push(thread::spawn(move || serve_vote_stream(stream, shared)));
+            handles.push(thread::spawn(move || {
+                serve_vote_stream(stream, shared, connection_id)
+            }));
         }
         for handle in handles {
             handle
@@ -742,6 +747,7 @@ fn serve_time_vote(listener: TcpListener) -> io::Result<TimeVoteReport> {
 fn serve_vote_stream(
     stream: TcpStream,
     world: Arc<Mutex<crate::world::ServerWorld>>,
+    connection_id: u64,
 ) -> io::Result<()> {
     configure_stream(&stream)?;
     let mut stream = stream;
@@ -754,23 +760,33 @@ fn serve_vote_stream(
             Err(error) => return Err(io::Error::other(error.to_string())),
         };
 
-        let response = match decode_client_command(&payload) {
-            Ok(command) => world
-                .lock()
-                .map_err(|_| io::Error::other("time-vote world mutex poisoned"))?
-                .apply(&command),
-            Err(rejection) => rejection.into_message(),
+        let (responses, closed) = match decode_client_command(&payload) {
+            Ok(command) => {
+                let mut world = world
+                    .lock()
+                    .map_err(|_| io::Error::other("time-vote world mutex poisoned"))?;
+                let responses = world.apply_session(connection_id, &command);
+                let closed = world.session_closed(connection_id);
+                (responses, closed)
+            }
+            Err(rejection) => (vec![rejection.into_message()], false),
         };
-        write_json_frame(&mut stream, &response).map_err(frame_to_io)?;
+        for response in &responses {
+            write_json_frame(&mut stream, response).map_err(frame_to_io)?;
+        }
 
-        let closed = world
-            .lock()
-            .map_err(|_| io::Error::other("time-vote world mutex poisoned"))?
-            .is_closed();
         if closed {
             break;
         }
     }
+
+    // EOF, a reset, or a timeout without `disconnect`: release the roster
+    // entry and open this session's resume window without touching the other
+    // connections.
+    world
+        .lock()
+        .map_err(|_| io::Error::other("time-vote world mutex poisoned"))?
+        .close_connection(connection_id);
 
     Ok(())
 }
@@ -1240,5 +1256,26 @@ mod tests {
             [ServerMessage::Reject { code, .. }] => assert_eq!(code, codes::UNAVAILABLE),
             other => panic!("expected vote.unavailable, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn multi_connection_loopback_passes_fails_and_cancels_deterministically() {
+        // Golden for the real-TCP three-phase harness (docs/05, docs/78).
+        const TIME_VOTE_LOOPBACK_CHECKSUM: &str = "ec840a35bac5065a";
+
+        let first = run_time_vote_loopback().expect("first time-vote loopback");
+        let second = run_time_vote_loopback().expect("second time-vote loopback");
+
+        // 2 + 3 + 2 real TCP connections, all sharing one world per phase.
+        assert_eq!(first.sessions, 7);
+        assert_eq!(first.votes, 3);
+        assert_eq!(
+            (first.passed, first.failed, first.cancelled),
+            (1, 1, 1),
+            "pass, fail, and quorum-loss cancel"
+        );
+        assert!(!first.paused, "the final phase starts from a fresh world");
+        assert_eq!(first.checksum, TIME_VOTE_LOOPBACK_CHECKSUM);
+        assert_eq!(first, second, "two runs must produce the same report");
     }
 }

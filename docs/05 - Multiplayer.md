@@ -244,7 +244,7 @@ The harness binds `127.0.0.1:0`, runs `hello → welcome`, `ping → pong`, `set
 
 `godot/mp_client.gd` + `mp_client.tscn` speak the same framing over `StreamPeerTCP` (big-endian length prefix, JSON, 1 MiB cap). In the normal path the client sends `hello`, `ping`, a valid and an invalid `set_tax`, a `place_road`, a `set_interest`, then `disconnect`, and asserts `welcome`, `pong`, three snapshots, a rejection, one `interest_view`, and `goodbye`. Seven command frames and eight response frames cross the socket.
 
-`--reconnect` runs the session-resume path instead: the first connection sends `hello`, `ping`, and `place_road`, captures `session_token` and the last snapshot tick, then disconnects. A second connection sends `resume {session_id, last_tick}` and asserts `welcome {resumed:true}` with the same token, a snapshot at or past `last_tick`, a resumed `pong`, and `goodbye`. Both connections together exchange seven command and eight response frames (four each on the first, three/four on the resumed one). The two connections must reach the same server process; `--listen PORT --sessions N` caps a run at N accepted sessions, and `--once` remains the `--sessions 1` shorthand. Without `--sessions`, the listener serves until stopped. v0 accepts one session at a time and keeps the world in memory, so the resume window lives in the same process.
+`--reconnect` runs the session-resume path instead: the first connection sends `hello`, `ping`, and `place_road`, captures `session_token` and the last snapshot tick, then disconnects. A second connection sends `resume {session_id, last_tick}` and asserts `welcome {resumed:true}` with the same token, a snapshot at or past `last_tick`, a resumed `pong`, and `goodbye`. Both connections together exchange seven command and eight response frames (four each on the first, three/four on the resumed one). The two connections must reach the same server process; `--listen PORT --sessions N` caps a run at N accepted sessions, and `--once` remains the `--sessions 1` shorthand. Without `--sessions`, the listener serves until stopped. The `--listen` accept loop serves one socket at a time and keeps the world in memory, so the resume window lives in the same process. Concurrent per-connection sessions exist in the shared `ServerWorld` model used by the time-vote harness; `--listen` remains sequential.
 
 ```bash
 GODOT=/path/to/godot ./scripts/smoke_mp_client.sh
@@ -269,10 +269,19 @@ The first stateful executor lives in `crates/server/src/world.rs` and is exporte
 
 ```rust
 ServerWorld {
+    // Shared by every connection.
     seed, tick, population, employed, buildings,
     economy: Economy, roads: RoadStore,
-    interest_center: [f32; 2], interest_radius_m: f32,
-    paused, session_checksum,
+    paused, vote: TimeVote, online: BTreeSet<String>,
+
+    // Active per-connection slot. The code keeps these fields flat on
+    // ServerWorld and mirrors them in SessionState when switching.
+    hello, player, role, closed, resume_window, session_id,
+    interest_center, interest_radius_m, rate, audit,
+    last_seen_tick, session_checksum, commands,
+
+    sessions: BTreeMap<connection_id, SessionState>,
+    active_connection, next_connection,
 }
 ```
 
@@ -282,9 +291,13 @@ Population, employment, and building counts are static for v0. `employed` is 60%
 
 | Method | Behavior |
 |---|---|
-| `ServerWorld::new(seed)` | Fresh single-session world; deterministic session id |
-| `apply(&ClientCommand) -> ServerMessage` | First response only; convenience wrapper for tests. Transport uses `apply_all` |
-| `apply_all(&ClientCommand) -> Vec<ServerMessage>` | Every response: one message normally, `welcome` + `snapshot` for `resume`, `snapshot` + `interest_view` for `set_interest` |
+| `ServerWorld::new(seed)` | Fresh shared world; the first connection gets a deterministic session id |
+| `apply(&ClientCommand) -> ServerMessage` | First response only; legacy single-session slot used by tests and single-connection loopbacks. Transport uses `apply_all` |
+| `apply_all(&ClientCommand) -> Vec<ServerMessage>` | Every response on the active session slot: one message normally, `welcome` + `snapshot` for `resume`, `snapshot` + `interest_view` for `set_interest` |
+| `open_connection() -> u64` | Issue a process-local connection id and install a fresh session for it |
+| `apply_session(connection_id, &ClientCommand) -> Vec<ServerMessage>` | Swap in that connection's session state, apply the command, and leave it active for the next command |
+| `close_connection(connection_id)` | Release a dropped connection: remove its player from `online` and open its resume window |
+| `set_session_role(connection_id, role)` | Dev-only per-connection role; not authentication |
 | `snapshot() -> ServerMessage` | Current `tick`, `population`, `balance`, `checksum`, plus the session viewport (`interest_center`, `interest_radius_m`, `visible_roads`) |
 | `interest_roads() -> Vec<RoadView>` | At most 64 matching roads, ascending id; the bounded detail list without the envelope |
 | `interest_view() -> ServerMessage` | `InterestView` with the viewport, the bounded road list, and `truncated` |
@@ -292,19 +305,24 @@ Population, employment, and building counts are static for v0. `employed` is 60%
 | `tick(dt_s)` | Alias for `advance_day` |
 | `checksum() -> String` | 16-hex FNV-1a over tick, population, balance, road store checksum, economy checksum |
 
+**Per-connection sessions.** The simulation — tick, pause, treasury, roads, vote, and the online roster — is shared. Handshake and close flags, player name, role, reconnect window, session token, interest viewport, rate bucket, audit ring, last-seen tick, and the per-session checksum are per connection. The active connection's fields live directly on `ServerWorld`; switching to another id parks them in `sessions` and installs the requested state, so the single-session `apply` path is unchanged. Connection `1` keeps the seed-derived token; later connections append `-<id>` (for example `session-…-2`), so two online players never share a resume token. A vote is stored once on the shared world: a ballot cast by one connection is visible to every other connection and counted once. A duplicate player name is still rejected across connections (`player_name.duplicate`).
+
+**Connection lifecycle.** `open_connection` issues ids `1, 2, …`; `apply_session` creates the state on first use. The multi-connection vote harness calls `apply_session` per TCP connection and `close_connection` on EOF/reset/timeout; the single-connection loopbacks keep using the legacy `apply`/`apply_all` slot. A new connection has its own empty resume window, so another player's pending reconnect never blocks `hello`. `resume {session_id}` searches the parked sessions and adopts only the matching one (player, role, viewport, audit ring, rate bucket); active sessions reject a claim with `resume.duplicate`. The legacy single-slot path keeps the `hello.resumable` attempt limit described below. The `--listen` accept loop is still sequential: it serves one socket at a time, while the shared world model supports concurrent sessions for the vote harness.
+
 **Command behavior**
 
 | Command | Accepted effect | Rejection codes |
 |---|---|---|
-| `hello` | One per session; returns `welcome` | `protocol.version_mismatch`, `player_name.*`, `content_hash.invalid`, `hello.duplicate`, `session.closed` |
+| `hello` | One per connection; returns `welcome`; a name already online is rejected | `protocol.version_mismatch`, `player_name.*`, `content_hash.invalid`, `hello.duplicate`, `player_name.duplicate`, `session.closed` |
 | `ping` | Echoes the nonce | `not_hello` before hello |
 | `time_control` pause/resume | Admin only; freezes/unfreezes `advance_day`; returns a snapshot; does not advance the tick | `not_hello`, `role.forbidden` |
 | `time_control` step | Admin only; advances exactly one game day and one tick, even while paused | `not_hello`, `role.forbidden` |
 | `time_control` speed | Rejected; v0 has no real-time loop | `time.invalid_action` |
 | `set_tax` | Validates 0–100 and writes the treasury per-day rates; increments tick | `tax.rate_out_of_range`, `not_hello` |
 | `place_road` | Adds a 6 m wide, axis-aligned segment; increments tick | `road.empty`, `road.not_axis_aligned`, `road.out_of_bounds`, `road.too_long` (>512 cells), `road.duplicate`, `road.overlap`, `road.store_full`, `road.id_exhausted` |
-| `set_interest` | View-only: stores the session viewport (`center_x`, `center_z`, `radius_m`) and returns a snapshot plus a bounded `interest_view`; does not advance the tick or move the checksum | `not_hello`, `interest.invalid_center`, `interest.radius_out_of_range` |
-| `disconnect` | Closes the session; returns `goodbye` | `session.closed` |
+| `set_interest` | View-only: stores the connection viewport (`center_x`, `center_z`, `radius_m`) and returns a snapshot plus a bounded `interest_view`; does not advance the tick or move the checksum | `not_hello`, `interest.invalid_center`, `interest.radius_out_of_range` |
+| `time_vote` | Per-connection ballot on the shared vote: call (initiator auto-yes), yes, no; admin cancel; returns `TimeVoteStatus` | `vote.open`, `vote.cooldown`, `vote.min_online`, `vote.unknown_player`, `vote.duplicate`, `vote.closed`, `vote.action_required`, `vote.action_unsupported`, `role.forbidden` |
+| `disconnect` | Closes this connection; returns `goodbye` | `session.closed` |
 
 `hello` and `disconnect` are accepted before `hello`; every other command is rejected with `not_hello`. Rejections never mutate state.
 
@@ -312,7 +330,7 @@ Population, employment, and building counts are static for v0. `employed` is 60%
 
 **Determinism.** The snapshot checksum is a pure function of the listed state; it excludes the wall clock, seed, and paused flag. `advance_day` never sleeps. `dt_s` is clamped to `0..=DAY_SECONDS`; non-finite and negative values become zero. A paused `advance_day` returns the current ledger without changing the tick.
 
-**Roles, rate limits, audit (dev-only).** `--role viewer|mayor|admin` sets the session role; `--listen` defaults to **mayor**. Viewer may hello/ping/disconnect, set its own interest viewport, and call/vote in a time vote; mayor may set tax and place roads; **time control (pause/resume/step) is admin-only** per D-021, while a passed vote applies pause/resume without a direct command. Unknown command tags fail closed to admin. `resume` is rate-limited like other commands; only `disconnect` bypasses the bucket. Each session has a deterministic token bucket (20 commands/s, burst 40) and a 256-entry audit ring (`tick`, role, command, code). `disconnect` bypasses the limiter. Neither role, audit, nor interest state is part of the world snapshot checksum. This is not authentication: the role is assigned by the server process for the local harness.
+**Roles, rate limits, audit (dev-only).** `--role viewer|mayor|admin` sets the default role for connections; `--listen` defaults to **mayor**, and the vote harness creates Viewer connections so every player may vote. Viewer may hello/ping/disconnect, set its own interest viewport, and call/vote in a time vote; mayor may set tax and place roads; **time control (pause/resume/step) is admin-only** per D-021, while a passed vote applies pause/resume without a direct command. Unknown command tags fail closed to admin. `resume` is rate-limited like other commands; only `disconnect` bypasses the bucket. Each connection has a deterministic token bucket (20 commands/s, burst 40) and a 256-entry audit ring (`tick`, role, command, code); switching connections swaps the bucket and ring with the rest of the session state, and `set_session_role` can assign a role to one harness connection. Neither role, audit, vote, nor interest state is part of the world snapshot checksum. This is not authentication: the role is assigned by the server process for the local harness.
 
 `SERVER_ROLES status=ok sessions=3 role_checks=4 rate_limited=1 audit=65 checksum=b6ab299531341226` is the loopback golden (viewer forbidden, mayor accepted, admin step, rate-limited ping).
 
@@ -325,9 +343,10 @@ Population, employment, and building counts are static for v0. `employed` is 60%
 | Save/load | `ServerSave` v1, atomic tmp/fsync/rename, one-step `.bak` recovery | `SERVER_SAVE status=ok bytes=744 tick=2 checksum=70e25aff45867b94`; `--listen PORT --save PATH --load PATH` |
 | Roles | Dev-only viewer/mayor/admin, token bucket, 256-entry audit ring | `SERVER_ROLES ... checksum=b6ab299531341226` |
 | Interest | Per-session viewport; snapshot reports `visible_roads`, plus a ≤64-road and ≤64-building `InterestView` | `SERVER_INTEREST status=ok center=0.0,0.0 radius=16.0 visible=1 roads=1 truncated=false buildings=1 buildings_truncated=false tick=2 checksum=6d92be74bdbc11f5` |
+| Time vote | Shared D-021 state machine; one ballot per player across concurrent connections | `SERVER_TIME_VOTE sessions=7 votes=3 passed=1 failed=1 cancelled=1 paused=false checksum=ec840a35bac5065a status=ok` |
 | Godot client | Loopback `hello`/`ping`/tax/road/interest/disconnect; `--reconnect` resumes a session with the token from `welcome` | `MP_CLIENT ... interest=ok roads=1 truncated=false ... frames=15`; `MP_CLIENT_RECONNECT status=ok resumed=true ... frames=15` |
 
-**Limits.** In-memory world with one session at a time; reconnect/resume works only inside the same server process (300-tick window), is not persisted, and its token is not authentication. No content-manifest enforcement, entity/agent/terrain streaming, delta snapshots, rollback, terrain sampling, or cost/material checks. Interest v0 is a per-session viewport that filters aggregate snapshot counts and bounded 64-road and 64-building detail lists (building records are synthetic fixtures); it does not stream other entity kinds or activate, deactivate, or hide simulation state. Persistence is one file per world; no journal, compression, or remote storage. Roles are assigned by the server process, not authenticated. Direct mutation of public fields does not refresh `session_checksum`; call `checksum()` for live state.
+**Limits.** In-memory world; the `--listen` accept loop still serves one socket at a time, while the shared world model supports concurrent per-connection sessions for the vote loopback. Reconnect/resume works only inside the same server process (300-tick window), is not persisted, and its token is not authentication. A new connection has its own session and resume window; only the legacy single-slot path keeps the `hello.resumable` attempt limit. No content-manifest enforcement, entity/agent/terrain streaming, delta snapshots, rollback, terrain sampling, or cost/material checks. Interest v0 is a per-session viewport that filters aggregate snapshot counts and bounded 64-road and 64-building detail lists (building records are synthetic fixtures); it does not stream other entity kinds or activate, deactivate, or hide simulation state. Persistence is one file per world; no journal, compression, or remote storage. Roles are assigned by the server process, not authenticated. Direct mutation of public fields does not refresh `session_checksum`; call `checksum()` for live state.
 
 **Loopback smoke**
 
@@ -338,11 +357,16 @@ cargo run --release -p townsmith-server -- --loopback-smoke
 # SERVER_ROLES status=ok sessions=3 role_checks=4 rate_limited=1 audit=65 checksum=b6ab299531341226
 # SERVER_RESUME status=ok sessions=2 commands=5 frames=11 resumed=true tick=1 checksum=157ba83a1acf65dd
 # SERVER_INTEREST status=ok center=0.0,0.0 radius=16.0 visible=1 roads=1 truncated=false buildings=1 buildings_truncated=false tick=2 checksum=6d92be74bdbc11f5
+# SERVER_TIME_VOTE sessions=7 votes=3 passed=1 failed=1 cancelled=1 paused=false checksum=ec840a35bac5065a status=ok
+cargo run --release -p townsmith-server -- --vote-smoke
+# SERVER_TIME_VOTE sessions=7 votes=3 passed=1 failed=1 cancelled=1 paused=false checksum=ec840a35bac5065a status=ok
 cargo run --release -p townsmith-server -- --save-load-smoke
 # SERVER_SAVE status=ok action=loopback bytes=744 tick=2 checksum=70e25aff45867b94
 ```
 
 The authority path binds `127.0.0.1:0` and runs `hello → welcome`, `set_tax → snapshot`, `place_road → snapshot`, `ping → pong`, `resume → snapshot`, `disconnect → goodbye`. The client replays the same commands on a local reference world and requires byte-for-byte identical responses; it also asserts the exact tick (1, 2), balance (100,000), and seed-derived population. Socket timeouts replace sleeps.
+
+The time-vote loopback opens **seven real TCP connections across three phases**, all sharing one `ServerWorld` per phase: phase 1 (2 players) calls pause, Bob's yes passes it, and the world pauses; phase 2 (3 players) calls pause and two no votes make the majority unreachable, so it fails; phase 3 (2 players) calls resume and one disconnect drops the roster below the two-player quorum, so it cancels. The report sums the accepted ballots (3), the pass/fail/cancel counters (1/1/1), the final world's `paused` state (`false`, because phase 3 starts from a fresh world), and a checksum over each phase's vote checksum, pause flag, and world checksum. Two runs are byte-identical.
 
 ## 6. Voxel editing and blueprint sync
 
@@ -486,16 +510,18 @@ See [[09 - Open Questions]] and [[10 - Decisions]].
 
 ### Session resume v0
 
-A disconnected client can resume the same in-memory world with `resume {session_id, last_tick}` inside a 300-tick grace window. The token is the seed-derived session id returned in `welcome`; it is **not** authentication. Success returns `welcome {resumed:true}` plus a snapshot, restores the player to the online roster, and preserves the dev role. Unknown/empty token, a last tick ahead of the authority, an expired window, or resuming while a session is active are rejected (`resume.*`). A fresh `hello` is normally rejected with `hello.resumable` while the window is open, but after **three** attempts the stale window is abandoned so a client that lost its token is never blocked forever. A duplicate online player name is rejected (`player_name.duplicate`). Reconnect state is process-local and is not restored by `ServerSave`; a fresh `hello` after expiry starts a new session.
+A disconnected client can resume the same in-memory world with `resume {session_id, last_tick}` inside a 300-tick grace window. The token returned in `welcome` identifies the connection's session; connection `1` derives it from the seed and later connections append their connection id, so concurrent players never share one. It is **not** authentication. Success returns `welcome {resumed:true}` plus a snapshot, restores the player to the online roster, and preserves the dev role. Unknown/empty token, a last tick ahead of the authority, an expired window, or resuming while that session is active are rejected (`resume.*`). In the per-connection model a claim may name a session parked under another connection id; the server adopts only that session (player, role, viewport, audit ring, rate bucket) and leaves every other connection online. A new connection has its own resume window, so another player's pending reconnect does not block its `hello`. On the legacy single-slot path (`--listen`), a fresh `hello` is normally rejected with `hello.resumable` while the window is open, but after **three** attempts the stale window is abandoned so a client that lost its token is never blocked forever. A duplicate online player name is rejected (`player_name.duplicate`). Reconnect state is process-local and is not restored by `ServerSave`; a fresh `hello` after expiry starts a new session.
 
 The Godot client covers the same path with `--reconnect`: it captures the token and tick from its first session, disconnects, and resumes on a second connection. `scripts/smoke_mp_client.sh` starts the server with `--sessions 2`, then asserts `MP_CLIENT_RECONNECT status=ok resumed=true ... frames=15` alongside the normal-path block. The listener still accepts one session at a time, so the reconnect is accepted only after the first disconnects; the token and window do not survive a restart.
 
 `cargo run --release -p townsmith-server -- --resume-smoke` prints `SERVER_RESUME status=ok ...`.
 ### Time-control vote v0
 
-`core`/server state machine: `TimeVote` implements D-021's 60-second window, simple majority of the online roster at vote start, minimum two online, one vote per player, initiator auto-yes, 300-tick failed/cancelled cooldown and 120-tick success cooldown. Passing `pause`/`resume` applies the effect once through `ServerWorld`; tie/expiry fails, losing quorum cancels. `time_vote` is a protocol command and returns `TimeVoteStatus` (state, counts, window, cooldown, paused, checksum). Ballots stay counted for the vote lifetime even if a voter disconnects, so a reconnect cannot vote twice. The multi-connection vote loopback is **deferred**: v0 still models one hello session per world, so the harness was removed rather than left failing; the pure state machine and single-world command path are covered by 18 tests.
+`core`/server state machine: `TimeVote` implements D-021's 60-second window, simple majority of the online roster at vote start, minimum two online, one vote per player, initiator auto-yes, 300-tick failed/cancelled cooldown and 120-tick success cooldown. Passing `pause`/`resume` applies the effect once through `ServerWorld`; tie/expiry fails, losing quorum cancels. `time_vote` is a protocol command and returns `TimeVoteStatus` (state, counts, window, cooldown, paused, checksum). Ballots stay counted for the vote lifetime even if a voter disconnects, so a reconnect cannot vote twice. The per-connection session model gives every TCP connection its own handshake, player name, role, and ballot identity while the vote, online roster, pause flag, and world checksum stay shared; a ballot cast by one connection is visible to and counted for every other connection. A ballot that resolves the vote immediately is drained by `ServerWorld::tick_vote`, so `pause`/`resume` is applied even when the state machine no longer reports an open vote.
 
-Limits: the multi-connection vote loopback/smoke is deferred because the v0 world still assumes one hello session; the pure state machine and single-world command path are tested (18 vote tests). No persistence of vote state, proxies, weighted votes, or UI. Q-078 tuning remains open.
+**Multi-connection vote smoke.** `cargo run --release -p townsmith-server -- --vote-smoke` runs three phases over seven real TCP connections sharing one world per phase (two yes votes pass pause; three players fail a pause with two no votes; two players cancel resume when one disconnects) and prints `SERVER_TIME_VOTE sessions=7 votes=3 passed=1 failed=1 cancelled=1 paused=false checksum=ec840a35bac5065a status=ok`. The same line is part of `--loopback-smoke`. Two runs produce the same checksum; the server test `multi_connection_loopback_passes_fails_and_cancels_deterministically` pins it and runs the harness twice.
+
+Limits: no persistence of vote state, proxies, weighted votes, or UI. Q-078 tuning remains open.
 
 ### Interest filtering v0
 

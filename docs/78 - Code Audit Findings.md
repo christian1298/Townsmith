@@ -17,7 +17,7 @@ tags:
 ## Fix session status (2026-11-23)
 
 > [!summary] Outcome
-> Every audited finding with a code or documentation defect is fixed and merged, except **F-003**, which is deferred because the v0 world intentionally permits one `hello` per process. Fixed work is covered by the named PRs and regression tests.
+> Every audited finding with a code or documentation defect is fixed. F-003, the last deferred item, is fixed by `fix/server-multi-session-vote` (PR #287): the shared world now keeps one session per connection and the D-021 time-vote loopback runs seven real TCP connections across three phases. Fixed work is covered by the named PRs and regression tests.
 
 | Area | Findings | Status | Evidence |
 |---|---|---|---|
@@ -40,17 +40,16 @@ tags:
 | Infrastructure seed treasury | F-016 | Fixed | PR #252; initial due charged, rollback restores only a created treasury |
 | ID range, seed bound, named-age docs | F-050, F-051, F-053 | Fixed | PR #253 |
 | Operational: extension rebuild and smoke re-run | F-082, F-084 | Verified | Extension rebuilt; world/bench/stream/movement/MP smokes run in this session |
+| Multi-connection sessions and vote loopback | F-003 | Fixed | PR #287; 7 new server tests; `SERVER_TIME_VOTE ... checksum=ec840a35bac5065a`; existing protocol/authority/roles/resume/interest pins unchanged |
 
 ### Deferred
 
-| Finding | Reason |
-|---|---|
-| F-003 | The v0 world assumes one `hello` per process; a multi-connection vote loopback needs a multi-session model, not a test-only patch. The pure vote state machine has 18 tests. |
+No audited finding remains deferred. F-003 was the last item; it is fixed in PR #287 (see the row above).
 
 > [!info] Post-audit tooling and product slices
-> The post-audit slices #257–#269 landed after this audit: #257 `F6` district selection focus, #258 1M gate-result evaluator (`scripts/check_metropolis_gate.py`), #259 Q-101 capture form, #260 district policy registry/bridge, #261 benchmark-screen frame-time graphs, #262 server `InterestView` road list, #263 F7 heatmap metric modes, #265 data-only `DistrictPolicyEffect`, #266 Godot interest preview, #267 Q-101 capture summarizer, #268 standalone policy editor, and #269 MP reconnect (`--reconnect`, server `--sessions N`). They are workflow and product capabilities, not additional audit fixes. **F-003 remains the only deferred finding.**
+> The post-audit slices #257–#269 landed after this audit: #257 `F6` district selection focus, #258 1M gate-result evaluator (`scripts/check_metropolis_gate.py`), #259 Q-101 capture form, #260 district policy registry/bridge, #261 benchmark-screen frame-time graphs, #262 server `InterestView` road list, #263 F7 heatmap metric modes, #265 data-only `DistrictPolicyEffect`, #266 Godot interest preview, #267 Q-101 capture summarizer, #268 standalone policy editor, and #269 MP reconnect (`--reconnect`, server `--sessions N`). They are workflow and product capabilities, not additional audit fixes. The later multi-connection session slice (#287) completes F-003.
 >
-> Open slices are **not** fixed by this batch and must not be marked done here: policy save composition, the policy panel, the 1M cohort gate, and the benchmark reference gate card. This note does not change the status of any F-xxx finding.
+> Open slices are **not** fixed by this batch and must not be marked done here: policy save composition, the policy panel, the 1M cohort gate, and the benchmark reference gate card. This note does not change the status of any other F-xxx finding.
 
 ## How to use this document
 
@@ -85,7 +84,7 @@ Fix: treat write errors like read errors (`session_ended` → end session, keep 
 ### Cluster A — server multiplayer/vote/reconnect seams (D-021)
 
 - **F-002** `crates/server/src/world.rs:177-179` — role matrix contradicts D-021: `required_role` maps `set_tax | place_road | time_control` to Mayor and `"time_vote"` falls into `_ => Admin`, so vote `call/yes/no` are admin-only. `protocol.rs:196-205` explicitly documents them as open to every role. Fail-closed (not a security hole), but the documented player vote path is unreachable. Fix: move `time_vote` to Mayor (or Viewer) tier, keep `Cancel` admin-only; add a roles-matrix test.
-- **F-003** `crates/server/src/vote.rs:671-845` — `run_time_vote_loopback` is `#[allow(dead_code)]`, called by no test or flag, and would fail immediately if run: (a) `serve_time_vote` gives each phase a Viewer-role world, so the first `call` is rejected per F-002; (b) all connections in a phase share one `ServerWorld` whose single `hello` flag makes the second client's `hello` fail `HELLO_DUPLICATE` (`world.rs:669`). The accepted D-021 multiplayer path has no working end-to-end harness. Fix: wire it into the smoke suite with per-connection session records (or multi-session world model).
+- **F-003** `crates/server/src/vote.rs:671-845` — `run_time_vote_loopback` is `#[allow(dead_code)]`, called by no test or flag, and would fail immediately if run: (a) `serve_time_vote` gives each phase a Viewer-role world, so the first `call` is rejected per F-002; (b) all connections in a phase share one `ServerWorld` whose single `hello` flag makes the second client's `hello` fail `HELLO_DUPLICATE` (`world.rs:669`). The accepted D-021 multiplayer path has no working end-to-end harness. Fix: wire it into the smoke suite with per-connection session records (or multi-session world model). **Fixed:** PR #287. `ServerWorld` now parks one `SessionState` per connection id and `apply_session` swaps it in around the existing executor; Viewer connections may vote (F-002 already fixed), `hello` is per connection, and duplicate names are rejected across connections. `run_time_vote_loopback` is wired to `--vote-smoke` and `--loopback-smoke` and pins `SERVER_TIME_VOTE sessions=7 votes=3 passed=1 failed=1 cancelled=1 paused=false checksum=ec840a35bac5065a status=ok`; seven new regression tests cover independent hellos, isolated roles/interest/audit, disconnect, shared ballots, resume adoption, the full loopback, and single-session parity.
 - **F-004** `crates/server/src/world.rs:509-520` — `online` roster leaks on non-clean disconnects: `Disconnect` (`world.rs:758-768`) removes the player, but EOF/reset/timeout followed by `begin_connection` → `remember_disconnect` never does. Phantom players skew vote denominators, suppress votes (abstain = no), keep `MIN_ONLINE` satisfied. Fix: remove the player from `online` in `remember_disconnect`.
 - **F-005** `crates/server/src/world.rs:864-911` — `apply_resume` sets `hello = true` but leaves `player = None` and never re-inserts into `online`; a resumed session is rejected by `apply_time_vote`'s player check (`world.rs:795-797`) with a misleading `not_hello`, and doesn't count toward quorum. Fix: store the pre-disconnect player name in the resume record and restore it.
 - **F-006** `crates/server/src/world.rs:676-689` — reconnect grace window can deadlock fresh clients: `hello` is rejected with `hello.resumable` while the window is open, and the window only expires when `self.tick` passes the deadline — but the tick advances only via accepted commands from an active session, impossible while hello is blocked (no clock in the listen loop). If the token is lost, no fresh client can ever start a session until restart. The expiry test only passes because it manually mutates `world.tick`. Fix: expire via rejected-attempt count or a grace counter in the accept loop.
@@ -245,7 +244,7 @@ Fix: treat write errors like read errors (`session_ended` → end session, keep 
 ## Suggested fix-session plan (one PR per cluster)
 
 1. **PR1 (P0):** F-001 + regression tests (oversized-tag frame; RST mid-session).
-2. **PR2 (server seams):** F-002..F-008 + F-039..F-042; wire `run_time_vote_loopback` into `cargo test -p townsmith-server`; roles-matrix test; D-021 ADR touch-up.
+2. **PR2 (server seams):** F-002..F-008 + F-039..F-042; wire `run_time_vote_loopback` into `cargo test -p townsmith-server`; roles-matrix test; D-021 ADR touch-up. F-003 landed separately in PR #287 with the real-TCP multi-connection smoke.
 3. **PR3 (NaN/dt):** F-009..F-012 + F-011's `SimError`; shared test fixture feeding NaN `dt` to every tick entry point.
 4. **PR4 (campaign/economy):** F-013..F-016 + F-052, F-064, F-065.
 5. **PR5 (world/save/mesh):** F-017..F-019 + F-043..F-047; proves via worldgen harness hardening (F-033).
