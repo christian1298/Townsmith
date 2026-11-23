@@ -663,6 +663,67 @@ Exit status is 2. That is the honest result: §8.2 #13–#15 and the world-save 
 > [!warning] Not the render gate
 > This measures only the headless cohort + active-agent CPU path. It has no renderer, GPU, world, buildings, construction, economy, traffic, pathfinding, network, or full 1M world save. `full_tick_ms_p99` is the whole 1 Hz tick **this scene** runs (cohort step + ten agent steps), a conservative superset of the cohort step but not the §5.3 district/building/economy pipeline; `server_rss_mb_peak` is this single process's peak RSS, not the `townsmith-server` crate. It does not close G-01, G-03, G-04, G-05, G-07, or G-08, and it is not §8 gate evidence.
 
+### 7.12 Local cohort evidence (2026-11-23)
+
+A local evidence record produced with the real harnesses and the fail-closed assembler (§8.4) on `origin/master` `4822f54`. It covers the **headless cohort, save/load, and streaming data harnesses only**. It contains **no render capture**, so every FPS, frame-time, draw-call, triangle, VRAM, and client-RSS field is `null`.
+
+**Host.** AMD Ryzen 9 7950X (16c/32t), 30.42 GiB RAM, CachyOS (Linux 7.3.5-2-cachyos), Rust 1.99.0, release build. This is **not** the §3.1 8c/16t + RTX 3060 reference rig, and no GPU was involved. The machine was **shared and loaded**: a Python process held ~100 % of one core and 4.3–11 GB RSS during the runs (load average 4–17; 28 GiB of 30 GiB used during the first cohort set). Timings are local trends, not gate numbers.
+
+**Commands** (run from the `docs/cohort-evidence` worktree at `4822f54`; the built binary is equivalent to `cargo run --release -p townsmith-bench --bin …`):
+
+```bash
+cargo build --release -p townsmith-bench --bin cohort_1m --bin save_1m --bin streaming_scale
+
+./target/release/cohort_1m --runs 3 > /tmp/opencode/gate-evidence/cohort_1m.json
+./target/release/cohort_1m --runs 3 > /tmp/opencode/gate-evidence/cohort_1m_confirm.json
+./target/release/save_1m --smoke > /tmp/opencode/gate-evidence/save_1m_smoke.json
+./target/release/save_1m > /tmp/opencode/gate-evidence/save_1m_full.json
+./target/release/streaming_scale --smoke > /tmp/opencode/gate-evidence/streaming_scale_smoke.txt
+./target/release/streaming_scale > /tmp/opencode/gate-evidence/streaming_scale.json
+
+./scripts/assemble_gate_result.py \
+  --cohort /tmp/opencode/gate-evidence/cohort_1m_confirm.json \
+  --save /tmp/opencode/gate-evidence/save_1m_full.json \
+  --streaming /tmp/opencode/gate-evidence/streaming_scale.json \
+  --hardware-note "AMD Ryzen 9 7950X 16c/32t, 30.42 GiB RAM, CachyOS, release; shared/loaded host; no render capture" \
+  --out /tmp/opencode/gate-evidence/late_metropolis_v1_local.json
+
+./scripts/check_metropolis_gate.py --result /tmp/opencode/gate-evidence/late_metropolis_v1_local.json
+./scripts/check_metropolis_gate.py --scene cohort_1m_v1 \
+  --result /tmp/opencode/gate-evidence/cohort_1m_confirm.json
+```
+
+Results stay in `/tmp/opencode/gate-evidence/`; recorded results are optional and not committed (§8.4, `benchmarks/results/gate/README.md`). A `run-log.txt` in that directory records the exact commands, exit codes, wall times, host, and checksums.
+
+**Cohort (`cohort_1m_v1`).** Fixture as §7.11: 10,000 cohorts × 100 = 1,000,000 population, 128 districts, 2,000 agents (1,000 sparse + 1,000 dense), 10 warm-up + 3,600 measured ticks. All three runs in both sets carry checksum `bb42539220e4c6a6`, `status=ok`.
+
+| Set | Tick p99 per run (ms) | Selected p99 | Tick mean (selected) | Cohort p99 | Agent p99 | Sim CPU ms/s | Peak RSS | p99 spread | Process wall |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 3.5170 / 3.4009 / 7.3090 | **3.5170** | 2.0217 | 0.2570 | 3.3136 | 3.5170 | 4.20 MiB | 82.41 % | 26.45 s |
+| 2 (repeat) | 3.4926 / 3.3944 / 3.4245 | **3.4245** | 1.9687 | 0.2227 | 3.2273 | 3.4245 | 4.40 MiB | 2.86 % | 21.29 s |
+
+Set 1's third run (7.3090 ms) and 82.41 % spread were heavy-neighbour noise; the set was repeated once, and set 2 — the one used for the assembled artifact — spread 2.86 %. Both sets carry the same checksum, and the evaluator does not gate on cohort p99 spread for this scene.
+
+**Save/load (`save_1m`).** Full envelope: 250,000 placements / 250,000 households / 1,000,000 population / 2,000 named, 2,000 terrain edits, 1,300 roads. JSON 182,808,978 B (174.34 MiB), combined checksum `8b3833b221f783d1`, **save 304.781 ms / load 818.179 ms**, peak RSS 509.6 MB, `status=ok`, 2.64 s wall on tmpfs. The smoke fixture measured save 36.009 ms / load 72.599 ms, 18,538,151 B, checksum `b9ecb8d06628eb68`.
+
+**Streaming (`streaming_scale`).** Smoke pins: `STREAMING_SCALE_SMOKE chunks=45 peak_resident=25 mesh_bytes_peak=196430640 buildings=25000 resident_buildings_peak=400 building_bytes_peak=3200 generate_ms_mean=119.63 mesh_ms_mean=56.53 checksum=f30740380558f66d building_checksum=68f62468d8b46b6b deterministic=true peak_ok=true pinned=true building_pinned=true buildings_ok=true accounting_ok=true building_balance_ok=true status=ok`. Full data pass: 525 chunks visited, 225 peak resident, 280,900,200 B peak mesh bytes, 325,434,992 B peak total resident bytes, 37,249 peak resident building records, terrain checksum `4dfb48204244e377`, building checksum `0703a5d4d5baa31c`, `status=capped`; generate 379.65 ms / mesh 103.77 ms mean, 20.10 s wall (slower than §7.9's 12.5 s because the host was shared).
+
+**Assembled artifact** (`late_metropolis_v1`, headless inputs only):
+
+```text
+GATE_RESULT_ASSEMBLE scene=late_metropolis_v1 fields=8 missing=21 out=/tmp/opencode/gate-evidence/late_metropolis_v1_local.json status=insufficient checksum=sha256:6077f40bbb01a614aed6a7995a57a3f06c5ed80982ba35b0fa7e05ba09a890db
+```
+
+The 8 recorded fields are `save_ms`, `save_size_mb`, `load_ms`, `cohort_tick_ms_p99`, `cohort_aggregate_ms_p99`, `agent_update_ms_p99`, `sim_cpu_ms_per_s`, and `server_rss_mb_peak`. `missing=21` lists `hardware`, `settings`, `route`, `duration_s`, `warmup_s`, `runs`, `headless`, every required FPS/frame-time/hitch/draw-call/triangle/VRAM/client-RSS field, `streaming_stalls_100ms`, `overhead_pct`, `run_spread_pct`, and `pathfinding_ms_p99`. The assembler is **fail-closed**: it writes only inputs it is given, so no render metric was invented or defaulted.
+
+**Evaluator.**
+
+- Late scene: `METROPOLIS_GATE status=insufficient scenes=1 checks=18 failed=0 hardware_match=unknown`, **exit 2**. Only `save_ms=304.781` (≤30 s), `load_ms=818.179` (≤30 s), `save_size_mb=174.34`, and the evaluator's absent-means-false `headless` check pass; the other 14 checks are `missing`.
+- Cohort scene alone: `METROPOLIS_GATE status=insufficient scenes=1 checks=17 failed=0 hardware_match=true`, **exit 2**. Every recorded simulation check passes — cohort p99 0.2227 ms (≤10), full tick p99 3.4245 ms (≤50), agents p99 3.2273 ms (≤10), sim CPU 3.4245 ms/s (≤250), RSS 4.40 MB (≤4096) — and `save_ms` / `save_size` are missing. `hardware_match=true` means the headless CPU/RAM thresholds (≥8c/16t, ≥30 GiB) were met by this 16c/32t host; it is **not** an RTX 3060 rig match.
+
+> [!warning] Insufficient by design — this closes no gate item
+> This record is **partial**: there is no reference-hardware (8c/16t + RTX 3060 12 GB) render result, no `late_metropolis_v1` scene/route/settings capture, no C1/C2 run, and no GPU, frame-time, draw-call, triangle, VRAM, or client-RSS evidence. It does **not** close G-01, G-03, G-07, G-08, or G-11, does not close the 3060 gate, and is not §8 gate evidence. The assembler cannot create a pass: it emitted `status=insufficient` and listed the absent fields instead of filling them, and even a `status=complete` artifact would still require the evaluator and the signed §10.2 report.
+
 ## 8. Pass/fail decision rules
 
 ### 8.1 Validity first
