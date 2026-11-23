@@ -212,6 +212,23 @@ example_copper_age/
 - Used for multiplayer manifests, save compatibility, and mod update detection.
 - Resource packs have their own hash; they do not affect the content hash because they are presentation-only.
 
+### 5.1 Runtime registry (bridge, local only)
+
+`TownsmithCore` owns a bridge-only content slot that opens on `ContentRegistry::base()`. It is **not** part of the world save: `world_save` does not read or write it, and no save field, placement, blueprint, or existing checksum changes.
+
+| Method | Returns | Purpose |
+|---|---|---|
+| `content_load_dir(path)` | `Dictionary` | Load one absolute local mod directory through `ContentPack::from_dir` + `merged_with_base`; replace the live registry only after the pack and merge validate |
+| `content_registry_summary()` | `Dictionary` | Read-only `ok`, `format_version`, `materials`, `rooms`, `props`, `total`, `packs`, `checksum` |
+| `content_registry_clear()` | `bool` | Drop the live pack and restore the bundled base registry |
+
+- `content_load_dir` requires a non-empty absolute path with no `..`. The pack loader then confines every manifest content path under the mod directory, rejects symlink escapes before reading, requires UTF-8, caps one file at 2 MiB and the manifest plus three documents at 8 MiB, and enforces the manifest namespace plus base-collision rules.
+- A failed load returns `{ ok: false, error_code, error }` with a stable code (`content_directory_missing`, `content_not_a_directory`, `content_invalid_manifest`, `content_path_escape`, `content_file_too_large`, `content_not_utf8`, `content_duplicate_id`, …) and leaves the previous registry untouched, including a failed first load.
+- The checksum is the existing `ContentRegistry::checksum()` of the live registry, 16 lowercase hex digits. Base is `c2df0f242f5e78d2`; the example pack merged after base is `330a538d07805b50`.
+- One local pack is live at a time (`packs` is `0` or `1`); a successful load replaces the previous pack rather than stacking. A later mod-set loader can own multiple packs and load order.
+- Scope: explicit local loading only. No discovery, downloads, ZIP/Workshop packages, scripts, native code, hot reload, cross-mod references, save references, migrations, or dependency/load-order resolution. D-006 remains **Proposed**.
+- Covered by 14 `godot_ext` tests: base counts and checksum, a valid merge, repeated-load determinism, clear, and the missing/non-directory/path/symlink/size/UTF-8/manifest/duplicate failure cases.
+
 ## 6. Resource packs
 
 Resource packs change **presentation**, not simulation.

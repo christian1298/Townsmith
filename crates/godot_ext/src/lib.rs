@@ -32,19 +32,19 @@ use core_city::{
     policy_placement_denial, starter, summarize, summarize_district, summarize_heatmap,
     AdvisorInput, AdvisorReport, Age, AgeState, CitizenDeath, CitizenMotion, CitizenPosition,
     CityLayout, CityRuntime, CitySummary, CityTier, ConstructionPhase, ConstructionSite,
-    ConstructionStore, ConstructionTimeScale, DistrictHeatmap, DistrictPolicy, DistrictPolicyError,
-    DistrictPolicyRequest, DistrictPolicyStore, DistrictSummary, Economy, Home, Household,
-    IndustryKind, IndustryStore, InfrastructureCosts, LifecycleTick, Lot, LotError, LotRequest,
-    LotStore, MaterializationBudget, MaterializationSelection, MaterializedCitizen, MotionLeg,
-    NamedCitizens, NamedSave, Placement, PlacementError, PlacementRequest, PlacementStore,
-    PolicyPlacementDenial, PolicyServiceWeight, PolicyTaxWeights, ResearchStore, RoadError,
-    RoadGraph, RoadRequest, RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind,
-    ServiceReport, ServiceStore, ServiceTier, Settlement, SettlementError, SettlementRequest,
-    SettlementStore, TechTree, Trade, TradePool, TutorialInput, UtilityConsumer, UtilityKind,
-    UtilityReport, UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY,
-    DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY, MAX_HEATMAP_CELLS, MAX_HEATMAP_CELL_M,
-    MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M, MIN_HEATMAP_CELL_M,
-    RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    ConstructionStore, ConstructionTimeScale, ContentPack, ContentRegistry, DistrictHeatmap,
+    DistrictPolicy, DistrictPolicyError, DistrictPolicyRequest, DistrictPolicyStore,
+    DistrictSummary, Economy, Home, Household, IndustryKind, IndustryStore, InfrastructureCosts,
+    LifecycleTick, Lot, LotError, LotRequest, LotStore, MaterializationBudget,
+    MaterializationSelection, MaterializedCitizen, MotionLeg, NamedCitizens, NamedSave, PackError,
+    Placement, PlacementError, PlacementRequest, PlacementStore, PolicyPlacementDenial,
+    PolicyServiceWeight, PolicyTaxWeights, ResearchStore, RoadError, RoadGraph, RoadRequest,
+    RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore,
+    ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree, Trade,
+    TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace,
+    Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY,
+    MAX_HEATMAP_CELLS, MAX_HEATMAP_CELL_M, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M,
+    MIN_HEATMAP_CELL_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -535,10 +535,248 @@ impl EditorState {
     }
 }
 
+/// Bridge-owned runtime content registry.
+///
+/// The slot starts with the bundled base content
+/// ([`ContentRegistry::base`]) and never touches the filesystem until
+/// [`Self::load_dir`] is called explicitly. A load validates one local mod
+/// directory through [`ContentPack::from_dir`] and merges it after base
+/// content; the live registry is replaced only after every check passes, so a
+/// failed load leaves the previous registry untouched.
+///
+/// The slot is bridge state only. It is not part of [`PlacementStore`] or the
+/// world save, adds no save field, and does not change any existing checksum.
+struct RuntimeContent {
+    registry: Option<ContentRegistry>,
+    pack: Option<RuntimePackInfo>,
+    base_error: Option<String>,
+}
+
+/// Identity of the one pack merged over the base content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimePackInfo {
+    /// Manifest ID, for example `example:copper_age`.
+    id: String,
+    /// Content namespace owned by the manifest.
+    namespace: String,
+    /// Stable pack checksum from [`ContentPack::checksum`].
+    checksum: u64,
+}
+
+/// Read-only counts for the live runtime registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContentSummary {
+    format_version: u32,
+    materials: usize,
+    rooms: usize,
+    props: usize,
+    total: usize,
+    packs: usize,
+    checksum: u64,
+}
+
+/// Stable error from a runtime content operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContentLoadError {
+    /// Stable machine-readable code.
+    code: &'static str,
+    /// Human-readable message, safe to show in a mod manager.
+    message: String,
+}
+
+impl Default for RuntimeContent {
+    fn default() -> Self {
+        Self::base()
+    }
+}
+
+impl RuntimeContent {
+    /// Open the slot on the bundled base registry without any disk access.
+    fn base() -> Self {
+        match ContentRegistry::base() {
+            Ok(registry) => Self {
+                registry: Some(registry),
+                pack: None,
+                base_error: None,
+            },
+            Err(error) => Self {
+                registry: None,
+                pack: None,
+                base_error: Some(error.to_string()),
+            },
+        }
+    }
+
+    /// Current registry counts and checksum.
+    fn summary(&self) -> Result<ContentSummary, ContentLoadError> {
+        let Some(registry) = self.registry.as_ref() else {
+            return Err(self.base_error());
+        };
+        Ok(ContentSummary {
+            format_version: registry.format_version(),
+            materials: registry.material_count(),
+            rooms: registry.room_count(),
+            props: registry.prop_count(),
+            total: registry.len(),
+            packs: if self.pack.is_some() { 1 } else { 0 },
+            checksum: registry.checksum(),
+        })
+    }
+
+    /// Validate one absolute local mod directory and merge it after base.
+    ///
+    /// The path must be absolute, non-empty, and free of `..` components.
+    /// [`ContentPack::from_dir`] then enforces the manifest content-path
+    /// confinement, UTF-8, per-file, and total-size rules. The merged registry
+    /// replaces the live one only after the pack and merge both validate.
+    fn load_dir(&mut self, raw: &str) -> Result<RuntimePackInfo, ContentLoadError> {
+        let dir = content_dir_from_arg(raw)?;
+        if self.registry.is_none() {
+            return Err(self.base_error());
+        }
+        let pack = ContentPack::from_dir(&dir).map_err(content_pack_error)?;
+        let info = RuntimePackInfo {
+            id: pack.manifest().id.clone(),
+            namespace: pack.namespace().to_owned(),
+            checksum: pack.checksum(),
+        };
+        let merged = pack.merged_with_base().map_err(content_pack_error)?;
+        // Commit only after the pack and the merged registry both validate.
+        self.registry = Some(merged);
+        self.pack = Some(info.clone());
+        self.base_error = None;
+        Ok(info)
+    }
+
+    /// Drop the live pack and restore the bundled base registry.
+    fn clear(&mut self) -> Result<(), ContentLoadError> {
+        match ContentRegistry::base() {
+            Ok(registry) => {
+                self.registry = Some(registry);
+                self.pack = None;
+                self.base_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                self.registry = None;
+                self.pack = None;
+                self.base_error = Some(message.clone());
+                Err(ContentLoadError {
+                    code: "content_base_invalid",
+                    message,
+                })
+            }
+        }
+    }
+
+    fn base_error(&self) -> ContentLoadError {
+        ContentLoadError {
+            code: "content_base_invalid",
+            message: self
+                .base_error
+                .clone()
+                .unwrap_or_else(|| "bundled base content is unavailable".to_owned()),
+        }
+    }
+}
+
+/// Validate the bridge argument for [`RuntimeContent::load_dir`].
+fn content_dir_from_arg(raw: &str) -> Result<PathBuf, ContentLoadError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ContentLoadError {
+            code: "invalid_content_path",
+            message: "content directory path is empty".to_owned(),
+        });
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err(ContentLoadError {
+            code: "invalid_content_path",
+            message: "content directory path must be absolute".to_owned(),
+        });
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(ContentLoadError {
+            code: "invalid_content_path",
+            message: "content directory path must not contain '..'".to_owned(),
+        });
+    }
+    Ok(path)
+}
+
+/// Map a pack failure to a stable bridge error code.
+fn content_pack_error(error: PackError) -> ContentLoadError {
+    let code = match &error {
+        PackError::Manifest(_) => "content_invalid_manifest",
+        PackError::Content(_) => "content_invalid_content",
+        PackError::Base(_) => "content_base_invalid",
+        PackError::Namespace { .. } => "content_namespace",
+        PackError::CollisionWithBase { .. } => "content_duplicate_id",
+        PackError::ReservedNamespace { .. } => "content_reserved_namespace",
+        PackError::Merge(_) => "content_merge",
+        PackError::MissingManifest { .. } => "content_missing_manifest",
+        PackError::AmbiguousManifest { .. } => "content_ambiguous_manifest",
+        PackError::NotADirectory { .. } => "content_not_a_directory",
+        PackError::MissingFile { .. } => "content_missing_file",
+        PackError::UnsafePath { .. } => "content_unsafe_path",
+        PackError::PathEscape { .. } => "content_path_escape",
+        PackError::NotAFile { .. } => "content_not_a_file",
+        PackError::FileTooLarge { .. } => "content_file_too_large",
+        PackError::PackTooLarge { .. } => "content_pack_too_large",
+        PackError::NotUtf8 { .. } => "content_not_utf8",
+        PackError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            "content_directory_missing"
+        }
+        PackError::Io { .. } => "content_io",
+    };
+    ContentLoadError {
+        code,
+        message: error.to_string(),
+    }
+}
+
+fn content_summary_dictionary(summary: &ContentSummary) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set("format_version", i64::from(summary.format_version));
+    result.set("materials", summary.materials as i64);
+    result.set("rooms", summary.rooms as i64);
+    result.set("props", summary.props as i64);
+    result.set("total", summary.total as i64);
+    result.set("packs", summary.packs as i64);
+    result.set(
+        "checksum",
+        &GString::from(&format!("{:016x}", summary.checksum)),
+    );
+    result
+}
+
+fn content_load_dictionary(
+    path: &Path,
+    pack: &RuntimePackInfo,
+    summary: &ContentSummary,
+) -> VarDictionary {
+    let mut result = content_summary_dictionary(summary);
+    result.set("path", &GString::from(path.to_string_lossy().as_ref()));
+    result.set("pack_id", &GString::from(&pack.id));
+    result.set("namespace", &GString::from(&pack.namespace));
+    result.set(
+        "pack_checksum",
+        &GString::from(&format!("{:016x}", pack.checksum)),
+    );
+    result
+}
+
 /// Coarse bridge object used by the Godot shell.
 #[derive(GodotClass)]
 #[class(init, base=RefCounted)]
 struct TownsmithCore {
+    content: Mutex<RuntimeContent>,
     terrain: Mutex<Option<TerrainBridge>>,
     editor: Mutex<Option<EditorState>>,
     world: Mutex<Option<PlacementStore>>,
@@ -565,6 +803,7 @@ struct TownsmithCore {
 impl Default for TownsmithCore {
     fn default() -> Self {
         Self {
+            content: Mutex::new(RuntimeContent::base()),
             terrain: Mutex::new(None),
             editor: Mutex::new(None),
             world: Mutex::new(None),
@@ -596,6 +835,73 @@ impl TownsmithCore {
     #[func]
     fn version(&self) -> GString {
         GString::from(env!("CARGO_PKG_VERSION"))
+    }
+
+    /// Read-only summary of the live runtime content registry.
+    ///
+    /// The registry starts at the bundled base content and is bridge state
+    /// only: [`TownsmithCore::world_save`] never reads or writes it, and no
+    /// save field references it. Returns:
+    ///
+    /// - `ok` (bool)
+    /// - `format_version` (int)
+    /// - `materials` / `rooms` / `props` / `total` (int counts)
+    /// - `packs` (int; `0` for base only, `1` after `content_load_dir`)
+    /// - `checksum` (String, 16 lowercase hex digits)
+    ///
+    /// On failure, returns `{ ok: false, error_code, error }`.
+    #[func]
+    fn content_registry_summary(&self) -> VarDictionary {
+        let content = self
+            .content
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match content.summary() {
+            Ok(summary) => content_summary_dictionary(&summary),
+            Err(error) => placement_simple_error(error.code, error.message),
+        }
+    }
+
+    /// Load one local mod directory and merge it after base content.
+    ///
+    /// `path` must be an absolute local directory without `..`. The pack is
+    /// validated by `ContentPack::from_dir` and merged with
+    /// `merged_with_base`; the live registry is replaced only after every
+    /// check passes, so a failed load leaves the previous registry untouched.
+    /// Loading is explicit: there is no discovery, download, ZIP/Workshop,
+    /// script, native-code, hot-reload, or cross-mod reference resolution.
+    ///
+    /// On success, returns the `content_registry_summary` keys plus `path`,
+    /// `pack_id`, `namespace`, and `pack_checksum`. On failure, returns
+    /// `{ ok: false, error_code, error }`.
+    #[func]
+    fn content_load_dir(&self, path: GString) -> VarDictionary {
+        let raw = path.to_string();
+        let mut content = self
+            .content
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match content.load_dir(&raw) {
+            Ok(pack) => match content.summary() {
+                Ok(summary) => content_load_dictionary(Path::new(raw.trim()), &pack, &summary),
+                Err(error) => placement_simple_error(error.code, error.message),
+            },
+            Err(error) => placement_simple_error(error.code, error.message),
+        }
+    }
+
+    /// Drop the live mod pack and restore the bundled base registry.
+    ///
+    /// Returns `true` when the base registry loaded. The content registry is
+    /// bridge state only; this does not touch the world save, placements,
+    /// blueprints, or any existing checksum.
+    #[func]
+    fn content_registry_clear(&self) -> bool {
+        self.content
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear()
+            .is_ok()
     }
 
     /// Generate a synthetic city layout for the rendering benchmark.
@@ -10688,6 +10994,7 @@ mod save_compat_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant};
 
     fn wait_for_result(bridge: &TerrainBridge, id: i64) -> TerrainResult {
@@ -13764,5 +14071,520 @@ mod tests {
             policy_service_funding_weight(Some(&policies), 7, Some(7), Some(7), Some(&services)),
             PolicyServiceWeight::ONE
         );
+    }
+
+    const BASE_MATERIALS: usize = 8;
+    const BASE_ROOMS: usize = 7;
+    const BASE_PROPS: usize = 8;
+    const BASE_TOTAL: usize = 23;
+    const BASE_CHECKSUM: u64 = 0xc2df_0f24_2f5e_78d2;
+
+    const EXAMPLE_MANIFEST: &str = include_str!("../../../content/mods/example.mod.json");
+    const EXAMPLE_MATERIALS: &str = include_str!("../../../content/mods/example/materials.json");
+    const EXAMPLE_ROOMS: &str = include_str!("../../../content/mods/example/rooms.json");
+    const EXAMPLE_PROPS: &str = include_str!("../../../content/mods/example/props.json");
+    const EXAMPLE_PACK_CHECKSUM: u64 = 0xad4c_6458_69a4_11ed;
+    const EXAMPLE_MERGED_MATERIALS: usize = 11;
+    const EXAMPLE_MERGED_ROOMS: usize = 9;
+    const EXAMPLE_MERGED_PROPS: usize = 11;
+    const EXAMPLE_MERGED_TOTAL: usize = 31;
+    const EXAMPLE_MERGED_CHECKSUM: u64 = 0x330a_538d_0780_5b50;
+
+    /// Self-cleaning mod directory under the OS temp directory.
+    struct TempContentDir {
+        path: PathBuf,
+    }
+
+    impl TempContentDir {
+        fn new(label: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "townsmith-content-{}-{unique}-{label}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("create temp content directory");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn as_str(&self) -> &str {
+            self.path.to_str().expect("temp content path is UTF-8")
+        }
+    }
+
+    impl Drop for TempContentDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn write_content_file(root: &Path, relative: &str, contents: &[u8]) {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create content parent directory");
+        }
+        std::fs::write(path, contents).expect("write content file");
+    }
+
+    fn write_example_pack(root: &Path) {
+        write_content_file(root, "mod.json", EXAMPLE_MANIFEST.as_bytes());
+        for (relative, body) in [
+            ("content/materials.json", EXAMPLE_MATERIALS),
+            ("content/rooms.json", EXAMPLE_ROOMS),
+            ("content/props.json", EXAMPLE_PROPS),
+        ] {
+            write_content_file(root, relative, body.as_bytes());
+        }
+    }
+
+    fn manifest_document(id: &str, content: (&str, &str, &str)) -> String {
+        serde_json::json!({
+            "format_version": 1,
+            "id": id,
+            "name": "Runtime content test",
+            "version": "1.0.0",
+            "game_version": ">=0.1.0 <0.2.0",
+            "content": {
+                "materials": content.0,
+                "rooms": content.1,
+                "props": content.2
+            }
+        })
+        .to_string()
+    }
+
+    fn material_value(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "name_key": "content.material.runtime_test",
+            "category": "wood",
+            "density_kg_m3": 700,
+            "color": [0.5, 0.4, 0.2],
+            "cost_per_litre": 0.1,
+            "tags": ["test"]
+        })
+    }
+
+    fn material_document(id: &str) -> String {
+        serde_json::json!({
+            "format_version": 1,
+            "materials": [material_value(id)]
+        })
+        .to_string()
+    }
+
+    fn room_document(id: &str) -> String {
+        serde_json::json!({
+            "format_version": 1,
+            "rooms": [{
+                "id": id,
+                "name_key": "content.room.runtime_test",
+                "category": "living",
+                "min_area_m2": 9.0,
+                "required_tags": ["bed"]
+            }]
+        })
+        .to_string()
+    }
+
+    fn prop_document(id: &str, room: &str) -> String {
+        serde_json::json!({
+            "format_version": 1,
+            "props": [{
+                "id": id,
+                "name_key": "content.prop.runtime_test",
+                "footprint_m": [1.6, 2.0],
+                "height_m": 0.6,
+                "cost": 10.0,
+                "allowed_rooms": [room],
+                "tags": ["sleep"]
+            }]
+        })
+        .to_string()
+    }
+
+    fn write_single_pack(root: &Path, id: &str, material: &str, room: &str, prop: &str) {
+        write_content_file(
+            root,
+            "mod.json",
+            manifest_document(id, ("materials.json", "rooms.json", "props.json")).as_bytes(),
+        );
+        write_content_file(
+            root,
+            "materials.json",
+            material_document(material).as_bytes(),
+        );
+        write_content_file(root, "rooms.json", room_document(room).as_bytes());
+        write_content_file(root, "props.json", prop_document(prop, room).as_bytes());
+    }
+
+    fn assert_content_load_fails(content: &mut RuntimeContent, raw: &str, code: &str) {
+        let before = content.summary().expect("summary before failed load");
+        let first = content.load_dir(raw).expect_err("load must fail");
+        let second = content.load_dir(raw).expect_err("load must fail again");
+        assert_eq!(first, second, "error must be stable");
+        assert_eq!(first.code, code, "{}", first.message);
+        assert_eq!(
+            content.summary().expect("summary after failed load"),
+            before
+        );
+    }
+
+    #[test]
+    fn content_registry_starts_with_the_committed_base_content() {
+        let first = RuntimeContent::base();
+        let summary = first.summary().expect("base summary");
+        assert_eq!(
+            summary,
+            RuntimeContent::base().summary().expect("base summary")
+        );
+        assert_eq!(summary.format_version, ContentRegistry::FORMAT_VERSION);
+        assert_eq!(summary.materials, BASE_MATERIALS);
+        assert_eq!(summary.rooms, BASE_ROOMS);
+        assert_eq!(summary.props, BASE_PROPS);
+        assert_eq!(summary.total, BASE_TOTAL);
+        assert_eq!(summary.packs, 0);
+        assert_eq!(summary.checksum, BASE_CHECKSUM);
+        assert_eq!(
+            summary.checksum,
+            ContentRegistry::base().expect("base registry").checksum()
+        );
+        let registry = first.registry.as_ref().expect("base registry");
+        assert!(registry.material("base:oak_plank").is_some());
+        assert!(registry.room("base:bedroom").is_some());
+        assert!(registry.prop("base:bed").is_some());
+    }
+
+    #[test]
+    fn content_load_dir_merges_the_pack_after_base() {
+        let dir = TempContentDir::new("valid");
+        write_example_pack(dir.path());
+        let mut content = RuntimeContent::base();
+        let pack = content.load_dir(dir.as_str()).expect("pack loads");
+        assert_eq!(pack.id, "example:copper_age");
+        assert_eq!(pack.namespace, "example");
+        assert_eq!(pack.checksum, EXAMPLE_PACK_CHECKSUM);
+        let summary = content.summary().expect("summary");
+        assert_eq!(summary.format_version, ContentRegistry::FORMAT_VERSION);
+        assert_eq!(summary.materials, EXAMPLE_MERGED_MATERIALS);
+        assert_eq!(summary.rooms, EXAMPLE_MERGED_ROOMS);
+        assert_eq!(summary.props, EXAMPLE_MERGED_PROPS);
+        assert_eq!(summary.total, EXAMPLE_MERGED_TOTAL);
+        assert_eq!(summary.packs, 1);
+        assert_eq!(summary.checksum, EXAMPLE_MERGED_CHECKSUM);
+        let registry = content.registry.as_ref().expect("merged registry");
+        assert!(registry.material("base:oak_plank").is_some());
+        assert!(registry.material("example:copper_sheet").is_some());
+        assert!(registry.room("example:smelter_hall").is_some());
+        assert!(registry.prop("example:copper_smelter").is_some());
+    }
+
+    #[test]
+    fn content_load_dir_missing_directory_keeps_the_previous_registry() {
+        let valid = TempContentDir::new("missing-valid");
+        write_example_pack(valid.path());
+        let mut content = RuntimeContent::base();
+        content.load_dir(valid.as_str()).expect("valid pack loads");
+
+        let empty = TempContentDir::new("missing-target");
+        let missing = empty.path().join("absent");
+        assert_content_load_fails(
+            &mut content,
+            missing.to_str().expect("missing path is UTF-8"),
+            "content_directory_missing",
+        );
+        assert_eq!(
+            content.summary().expect("summary").checksum,
+            EXAMPLE_MERGED_CHECKSUM
+        );
+    }
+
+    #[test]
+    fn content_load_dir_non_directory_keeps_the_previous_registry() {
+        let valid = TempContentDir::new("file-valid");
+        write_example_pack(valid.path());
+        let mut content = RuntimeContent::base();
+        content.load_dir(valid.as_str()).expect("valid pack loads");
+
+        let dir = TempContentDir::new("file-target");
+        write_content_file(dir.path(), "mod.json", b"{}");
+        let file = dir.path().join("mod.json");
+        assert_content_load_fails(
+            &mut content,
+            file.to_str().expect("file path is UTF-8"),
+            "content_not_a_directory",
+        );
+        assert_eq!(content.summary().expect("summary").packs, 1);
+    }
+
+    #[test]
+    fn content_load_dir_rejects_relative_and_traversal_paths() {
+        let mut content = RuntimeContent::base();
+        assert_content_load_fails(&mut content, "mods/example", "invalid_content_path");
+        let traversal = std::env::temp_dir().join("..").join("townsmith-content");
+        assert_content_load_fails(
+            &mut content,
+            traversal.to_str().expect("traversal path is UTF-8"),
+            "invalid_content_path",
+        );
+        assert_content_load_fails(&mut content, "   ", "invalid_content_path");
+        let summary = content.summary().expect("summary");
+        assert_eq!(summary.checksum, BASE_CHECKSUM);
+        assert_eq!(summary.packs, 0);
+    }
+
+    #[test]
+    fn content_load_dir_rejects_absolute_and_traversal_manifest_paths() {
+        for (label, bad_path) in [
+            ("manifest-parent", "../materials.json"),
+            ("manifest-absolute", "/etc/materials.json"),
+            ("manifest-nested-parent", "content/../../materials.json"),
+        ] {
+            let dir = TempContentDir::new(label);
+            write_content_file(
+                dir.path(),
+                "mod.json",
+                manifest_document("runtime:unsafe", (bad_path, "rooms.json", "props.json"))
+                    .as_bytes(),
+            );
+            write_content_file(
+                dir.path(),
+                "materials.json",
+                material_document("runtime:material").as_bytes(),
+            );
+            write_content_file(
+                dir.path(),
+                "rooms.json",
+                room_document("runtime:room").as_bytes(),
+            );
+            write_content_file(
+                dir.path(),
+                "props.json",
+                prop_document("runtime:prop", "runtime:room").as_bytes(),
+            );
+
+            let mut content = RuntimeContent::base();
+            assert_content_load_fails(&mut content, dir.as_str(), "content_invalid_manifest");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn content_load_dir_rejects_a_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let outside = TempContentDir::new("symlink-outside");
+        write_content_file(
+            outside.path(),
+            "materials.json",
+            EXAMPLE_MATERIALS.as_bytes(),
+        );
+        let dir = TempContentDir::new("symlink-pack");
+        write_content_file(dir.path(), "mod.json", EXAMPLE_MANIFEST.as_bytes());
+        write_content_file(dir.path(), "content/rooms.json", EXAMPLE_ROOMS.as_bytes());
+        write_content_file(dir.path(), "content/props.json", EXAMPLE_PROPS.as_bytes());
+        symlink(
+            outside.path().join("materials.json"),
+            dir.path().join("content/materials.json"),
+        )
+        .expect("create symlink");
+
+        let mut content = RuntimeContent::base();
+        assert_content_load_fails(&mut content, dir.as_str(), "content_path_escape");
+    }
+
+    #[test]
+    fn content_load_dir_rejects_an_oversized_file() {
+        let dir = TempContentDir::new("oversized");
+        write_content_file(
+            dir.path(),
+            "mod.json",
+            manifest_document(
+                "runtime:pack",
+                ("materials.json", "rooms.json", "props.json"),
+            )
+            .as_bytes(),
+        );
+        write_content_file(
+            dir.path(),
+            "rooms.json",
+            room_document("runtime:room").as_bytes(),
+        );
+        write_content_file(
+            dir.path(),
+            "props.json",
+            prop_document("runtime:prop", "runtime:room").as_bytes(),
+        );
+        let mut oversized = material_document("runtime:material");
+        let limit = usize::try_from(core_city::pack::MAX_PACK_FILE_BYTES).expect("limit fits");
+        oversized.push_str(&" ".repeat(limit));
+        write_content_file(dir.path(), "materials.json", oversized.as_bytes());
+
+        let mut content = RuntimeContent::base();
+        assert_content_load_fails(&mut content, dir.as_str(), "content_file_too_large");
+    }
+
+    #[test]
+    fn content_load_dir_rejects_invalid_utf8() {
+        let dir = TempContentDir::new("utf8");
+        write_content_file(
+            dir.path(),
+            "mod.json",
+            manifest_document(
+                "runtime:pack",
+                ("materials.json", "rooms.json", "props.json"),
+            )
+            .as_bytes(),
+        );
+        write_content_file(dir.path(), "materials.json", &[b'{', 0xff, b'}']);
+        write_content_file(
+            dir.path(),
+            "rooms.json",
+            room_document("runtime:room").as_bytes(),
+        );
+        write_content_file(
+            dir.path(),
+            "props.json",
+            prop_document("runtime:prop", "runtime:room").as_bytes(),
+        );
+
+        let mut content = RuntimeContent::base();
+        assert_content_load_fails(&mut content, dir.as_str(), "content_not_utf8");
+    }
+
+    #[test]
+    fn content_load_dir_rejects_an_invalid_manifest() {
+        let malformed = TempContentDir::new("manifest-malformed");
+        write_content_file(malformed.path(), "mod.json", b"{");
+
+        let mut content = RuntimeContent::base();
+        assert_content_load_fails(&mut content, malformed.as_str(), "content_invalid_manifest");
+
+        let unsupported = TempContentDir::new("manifest-version");
+        let mut manifest: serde_json::Value = serde_json::from_str(&manifest_document(
+            "runtime:pack",
+            ("materials.json", "rooms.json", "props.json"),
+        ))
+        .expect("manifest parses");
+        manifest["format_version"] = serde_json::json!(2);
+        write_content_file(
+            unsupported.path(),
+            "mod.json",
+            manifest.to_string().as_bytes(),
+        );
+        assert_content_load_fails(
+            &mut content,
+            unsupported.as_str(),
+            "content_invalid_manifest",
+        );
+    }
+
+    #[test]
+    fn content_load_dir_rejects_duplicate_ids() {
+        let collision = TempContentDir::new("duplicate-base");
+        write_single_pack(
+            collision.path(),
+            "base",
+            "base:oak_plank",
+            "base:runtime_room",
+            "base:runtime_prop",
+        );
+        let mut content = RuntimeContent::base();
+        assert_content_load_fails(&mut content, collision.as_str(), "content_duplicate_id");
+
+        let internal = TempContentDir::new("duplicate-pack");
+        write_single_pack(
+            internal.path(),
+            "runtime:pack",
+            "runtime:material",
+            "runtime:room",
+            "runtime:prop",
+        );
+        let duplicated = serde_json::json!({
+            "format_version": 1,
+            "materials": [
+                material_value("runtime:material"),
+                material_value("runtime:material")
+            ]
+        })
+        .to_string();
+        write_content_file(internal.path(), "materials.json", duplicated.as_bytes());
+        assert_content_load_fails(&mut content, internal.as_str(), "content_invalid_content");
+    }
+
+    #[test]
+    fn content_registry_clear_restores_the_base() {
+        let dir = TempContentDir::new("clear");
+        write_example_pack(dir.path());
+        let mut content = RuntimeContent::base();
+        content.load_dir(dir.as_str()).expect("pack loads");
+        assert_eq!(content.summary().expect("summary").packs, 1);
+
+        content.clear().expect("clear restores base");
+        let summary = content.summary().expect("summary");
+        assert_eq!(summary.materials, BASE_MATERIALS);
+        assert_eq!(summary.rooms, BASE_ROOMS);
+        assert_eq!(summary.props, BASE_PROPS);
+        assert_eq!(summary.total, BASE_TOTAL);
+        assert_eq!(summary.packs, 0);
+        assert_eq!(summary.checksum, BASE_CHECKSUM);
+    }
+
+    #[test]
+    fn content_load_dir_is_deterministic_across_repeated_loads() {
+        let dir = TempContentDir::new("repeat");
+        write_example_pack(dir.path());
+        let mut content = RuntimeContent::base();
+        let first_pack = content.load_dir(dir.as_str()).expect("first load");
+        let first = content.summary().expect("first summary");
+        let second_pack = content.load_dir(dir.as_str()).expect("second load");
+        let second = content.summary().expect("second summary");
+
+        assert_eq!(first_pack, second_pack);
+        assert_eq!(first, second);
+        assert_eq!(second.packs, 1);
+        assert_eq!(second.checksum, EXAMPLE_MERGED_CHECKSUM);
+    }
+
+    #[test]
+    fn failed_first_load_leaves_the_base_registry() {
+        let dir = TempContentDir::new("partial");
+        write_content_file(
+            dir.path(),
+            "mod.json",
+            manifest_document(
+                "runtime:pack",
+                ("materials.json", "rooms.json", "props.json"),
+            )
+            .as_bytes(),
+        );
+        // The materials document is valid and would add one definition; the
+        // invalid rooms document must stop the whole load before any merge.
+        write_content_file(
+            dir.path(),
+            "materials.json",
+            material_document("runtime:partial").as_bytes(),
+        );
+        write_content_file(dir.path(), "rooms.json", b"{");
+        write_content_file(
+            dir.path(),
+            "props.json",
+            prop_document("runtime:prop", "runtime:room").as_bytes(),
+        );
+
+        let mut content = RuntimeContent::base();
+        assert_content_load_fails(&mut content, dir.as_str(), "content_invalid_content");
+        let summary = content.summary().expect("summary");
+        assert_eq!(summary.materials, BASE_MATERIALS);
+        assert_eq!(summary.rooms, BASE_ROOMS);
+        assert_eq!(summary.props, BASE_PROPS);
+        assert_eq!(summary.total, BASE_TOTAL);
+        assert_eq!(summary.packs, 0);
+        assert_eq!(summary.checksum, BASE_CHECKSUM);
     }
 }

@@ -38,6 +38,9 @@ tags:
 | `world_load(path, expected_seed)` | `Dictionary` | Read JSON for one seed, verify structure, packages, construction, roads, lots, settlements, deltas, and optional policies, replace the stores |
 | `world_height_at(seed, x, z)` | `float` | One terrain sample for the preview; `-1.0` on invalid input |
 | `city_summary()` | `Dictionary` | Derived population, housing, jobs, employment, happiness; see [[49 - Phase 3 Slice Plan]] |
+| `content_registry_summary()` | `Dictionary` | Live content counts, `format_version`, `packs`, and stable checksum; bridge state only, not saved |
+| `content_load_dir(path)` | `Dictionary` | Load one absolute local mod directory through the pack validators and merge it after base; a failed load leaves the previous registry untouched |
+| `content_registry_clear()` | `bool` | Drop the live pack and restore the bundled base content registry |
 
 Terrain-edit methods (`terrain_edit_height`, `terrain_delta_count`, `terrain_delta_checksum`, `terrain_clear_deltas`, and `reset_terrain_workers`) are documented in [[43 - Terrain Edits]]. `world_height_at` and placement validation use those deltas. `city_summary` is derived from completed placements and is not a separate save field; see [[49 - Phase 3 Slice Plan]].
 
@@ -50,6 +53,8 @@ Road methods (`road_validate`, `road_add`, `roads`, `road_count`, `road_checksum
 Lot methods (`lot_validate`, `lot_add`, `lots`, `lot_count`, `lot_checksum`, `lot_clear`, `lot_remove`) are documented in [[47 - Lots and Zoning]]. The world save carries an optional `lots` object; old saves load with the lot store closed.
 
 `x` and `z` are the **centre** of the rotated footprint in world metres. The blueprint mesh is volume-local with its minimum corner at `(0, 0, 0)`; a renderer offsets it by `-bounds_m / 2` on X/Z, then rotates around Y. `rotation` is normalized to 0/90/180/270.
+
+Content methods (`content_load_dir`, `content_registry_summary`, `content_registry_clear`) are bridge state only and are not written by `world_save`. The slot opens on `ContentRegistry::base()`, loads at most one absolute local mod directory at a time, and commits the merged registry only after the pack, namespace, path, size, UTF-8, and duplicate checks pass. No save field, placement, blueprint, or existing checksum changes. See [[06 - Modding and Resource Packs]] §5.1.
 
 ## 2. Validation
 
@@ -214,8 +219,8 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 
 - `core_city`: placement persistence, construction, roads, lots, settlements, households, treasury/loans, industry, utilities, traffic, the advisor, structural placement limits, research, age gates, civic services, and district policies; **535 tests**.
 - `core_structure`: **22 tests + 1 doctest** for system tiers, story/height/span/foundation rules, and composite grounds.
-- `godot_ext`: **142 tests** total, including save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
-- Workspace: **1154 tests** (1149 unit/integration + 5 doctests). Verified on 2026-11-23 at master `a39a6bd`.
+- `godot_ext`: **156 tests** total, including runtime content loading, save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
+- Workspace: **1168 tests** (1163 unit/integration + 5 doctests). Verified on 2026-11-23 on `feat/content-runtime` (base master `4822f54`).
 - Godot headless: `WORLD_PLACEMENT ... status=ok` and `WORLD_SCENE ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 
