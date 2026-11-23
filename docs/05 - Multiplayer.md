@@ -73,8 +73,8 @@ The client never simulates the authoritative city. It predicts local movement an
 
 ⚙️ = configurable; admin-only by default. All players can start a time vote by default (`time.vote`). The **Builder** role is a player permission role, not the NPC construction trade; construction crews are simulation jobs.
 
-> [!warning] Blueprint placement is not server-authoritative yet
-> Protocol v0 has no `place_blueprint` command and `ServerWorld` has no placement store. The bridge path (`world_place_blueprint` in `crates/godot_ext`) is the single-player/developer path: it applies the district construction/allowlist gate and charges the first construction installment against local stores. A multiplayer client cannot rely on the server to enforce placement, policy, or cost today. D-032 (Proposed) defines the authoritative command; D-033 (Proposed) would add the per-settlement `build` check inside it. Until both land, the **Place buildings** column describes intended policy, not protocol-v0 enforcement, and blueprint editing has the same gap.
+> [!warning] Blueprint placement: D-032 accepted, server implementation in progress
+> D-032 (**Accepted 2026-11-23**) makes `place_blueprint` the v1 server authority. The command carries only `{ blueprint_hash, x, z, rotation }`; the package path never crosses the wire, and the server resolves the hash in its own pre-seeded content-addressed `.tsbp` library. Placement is authorized by the global Mayor/Admin placement role (configurable) in v1; per-settlement `build` permissions are D-033 (Proposed) and **not v1**. Package upload/fetch, transfer, and auto-download are also **not v1**. Protocol v0 is unchanged until the command lands; until then `world_place_blueprint` in `crates/godot_ext` is the single-player/developer path: it applies the district gate and first installment to local stores only, and a multiplayer client cannot rely on the server to enforce placement, policy, or cost. The **Place buildings** column still describes intended policy, not protocol-v0 enforcement, and blueprint editing has the same gap.
 
 - Permissions are configurable per player and per role.
 - The server owner can disable roles entirely for a "everyone is mayor" casual server.
@@ -94,7 +94,7 @@ The client never simulates the authoritative city. It predicts local movement an
 - Admins can override ownership, transfer it, or resolve disputes.
 - Shared services (highways, regional rail, power) are managed at the world/server level; local services at the settlement level.
 
-D-033's proposed enforcement points are the future server `place_blueprint` (D-032), policy CRUD, tax commands, settlement rename/transfer/remove, membership edits, and dashboard edit paths once they exist. A global role is a ceiling; a settlement permission never grants a global capability, and single-player/dev keeps an implicit owner.
+D-033's proposed enforcement points are the D-032 server `place_blueprint`, policy CRUD, tax commands, settlement rename/transfer/remove, membership edits, and dashboard edit paths once they exist. D-032 v1 uses the global placement role only; settlement-scoped `build` is not v1. A global role is a ceiling; a settlement permission never grants a global capability, and single-player/dev keeps an implicit owner.
 
 ## 4. Time and ticks
 
@@ -184,16 +184,16 @@ The server validates every command:
 
 Accepted commands produce **events** (construction site created, phase changed, building completed, tax changed, blueprint updated) that are broadcast to interested clients. Rejected commands return a reason for UI feedback.
 
-> [!note] Proposed command: server-authoritative blueprint placement (D-032)
-> **Not implemented.** Protocol v0 has no placement command, and the authoritative executor has no placement store. D-032 proposes the next-version command:
+> [!note] Accepted command: server-authoritative blueprint placement (D-032, staged v1)
+> **Not implemented yet.** Protocol v0 has no placement command, and the authoritative executor has no placement store. D-032 (**Accepted 2026-11-23**) defines the protocol v1 command:
 >
 > ```text
 > place_blueprint { blueprint_hash, x, z, rotation }
 > ```
 >
-> The server would resolve the hash in its own content-addressed `.tsbp` library (the path never crosses the wire), validate role, package hash/size, seed/age, terrain/overlap, and the district policy gate (`construction_allowed` + allowlist, smallest containing id), then charge the D-028 installment through the authoritative ledger and return `place_blueprint_result { tick, placement_id, blueprint_hash, placement_checksum, world_checksum, placement }`. Clients may predict a preview but never commit. Package transfer, modded content, rate limits, and save migration are Q-107–Q-110.
+> The server resolves the hash in its own pre-seeded content-addressed `.tsbp` library; the path and package bytes never cross the wire, and v1 has no upload, fetch, or auto-download. It validates the global placement role, package hash/size, seed/age, the deterministic placeholder ground, overlap, and the district policy gate (`construction_allowed` + allowlist, smallest containing id; the registry is server-config JSON at startup), then charges the D-028 installment through the authoritative ledger and returns `place_blueprint_result { tick, placement_id, blueprint_hash, placement_checksum, world_checksum, placement }`. Idempotency is exact placement identity (hash + centre + rotation), reusing the existing per-session token bucket and audit ring. Placements and construction are optional `ServerSave` fields; older saves load unchanged. Clients may predict a preview but never commit.
 >
-> Until D-032 lands, `world_place_blueprint` remains a client-side single-player/dev path and the server does not enforce placement, policy, or construction charges.
+> Upload/fetch, mod auto-download, rollback/history, and per-settlement permissions are **not v1**. Until the command lands, `world_place_blueprint` remains a client-side single-player/dev path and the server does not enforce placement, policy, or construction charges.
 
 ### Protocol v0 (Phase 6 foundation)
 
@@ -525,17 +525,14 @@ Multiplayer + modding is a trust problem. The server is the authority.
 - **Q-030:** Is host migration required? Default: no; dedicated servers are the durable option.
 - **Q-031:** Voice chat at launch, or text only? Default: text only.
 - **Q-032:** Steam networking (lobbies, server browser) or direct IP first? Default: direct IP + invite codes first, Steam later.
-- **Q-107:** How does a `.tsbp` package reach the authoritative server?
-- **Q-108:** How are modded blueprints resolved when the server lacks the mod?
-- **Q-109:** Placement rate limits, quotas, idempotency, and audit?
-- **Q-110:** Placement save migration and rollback/history?
+- **Q-107–Q-110 (answered by D-032):** v1 uses a pre-seeded content-addressed server library and a hash-only `place_blueprint`, exact-placement idempotency with the existing token bucket/audit ring, and optional `ServerSave` fields. Upload/fetch, mod removal, quotas, and rollback/history remain future work.
 - **Q-111:** Stable player identity source for settlement ownership?
 - **Q-112:** Claim and abandonment rules for unowned settlements?
 - **Q-113:** Offline owner transfer and succession?
 - **Q-114:** Per-settlement member and per-player settlement limits?
 - **Q-115:** Settlement-level blueprint/mod permissions?
 
-See [[09 - Open Questions]] and [[10 - Decisions]]. D-032 (Proposed) is the server-authoritative blueprint placement ADR; D-033 (Proposed) is the settlement ownership, membership, and permissions ADR.
+See [[09 - Open Questions]] and [[10 - Decisions]]. D-032 (Accepted) is the server-authoritative blueprint placement ADR; D-033 (Proposed) is the settlement ownership, membership, and permissions ADR.
 
 ### Session resume v0
 
