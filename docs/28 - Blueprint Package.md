@@ -177,7 +177,7 @@ saves/
 
 - `world_save_with_library(path, library_root)` opens and validates the root, loads every unique placement package, and checks its content hash and metadata against every placement record **before** copying anything. It then inserts each unique package by content hash and finally writes exactly the same v1 JSON as `world_save`. `blueprint_path` remains the recorded absolute path, so the save JSON, placement checksum, and world checksum do not change.
 - The result adds `blueprint_packages` (unique hashes), `blueprint_packages_inserted` (new copies), `blueprint_packages_existing` (identical copies already stored), and `blueprint_library_packages` (total library count after the copy).
-- `world_load_with_library(path, expected_seed, library_root)` has the same validation and replacement semantics as `world_load`. It first tries each recorded `blueprint_path`. If that package is missing, invalid, or its path is invalid, it resolves `blueprint_hash` through the library, then fully revalidates the stored package (format, hash, bounds, solid count, metadata). It never trusts a library entry without those checks and never rewrites the save JSON.
+- `world_load_with_library(path, expected_seed, library_root)` has the same validation and replacement semantics as `world_load`. It first tries each recorded `blueprint_path`. If that package is missing, invalid, or its path is invalid, it resolves `blueprint_hash` through the library, then fully revalidates the stored package (format, hash, bounds, solid count, metadata). It never trusts a library entry without those checks and never rewrites the save JSON. A successful portable load also exposes the library path as bridge-only `resolved_blueprint_path` on the matching `world_placements()` entries, so the world scene can render and select the building with the original package files gone. The recorded `blueprint_path` stays unchanged, and the field is not saved.
 - `world_load(path, expected_seed)` is unchanged and still reports `missing_blueprint` when a recorded package is gone, so the portable path is opt-in.
 - No auto-download, network access, server protocol change, or save schema change is involved.
 
@@ -236,7 +236,7 @@ The bridge-side portable save tests (unique-package copy, repeat-save dedup, del
 - Material keys are provisional until the content registry.
 - No mod/resource-pack resolver yet.
 - No savegame-format migration yet; `format_version` is the hook.
-- The world save still stores absolute `blueprint_path` values. The opt-in `world_save_with_library` / `world_load_with_library` bridge path can travel with a sidecar library, but the JSON has no library reference field and no automatic root discovery.
+- The world save still stores absolute `blueprint_path` values. The opt-in `world_save_with_library` / `world_load_with_library` bridge path can travel with a sidecar library, but the JSON has no library reference field and no automatic root discovery. A portable load makes the resolved packages renderable through bridge-only `resolved_blueprint_path`; the JSON is not rewritten and the recorded path remains authoritative for the next plain load.
 
 ## 10. Next
 

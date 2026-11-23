@@ -32,7 +32,7 @@ tags:
 | `blueprint_library_insert(root_path, tsbp_path)` | `Dictionary` | Validate one absolute `.tsbp` and store it by content hash; `ok`, `hash`, `path`, `inserted`, `count`, `total_bytes`, `checksum` |
 | `blueprint_library_resolve(root_path, hash)` | `Dictionary` | Resolve `blake3:<hex>` to `ok`, `path`, `exists`; a valid missing hash is `ok = true`, `exists = false` |
 | `world_place_blueprint(seed, path, x, z, rotation)` | `Dictionary` | Validate, apply the district construction/allowlist gate, and append; `ok`, `seed`, `count`, `checksum`, `placement` |
-| `world_placements()` | `Dictionary` | `open`, `seed`, `next_id`, `count`, `checksum`, `placements[]` |
+| `world_placements()` | `Dictionary` | `open`, `seed`, `next_id`, `count`, `checksum`, `placements[]`; a placement resolved from the library during `world_load_with_library` also carries bridge-only `resolved_blueprint_path` |
 | `world_placement_count()` | `int` | Placement count |
 | `world_placement_checksum()` | `String` | Stable 64-bit checksum, hex |
 | `world_clear_placements()` | `bool` | Clear placements; keep the seed |
@@ -64,6 +64,8 @@ Content methods (`content_load_dir`, `content_registry_summary`, `content_regist
 Blueprint-library methods (`blueprint_library_summary`, `blueprint_library_insert`, `blueprint_library_resolve`) are **stateless** and local-only: each call opens the explicit absolute root, performs one operation, and returns. They do not open the world, are not written by `world_save`, and do not change placement, blueprint, or existing save checksums. `insert` validates with `load_tsbp` and stores the exact validated bytes at `<root>/<first-two-hash-hex>/<hash-hex>.tsbp`; the address is the package's semantic `blake3:` content hash. A duplicate is a no-op, a different file under the same hash is a collision, and a failed insert leaves the library unchanged. The package cap is 96 MiB (`MAX_PACKAGE_BYTES`). Roots and sources must be absolute without `.`/`..`; symlinked shards and entries are rejected. Error codes are stable: `invalid_blueprint_library_root`, `blueprint_library_root_missing`, `blueprint_library_not_a_directory`, `invalid_blueprint_library_hash`, `invalid_blueprint_path`, `blueprint_library_missing_file`, `blueprint_library_not_a_file`, `blueprint_library_invalid_package`, `blueprint_library_too_large`, `blueprint_library_path_escape`, `blueprint_library_collision`, and `blueprint_library_io`.
 
 `world_save_with_library` and `world_load_with_library` are the opt-in portable-save pair. The caller passes an explicit absolute library root, conventionally a `blueprints/` directory beside the save; there is no discovery or download. Save validates every unique source package and every placement record **before** the first copy, then inserts by content hash and writes the unchanged v1 JSON, so the save bytes and checksums match `world_save`. The result adds `blueprint_packages`, `blueprint_packages_inserted`, `blueprint_packages_existing`, and `blueprint_library_packages`. Load keeps the recorded path as the first choice and only resolves `blueprint_hash` when that package is missing or unreadable; a resolved package is fully validated and metadata-checked, and the JSON is not rewritten. `world_load` alone keeps the pre-existing `missing_blueprint` behavior, so the portable path is opt-in. A failed save copy writes no save; a failed load replaces no store. The save JSON still stores absolute `blueprint_path` values and has no library reference field.
+
+A successful `world_load_with_library` also installs a bridge-only map of content hash → resolved package path for the placements whose recorded path failed. `world_placements()` attaches that path as `resolved_blueprint_path` when it differs from the recorded `blueprint_path`; the recorded path, placement checksum, save JSON, and `world_save` output are unchanged. The map is keyed by hash, so two placements that share a package share one entry. A plain successful `world_load` replaces it with an empty map, `world_clear_placements` clears it, and `world_remove_placement` drops entries no longer referenced by any placement. A failed load leaves the previous map and every store untouched. The path is reported as-is even if the library file is deleted after loading; there is no existence check or silent fallback. Scene rendering and selection use this bridge field while the authoritative save record keeps `blueprint_path`.
 
 ## 2. Validation
 
@@ -141,7 +143,7 @@ The in-game dashboard is now a second CRUD consumer of the same registry through
 
 2B adds an optional `terrain_deltas` (hex `TSDL`) + `terrain_checksum` pair when edits exist; 2D adds a `construction` object when sites exist; 2E adds optional `roads`, `lots`, and `settlements` objects. Phase 3 adds optional `population`, `economy`, `industry`, and `utilities` objects, and an optional `policies` registry object when a district-policy registry is open; each is validated and replaced atomically with the rest of the world. A world without a registry omits `policies` entirely, so its JSON and checksums are byte-identical to a pre-policy save. At the file layer, `world_save` writes a sibling temp file, syncs it, rotates a structurally valid previous save to `<path>.bak`, then renames the temp over the primary. `world_load` falls back to `.bak` when the primary is missing or invalid JSON, and returns `recovered_from_backup`, `backup`, and `backup_checksum`; store/schema validation failures still reject rather than silently falling back. `world_save` also commits the sanitized household clone and the validated registry clone back to their live stores only after a durable write, so stale staffing cannot survive until reload and a failed save changes no live store. `lot_validate` rejects a foreign-seed lot store exactly like `lot_add`. The registry envelope is additive: its `policies` payload carries the policy record fields, and the world result adds `district_policies` and `district_policy_checksum` while keeping the existing keys. See [[43 - Terrain Edits]], [[45 - Construction Sites]], [[46 - Road Network]], [[47 - Lots and Zoning]], and [[48 - Settlement Boundaries]].
 
-`world_save_with_library` does not add a save field. It copies the packages referenced by the existing `blueprint_path` / `blueprint_hash` records into a sidecar library, then writes the same JSON bytes as `world_save`; the save remains readable by a build without the library. `world_load_with_library` reads the same file and only changes package lookup, so no migration or format-version bump is needed. Missing, corrupt, or mismatched sources fail with `blueprint_library_missing_file`, `blueprint_library_invalid_package`, `blueprint_hash_mismatch`, or `blueprint_metadata_mismatch`, and the save is not written; a load failure leaves every live store unchanged. The library convention is `<save directory>/blueprints`, but the bridge takes the root explicitly and validates it as an absolute directory without `.` or `..`.
+`world_save_with_library` does not add a save field. It copies the packages referenced by the existing `blueprint_path` / `blueprint_hash` records into a sidecar library, then writes the same JSON bytes as `world_save`; the save remains readable by a build without the library. `world_load_with_library` reads the same file and only changes package lookup, so no migration or format-version bump is needed. It may expose a bridge-only `resolved_blueprint_path` through `world_placements` for a placement whose recorded package was replaced by the library entry; that field is never written to the save. Missing, corrupt, or mismatched sources fail with `blueprint_library_missing_file`, `blueprint_library_invalid_package`, `blueprint_hash_mismatch`, or `blueprint_metadata_mismatch`, and the save is not written; a load failure leaves every live store, including the previous resolution map, unchanged. The library convention is `<save directory>/blueprints`, but the bridge takes the root explicitly and validates it as an absolute directory without `.` or `..`.
 
 `world_load` rejects:
 
@@ -199,6 +201,18 @@ GODOT=/path/to/godot ./scripts/smoke_world_scene.sh
 WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok trades=ok render=ok structure=ok age=ok research=ok starter=ok named=ok occupancy=ok industry=ok utilities=ok services=ok economy=ok dashboard=ok district_ui=ok heatmap_ui=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
 ```
 
+The portable-load bridge smoke creates a uniquely named package, saves with the library, deletes the source, and checks the resolved path end to end:
+
+```bash
+GODOT=/path/to/godot ./scripts/smoke_world_library.sh
+```
+
+It loads with `world_load_with_library`, asserts `world_placements` reports the library path in `resolved_blueprint_path` while the recorded `blueprint_path` and placement checksum stay unchanged, builds the mesh from the resolved path, then checks that a fresh plain `world_load` fails with `missing_blueprint` and exposes no resolved field, that the loaded core keeps its previous map after a plain-load failure, that deleting the library entry leaves the stale path visible and a failed reload changes nothing, and that `world_clear_placements` empties the store. Recorded marker:
+
+```text
+WORLD_LIBRARY resolved=ok mesh=ok plain=ok guard=ok stale=ok clear=ok checksum=... status=ok
+```
+
 ## 5. Scene
 
 `godot/world_placement.tscn` + `godot/world_placement.gd` is the first playable streamed-world placement shell.
@@ -210,7 +224,7 @@ WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lot
 - Placed meshes carry per-material vertex colors: timber, stone, roof, glass, and door surfaces. The placement material uses `vertex_color_use_as_albedo`; doors and windows are therefore visible without one draw call per material.
 - Placed foundations extend 2 cm above the base. A foundation top exactly coplanar with the terrain z-fights across the full lot; the thin plinth removes it while staying hidden at the building edge.
 - `R` rotates 90°, `X` raises and `Z` lowers the target terrain by 1 m, left click creates a construction site, right click selects, `Enter` enters the selected building, `Delete` clears, `F5` saves, and `F9` loads. See [[44 - Mayor Mode]] for the camera and selection rules.
-- Placed buildings are rebuilt from the `.tsbp`; each has a mesh child, plus a named `Foundation` box when `foundation_m > 0`. The scene does not cache scenes.
+- Placed buildings are rebuilt from the `.tsbp`; each has a mesh child, plus a named `Foundation` box when `foundation_m > 0`. The scene does not cache scenes. After `world_load_with_library`, rendering and selection use `resolved_blueprint_path` when the bridge provides it, so a portable world still builds its meshes with the original package files gone. The save record keeps `blueprint_path`.
 - Terrain edits remesh only the affected chunk; loading a world marks every loaded chunk dirty.
 - Validation runs when the 1 m target cell or rotation changes, not every frame. The ghost y comes from the validated centre; an invalid ghost sits on the sampled terrain.
 - The default blueprint is generated once from the shared acceptance house at `user://world_placement/acceptance_house.tsbp`; `--blueprint <absolute.tsbp>` overrides it. The default save is `user://world_placement/world.json`; `--world-save <absolute.json>` overrides it.
@@ -219,7 +233,7 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 
 ## 6. Limits
 
-- The world save still references **absolute package paths** in the JSON. Portability is opt-in: `world_save_with_library` copies the packages into a sidecar library and `world_load_with_library` resolves a missing/unreadable path by content hash. The JSON itself has no library reference, the library root is not discovered automatically, and a plain `world_load` remains non-portable.
+- The world save still references **absolute package paths** in the JSON. Portability is opt-in: `world_save_with_library` copies the packages into a sidecar library and `world_load_with_library` resolves a missing/unreadable path by content hash. A world loaded that way renders and selects from `resolved_blueprint_path`, so the world scene no longer needs the original package files until the next plain load. The JSON itself has no library reference, the library root is not discovered automatically, and a plain `world_load` remains non-portable.
 - Placement creates a phased construction site; the v0 state machine and visuals are in [[45 - Construction Sites]].
 - Terrain edits use the 2B delta fields in the same JSON; see [[43 - Terrain Edits]].
 - `world_load` re-verifies package hashes and metadata (id, name, bounds, capacity, jobs, structure) but does not re-run slope/water sampling. Terrain edits can invalidate an old site; the gameplay layer will revalidate before construction.
@@ -233,9 +247,9 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 - `core_city`: placement persistence, construction, roads, lots, settlements, households, treasury/loans, industry, utilities, traffic, the advisor, structural placement limits, research, age gates, civic services, and district policies; **535 tests**.
 - `core_structure`: **22 tests + 1 doctest** for system tiers, story/height/span/foundation rules, and composite grounds.
 - `core_blueprint`: **40 tests** (37 integration + 3 unit), including package validation and the local content-addressed library.
-- `godot_ext`: **186 tests** total, including runtime content loading, blueprint-library insert/resolve/error mapping, portable save/load copy-and-resolve semantics, package deduplication, missing/corrupt/hash/metadata failure codes, save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
-- Workspace: **1219 tests** (1214 unit/integration + 5 doctests). Verified on 2026-11-23 on `feat/world-blueprint-refs` (base master `61434d9`).
-- Godot headless: `WORLD_PLACEMENT ... status=ok` and `WORLD_SCENE ... status=ok`.
+- `godot_ext`: **193 tests** total, including runtime content loading, blueprint-library insert/resolve/error mapping, portable save/load copy-and-resolve semantics, package deduplication, missing/corrupt/hash/metadata failure codes, save-path validation, resolved-path exposure and lifetime, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
+- Workspace: **1226 tests** (1221 unit/integration + 5 doctests). Verified on 2026-11-23 on `feat/world-library-render` (base master `7f5aa04`).
+- Godot headless: `WORLD_PLACEMENT ... status=ok`, `WORLD_SCENE ... status=ok`, and `WORLD_LIBRARY ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 
 ## 8. Next

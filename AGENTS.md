@@ -398,6 +398,7 @@ GODOT=/path/to/godot ./scripts/smoke_layout.sh
 GODOT=/path/to/godot ./scripts/smoke_acceptance.sh
 GODOT=/path/to/godot ./scripts/smoke_world_placement.sh
 GODOT=/path/to/godot ./scripts/smoke_world_scene.sh
+GODOT=/path/to/godot ./scripts/smoke_world_library.sh   # portable load resolves render paths without the source package
 GODOT=/path/to/godot ./scripts/smoke_blueprint.sh
 
 # Standalone district policy CRUD editor (developer scene; not the dashboard)
