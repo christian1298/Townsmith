@@ -64,9 +64,6 @@ For `dt` seconds:
 ```text
 days = dt / 86,400
 income = (population × resident_tax + employed × business_tax) × days
-
-> [!info] District tax multipliers (D-030, Proposed)
-> `economy_tick` may scale the two income terms by `PolicyTaxWeights { resident, business }`. The bridge weights residents by the policy at their home centre and staffed jobs by the policy at their workplace centre, then passes the weighted means into `Economy::tick_with_policy_taxes`. Neutral weights (no registry, no covering policy, foreign seed, non-finite, or zero denominator) run the legacy arithmetic verbatim, so default checksums and save JSON do not move. Only the tax multiplier is wired; service funding, upkeep, and construction gating remain unwired.
 operating = (employed × 20 + completed_buildings × upkeep
              + utility_sites × 2 + service_sites × 5) × days
 loan_interest = Σ(outstanding_balance × rate_per_day) × days
@@ -77,9 +74,15 @@ days_elapsed += days
 bankrupt = balance <= −50,000
 ```
 
+> [!info] District tax multipliers (D-030, Proposed)
+> `economy_tick` may scale the two income terms by `PolicyTaxWeights { resident, business }`. The bridge weights residents by the policy at their home centre and staffed jobs by the policy at their workplace centre, then passes the weighted means into `Economy::tick_with_policy_taxes`. Neutral weights (no registry, no covering policy, foreign seed, non-finite, or zero denominator) run the legacy arithmetic verbatim, so default checksums and save JSON do not move.
+
+> [!info] District service funding (D-031, Proposed)
+> `economy_tick` may scale **only** the civic service term of `InfrastructureCosts` by `PolicyServiceWeight`. The bridge averages the district `service_funding` value over completed service sites (the policy at each site centre, smallest id, `1.0` outside every circle), then passes the mean into `Economy::tick_with_policy_weights`. Utility upkeep is never scaled. Neutral weights (no registry, no covering site, foreign seed, non-finite, or zero completed sites) run the legacy arithmetic verbatim. Funding changes billed upkeep, not service coverage or output.
+
 Each loan's balance falls by its principal payment; interest is paid from the treasury and does not capitalize. A paid-off loan is removed.
 
-`tick()` keeps the legacy zero-infrastructure path so pinned city-loop checksums stay unchanged. The Industrial and Modern probes call `tick_with_infrastructure(...)`, which includes utility/service site upkeep and reports it as `infrastructure` in `EconomyTick`. `daily_net_with_infrastructure` includes the same cost. The bridge `economy_tick` reads each store's real `total_upkeep_per_day()` (per-kind utilities, per-kind/tier services), builds `InfrastructureCosts`, and calls `tick_with_infrastructure_costs`; `economy_state` exposes `infrastructure_per_day`, `utility_sites`, `service_sites`, `utility_upkeep`, and `service_upkeep`. The scene HUD therefore reflects the charged per-kind cost.
+`tick()` keeps the legacy zero-infrastructure path so pinned city-loop checksums stay unchanged. The Industrial and Modern probes call `tick_with_infrastructure(...)`, which includes utility/service site upkeep and reports it as `infrastructure` in `EconomyTick`. `daily_net_with_infrastructure` includes the same cost. The bridge `economy_tick` reads each store's real `total_upkeep_per_day()` (per-kind utilities, per-kind/tier services), builds `InfrastructureCosts`, resolves the district tax and service-funding weights, and calls `tick_with_policy_weights`; `economy_state` exposes `infrastructure_per_day`, `utility_sites`, `service_sites`, `utility_upkeep`, and `service_upkeep`. The tick payload also reports `policy_tax_multiplier_resident`, `policy_tax_multiplier_business`, and `policy_service_funding_weight`; every weight is neutral on a policy-less world. The scene HUD therefore reflects the charged per-kind cost.
 
 ## 4. Construction
 

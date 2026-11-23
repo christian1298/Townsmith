@@ -5,8 +5,9 @@
 //! immutable [`DistrictPolicyEffect`]. The helpers in this module are pure
 //! functions over registry data:
 //!
-//! - no simulation, cohort, household, traffic, construction, treasury, or
-//!   economy code reads an effect yet;
+//! - the bridge treasury reads the tax multiplier through an effect for
+//!   [`PolicyTaxWeights`](crate::PolicyTaxWeights) (D-030); no cohort,
+//!   household, traffic, or construction code reads an effect;
 //! - no UI or bridge consumer displays or edits one;
 //! - effects are never persisted. They add no field to [`DistrictPolicy`] or
 //!   [`DistrictPolicyStore`] and do not change the world-save envelope or its

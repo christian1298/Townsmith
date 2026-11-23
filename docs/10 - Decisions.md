@@ -2,7 +2,7 @@
 title: Decisions
 project: Townsmith
 status: active
-updated: 2026-11-22
+updated: 2026-11-23
 tags:
   - townsmith
   - adr
@@ -48,6 +48,7 @@ tags:
 | D-028 | Construction is billed in phase installments; unaffordable work stalls | Proposed | 2026-11-22 | [[53 - Treasury and Taxes]], [[77 - Infrastructure Costs]], [[02 - Game Design]] |
 | D-029 | Construction uses a mode-selected clock; campaign builds take game days | Proposed | 2026-11-22 | [[02 - Game Design]], [[09 - Open Questions]], [[53 - Treasury and Taxes]] |
 | D-030 | District policy tax multipliers weight city tax income by home and workplace | Proposed | 2026-11-23 | [[07 - Simulation and AI]], [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]] |
+| D-031 | District policy service funding weights civic service upkeep by completed site | Proposed | 2026-11-23 | [[07 - Simulation and AI]], [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]] |
 
 ---
 
@@ -1250,6 +1251,48 @@ Placement currently checks and charges the full material price up front, while t
 ### Review trigger
 
 Bridge/economy wiring, the first playable large-city financing run, and the Q-101 playtest.
+
+---
+
+## D-031 — District policy service funding weights civic service upkeep by completed site
+
+**Status:** Proposed · **Date:** 2026-11-23 · **Affects:** [[07 - Simulation and AI]], [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]]
+
+### Context
+
+`DistrictPolicy` carries a `service_funding` multiplier (`0.0–2.0`) and `DistrictPolicyEffect` exposes it, but the treasury billed every civic service site at its catalog rate. D-030 wired the tax multiplier into income; service funding stayed inert. The second simulation consumer is the treasury's operating ledger.
+
+### Decision
+
+- Add an explicit `PolicyServiceWeight` value object to the economy. Neutral is exactly `1.0`; any accepted weight must be finite and inside the policy bounds `0.0..=2.0`, matching `MAX_DISTRICT_SERVICE_FUNDING`.
+- `Economy::tick_with_policy_weights(...)` accepts both `PolicyTaxWeights` and `PolicyServiceWeight` and scales **only** the civic service term of `InfrastructureCosts`. Utility upkeep is never scaled. With neutral weights it executes the existing arithmetic verbatim, so the default ledger, save JSON, and checksums do not move.
+- `tick_with_infrastructure_costs` and `tick_with_policy_taxes` keep their current behavior by delegating with `PolicyServiceWeight::ONE`.
+- The bridge resolves the weight from completed civic service sites: each operational site contributes the `service_funding` of the policy at its centre, resolved by `policy_at` (smallest containing id), and the mean is `sum(service_funding_i) / N`. A site outside every circle contributes the neutral `1.0`; sites still inside their campaign lead time do not contribute.
+- Missing, empty, or foreign-seed policy registries, foreign placement, population, or service seeds, non-finite multipliers, and zero completed sites all fall back to neutral `1.0` rather than guessing.
+- The bridge adds `policy_service_funding_weight` to the `economy_tick` payload. No existing field, save field, or checksum changes on a policy-less world.
+
+### Consequences
+
+**Positive**
+- Service funding now has one real, testable ledger consumer while the neutral path stays checksum-identical.
+- High-funding districts pay more for their completed service sites and low-funding districts pay less, so district policy has a visible operating-cost trade-off.
+- Utilities stay on their own cost line, so the policy cannot silently discount unrelated infrastructure.
+
+**Negative**
+- A single city-wide mean dilutes local differences: one funded district and one unfunded district average across the whole service network.
+- Funding changes billed upkeep only, not service coverage, capacity, or output. Service quality remains a later model.
+- A policy that covers only homes or industry does not change service upkeep, which can surprise players until the dashboard explains the base.
+
+### Alternatives considered
+
+- **Per-site ledger rows:** more accurate, but the treasury is city-level and a per-site row adds cost without a service-quality model to spend it on.
+- **Scale total infrastructure:** simpler, but would discount utilities that the policy does not govern.
+- **Gate service placement by funding:** conflates an operating budget with a construction permit and duplicates the existing placement rule.
+- **Wait for a service-quality model:** leaves a stored multiplier inert and untestable in the ledger.
+
+### Review trigger
+
+A balance pass on district service competition, or the first service-quality/output model. Revisit per-site billing and whether funding should also change coverage then.
 
 ---
 
