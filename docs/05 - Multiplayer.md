@@ -74,7 +74,7 @@ The client never simulates the authoritative city. It predicts local movement an
 ⚙️ = configurable; admin-only by default. All players can start a time vote by default (`time.vote`). The **Builder** role is a player permission role, not the NPC construction trade; construction crews are simulation jobs.
 
 > [!warning] Blueprint placement is not server-authoritative yet
-> Protocol v0 has no `place_blueprint` command and `ServerWorld` has no placement store. The bridge path (`world_place_blueprint` in `crates/godot_ext`) is the single-player/developer path: it applies the district construction/allowlist gate and charges the first construction installment against local stores. A multiplayer client cannot rely on the server to enforce placement, policy, or cost today. D-032 (Proposed) defines the authoritative command; until it lands, the **Place buildings** column describes intended policy, not protocol-v0 enforcement, and blueprint editing has the same gap.
+> Protocol v0 has no `place_blueprint` command and `ServerWorld` has no placement store. The bridge path (`world_place_blueprint` in `crates/godot_ext`) is the single-player/developer path: it applies the district construction/allowlist gate and charges the first construction installment against local stores. A multiplayer client cannot rely on the server to enforce placement, policy, or cost today. D-032 (Proposed) defines the authoritative command; D-033 (Proposed) would add the per-settlement `build` check inside it. Until both land, the **Place buildings** column describes intended policy, not protocol-v0 enforcement, and blueprint editing has the same gap.
 
 - Permissions are configurable per player and per role.
 - The server owner can disable roles entirely for a "everyone is mayor" casual server.
@@ -85,11 +85,16 @@ The client never simulates the authoritative city. It predicts local movement an
 
 ### Settlement ownership
 
+> [!warning] Proposed — not implemented (D-033)
+> Settlement ownership is currently an **unenforced display string**. `Settlement.owner` accepts any 1–48 character value from the caller, the bridge and dashboard never check it, the authoritative `ServerWorld` has no settlement store, and protocol v0 has no settlement command. The only roles are global dev roles assigned by the server process (`viewer`/`mayor`/`admin`). The bullets below are the intended model; D-033 (Proposed) defines membership, the `build`/`manage`/`tax`/`members` permissions, claims, transfer, and save migration. None of it is enforced today.
+
 - Every settlement has an **owner**: a player, a group, or the server (shared).
 - The owner can set local policies, taxes, building permissions, and blueprint allowlists.
 - A player may own **multiple settlements**; a settlement may have multiple managers with roles.
 - Admins can override ownership, transfer it, or resolve disputes.
 - Shared services (highways, regional rail, power) are managed at the world/server level; local services at the settlement level.
+
+D-033's proposed enforcement points are the future server `place_blueprint` (D-032), policy CRUD, tax commands, settlement rename/transfer/remove, membership edits, and dashboard edit paths once they exist. A global role is a ceiling; a settlement permission never grants a global capability, and single-player/dev keeps an implicit owner.
 
 ## 4. Time and ticks
 
@@ -508,7 +513,7 @@ Multiplayer + modding is a trust problem. The server is the authority.
 ## 13. Open questions
 
 - **Q-002:** Target player count and server type? Affects bandwidth, AOI, and simulation budgets.
-- **Q-066:** Settlement ownership: how are permissions, shared services, and transfers handled?
+- **Q-066 (answered by D-019):** Multiple settlements; each player may manage one or several. The concrete permissions, membership, and transfer contract is D-033 (Proposed), with Q-111–Q-115.
 - **Q-070:** 1M multiplayer: players per server, active-region cap, server hardware.
 - **Q-078:** Time-vote duration, cooldown, and quorum tuning.
 - **Q-083:** Construction management depth: auto-assign crews vs player priority.
@@ -524,8 +529,13 @@ Multiplayer + modding is a trust problem. The server is the authority.
 - **Q-108:** How are modded blueprints resolved when the server lacks the mod?
 - **Q-109:** Placement rate limits, quotas, idempotency, and audit?
 - **Q-110:** Placement save migration and rollback/history?
+- **Q-111:** Stable player identity source for settlement ownership?
+- **Q-112:** Claim and abandonment rules for unowned settlements?
+- **Q-113:** Offline owner transfer and succession?
+- **Q-114:** Per-settlement member and per-player settlement limits?
+- **Q-115:** Settlement-level blueprint/mod permissions?
 
-See [[09 - Open Questions]] and [[10 - Decisions]]. D-032 (Proposed) is the server-authoritative blueprint placement ADR.
+See [[09 - Open Questions]] and [[10 - Decisions]]. D-032 (Proposed) is the server-authoritative blueprint placement ADR; D-033 (Proposed) is the settlement ownership, membership, and permissions ADR.
 
 ### Session resume v0
 

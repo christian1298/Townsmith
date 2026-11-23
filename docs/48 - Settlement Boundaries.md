@@ -26,7 +26,7 @@ This slice proves the settlement identity half of D-019:
 - list every settlement in the dashboard, select one for the existing 256 m district, policy, and heatmap queries, and show a read-only detail block (identity, 256 m district metrics, containing policy) under the selector;
 - save and reload the settlement layer with the world.
 
-It does **not** add districts, taxes, service coverage, permissions, merging, or automatic growth. Those remain later simulation and multiplayer work.
+It does **not** add districts, taxes, service coverage, permissions, merging, or automatic growth. Those remain later simulation and multiplayer work. D-033 (Proposed) is the next step for ownership, membership, and permissions; this slice stays identity-only.
 
 ## 2. Data model
 
@@ -63,6 +63,35 @@ Rules:
 | Ids | 1..=`i64::MAX` |
 
 A settlement is **soft**: there is no wall, no collision, and no hard build permission yet. `contains` is a squared-radius test; `owner_at` returns the nearest containing settlement, with the lower id winning ties.
+
+This is the current **v1** model. D-033 (Proposed) adds an owner id, members, and a membership revision; see §2.1.
+
+### 2.1 Ownership and permissions (proposed, D-033)
+
+> [!warning] Proposed — not implemented
+> `owner` is an identity-only display string. `settlement_found` accepts any 1–48 character owner from the caller, `settlement_remove` removes by id without a caller check, and `owner_at` is a spatial lookup, not authorization. There is no membership, role, permission, transfer, claim, or audit model, and the authoritative server has no settlement store. Nothing in this section exists in code, saves, or protocol v0.
+
+D-033 proposes:
+
+- one **owner** with all permissions and zero or more **members**, each with a stable server-issued player id rather than a display name;
+- a permission set of `build`, `manage` (rename and initiate transfer), `tax`, and `members` (invite/remove/change role), derived from a role preset;
+- an owner who cannot be removed or demoted; a Manager may initiate but not complete a transfer;
+- server-side checks for placement, policy CRUD, tax commands, settlement rename/transfer/remove, and membership edits, with the existing global role as a ceiling and admin override;
+- claims only for an **unowned** settlement, by an explicit id and the Mayor/Admin role, never automatically by entering the radius;
+- an implicit owner in single-player/dev, so local behavior does not change.
+
+Role presets:
+
+| Role | `build` | `manage` | `tax` | `members` |
+|---|---|---|---|---|
+| Owner | ✅ | ✅ | ✅ | ✅ |
+| Manager | ✅ | ✅ | ✅ | ✅ |
+| Builder | ✅ | ❌ | ❌ | ❌ |
+| Member | ❌ | ❌ | ❌ | ❌ |
+
+Proposed save v2 adds `owner_id`, `members`, and `membership_revision`, and keeps the `owner` display string. A v1 `owner` string maps to an id only when the server's player registry has exactly one non-ambiguous match; otherwise the record stays unowned for admin assignment. Membership edits use `expected_revision` and reject a stale change with `settlement.revision_conflict`.
+
+Enforcement points and the full claim/transfer rules are in [[10 - Decisions]] D-033. Identity, claiming, offline transfer, limits, and mod/blueprint permissions are Q-111–Q-115.
 
 ## 3. API
 
@@ -118,6 +147,7 @@ Load:
 - The status line shows the settlement count.
 - The dashboard's read-only Settlements section lists every record in ascending id order and selects one with `PageUp` / `PageDown` (or clears it through the leading `none` entry). The selection drives the dashboard's 256 m district query, containing-policy scan, and `F7` heatmap centre until cleared; `F6` building focus yields to it. While a record is selected, a read-only detail block under the list repeats its name, owner, id, centre, radius, the same 256 m district metrics (population, housing, vacancies, jobs, employed/unemployed, happiness, food/water/rest, commute, completed buildings, construction sites), and the smallest-id containing policy (name, tax, funding, construction flag, allowlist count). It uses only the existing `settlements()`, `district_summary`, and `district_policies_state` reads; it cannot mutate a settlement or policy. See [[57 - Dashboard and Advisor]] §5.2.
 - Save/load rebuilds rings and labels from the store; the dashboard revalidates a selected id after load and falls back to no settlement when it no longer exists.
+- The dashboard selector and detail block are read-only. D-033 (Proposed) would add membership and permission-gated edit actions server-side; no role display, invite, rename, transfer, claim, or remove control exists in this slice.
 
 The ring is a developer overlay, not final art. It samples every segment endpoint with `world_height_at`; a segment can clip a very steep slope between endpoints.
 
@@ -149,17 +179,17 @@ It checks:
 ## 8. Limits
 
 - No districts, policies, taxes, services, land value, or budgets. The dashboard has a read-only settlement selector plus a read-only detail block over the existing 256 m district, containing-policy, and heatmap queries, and the developer-only read-only overview in [[57 - Dashboard and Advisor]] §4.3 lists settlements and samples one fixed 256 m district around each centre; neither adds district simulation, editing, or save fields.
-- No hard permission checks; `owner` is descriptive.
+- No hard permission checks; `owner` is an unenforced display string. D-033 (Proposed) defines membership, permissions, claims, and transfer; none is implemented.
 - Overlapping settlements are allowed; nearest-centre ownership is provisional.
-- No settlement merge, rename, or owner transfer.
+- No settlement merge, rename, or owner transfer. D-033 (Proposed) puts rename and owner transfer behind `manage` and the owner/admin rule.
 - No automatic lot/placement assignment; ownership is derived by containment.
-- No multiplayer authority or per-player permissions.
+- No multiplayer authority or per-player permissions. Server roles are global dev roles and the server has no settlement store; D-033 (Proposed) is the contract.
 - Ring/label overlay is English-only and developer-oriented.
 - Settlement names are not localized.
 
 ## 9. Next
 
 1. Phase 3 simulation: districts, service coverage, land value, and taxes.
-2. Per-player ownership and permission checks with the authoritative server.
+2. Per-player ownership and permission checks with the authoritative server (D-033, Proposed; Q-111–Q-115).
 3. Settlement merge/split rules and a region view.
 4. Automatic lot generation tied to settlement growth.
