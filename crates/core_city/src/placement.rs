@@ -80,6 +80,10 @@ pub struct Placement {
     pub blueprint_hash: String,
     /// Source package path. The first slice stores it as-is.
     pub blueprint_path: String,
+    /// Content-addressed package reference (`tsbp:blake3:<64hex>`) for a local
+    /// blueprint library; `None` on legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blueprint_ref: Option<String>,
     /// Human-readable blueprint name.
     pub name: String,
     /// Building base centre; `y` is the foundation top.
@@ -115,6 +119,7 @@ impl Placement {
             blueprint_id: request.blueprint_id.clone(),
             blueprint_hash: request.blueprint_hash.clone(),
             blueprint_path: request.blueprint_path.clone(),
+            blueprint_ref: None,
             name: request.name.clone(),
             center: plan.center,
             rotation_deg: plan.rotation_deg,
@@ -938,6 +943,15 @@ fn validate_record(placement: &Placement, next_id: u64) -> Result<(), PlacementE
             });
         }
     }
+    if let Some(blueprint_ref) = placement.blueprint_ref.as_deref() {
+        let expected = format!("tsbp:{}", placement.blueprint_hash);
+        if blueprint_ref != expected {
+            return Err(PlacementError::InvalidRecord {
+                id: placement.id,
+                reason: "blueprint reference does not match the content hash",
+            });
+        }
+    }
 
     for value in placement.bounds_m {
         if !value.is_finite() || value <= 0.0 {
@@ -1191,6 +1205,76 @@ mod tests {
         assert_eq!(loaded.checksum(), checksum);
         assert_eq!(loaded.placements[0].resident_capacity, 2);
         assert_eq!(loaded.placements[0].material_cost, 100.0);
+    }
+
+    /// Master `db5c495` output for one legacy placement. Records without a
+    /// `blueprint_ref` must serialize and checksum exactly as before.
+    const LEGACY_JSON: &str = r#"{
+  "format_version": 1,
+  "seed": 2026,
+  "next_id": 2,
+  "placements": [
+    {
+      "id": 1,
+      "blueprint_id": "local:house",
+      "blueprint_hash": "blake3:test",
+      "blueprint_path": "/townsmith/house.tsbp",
+      "name": "House",
+      "center": [
+        128.0,
+        32.0,
+        128.0
+      ],
+      "rotation_deg": 0,
+      "footprint_m": [
+        8.0,
+        6.0
+      ],
+      "bounds_m": [
+        8.0,
+        6.0,
+        6.0
+      ],
+      "foundation_m": 0.0,
+      "material_cost": 100.0,
+      "resident_capacity": 2,
+      "job_slots": 0,
+      "solid_voxels": 100
+    }
+  ]
+}"#;
+
+    #[test]
+    fn legacy_records_without_a_reference_keep_their_json_and_checksum() {
+        let store = PlacementStore::from_json(LEGACY_JSON).expect("legacy save loads");
+        assert_eq!(store.placements[0].blueprint_ref, None);
+        assert_eq!(store.to_json_pretty().expect("json"), LEGACY_JSON);
+        assert_eq!(store.checksum(), 0xc552_e58d_3d06_0904);
+    }
+
+    #[test]
+    fn references_must_match_the_content_hash() {
+        let mut store = PlacementStore::new(2026);
+        store.place(&request(128.0, 128.0), flat).expect("place");
+        store.placements[0].blueprint_ref = Some("tsbp:blake3:test".to_string());
+        let json = store.to_json_pretty().expect("json");
+        assert!(json.contains("\"blueprint_ref\": \"tsbp:blake3:test\""));
+        PlacementStore::from_json(&json).expect("matching reference");
+
+        store.placements[0].blueprint_ref = Some("tsbp:blake3:other".to_string());
+        assert_eq!(
+            PlacementStore::from_json(&store.to_json_pretty().expect("json"))
+                .expect_err("mismatched reference")
+                .code(),
+            "invalid_record"
+        );
+        store.placements[0].blueprint_ref = Some("blake3:test".to_string());
+        assert_eq!(
+            PlacementStore::from_json(&store.to_json_pretty().expect("json"))
+                .expect_err("malformed reference")
+                .code(),
+            "invalid_record"
+        );
     }
 
     #[test]

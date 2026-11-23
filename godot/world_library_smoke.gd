@@ -1,11 +1,11 @@
 extends SceneTree
 
-## Headless bridge smoke for a portable world load.
+## Headless bridge smoke for a portable world save with placement references.
 ##
 ## Builds a uniquely named package, saves it through world_save_with_library,
-## deletes the source, then checks that world_load_with_library exposes the
-## library path through world_placements and that plain load/failure/clear keep
-## the expected state.
+## deletes the source, then checks that world_load_with_library resolves the
+## content-addressed reference and that plain load/failure/clear keep the
+## expected state.
 
 const SEED := 2026
 const SITE_X := 169.0
@@ -32,9 +32,33 @@ func _remove_tree(path: String) -> void:
 	dir.list_dir_end()
 	DirAccess.remove_absolute(path)
 
+func _collect_json_strings(value, out: Array) -> void:
+	match typeof(value):
+		TYPE_STRING:
+			out.append(value)
+		TYPE_ARRAY:
+			for item in value:
+				_collect_json_strings(item, out)
+		TYPE_DICTIONARY:
+			for key in value:
+				_collect_json_strings(value[key], out)
+
+func _json_has_no_library_root(text: String, root: String) -> bool:
+	var value = JSON.parse_string(text)
+	if typeof(value) != TYPE_DICTIONARY:
+		return false
+	var strings: Array = []
+	_collect_json_strings(value, strings)
+	for item in strings:
+		if str(item).contains(root):
+			return false
+	return true
+
 func _plain_load_has_no_resolved_field(core, save_path: String) -> bool:
 	var result: Dictionary = core.world_load(save_path, SEED)
-	if bool(result.get("ok", false)) or str(result.get("error_code", "")) != "missing_blueprint":
+	if bool(result.get("ok", false)):
+		return false
+	if str(result.get("error_code", "")) != "blueprint_reference_requires_library":
 		return false
 	var state: Dictionary = core.world_placements()
 	if int(state.get("count", -1)) != 0:
@@ -52,6 +76,7 @@ func _init() -> void:
 	DirAccess.make_dir_recursive_absolute(library)
 	var package := base.path_join("world_library_unique_house.tsbp")
 	var save_path := base.path_join("world.json")
+	var plain_save_path := base.path_join("world_plain.json")
 
 	var core = TownsmithCore.new()
 	if not core.create_editor_volume(0, 0, 0) or not core.editor_build_acceptance_house():
@@ -74,12 +99,64 @@ func _init() -> void:
 	if not bool(saved.get("ok", false)):
 		_fail("save_failed:" + str(saved.get("error_code", "")))
 		return
+	if int(saved.get("blueprint_references", 0)) != 1:
+		_fail("save_reference_count")
+		return
+	var saved_text := FileAccess.get_file_as_string(save_path)
+	var saved_value = JSON.parse_string(saved_text)
+	if typeof(saved_value) != TYPE_DICTIONARY:
+		_fail("save_invalid_json")
+		return
+	var saved_placements: Array = saved_value.get("placements", [])
+	if saved_placements.is_empty() or str(saved_placements[0].get("blueprint_ref", "")) == "":
+		_fail("save_missing_reference")
+		return
+	if not _json_has_no_library_root(saved_text, library):
+		_fail("save_contains_library_root")
+		return
+	var stamped: Dictionary = core.world_placements()
+	var stamped_checksum := str(stamped.get("checksum", ""))
+	if stamped_checksum == before_checksum:
+		_fail("save_did_not_stamp_store")
+		return
+	var stamped_entry: Dictionary = stamped.get("placements", [])[0]
+	var reference := str(stamped_entry.get("blueprint_ref", ""))
+	if reference == "" or reference == recorded:
+		_fail("live_reference_missing")
+		return
+	if str(stamped_entry.get("blueprint_path", "")) != recorded:
+		_fail("recorded_path_changed")
+		return
+	if stamped_entry.has("resolved_blueprint_path"):
+		_fail("save_invented_resolved_path")
+		return
+
+	# A later plain save keeps the references and writes no library root.
+	var plain: Dictionary = core.world_save(plain_save_path)
+	if not bool(plain.get("ok", false)):
+		_fail("plain_save_failed:" + str(plain.get("error_code", "")))
+		return
+	if FileAccess.get_file_as_string(plain_save_path) != saved_text:
+		_fail("plain_save_changed_json")
+		return
+
+	# While the legacy path still exists, a plain load ignores the reference.
+	var path_core = TownsmithCore.new()
+	var path_load: Dictionary = path_core.world_load(save_path, SEED)
+	if not bool(path_load.get("ok", false)):
+		_fail("path_load_failed:" + str(path_load.get("error_code", "")))
+		return
+	var path_entry: Dictionary = path_core.world_placements().get("placements", [])[0]
+	if path_entry.has("resolved_blueprint_path"):
+		_fail("path_load_invented_resolved_path")
+		return
+
 	if DirAccess.remove_absolute(package) != OK:
 		_fail("source_remove_failed")
 		return
 
-	# A fresh plain load still reports the original missing-package error and
-	# never invents a resolved field.
+	# A fresh plain load now reports the reference-specific error and never
+	# invents a resolved field.
 	var plain_core = TownsmithCore.new()
 	if not _plain_load_has_no_resolved_field(plain_core, save_path):
 		_fail("plain_load_changed")
@@ -89,16 +166,25 @@ func _init() -> void:
 	if not bool(loaded.get("ok", false)):
 		_fail("portable_load_failed:" + str(loaded.get("error_code", "")))
 		return
+	if int(loaded.get("resolved_references", 0)) != 1:
+		_fail("resolved_reference_count")
+		return
+	if int(loaded.get("legacy_path_fallbacks", -1)) != 0:
+		_fail("legacy_fallback_count")
+		return
 	var state: Dictionary = core.world_placements()
 	var entry: Dictionary = state.get("placements", [])[0]
 	var resolved := str(entry.get("resolved_blueprint_path", ""))
 	if resolved == "" or resolved == recorded:
 		_fail("resolved_missing")
 		return
-	if str(entry.get("blueprint_path", "")) != recorded:
-		_fail("recorded_path_changed")
+	if str(entry.get("blueprint_ref", "")) != reference:
+		_fail("loaded_reference_changed")
 		return
-	if str(state.get("checksum", "")) != before_checksum:
+	if str(entry.get("blueprint_path", "")) != recorded:
+		_fail("loaded_path_changed")
+		return
+	if str(state.get("checksum", "")) != stamped_checksum:
 		_fail("checksum_changed")
 		return
 	var info: Dictionary = core.world_blueprint_info(resolved)
@@ -109,12 +195,12 @@ func _init() -> void:
 
 	# A plain load after the portable load still fails and leaves the previous
 	# placement store and resolution map untouched.
-	var plain: Dictionary = core.world_load(save_path, SEED)
-	if bool(plain.get("ok", false)) or str(plain.get("error_code", "")) != "missing_blueprint":
+	var plain_after: Dictionary = core.world_load(save_path, SEED)
+	if bool(plain_after.get("ok", false)) or str(plain_after.get("error_code", "")) != "blueprint_reference_requires_library":
 		_fail("plain_load_unexpected")
 		return
 	var after_plain: Dictionary = core.world_placements()
-	if str(after_plain.get("checksum", "")) != before_checksum:
+	if str(after_plain.get("checksum", "")) != stamped_checksum:
 		_fail("plain_load_changed_state")
 		return
 	if str(after_plain.get("placements", [])[0].get("resolved_blueprint_path", "")) != resolved:
@@ -135,7 +221,7 @@ func _init() -> void:
 		_fail("failed_load_unexpected")
 		return
 	var after_failed: Dictionary = core.world_placements()
-	if str(after_failed.get("checksum", "")) != before_checksum:
+	if str(after_failed.get("checksum", "")) != stamped_checksum:
 		_fail("failed_load_changed_state")
 		return
 	if str(after_failed.get("placements", [])[0].get("resolved_blueprint_path", "")) != resolved:
@@ -149,6 +235,6 @@ func _init() -> void:
 		_fail("clear_count")
 		return
 
-	print("WORLD_LIBRARY resolved=ok mesh=ok plain=ok guard=ok stale=ok clear=ok checksum=%s status=ok" % before_checksum)
+	print("WORLD_LIBRARY resolved=ok refs=ok plain=ok guard=ok stale=ok clear=ok checksum=%s status=ok" % stamped_checksum)
 	_remove_tree(base)
 	quit(0)

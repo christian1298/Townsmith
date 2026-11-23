@@ -29,7 +29,7 @@ if [[ -z "$LINE" ]]; then
 	echo "World library smoke failed: no marker" >&2
 	exit 1
 fi
-if [[ "$LINE" != *"resolved=ok"* || "$LINE" != *"mesh=ok"* || "$LINE" != *"plain=ok"* || "$LINE" != *"guard=ok"* || "$LINE" != *"stale=ok"* || "$LINE" != *"clear=ok"* || "$LINE" != *"status=ok"* ]]; then
+if [[ "$LINE" != *"resolved=ok"* || "$LINE" != *"refs=ok"* || "$LINE" != *"plain=ok"* || "$LINE" != *"guard=ok"* || "$LINE" != *"stale=ok"* || "$LINE" != *"clear=ok"* || "$LINE" != *"status=ok"* ]]; then
 	echo "World library smoke contract mismatch: $LINE" >&2
 	exit 1
 fi
