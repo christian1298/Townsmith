@@ -20,6 +20,16 @@
 //! lookup rule in this slice is the smallest policy id whose inclusive circle
 //! contains a point; overlap resolution, priority, and the actual tax/funding
 //! effects remain open design work.
+//!
+//! # Point queries
+//!
+//! [`DistrictPolicyStore::policy_at`] and the effect layer built on it resolve a
+//! point through a **derived** uniform XZ grid index. The index is not
+//! serialized and does not change the save or checksum: it is rebuilt by every
+//! constructor and mutation. A lookup tests only the policies whose circle
+//! bounding box covers the query bucket (plus any record with non-finite or
+//! out-of-range geometry), in ascending id order, so the smallest containing id
+//! is still the result.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -61,6 +71,14 @@ pub const MAX_DISTRICT_POLICY_NAME_CHARS: usize = 64;
 
 /// Largest accepted blueprint allowlist.
 pub const MAX_DISTRICT_POLICY_ALLOWLIST: usize = 256;
+
+/// Edge length in metres of one bucket in the derived point-query index.
+///
+/// A maximum-radius policy covers at most `17 x 17 = 289` buckets, so the
+/// 4,096-policy cap bounds the index at roughly 1.2 million candidate entries
+/// even in the worst case. The grid is derived state: it is never serialized
+/// and does not affect the save or checksum.
+const POLICY_INDEX_CELL_M: f64 = 512.0;
 
 /// One saved district policy.
 ///
@@ -414,13 +432,192 @@ impl fmt::Display for DistrictPolicyError {
 
 impl Error for DistrictPolicyError {}
 
+/// Derived uniform XZ grid over the policy circles.
+///
+/// One bucket holds the ascending ids of every policy whose circle bounding box
+/// overlaps that bucket. The box is conservative, so a query bucket is a
+/// superset of the policies that can contain a point in the bucket; the exact
+/// inclusive [`DistrictPolicy::contains`] test decides. Records with geometry
+/// outside the validated range (non-finite, negative, or larger than the world
+/// bounds) cannot be bucketed conservatively and are kept in `unindexed`;
+/// every query tests them so behavior still matches a brute-force scan.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct PolicySpatialIndex {
+    /// Candidate policy ids per `(cell_x, cell_z)` bucket, ascending.
+    cells: BTreeMap<(i32, i32), Vec<u64>>,
+    /// Ids tested for every query because they cannot be bucketed, ascending.
+    unindexed: Vec<u64>,
+}
+
+impl PolicySpatialIndex {
+    /// An empty index, usable in a `const` constructor.
+    const fn new() -> Self {
+        Self {
+            cells: BTreeMap::new(),
+            unindexed: Vec::new(),
+        }
+    }
+
+    /// Drop every bucket. The store rebuilds from its policy map.
+    fn clear(&mut self) {
+        self.cells.clear();
+        self.unindexed.clear();
+    }
+
+    /// Rebuild from the policy map, in ascending id order.
+    fn rebuild(&mut self, policies: &BTreeMap<u64, DistrictPolicy>) {
+        self.clear();
+        for policy in policies.values() {
+            self.insert(policy);
+        }
+    }
+
+    /// Add one policy to every bucket its bounding box covers.
+    ///
+    /// Cost is `O(cells covered)`: at most 289 buckets for an accepted radius.
+    fn insert(&mut self, policy: &DistrictPolicy) {
+        let Some(((min_x, min_z), (max_x, max_z))) = policy_index_bounds(policy) else {
+            insert_sorted(&mut self.unindexed, policy.id);
+            return;
+        };
+        for x in min_x..=max_x {
+            for z in min_z..=max_z {
+                let ids = self.cells.entry((x, z)).or_default();
+                insert_sorted(ids, policy.id);
+            }
+        }
+    }
+
+    /// Remove one policy from every bucket its bounding box covered.
+    ///
+    /// Cost is `O(cells covered)` plus the bucket length for the id scan.
+    fn remove(&mut self, policy: &DistrictPolicy) {
+        let Some(((min_x, min_z), (max_x, max_z))) = policy_index_bounds(policy) else {
+            self.unindexed.retain(|id| *id != policy.id);
+            return;
+        };
+        for x in min_x..=max_x {
+            for z in min_z..=max_z {
+                let empty = {
+                    let Some(ids) = self.cells.get_mut(&(x, z)) else {
+                        continue;
+                    };
+                    ids.retain(|id| *id != policy.id);
+                    ids.is_empty()
+                };
+                if empty {
+                    self.cells.remove(&(x, z));
+                }
+            }
+        }
+    }
+
+    /// Candidate ids for `point`'s bucket, ascending.
+    fn candidates(&self, point: [f32; 2]) -> &[u64] {
+        self.cells
+            .get(&point_cell(point))
+            .map_or(&[], Vec::as_slice)
+    }
+}
+
+/// Add `id` to an ascending id list, keeping it sorted and duplicate-free.
+fn insert_sorted(ids: &mut Vec<u64>, id: u64) {
+    if let Err(position) = ids.binary_search(&id) {
+        ids.insert(position, id);
+    }
+}
+
+/// Bucket range covering `policy`'s circle bounding box.
+///
+/// `None` means the record is outside the range the grid can represent
+/// conservatively; the caller keeps it in the always-tested list instead. The
+/// range is computed in `f64` from the stored `f32` values, so every point the
+/// inclusive circle test accepts lies inside it.
+fn policy_index_bounds(policy: &DistrictPolicy) -> Option<((i32, i32), (i32, i32))> {
+    let [x, z] = policy.center;
+    let radius = policy.radius_m;
+    if !x.is_finite() || !z.is_finite() || !radius.is_finite() {
+        return None;
+    }
+    if x.abs() > MAX_WORLD_COORD_M
+        || z.abs() > MAX_WORLD_COORD_M
+        || !(0.0..=MAX_DISTRICT_POLICY_RADIUS_M).contains(&radius)
+    {
+        return None;
+    }
+    let x = f64::from(x);
+    let z = f64::from(z);
+    let radius = f64::from(radius);
+    let cell = |value: f64| -> i32 { (value / POLICY_INDEX_CELL_M).floor() as i32 };
+    Some((
+        (cell(x - radius), cell(z - radius)),
+        (cell(x + radius), cell(z + radius)),
+    ))
+}
+
+/// Bucket containing `point`. The caller rejects non-finite points first.
+fn point_cell(point: [f32; 2]) -> (i32, i32) {
+    let cell = |value: f32| -> i32 { (f64::from(value) / POLICY_INDEX_CELL_M).floor() as i32 };
+    (cell(point[0]), cell(point[1]))
+}
+
+/// Smallest id whose circle contains `point`, searching two ascending lists.
+///
+/// `candidates` and `unindexed` are each sorted and disjoint; merging them by
+/// id preserves the registry's smallest-id rule exactly.
+fn first_containing<'a>(
+    policies: &'a BTreeMap<u64, DistrictPolicy>,
+    candidates: &[u64],
+    unindexed: &[u64],
+    point: [f32; 2],
+) -> Option<&'a DistrictPolicy> {
+    let mut candidate_index = 0;
+    let mut unindexed_index = 0;
+    loop {
+        let id = match (
+            candidates.get(candidate_index),
+            unindexed.get(unindexed_index),
+        ) {
+            (Some(&candidate), Some(&fallback)) => {
+                if candidate <= fallback {
+                    candidate_index += 1;
+                }
+                if fallback <= candidate {
+                    unindexed_index += 1;
+                }
+                candidate.min(fallback)
+            }
+            (Some(&candidate), None) => {
+                candidate_index += 1;
+                candidate
+            }
+            (None, Some(&fallback)) => {
+                unindexed_index += 1;
+                fallback
+            }
+            (None, None) => return None,
+        };
+        let Some(policy) = policies.get(&id) else {
+            continue;
+        };
+        if policy.contains(point) {
+            return Some(policy);
+        }
+    }
+}
+
 /// Persistent district-policy registry.
 ///
 /// The store is additive: when no registry exists the world save omits the
 /// optional `policies` object, so old saves and their checksums do not move.
 /// It owns a `seed` so the save/load path can reject a registry that belongs
 /// to another world.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// A derived spatial index accelerates [`Self::policy_at`]. It is skipped by
+/// serde, adds no save field, and is rebuilt by every constructor and mutation.
+/// Mutating [`Self::policies`] directly bypasses the setters; call
+/// [`Self::rebuild_index`] afterwards.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DistrictPolicyStore {
     /// Save format version.
     pub format_version: u16,
@@ -430,6 +627,38 @@ pub struct DistrictPolicyStore {
     pub next_id: u64,
     /// Policies keyed by id, iterated in ascending id order.
     pub policies: BTreeMap<u64, DistrictPolicy>,
+    /// Derived point-query grid. Not serialized.
+    #[serde(skip)]
+    index: PolicySpatialIndex,
+}
+
+/// Deserialize the persisted fields and rebuild the derived index.
+///
+/// The load shape is unchanged: the same four fields are required and unknown
+/// fields are ignored. Building the index here means every serde path — the
+/// store helpers, `serde_json::from_value` in the bridge, and the world save —
+/// yields a queryable registry.
+impl<'de> Deserialize<'de> for DistrictPolicyStore {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Persisted {
+            format_version: u16,
+            seed: u64,
+            next_id: u64,
+            policies: BTreeMap<u64, DistrictPolicy>,
+        }
+
+        let persisted = Persisted::deserialize(deserializer)?;
+        Ok(Self::from_parts(
+            persisted.format_version,
+            persisted.seed,
+            persisted.next_id,
+            persisted.policies,
+        ))
+    }
 }
 
 impl DistrictPolicyStore {
@@ -441,7 +670,39 @@ impl DistrictPolicyStore {
             seed,
             next_id: 1,
             policies: BTreeMap::new(),
+            index: PolicySpatialIndex::new(),
         }
+    }
+
+    /// Assemble a registry from already-validated persisted fields.
+    ///
+    /// Used by the serde implementation; every other constructor starts from
+    /// [`Self::new`]. The derived index is built here, never loaded.
+    fn from_parts(
+        format_version: u16,
+        seed: u64,
+        next_id: u64,
+        policies: BTreeMap<u64, DistrictPolicy>,
+    ) -> Self {
+        let mut store = Self {
+            format_version,
+            seed,
+            next_id,
+            policies,
+            index: PolicySpatialIndex::new(),
+        };
+        store.rebuild_index();
+        store
+    }
+
+    /// Rebuild the derived point-query index from [`Self::policies`].
+    ///
+    /// Constructors, [`Self::create`], [`Self::update`], [`Self::remove`], and
+    /// [`Self::clear`] maintain the index automatically. Call this only after
+    /// mutating the public policy map directly. The index is not serialized and
+    /// rebuilding it never changes the save or checksum.
+    pub fn rebuild_index(&mut self) {
+        self.index.rebuild(&self.policies);
     }
 
     /// Number of stored policies.
@@ -492,6 +753,7 @@ impl DistrictPolicyStore {
         let mut policy = policy;
         policy.id = id;
         self.next_id += 1;
+        self.index.insert(&policy);
         self.policies.insert(id, policy.clone());
         Ok(policy)
     }
@@ -507,31 +769,63 @@ impl DistrictPolicyStore {
         id: u64,
         request: &DistrictPolicyRequest,
     ) -> Result<DistrictPolicy, DistrictPolicyError> {
-        if !self.policies.contains_key(&id) {
+        let Some(previous) = self.policies.get(&id) else {
             return Err(DistrictPolicyError::NotFound { id });
-        }
+        };
         let policy = policy_from_request(id, request)?;
+        self.index.remove(previous);
+        self.index.insert(&policy);
         self.policies.insert(id, policy.clone());
         Ok(policy)
     }
 
     /// Remove one policy by id. Returns `false` when the id is absent.
     pub fn remove(&mut self, id: u64) -> bool {
-        self.policies.remove(&id).is_some()
+        let Some(policy) = self.policies.remove(&id) else {
+            return false;
+        };
+        self.index.remove(&policy);
+        true
+    }
+
+    /// Remove every policy, keeping the seed and the next-id counter.
+    ///
+    /// Ids are not reused: a later [`Self::create`] continues from the previous
+    /// counter, so an external reference to a cleared id cannot alias a new
+    /// policy. The derived index is cleared with the map.
+    pub fn clear(&mut self) {
+        self.policies.clear();
+        self.index.clear();
     }
 
     /// Smallest-id policy whose inclusive circle contains `point`.
     ///
-    /// `BTreeMap` iteration is ascending, so the first match is the smallest
-    /// id. Overlapping policies are allowed; this helper prefers the older id
+    /// Overlapping policies are allowed; this helper prefers the older id
     /// rather than the smallest or nearest circle. A non-finite point returns
     /// `None`.
+    ///
+    /// The derived grid index restricts the scan to policies whose circle can
+    /// contain the point; candidates are still tested in ascending id order, so
+    /// the result is identical to a brute-force scan of the registry. An empty
+    /// registry is an immediate `None` and a single policy skips the index.
     #[must_use]
     pub fn policy_at(&self, point: [f32; 2]) -> Option<&DistrictPolicy> {
         if !point.iter().all(|value| value.is_finite()) {
             return None;
         }
-        self.policies.values().find(|policy| policy.contains(point))
+        if self.policies.is_empty() {
+            return None;
+        }
+        if self.policies.len() == 1 {
+            let (_, policy) = self.policies.first_key_value()?;
+            return policy.contains(point).then_some(policy);
+        }
+        first_containing(
+            &self.policies,
+            self.index.candidates(point),
+            &self.index.unindexed,
+            point,
+        )
     }
 
     /// Ids of stored policies whose circles intersect `policy`, ascending.
@@ -1090,6 +1384,487 @@ mod tests {
         // Removing the older policy promotes the inner one.
         assert!(store.remove(1));
         assert_eq!(store.policy_at([0.0, 0.0]).map(|policy| policy.id), Some(2));
+    }
+
+    /// Deterministic pseudo-random values for index equivalence tests.
+    struct TestRng(u64);
+
+    impl TestRng {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0
+        }
+
+        fn unit(&mut self) -> f32 {
+            ((self.next_u64() >> 40) as f32) / 16_777_216.0
+        }
+
+        fn range(&mut self, min: f32, max: f32) -> f32 {
+            min + (max - min) * self.unit()
+        }
+    }
+
+    /// The pre-index lookup rule: ascending scan of the stored map.
+    fn brute_force_id(store: &DistrictPolicyStore, point: [f32; 2]) -> Option<u64> {
+        if !point.iter().all(|value| value.is_finite()) {
+            return None;
+        }
+        store
+            .policies
+            .values()
+            .find(|policy| policy.contains(point))
+            .map(|policy| policy.id)
+    }
+
+    /// Structural check that the derived index covers exactly the right cells.
+    fn assert_index_consistent(store: &DistrictPolicyStore) {
+        for (cell, ids) in &store.index.cells {
+            assert!(!ids.is_empty(), "bucket {cell:?} is empty");
+            assert!(
+                ids.windows(2).all(|pair| pair[0] < pair[1]),
+                "bucket {cell:?} is not in ascending id order"
+            );
+            for id in ids {
+                let policy = store.policies.get(id).expect("bucket id exists");
+                let ((min_x, min_z), (max_x, max_z)) =
+                    policy_index_bounds(policy).expect("indexed policy has bounds");
+                assert!(
+                    (min_x..=max_x).contains(&cell.0) && (min_z..=max_z).contains(&cell.1),
+                    "policy {id} listed in a bucket outside its bounds"
+                );
+            }
+        }
+
+        assert!(
+            store
+                .index
+                .unindexed
+                .windows(2)
+                .all(|pair| pair[0] < pair[1]),
+            "unindexed ids are not in ascending order"
+        );
+        for id in &store.index.unindexed {
+            assert!(store.policies.contains_key(id), "unindexed id exists");
+        }
+
+        for policy in store.policies.values() {
+            match policy_index_bounds(policy) {
+                Some(((min_x, min_z), (max_x, max_z))) => {
+                    for x in min_x..=max_x {
+                        for z in min_z..=max_z {
+                            let ids = store
+                                .index
+                                .cells
+                                .get(&(x, z))
+                                .expect("covered bucket exists");
+                            assert!(
+                                ids.binary_search(&policy.id).is_ok(),
+                                "policy {} missing from bucket ({x}, {z})",
+                                policy.id
+                            );
+                        }
+                    }
+                }
+                None => assert!(
+                    store.index.unindexed.binary_search(&policy.id).is_ok(),
+                    "unindexed policy {} missing",
+                    policy.id
+                ),
+            }
+        }
+    }
+
+    /// Compare the indexed query with the brute-force rule at every point.
+    fn assert_matches_brute_force(store: &DistrictPolicyStore, points: &[[f32; 2]]) {
+        assert_index_consistent(store);
+        for &point in points {
+            assert_eq!(
+                store.policy_at(point).map(|policy| policy.id),
+                brute_force_id(store, point),
+                "point {point:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn indexed_lookup_matches_brute_force_scan() {
+        let mut rng = TestRng::new(0x5eed_1234);
+        let mut store = DistrictPolicyStore::new(2026);
+        for index in 0..64 {
+            let request = request(
+                &format!("District {index}"),
+                rng.range(-900.0, 900.0),
+                rng.range(-900.0, 900.0),
+                rng.range(16.0, 480.0),
+            );
+            store.create(&request).expect("create");
+        }
+
+        let mut points = vec![
+            [0.0, 0.0],
+            [512.0, 0.0],
+            [-512.0, 512.0],
+            [0.0, -1024.0],
+            [6000.0, -6000.0],
+            [-1_000_000.0, 1_000_000.0],
+            [1_000_000.5, 0.0],
+        ];
+        for policy in store.list() {
+            points.push(policy.center);
+            points.push([policy.center[0] + policy.radius_m, policy.center[1]]);
+            points.push([policy.center[0] - policy.radius_m, policy.center[1]]);
+            points.push([policy.center[0], policy.center[1] + policy.radius_m]);
+            points.push([policy.center[0], policy.center[1] - policy.radius_m]);
+            points.push([policy.center[0] + policy.radius_m + 0.25, policy.center[1]]);
+        }
+        for _ in 0..2_000 {
+            points.push([rng.range(-1_300.0, 1_300.0), rng.range(-1_300.0, 1_300.0)]);
+        }
+
+        assert_matches_brute_force(&store, &points);
+    }
+
+    #[test]
+    fn smallest_id_wins_after_inserting_a_smaller_id_and_removing_the_smallest() {
+        let mut store = DistrictPolicyStore::new(2026);
+        let outer = store
+            .create(&request("Outer", 0.0, 0.0, 400.0))
+            .expect("outer");
+        let inner = store
+            .create(&request("Inner", 0.0, 0.0, 100.0))
+            .expect("inner");
+        assert_eq!((outer.id, inner.id), (1, 2));
+        assert_eq!(store.policy_at([0.0, 0.0]).map(|policy| policy.id), Some(1));
+
+        // A smaller id can only arrive through an import or direct map write,
+        // not through `create`; the index must still order it first.
+        store.policies.insert(0, placement_policy(0, true, &[]));
+        store.rebuild_index();
+        assert_eq!(store.policy_at([0.0, 0.0]).map(|policy| policy.id), Some(0));
+        assert_matches_brute_force(
+            &store,
+            &[
+                [0.0, 0.0],
+                [0.0, 64.0],
+                [0.0, 65.0],
+                [0.0, 400.0],
+                [0.0, 401.0],
+            ],
+        );
+
+        // Removing the current smallest promotes the next id.
+        assert!(store.remove(0));
+        assert_eq!(store.policy_at([0.0, 0.0]).map(|policy| policy.id), Some(1));
+        assert!(store.remove(1));
+        assert_eq!(store.policy_at([0.0, 0.0]).map(|policy| policy.id), Some(2));
+
+        // Moving the remaining circle away removes it from the old buckets.
+        store
+            .update(2, &request("Moved", 5_000.0, 5_000.0, 64.0))
+            .expect("update");
+        assert!(store.policy_at([0.0, 0.0]).is_none());
+        assert_eq!(
+            store.policy_at([5_000.0, 5_000.0]).map(|policy| policy.id),
+            Some(2)
+        );
+        assert_index_consistent(&store);
+    }
+
+    #[test]
+    fn mutations_keep_the_index_consistent() {
+        let mut rng = TestRng::new(7);
+        let mut store = DistrictPolicyStore::new(2026);
+        let mut probes = vec![
+            [0.0, 0.0],
+            [512.0, 0.0],
+            [-512.0, -512.0],
+            [1024.0, 512.0],
+            [2500.0, -2500.0],
+        ];
+        for index in 0..40 {
+            let request = request(
+                &format!("District {index}"),
+                rng.range(-1_500.0, 1_500.0),
+                rng.range(-1_500.0, 1_500.0),
+                rng.range(16.0, 400.0),
+            );
+            let policy = store.create(&request).expect("create");
+            probes.push(policy.center);
+        }
+        assert_matches_brute_force(&store, &probes);
+
+        for id in 1..=10 {
+            let request = request(
+                &format!("Updated {id}"),
+                rng.range(-2_000.0, 2_000.0),
+                rng.range(-2_000.0, 2_000.0),
+                rng.range(16.0, 700.0),
+            );
+            let policy = store.update(id, &request).expect("update");
+            probes.push(policy.center);
+        }
+        assert_matches_brute_force(&store, &probes);
+
+        for id in (1..=40).step_by(3) {
+            assert!(store.remove(id), "remove {id}");
+        }
+        assert_matches_brute_force(&store, &probes);
+
+        store.clear();
+        assert!(store.is_empty());
+        assert!(store.index.cells.is_empty());
+        assert!(store.index.unindexed.is_empty());
+        for point in probes {
+            assert!(store.policy_at(point).is_none());
+        }
+    }
+
+    #[test]
+    fn json_round_trip_rebuilds_the_index_and_preserves_checksum() {
+        let mut store = DistrictPolicyStore::new(2026);
+        store
+            .create(&request("Outer", 0.0, 0.0, 400.0))
+            .expect("outer");
+        store
+            .create(&request("Inner", -700.0, 300.0, 64.0))
+            .expect("inner");
+        store
+            .create(&request("Far", 3_000.0, -3_000.0, 1_024.0))
+            .expect("far");
+        let checksum = store.checksum();
+        let json = store.to_json_pretty().expect("json");
+        assert!(
+            !json.contains("\"index\""),
+            "the derived index must not be serialized"
+        );
+        let value: serde_json::Value = serde_json::from_str(&json).expect("value");
+        let object = value.as_object().expect("store object");
+        assert_eq!(
+            object.len(),
+            4,
+            "the store must serialize exactly its four persisted fields"
+        );
+        for field in ["format_version", "seed", "next_id", "policies"] {
+            assert!(object.contains_key(field), "missing field {field}");
+        }
+
+        let loaded = DistrictPolicyStore::from_json(&json).expect("load");
+        assert_eq!(loaded, store);
+        assert_eq!(loaded.checksum(), checksum);
+        assert_eq!(loaded.to_json_pretty().expect("json"), json);
+        assert_matches_brute_force(&loaded, &[[0.0, 0.0], [-700.0, 300.0], [3_000.0, -3_000.0]]);
+
+        // The bridge loads through `serde_json::from_value`, not `from_json`.
+        let value: serde_json::Value = serde_json::from_str(&json).expect("value");
+        let via_value: DistrictPolicyStore = serde_json::from_value(value).expect("from value");
+        assert_eq!(via_value, store);
+        assert_eq!(via_value.checksum(), checksum);
+        assert_eq!(
+            via_value.policy_at([0.0, 0.0]).map(|policy| policy.id),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn empty_and_single_policy_fast_paths_are_exact() {
+        let empty = DistrictPolicyStore::new(2026);
+        assert!(empty.policy_at([0.0, 0.0]).is_none());
+        assert!(empty.policy_at([f32::NAN, 0.0]).is_none());
+        assert!(empty.index.cells.is_empty());
+        assert!(empty.index.unindexed.is_empty());
+
+        let (mut store, policy) = store_with_one();
+        assert_eq!(
+            store.policy_at([100.0, 100.0]).map(|policy| policy.id),
+            Some(1)
+        );
+        // The radius itself is inclusive, including at the bucket edge.
+        assert_eq!(
+            store.policy_at([164.0, 100.0]).map(|policy| policy.id),
+            Some(1)
+        );
+        assert!(store.policy_at([164.001, 100.0]).is_none());
+        assert!(store.policy_at([-100.0, -100.0]).is_none());
+
+        store
+            .update(policy.id, &request("Moved", -300.0, 250.0, 32.0))
+            .expect("update");
+        assert!(store.policy_at([100.0, 100.0]).is_none());
+        assert_eq!(
+            store.policy_at([-300.0, 250.0]).map(|policy| policy.id),
+            Some(1)
+        );
+        assert_index_consistent(&store);
+    }
+
+    #[test]
+    fn circles_on_bucket_edges_are_found() {
+        let mut store = DistrictPolicyStore::new(2026);
+        let edge = store
+            .create(&request("Edge", 0.0, 0.0, POLICY_INDEX_CELL_M as f32))
+            .expect("edge");
+        assert_eq!(
+            store.policy_at([512.0, 0.0]).map(|policy| policy.id),
+            Some(edge.id)
+        );
+        assert_eq!(
+            store.policy_at([511.999, 0.0]).map(|policy| policy.id),
+            Some(edge.id)
+        );
+        assert!(store.policy_at([512.001, 0.0]).is_none());
+        assert_eq!(
+            store.policy_at([0.0, -512.0]).map(|policy| policy.id),
+            Some(edge.id)
+        );
+
+        // A circle straddling the 1024 m bucket edge must be listed in both.
+        let straddle = store
+            .create(&request("Straddle", 1_000.0, 0.0, 40.0))
+            .expect("straddle");
+        for x in [960.0, 1_000.0, 1_024.0, 1_040.0] {
+            assert_eq!(
+                store.policy_at([x, 0.0]).map(|policy| policy.id),
+                Some(straddle.id),
+                "x {x}"
+            );
+        }
+        assert!(store.policy_at([1_040.001, 0.0]).is_none());
+        assert_matches_brute_force(
+            &store,
+            &[[512.0, 0.0], [1_024.0, 0.0], [1_040.0, 0.0], [1_041.0, 0.0]],
+        );
+    }
+
+    #[test]
+    fn non_finite_points_and_geometry_keep_scan_semantics() {
+        let mut store = DistrictPolicyStore::new(2026);
+        store
+            .create(&request("Normal", 0.0, 0.0, 64.0))
+            .expect("normal");
+
+        for point in [
+            [f32::NAN, 0.0],
+            [0.0, f32::INFINITY],
+            [f32::NEG_INFINITY, f32::NAN],
+        ] {
+            assert!(store.policy_at(point).is_none(), "point {point:?}");
+        }
+
+        // Records that cannot be bucketed are still tested, in id order.
+        let mut infinite_radius = placement_policy(50, true, &[]);
+        infinite_radius.center = [10_000.0, 10_000.0];
+        infinite_radius.radius_m = f32::INFINITY;
+        store.policies.insert(50, infinite_radius);
+
+        let mut nan_radius = placement_policy(51, true, &[]);
+        nan_radius.center = [30_000.0, 30_000.0];
+        nan_radius.radius_m = f32::NAN;
+        store.policies.insert(51, nan_radius);
+
+        let mut infinite_center = placement_policy(52, true, &[]);
+        infinite_center.center = [f32::INFINITY, 0.0];
+        infinite_center.radius_m = f32::INFINITY;
+        store.policies.insert(52, infinite_center);
+
+        let mut negative_radius = placement_policy(53, true, &[]);
+        negative_radius.center = [-30_000.0, -30_000.0];
+        negative_radius.radius_m = -64.0;
+        store.policies.insert(53, negative_radius);
+        store.rebuild_index();
+
+        assert_eq!(store.index.unindexed, vec![50, 51, 52, 53]);
+        assert_eq!(store.policy_at([0.0, 0.0]).map(|policy| policy.id), Some(1));
+        assert_eq!(
+            store
+                .policy_at([10_000.0, 10_000.0])
+                .map(|policy| policy.id),
+            Some(50)
+        );
+        assert_eq!(
+            store
+                .policy_at([30_000.0, 30_000.0])
+                .map(|policy| policy.id),
+            Some(50)
+        );
+        // id 50's infinite radius contains every finite point, so it wins
+        // until it is removed.
+        assert_eq!(
+            store
+                .policy_at([-30_000.0, -30_000.0])
+                .map(|policy| policy.id),
+            Some(50)
+        );
+        assert_matches_brute_force(
+            &store,
+            &[
+                [0.0, 0.0],
+                [10_000.0, 10_000.0],
+                [30_000.0, 30_000.0],
+                [-30_000.0, -30_000.0],
+                [1_000_000.0, -1_000_000.0],
+            ],
+        );
+
+        // Removing the smallest catch-all exposes the next unindexed id.
+        assert!(store.remove(50));
+        assert_eq!(
+            store
+                .policy_at([30_000.0, 30_000.0])
+                .map(|policy| policy.id),
+            Some(52)
+        );
+        assert_matches_brute_force(&store, &[[10_000.0, 10_000.0], [30_000.0, 30_000.0]]);
+
+        // With both infinite-radius records gone, the negative-radius record
+        // still behaves like its absolute radius.
+        assert!(store.remove(52));
+        assert_eq!(
+            store
+                .policy_at([-30_000.0, -30_000.0])
+                .map(|policy| policy.id),
+            Some(53)
+        );
+        assert_matches_brute_force(&store, &[[-30_000.0, -30_000.0], [30_000.0, 30_000.0]]);
+    }
+
+    #[test]
+    fn full_registry_matches_brute_force() {
+        let mut rng = TestRng::new(12_345);
+        let mut store = DistrictPolicyStore::new(2026);
+        for index in 0..MAX_DISTRICT_POLICIES {
+            let request = request(
+                &format!("District {index}"),
+                rng.range(-20_000.0, 20_000.0),
+                rng.range(-20_000.0, 20_000.0),
+                rng.range(16.0, 900.0),
+            );
+            store.create(&request).expect("create");
+        }
+        assert_eq!(store.count(), MAX_DISTRICT_POLICIES);
+
+        let mut points: Vec<[f32; 2]> = (0..256)
+            .map(|_| {
+                [
+                    rng.range(-25_000.0, 25_000.0),
+                    rng.range(-25_000.0, 25_000.0),
+                ]
+            })
+            .collect();
+        for id in [1, 2_048, MAX_DISTRICT_POLICIES as u64] {
+            let policy = store.get(id).expect("policy");
+            points.push(policy.center);
+            points.push([policy.center[0] + policy.radius_m, policy.center[1]]);
+        }
+        points.push([1_000_000.0, -1_000_000.0]);
+
+        assert_matches_brute_force(&store, &points);
     }
 
     #[test]

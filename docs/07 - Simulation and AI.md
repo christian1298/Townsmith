@@ -132,6 +132,8 @@ A city of 1M people does not need to know that citizen #481,222 is 3% hungrier t
 > | Blueprint allowlist | at most 256 entries matching `^[a-z0-9_]+:[a-z0-9_./-]+$` |
 >
 > Circles include their radius. Overlaps are allowed and reported by a query helper rather than rejected; `policy_at(point)` deterministically returns the smallest containing id. Format v1 JSON validates the version, seed, `next_id`, record ids, and every field, and carries an FNV-1a checksum for bridge payloads and regression tests. The bridge world save persists the registry as an optional `policies` object (see [[42 - World Placement Bridge]]); overlap priority beyond smallest-id still needs a later ADR.
+>
+> **Query cost:** point queries use a derived 512 m XZ grid index, so `policy_at`/`effect_at` test only the policies whose circle bounding box covers the query bucket — not all 4,096 — while still resolving in ascending id order. The index is not serialized, adds no save field, and does not change the save or checksum; it is rebuilt on every registry mutation and on load. The 4,096-policy cap and the smallest-id overlap rule are unchanged.
 
 > [!info] District policy effects (derived)
 > `core_city::policy_effect` adds a **derived** layer over the registry. `DistrictPolicyStore::effective_policy(point)` names the policy that applies at an XZ point; `effect_at(point, base_resident, base_business)` resolves it into a `DistrictPolicyEffect`. The effect carries the policy id and name, `tax_multiplier`, `service_funding`, `construction_allowed`, a copy of the blueprint allowlist, the clamped base rates, and the two scaled per-day rates.
