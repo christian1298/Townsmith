@@ -116,7 +116,7 @@ blake3:9f5bcd407d25c5b5204315c873faa1321dfb5dd969c9a22d2322f7502f95a070
 
 ## 6. Local blueprint library
 
-`core_blueprint::BlueprintLibrary` stores validated packages in an explicit absolute local directory. **The world save still stores absolute package paths**; the opt-in bridge save/load (§6.5) can travel with a library beside the save, but does not add a reference field to the JSON.
+`core_blueprint::BlueprintLibrary` stores validated packages in an explicit absolute local directory. **The world save keeps the recorded absolute `blueprint_path`** and can additionally carry an optional content-addressed `blueprint_ref` (`tsbp:blake3:<64hex>`) when written by the opt-in bridge save (§6.5). Legacy records omit the field and stay byte-identical.
 
 ### 6.1 Layout and addressing
 
@@ -158,7 +158,7 @@ Hard-link publication requires a filesystem that supports hard links on the same
 
 - No discovery, download, ZIP/Workshop packaging, script/native execution, or hot reload.
 - The library is not opened by `save_tsbp`/`load_tsbp`; existing package hashes and behavior are unchanged.
-- No save reference field and no placement-path migration. The opt-in bridge integration in §6.5 copies packages but leaves `blueprint_path` absolute in the JSON.
+- No automatic placement-path migration: a reference is added only by `world_save_with_library`, and `blueprint_path` stays in the JSON as a fallback. No discovery, root inference, or rewriting of an existing save.
 
 ### 6.5 Portable world save
 
@@ -175,11 +175,11 @@ saves/
         └── d0f1a9...0095.tsbp
 ```
 
-- `world_save_with_library(path, library_root)` opens and validates the root, loads every unique placement package, and checks its content hash and metadata against every placement record **before** copying anything. It then inserts each unique package by content hash and finally writes exactly the same v1 JSON as `world_save`. `blueprint_path` remains the recorded absolute path, so the save JSON, placement checksum, and world checksum do not change.
-- The result adds `blueprint_packages` (unique hashes), `blueprint_packages_inserted` (new copies), `blueprint_packages_existing` (identical copies already stored), and `blueprint_library_packages` (total library count after the copy).
-- `world_load_with_library(path, expected_seed, library_root)` has the same validation and replacement semantics as `world_load`. It first tries each recorded `blueprint_path`. If that package is missing, invalid, or its path is invalid, it resolves `blueprint_hash` through the library, then fully revalidates the stored package (format, hash, bounds, solid count, metadata). It never trusts a library entry without those checks and never rewrites the save JSON. A successful portable load also exposes the library path as bridge-only `resolved_blueprint_path` on the matching `world_placements()` entries, so the world scene can render and select the building with the original package files gone. The recorded `blueprint_path` stays unchanged, and the field is not saved.
-- `world_load(path, expected_seed)` is unchanged and still reports `missing_blueprint` when a recorded package is gone, so the portable path is opt-in.
-- No auto-download, network access, server protocol change, or save schema change is involved.
+- `world_save_with_library(path, library_root)` opens and validates the root, loads every unique placement package (including a record whose recorded path is missing but whose `blueprint_ref` resolves in the library), and checks its content hash and metadata against every placement record **before** copying anything. It then inserts each unique package by content hash and writes the v1 JSON. On the saved clone each record gains `blueprint_ref = "tsbp:" + blueprint_hash`; `blueprint_path` remains the recorded absolute path as a legacy fallback. The library root never enters the save JSON. The live store commits the stamped clone only after a durable write, so a later plain `world_save` keeps the references. A failed save writes no save and changes no live store.
+- The result adds `blueprint_packages` (unique hashes), `blueprint_packages_inserted` (new copies), `blueprint_packages_existing` (identical copies already stored), `blueprint_library_packages` (total library count after the copy), and `blueprint_references` (saved records carrying a reference).
+- `world_load_with_library(path, expected_seed, library_root)` has the same validation and replacement semantics as `world_load`. Resolution per placement is reference-first: a `blueprint_ref` must parse as `tsbp:blake3:<64 lowercase hex>` matching the recorded hash and resolve in the library; otherwise the recorded `blueprint_path` is used (legacy); otherwise the library is tried by `blueprint_hash`. A reference is never treated as a path. Without a library, a working recorded path is used and a failed one reports `blueprint_reference_requires_library`. A reference that resolves to a missing, invalid, or hash/metadata-mismatched package fails closed instead of falling back to a different path. The stored package is fully revalidated (format, hash, bounds, solid count, metadata), the save JSON is never rewritten, and the result adds `resolved_references` and `legacy_path_fallbacks`. A successful portable load also exposes the library path as bridge-only `resolved_blueprint_path` on the matching `world_placements()` entries, so the world scene can render and select the building with the original package files gone. The recorded `blueprint_path` and `blueprint_ref` stay unchanged and are not rewritten.
+- `world_load(path, expected_seed)` is unchanged for a legacy record and still reports `missing_blueprint` when its recorded package is gone. A record with a reference reports `blueprint_reference_requires_library` when no library is configured and its path fails, so the portable path is opt-in.
+- No auto-download, network access, server protocol change, or format-version bump is involved.
 
 Stable bridge error codes:
 
@@ -189,6 +189,8 @@ Stable bridge error codes:
 | Root does not exist | `blueprint_library_root_missing` |
 | Root exists but is not a directory | `blueprint_library_not_a_directory` |
 | Package path is empty, relative, traversing, or not `.tsbp` | `invalid_blueprint_path` |
+| A malformed or mismatched `blueprint_ref` in the save | `invalid_record` (store validation) |
+| A reference needs a library but none is configured and the path failed | `blueprint_reference_requires_library` |
 | Recorded package is missing and the hash is absent from the library | `blueprint_library_missing_file` |
 | Library entry is unreadable or fails package validation | `blueprint_library_invalid_package` |
 | Package content hash differs from the record | `blueprint_hash_mismatch` |
@@ -253,12 +255,12 @@ The bridge-side portable save tests (unique-package copy, repeat-save dedup, del
 - Material keys are provisional until the content registry.
 - No mod/resource-pack resolver yet.
 - No savegame-format migration yet; `format_version` is the hook.
-- The world save still stores absolute `blueprint_path` values. The opt-in `world_save_with_library` / `world_load_with_library` bridge path can travel with a sidecar library, but the JSON has no library reference field and no automatic root discovery. A portable load makes the resolved packages renderable through bridge-only `resolved_blueprint_path`; the JSON is not rewritten and the recorded path remains authoritative for the next plain load.
+- The world save still stores absolute `blueprint_path` values alongside an optional content-addressed `blueprint_ref`. The opt-in `world_save_with_library` / `world_load_with_library` bridge path travels with a sidecar library; the root is explicit and never saved or discovered. A portable load makes resolved packages renderable through bridge-only `resolved_blueprint_path`; the JSON is not rewritten. A plain load can use the reference only when a library is configured, and the recorded path remains the legacy fallback.
 - The server library is pre-seeded and read-only at serve time. There is no package upload, remote fetch, content manifest negotiation, or mod auto-download; the server cannot resolve a package the operator did not install. The server save records the stable content-addressed reference `tsbp:blake3:<hex>` in its placement records, not the resolved library path.
 
 ## 10. Next
 
-1. Add an optional content-addressed library reference to the placement record, resolving through `BlueprintLibrary` and keeping legacy absolute paths loadable (the bridge-side copy/resolve path in §6.5 is the compatibility layer; the server-side hash-only wire is in §6.6).
+1. Add automatic library-root discovery beside a portable save and migrate `blueprint_path` to a presentation-only hint once every bridge and server consumer resolves references; the reference field and reference-first load are implemented in §6.5.
 2. Room detection + stats to fill `rooms`, `materials`, and `stats`.
 3. Thumbnail rendering at save time.
 4. Content registry keys and dependency resolution.

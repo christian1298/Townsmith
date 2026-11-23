@@ -54,6 +54,7 @@ Read the docs that match your task. The index in `00 - Start Here` has a reading
 - Basements/sub-ground floors: cellars and utility basements at launch, underground parking later; separate depth limits; no material minimum height (D-025, accepted).
 - Authoring: workshop/creative editor first; build-anywhere placement; permissioned live editing later (D-026, accepted).
 - Blueprint package: `.tsbp` v1 zip + JSON + RLE voxels + BLAKE3 hash (D-027, accepted).
+- Bridge placement records may carry an optional `tsbp:blake3:<64hex>` library reference; `world_save_with_library` stamps it and `world_load_with_library` resolves reference-first, keeping `blueprint_path` as the legacy fallback and leaving plain saves byte-identical.
 - Construction is billed in phase installments; unaffordable work stalls (D-028, proposed).
 - Construction uses a mode-selected clock; campaign builds take game days (D-029, proposed).
 - District policy tax multipliers weight city tax income by home and workplace (D-030, proposed).

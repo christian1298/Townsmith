@@ -3286,6 +3286,7 @@ mod tests {
             blueprint_id: format!("local:interest_{id}"),
             blueprint_hash: format!("blake3:{id:064x}"),
             blueprint_path: format!("tsbp:blake3:{id:064x}"),
+            blueprint_ref: None,
             name: format!("Interest House {id}"),
             center: [x, 40.0, z],
             rotation_deg: 0,

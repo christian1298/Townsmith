@@ -467,6 +467,7 @@ mod tests {
             blueprint_id: format!("local:test_{id}"),
             blueprint_hash: "blake3:test".to_string(),
             blueprint_path: format!("/tmp/test_{id}.tsbp"),
+            blueprint_ref: None,
             name: format!("Test {id}"),
             center,
             rotation_deg: 0,

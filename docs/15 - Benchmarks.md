@@ -361,6 +361,8 @@ SERVER_PLACEMENT placed=1 duplicate=1 policy=1 funds=1 overlap=1 save=1 reload=1
 
 Pin the seven booleans and the 16-hex checksum `d26569ec3dc6b464`. The checksum is root-independent: the authoritative placement record stores the content-addressed reference `tsbp:blake3:<hex>`, not the resolved library path, so two runs in different temp library roots report the same hex. The save JSON and wire message contain no `/tmp`, `/media`, or library-root path.
 
+The bridge-side portable-save pin is tracked in [[42 - World Placement Bridge]] (`WORLD_LIBRARY ... checksum=31cc92cee8fc7624`). It moved from `08c0f111ef5e72d6` when `world_save_with_library` began stamping `blueprint_ref` on the saved records; the legacy plain `world_save` checksum is unchanged.
+
 #### 3D client placement smoke (D-032)
 
 ```bash
