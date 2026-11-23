@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use core_sim::{Cohort, CohortSimulation};
 use townsmith_server::listen::{run_listen, run_save_load_smoke, ListenConfig};
-use townsmith_server::placement::run_placement_smoke;
+use townsmith_server::placement::{run_placement_smoke, write_placement_fixture};
 use townsmith_server::protocol::{run_loopback_smoke, LOOPBACK_SEED};
 use townsmith_server::save::LoadedWorld;
 use townsmith_server::vote::run_time_vote_loopback;
@@ -215,6 +215,18 @@ fn main() {
             Err(error) => {
                 eprintln!("SERVER_PLACEMENT status=error error={error}");
                 std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if let Some(root) = arg_value("--placement-fixture") {
+        let path = PathBuf::from(&root);
+        match write_placement_fixture(&path) {
+            Ok(hash) => println!("SERVER_PLACEMENT_FIXTURE hash={hash} status=ok"),
+            Err(error) => {
+                eprintln!("SERVER_PLACEMENT_FIXTURE status=error error={error}");
+                std::process::exit(2);
             }
         }
         return;

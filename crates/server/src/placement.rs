@@ -31,6 +31,12 @@ pub const PLACEMENT_SMOKE_BLUEPRINT_ID: &str = "local:server_smoke_house";
 /// Blueprint material cost used by the deterministic placement smoke.
 pub const PLACEMENT_SMOKE_COST: f64 = 1_000.0;
 
+/// Blueprint id used by the 3D client placement fixture.
+pub const CLIENT_FIXTURE_BLUEPRINT_ID: &str = "local:client_smoke_house";
+
+/// Blueprint material cost used by the 3D client placement fixture.
+pub const CLIENT_FIXTURE_COST: f64 = 1_000.0;
+
 /// Centre of the accepted smoke placement.
 pub const PLACEMENT_SMOKE_CENTER: [f64; 2] = [0.0, 0.0];
 
@@ -123,6 +129,59 @@ fn placement_result(message: &ServerMessage) -> Option<(u64, String)> {
         } => Some((*placement_id, world_checksum.clone())),
         _ => None,
     }
+}
+
+/// Write the 3D client placement fixture into `root` and return its canonical
+/// `blake3:<hex>` content hash.
+///
+/// The fixture is a deliberately visible 32 × 16 × 32-voxel solid in a
+/// 32 × 32 × 32-voxel volume (3.2 m bounds): a remote client renders its
+/// authoritative footprint and bounds instead of a single-voxel speck. It has
+/// id [`CLIENT_FIXTURE_BLUEPRINT_ID`], material cost [`CLIENT_FIXTURE_COST`],
+/// capacity 2, one job slot, and no declared structure, so it is not age-gated.
+///
+/// `root` must be an absolute directory. The directory is created when
+/// missing, the package is written beside the library shard, and the validated
+/// bytes are inserted under their content hash. A repeat is a no-op and
+/// returns the same hash.
+///
+/// # Errors
+///
+/// Returns a human-readable message for a relative root, a filesystem error, a
+/// failed package save, or a rejected library insert.
+pub fn write_placement_fixture(root: &Path) -> Result<String, String> {
+    if !root.is_absolute() {
+        return Err(format!(
+            "fixture root must be an absolute path, got `{}`",
+            root.display()
+        ));
+    }
+    fs::create_dir_all(root)
+        .map_err(|error| format!("create fixture root {}: {error}", root.display()))?;
+
+    let mut volume = VoxelVolume::new(
+        VolumeConfig::new(1, 1, 1).map_err(|error| format!("volume config: {error}"))?,
+    )
+    .map_err(|error| format!("volume: {error}"))?;
+    volume
+        .fill_box(VolumePos::new(0, 0, 0), VolumePos::new(32, 16, 32), 1)
+        .map_err(|error| format!("fill: {error}"))?;
+
+    let mut metadata = BlueprintMetadata::new(CLIENT_FIXTURE_BLUEPRINT_ID, "Client Smoke House");
+    metadata.stats.resident_capacity = 2;
+    metadata.stats.job_slots = 1;
+    metadata.stats.material_cost = CLIENT_FIXTURE_COST;
+    metadata.structure = None;
+    let blueprint = core_blueprint::Blueprint::new(metadata, volume);
+
+    let package = root.join("client_smoke_house.tsbp");
+    let hash = save_tsbp_with_hash(&package, &blueprint)
+        .map_err(|error| format!("save package: {error}"))?;
+    let library = BlueprintLibrary::new(root).map_err(|error| format!("open library: {error}"))?;
+    library
+        .insert_file(&package)
+        .map_err(|error| format!("insert package: {error}"))?;
+    Ok(hash)
 }
 
 /// Write the tiny smoke package and insert it into `library_root`.
@@ -376,5 +435,32 @@ mod tests {
         // The record stores a content-addressed reference, so two runs in
         // different temp library roots report the identical checksum.
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn client_placement_fixture_is_deterministic_and_valid() {
+        let first_dir = TempDir::new("client-fixture-a").expect("first temp dir");
+        let second_dir = TempDir::new("client-fixture-b").expect("second temp dir");
+        let first = write_placement_fixture(first_dir.path()).expect("first fixture");
+        let second = write_placement_fixture(second_dir.path()).expect("second fixture");
+        assert_eq!(first, second);
+        assert!(first.starts_with("blake3:"));
+        let hex = first.strip_prefix("blake3:").expect("canonical prefix");
+        assert_eq!(hex.len(), 64);
+        assert!(hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+
+        let library = BlueprintLibrary::new(first_dir.path()).expect("open library");
+        let path = library.resolve(&first).expect("fixture is stored");
+        let blueprint = core_blueprint::load_tsbp(&path).expect("load fixture");
+        assert_eq!(blueprint.metadata.id, CLIENT_FIXTURE_BLUEPRINT_ID);
+        assert_eq!(blueprint.metadata.content_hash, first);
+        assert_eq!(blueprint.metadata.stats.resident_capacity, 2);
+        assert_eq!(blueprint.metadata.stats.job_slots, 1);
+        assert_eq!(blueprint.metadata.stats.material_cost, CLIENT_FIXTURE_COST);
+        assert!(blueprint.metadata.structure.is_none());
+        assert_eq!(blueprint.metadata.bounds_m, [3.2, 3.2, 3.2]);
+        assert_eq!(blueprint.metadata.solid_voxels, 32 * 16 * 32);
     }
 }

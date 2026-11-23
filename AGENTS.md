@@ -328,11 +328,15 @@ cargo run --release -p townsmith-server -- --vote-smoke   # 7-connection D-021 v
 # D-032 authoritative blueprint placement (temp library, policy, charge, save/load)
 cargo run --release -p townsmith-server -- --placement-smoke
 # Prints SERVER_PLACEMENT placed=1 duplicate=1 policy=1 funds=1 overlap=1 save=1 reload=1 checksum=<hex> status=ok
+# Write/insert the 3D client fixture package into an absolute content-addressed library
+cargo run --release -p townsmith-server -- --placement-fixture /abs/client-library
+# Prints SERVER_PLACEMENT_FIXTURE hash=blake3:<64 hex> status=ok
 # Listen with an operator-supplied placement configuration (both optional; no upload/fetch)
 cargo run --release -p townsmith-server -- --listen 47015 --blueprint-library /abs/blueprints --policies /abs/policies.json
 GODOT=/path/to/godot ./scripts/smoke_interest_preview.sh   # headless 3D interest-view road preview, two runs, same checksum
 GODOT=/path/to/godot ./scripts/smoke_mp_client.sh   # normal path (frames 7/8) + reconnect resume via --sessions 2
 GODOT=/path/to/godot ./scripts/smoke_mp_world_client.sh   # loopback server -> 3D world client; two fresh runs, identical checksums
+GODOT=/path/to/godot ./scripts/smoke_mp_placement.sh   # 3D client sends place_blueprint; two runs, placement/world checksum pins
 GODOT=/path/to/godot ./scripts/smoke_movement_stress.sh
 GODOT=/path/to/godot "${GODOT:-godot}" --headless --path godot res://movement_stress.tscn -- --agents 2000
 
