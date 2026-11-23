@@ -17,9 +17,9 @@
 #
 # Default success prints one line per table plus a summary:
 #   LOCALE_CHECK file=godot/editor_i18n.gd keys=111 min=111 status=ok
-#   LOCALE_CHECK file=godot/world_i18n.gd keys=252 min=252 status=ok
+#   LOCALE_CHECK file=godot/world_i18n.gd keys=259 min=259 status=ok
 #   LOCALE_CHECK file=godot/content_i18n.gd keys=34 min=34 status=ok
-#   LOCALE_CHECK editor=111 world=252 content=34 status=ok
+#   LOCALE_CHECK editor=111 world=259 content=34 status=ok
 #
 # Single-file success keeps the original contract:
 #   LOCALE_CHECK keys=111 status=ok
@@ -34,7 +34,7 @@ EDITOR_FILE="$ROOT/godot/editor_i18n.gd"
 WORLD_FILE="$ROOT/godot/world_i18n.gd"
 CONTENT_FILE="$ROOT/godot/content_i18n.gd"
 EDITOR_MIN_KEYS=111
-WORLD_MIN_KEYS=252
+WORLD_MIN_KEYS=259
 CONTENT_MIN_KEYS=34
 LOCALES=(en de)
 
