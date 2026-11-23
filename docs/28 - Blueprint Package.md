@@ -116,7 +116,7 @@ blake3:9f5bcd407d25c5b5204315c873faa1321dfb5dd969c9a22d2322f7502f95a070
 
 ## 6. Local blueprint library
 
-`core_blueprint::BlueprintLibrary` stores validated packages in an explicit absolute local directory. It is the foundation for portable save references, but **the world save still stores absolute package paths**; wiring references into the save is the next slice.
+`core_blueprint::BlueprintLibrary` stores validated packages in an explicit absolute local directory. **The world save still stores absolute package paths**; the opt-in bridge save/load (§6.5) can travel with a library beside the save, but does not add a reference field to the JSON.
 
 ### 6.1 Layout and addressing
 
@@ -158,7 +158,44 @@ Hard-link publication requires a filesystem that supports hard links on the same
 
 - No discovery, download, ZIP/Workshop packaging, script/native execution, or hot reload.
 - The library is not opened by `save_tsbp`/`load_tsbp`; existing package hashes and behavior are unchanged.
-- No save reference field, no placement-path migration, and no bridge placement uses the library yet.
+- No save reference field and no placement-path migration. The opt-in bridge integration in §6.5 copies packages but leaves `blueprint_path` absolute in the JSON.
+
+### 6.5 Portable world save
+
+The caller chooses a library directory next to the save. The convention is `<save directory>/blueprints`, but the bridge takes an explicit absolute root and does not derive it:
+
+```text
+saves/
+├── world.json
+├── world.json.bak
+└── blueprints/
+    ├── 9f/
+    │   └── 9f5bcd...a070.tsbp
+    └── d0/
+        └── d0f1a9...0095.tsbp
+```
+
+- `world_save_with_library(path, library_root)` opens and validates the root, loads every unique placement package, and checks its content hash and metadata against every placement record **before** copying anything. It then inserts each unique package by content hash and finally writes exactly the same v1 JSON as `world_save`. `blueprint_path` remains the recorded absolute path, so the save JSON, placement checksum, and world checksum do not change.
+- The result adds `blueprint_packages` (unique hashes), `blueprint_packages_inserted` (new copies), `blueprint_packages_existing` (identical copies already stored), and `blueprint_library_packages` (total library count after the copy).
+- `world_load_with_library(path, expected_seed, library_root)` has the same validation and replacement semantics as `world_load`. It first tries each recorded `blueprint_path`. If that package is missing, invalid, or its path is invalid, it resolves `blueprint_hash` through the library, then fully revalidates the stored package (format, hash, bounds, solid count, metadata). It never trusts a library entry without those checks and never rewrites the save JSON.
+- `world_load(path, expected_seed)` is unchanged and still reports `missing_blueprint` when a recorded package is gone, so the portable path is opt-in.
+- No auto-download, network access, server protocol change, or save schema change is involved.
+
+Stable bridge error codes:
+
+| Condition | Code |
+|---|---|
+| Root is relative, empty, or contains `.`/`..` | `invalid_blueprint_library_root` |
+| Root does not exist | `blueprint_library_root_missing` |
+| Root exists but is not a directory | `blueprint_library_not_a_directory` |
+| Package path is empty, relative, traversing, or not `.tsbp` | `invalid_blueprint_path` |
+| Recorded package is missing and the hash is absent from the library | `blueprint_library_missing_file` |
+| Library entry is unreadable or fails package validation | `blueprint_library_invalid_package` |
+| Package content hash differs from the record | `blueprint_hash_mismatch` |
+| Package id, name, bounds, capacity, jobs, or structure differs | `blueprint_metadata_mismatch` |
+| A different file is already stored under the same hash | `blueprint_library_collision` |
+
+A failed save-with-library validates all unique packages before the first insert, so a missing, corrupt, or mismatched source leaves the library unchanged; the save is not written. A failed load leaves placements, construction, population, and every other world store unchanged, as before.
 
 ## 7. API
 
@@ -189,6 +226,8 @@ let summary = library.summary()?;
 - crafted oversized volume and solid-count streams rejected before allocation;
 - library insert/resolve/list/summary determinism, duplicate no-op, collision rejection, size/traversal/symlink/missing-path errors, atomic insert, and unchanged existing package hashes.
 
+The bridge-side portable save tests (unique-package copy, repeat-save dedup, deleted-source resolution, and stable failure codes) are listed in [[42 - World Placement Bridge]] §7.
+
 ## 9. Limitations
 
 - No zstd/deflate yet; v1 uses zip `Stored`.
@@ -197,11 +236,11 @@ let summary = library.summary()?;
 - Material keys are provisional until the content registry.
 - No mod/resource-pack resolver yet.
 - No savegame-format migration yet; `format_version` is the hook.
-- The world save still stores absolute `blueprint_path` values. The local library is a storage foundation, not a save reference yet.
+- The world save still stores absolute `blueprint_path` values. The opt-in `world_save_with_library` / `world_load_with_library` bridge path can travel with a sidecar library, but the JSON has no library reference field and no automatic root discovery.
 
 ## 10. Next
 
-1. Wire placement records to a content-addressed library reference instead of an absolute path, resolving through `BlueprintLibrary` and keeping legacy absolute paths loadable.
+1. Add an optional content-addressed library reference to the placement record, resolving through `BlueprintLibrary` and keeping legacy absolute paths loadable (the bridge-side copy/resolve path in §6.5 is the compatibility layer).
 2. Room detection + stats to fill `rooms`, `materials`, and `stats`.
 3. Thumbnail rendering at save time.
 4. Content registry keys and dependency resolution.
