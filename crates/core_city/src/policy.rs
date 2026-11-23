@@ -7,8 +7,8 @@
 //!
 //! - [`policy_allows_placement`] and [`policy_placement_denial`] decide whether
 //!   a blueprint id may be placed under one policy. The bridge applies the
-//!   result to `world_place_blueprint`; no simulation or economy code reads a
-//!   policy yet;
+//!   result to `world_place_blueprint`; the treasury also reads `tax_multiplier`
+//!   (D-030) and `service_funding` (D-031);
 //! - no UI displays or edits a policy except the standalone developer scene;
 //! - [`DistrictPolicyStore`] can be composed into the world-save envelope as an
 //!   optional `policies` object; saving and loading persist the records, but
@@ -64,10 +64,11 @@ pub const MAX_DISTRICT_POLICY_ALLOWLIST: usize = 256;
 
 /// One saved district policy.
 ///
-/// Taxes and service funding remain inert data for later simulation and UI
-/// slices. [`construction_allowed`](Self::construction_allowed) and
+/// [`construction_allowed`](Self::construction_allowed) and
 /// [`blueprint_allowlist`](Self::blueprint_allowlist) are applied to blueprint
-/// placement by the bridge through [`policy_placement_denial`].
+/// placement by the bridge through [`policy_placement_denial`]. The treasury
+/// applies `tax_multiplier` to city income (D-030) and `service_funding` to
+/// civic service upkeep (D-031).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DistrictPolicy {
     /// Stable id within the world. Assigned by the store and immutable on
@@ -79,12 +80,13 @@ pub struct DistrictPolicy {
     pub center: [f32; 2],
     /// Inclusive circle radius in metres, `16..=4096`.
     pub radius_m: f32,
-    /// Tax multiplier, `0.25..=4.0`. Not applied yet.
+    /// Tax multiplier, `0.25..=4.0`. Applied to city tax income by D-030.
     pub tax_multiplier: f32,
-    /// Service-funding multiplier, `0.0..=2.0`. Not applied yet.
+    /// Service-funding multiplier, `0.0..=2.0`. Applied to civic service
+    /// upkeep by D-031.
     pub service_funding: f32,
     /// Whether construction is allowed inside the circle. Enforced for
-    /// blueprint placement by the bridge; taxes and funding stay data-only.
+    /// blueprint placement by the bridge.
     pub construction_allowed: bool,
     /// Namespaced blueprint ids allowed in the district. An empty set is
     /// unrestricted; a non-empty set denies every other id at blueprint

@@ -37,13 +37,14 @@ use core_city::{
     IndustryKind, IndustryStore, InfrastructureCosts, LifecycleTick, Lot, LotError, LotRequest,
     LotStore, MaterializationBudget, MaterializationSelection, MaterializedCitizen, MotionLeg,
     NamedCitizens, NamedSave, Placement, PlacementError, PlacementRequest, PlacementStore,
-    PolicyPlacementDenial, PolicyTaxWeights, ResearchStore, RoadError, RoadGraph, RoadRequest,
-    RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore,
-    ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree, Trade,
-    TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace,
-    Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY,
-    MAX_HEATMAP_CELLS, MAX_HEATMAP_CELL_M, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M,
-    MIN_HEATMAP_CELL_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    PolicyPlacementDenial, PolicyServiceWeight, PolicyTaxWeights, ResearchStore, RoadError,
+    RoadGraph, RoadRequest, RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind,
+    ServiceReport, ServiceStore, ServiceTier, Settlement, SettlementError, SettlementRequest,
+    SettlementStore, TechTree, Trade, TradePool, TutorialInput, UtilityConsumer, UtilityKind,
+    UtilityReport, UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY,
+    DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY, MAX_HEATMAP_CELLS, MAX_HEATMAP_CELL_M,
+    MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M, MIN_HEATMAP_CELL_M,
+    RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -3892,10 +3893,11 @@ impl TownsmithCore {
         let buildings = summary
             .get("completed_buildings")
             .map_or(0, |value| value.to::<i64>()) as u64;
-        // Resolve district tax weights before taking the economy lock. This
-        // block holds world -> construction -> policies -> population in the
-        // documented order and releases every store before the treasury lock.
-        let policy_weights = {
+        // Resolve district tax and service-funding weights before taking the
+        // economy lock. This block holds world -> construction -> policies ->
+        // population -> services in the documented order (services are read
+        // last and every store is released before the treasury lock).
+        let (policy_weights, policy_service_weight, service_sites, service_upkeep) = {
             let placements = self.world.lock().unwrap_or_else(|error| error.into_inner());
             let construction = self
                 .construction
@@ -3909,6 +3911,10 @@ impl TownsmithCore {
                 .population
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
+            let services = self
+                .services
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let (homes, workplaces) = match placements.as_ref() {
                 Some(placements) => (
                     completed_homes(placements, &construction)
@@ -3919,7 +3925,7 @@ impl TownsmithCore {
                 ),
                 None => (BTreeMap::new(), Vec::new()),
             };
-            match population_guard.as_ref() {
+            let policy_weights = match population_guard.as_ref() {
                 Some(runtime) => policy_tax_weights(
                     policies.as_ref(),
                     seed,
@@ -3930,12 +3936,34 @@ impl TownsmithCore {
                     &runtime.staffing,
                 ),
                 None => PolicyTaxWeights::ONE,
-            }
+            };
+            let policy_service_weight = policy_service_funding_weight(
+                policies.as_ref(),
+                seed,
+                placements.as_ref().map(|placements| placements.seed),
+                population_guard.as_ref().map(|runtime| runtime.seed),
+                services.as_ref(),
+            );
+            let (service_sites, service_upkeep) = services
+                .as_ref()
+                .filter(|services| services.seed == seed)
+                .map_or((0, 0.0), |services| {
+                    (
+                        services.site_count() as u64,
+                        services.total_upkeep_per_day(),
+                    )
+                });
+            (
+                policy_weights,
+                policy_service_weight,
+                service_sites,
+                service_upkeep,
+            )
         };
-        // Read the site counts and upkeep totals before taking the economy lock:
-        // the lock order is world -> ... -> economy -> utilities/services.
+        // Read the utility site count and upkeep total before taking the
+        // economy lock: the lock order is world -> ... -> economy ->
+        // utilities/services.
         let (utility_sites, utility_upkeep) = self.utility_infrastructure_for_seed(seed);
-        let (service_sites, service_upkeep) = self.service_infrastructure_for_seed(seed);
         let infrastructure = match InfrastructureCosts::new(utility_upkeep, service_upkeep) {
             Ok(costs) => costs,
             Err(error) => {
@@ -3953,13 +3981,14 @@ impl TownsmithCore {
             );
         }
         let economy = guard.get_or_insert_with(|| Economy::new(seed));
-        let tick = economy.tick_with_policy_taxes(
+        let tick = economy.tick_with_policy_weights(
             seconds,
             population,
             employed,
             buildings,
             infrastructure,
             policy_weights,
+            policy_service_weight,
         );
         let utility_payment_due = self.settle_utility_payments(seed, economy);
         let service_payment_due = self.settle_service_payments(seed, economy);
@@ -3974,6 +4003,10 @@ impl TownsmithCore {
         result.set("service_upkeep", infrastructure.service_per_day());
         result.set("policy_tax_multiplier_resident", policy_weights.resident());
         result.set("policy_tax_multiplier_business", policy_weights.business());
+        result.set(
+            "policy_service_funding_weight",
+            policy_service_weight.value(),
+        );
         result.set("balance", tick.balance);
         result.set("utility_payment_due", utility_payment_due);
         result.set("service_payment_due", service_payment_due);
@@ -8412,6 +8445,61 @@ fn weighted_tax_multiplier(
     }
     let average = weighted / weight;
     average.is_finite().then_some(average)
+}
+
+/// Weighted service-funding multiplier for one treasury tick.
+///
+/// Every **completed** civic service site contributes its district
+/// `service_funding` value, resolved by [`DistrictPolicyStore::policy_at`] at
+/// the site centre, and the mean is `sum(funding) / site_count`. A site outside
+/// every circle contributes the neutral multiplier `1.0`, and overlapping
+/// policies resolve through the smallest policy id.
+///
+/// Missing, empty, or foreign-seed registries, foreign placement, population,
+/// or service seeds, and a non-finite multiplier return
+/// [`PolicyServiceWeight::ONE`]. A city with no completed service sites also
+/// stays neutral, so utility-only infrastructure is unaffected.
+fn policy_service_funding_weight(
+    policies: Option<&DistrictPolicyStore>,
+    seed: u64,
+    placement_seed: Option<u64>,
+    population_seed: Option<u64>,
+    services: Option<&ServiceStore>,
+) -> PolicyServiceWeight {
+    let Some(policies) = policies else {
+        return PolicyServiceWeight::ONE;
+    };
+    if policies.seed != seed || policies.is_empty() {
+        return PolicyServiceWeight::ONE;
+    }
+    if placement_seed.is_some_and(|placement| placement != seed) {
+        return PolicyServiceWeight::ONE;
+    }
+    if population_seed.is_some_and(|population| population != seed) {
+        return PolicyServiceWeight::ONE;
+    }
+    let Some(services) = services else {
+        return PolicyServiceWeight::ONE;
+    };
+    if services.seed != seed {
+        return PolicyServiceWeight::ONE;
+    }
+    let mut total = 0.0;
+    let mut sites = 0_u64;
+    for site in services.sites.values().filter(|site| site.is_operational()) {
+        let funding = policies
+            .policy_at([site.center[0], site.center[2]])
+            .map_or(1.0, |policy| f64::from(policy.service_funding));
+        if !funding.is_finite() {
+            return PolicyServiceWeight::ONE;
+        }
+        total += funding;
+        sites += 1;
+    }
+    if sites == 0 || !total.is_finite() {
+        return PolicyServiceWeight::ONE;
+    }
+    PolicyServiceWeight::new(total / sites as f64).unwrap_or(PolicyServiceWeight::ONE)
 }
 
 fn completed_utility_consumers(
@@ -13210,6 +13298,261 @@ mod tests {
                 &BTreeMap::new(),
             ),
             PolicyTaxWeights::ONE
+        );
+    }
+
+    fn service_policy(
+        seed: u64,
+        name: &str,
+        center: [f32; 2],
+        radius_m: f32,
+        service_funding: f32,
+    ) -> DistrictPolicyStore {
+        let mut store = DistrictPolicyStore::new(seed);
+        let request = DistrictPolicyRequest {
+            name: name.to_string(),
+            center,
+            radius_m,
+            tax_multiplier: 1.0,
+            service_funding,
+            construction_allowed: true,
+            blueprint_allowlist: BTreeSet::new(),
+        };
+        store.create(&request).expect("policy");
+        store
+    }
+
+    fn service_store(seed: u64, sites: &[(u64, [f32; 3], bool)]) -> ServiceStore {
+        let mut store = ServiceStore::new(seed);
+        for &(id, center, operational) in sites {
+            let mut site =
+                core_city::ServiceSite::default_for(ServiceKind::School, ServiceTier::Basic);
+            site.center = center;
+            site.build_days_remaining = if operational { 0.0 } else { 1.0 };
+            store.sites.insert(id, site);
+        }
+        store
+    }
+
+    #[test]
+    fn missing_empty_or_foreign_policy_store_keeps_service_funding_neutral() {
+        let services = service_store(7, &[(1, [0.0, 0.0, 0.0], true)]);
+        assert_eq!(
+            policy_service_funding_weight(None, 7, Some(7), Some(7), Some(&services)),
+            PolicyServiceWeight::ONE
+        );
+
+        let empty = DistrictPolicyStore::new(7);
+        assert_eq!(
+            policy_service_funding_weight(Some(&empty), 7, Some(7), Some(7), Some(&services)),
+            PolicyServiceWeight::ONE
+        );
+
+        // A registry without a completed service site has no denominator.
+        let policies = service_policy(7, "Funded", [0.0, 0.0], 100.0, 2.0);
+        assert_eq!(
+            policy_service_funding_weight(Some(&policies), 7, Some(7), Some(7), None),
+            PolicyServiceWeight::ONE
+        );
+        assert_eq!(
+            policy_service_funding_weight(
+                Some(&policies),
+                7,
+                Some(7),
+                Some(7),
+                Some(&ServiceStore::new(7)),
+            ),
+            PolicyServiceWeight::ONE
+        );
+    }
+
+    #[test]
+    fn half_funding_policy_halves_the_charged_service_term() {
+        let policies = service_policy(7, "Half", [0.0, 0.0], 100.0, 0.5);
+        let services = service_store(
+            7,
+            &[(1, [10.0, 0.0, 0.0], true), (2, [-10.0, 0.0, 0.0], true)],
+        );
+        let weight =
+            policy_service_funding_weight(Some(&policies), 7, Some(7), Some(7), Some(&services));
+        assert_eq!(weight, PolicyServiceWeight::new(0.5).expect("weight"));
+
+        let costs = InfrastructureCosts::new(100.0, 200.0).expect("costs");
+        let mut neutral = Economy::new(7);
+        let base = neutral.tick_with_infrastructure_costs(core_city::DAY_SECONDS, 0, 0, 0, costs);
+        let mut weighted = Economy::new(7);
+        let tick = weighted.tick_with_policy_weights(
+            core_city::DAY_SECONDS,
+            0,
+            0,
+            0,
+            costs,
+            PolicyTaxWeights::ONE,
+            weight,
+        );
+        assert!((base.infrastructure - 300.0).abs() < 1e-9);
+        assert!((tick.infrastructure - 200.0).abs() < 1e-9);
+        assert!((tick.expenses - (base.expenses - 100.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn double_funding_policy_doubles_the_charged_service_term() {
+        let policies = service_policy(7, "Doubled", [0.0, 0.0], 100.0, 2.0);
+        let services = service_store(7, &[(1, [10.0, 0.0, 0.0], true)]);
+        let weight =
+            policy_service_funding_weight(Some(&policies), 7, Some(7), Some(7), Some(&services));
+        assert_eq!(weight, PolicyServiceWeight::new(2.0).expect("weight"));
+
+        let costs = InfrastructureCosts::new(100.0, 200.0).expect("costs");
+        let mut economy = Economy::new(7);
+        let tick = economy.tick_with_policy_weights(
+            core_city::DAY_SECONDS,
+            0,
+            0,
+            0,
+            costs,
+            PolicyTaxWeights::ONE,
+            weight,
+        );
+        assert!((tick.infrastructure - 500.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn policies_covering_only_homes_or_industry_do_not_change_service_funding() {
+        // A home/industry policy at the origin must not scale a service site
+        // that stands outside its circle.
+        let policies = service_policy(7, "Old Town", [0.0, 0.0], 16.0, 0.5);
+        let services = service_store(7, &[(1, [400.0, 0.0, 0.0], true)]);
+        assert_eq!(
+            policy_service_funding_weight(Some(&policies), 7, Some(7), Some(7), Some(&services)),
+            PolicyServiceWeight::ONE
+        );
+    }
+
+    #[test]
+    fn only_completed_service_sites_contribute_to_the_funding_weight() {
+        let policies = service_policy(7, "Doubled", [0.0, 0.0], 100.0, 2.0);
+        let mixed = service_store(
+            7,
+            &[(1, [0.0, 0.0, 0.0], true), (2, [50.0, 0.0, 0.0], false)],
+        );
+        assert_eq!(
+            policy_service_funding_weight(Some(&policies), 7, Some(7), Some(7), Some(&mixed)),
+            PolicyServiceWeight::new(2.0).expect("weight")
+        );
+
+        let building = service_store(7, &[(1, [0.0, 0.0, 0.0], false)]);
+        assert_eq!(
+            policy_service_funding_weight(Some(&policies), 7, Some(7), Some(7), Some(&building)),
+            PolicyServiceWeight::ONE
+        );
+    }
+
+    #[test]
+    fn service_funding_weight_is_the_mean_over_completed_sites_and_repeats() {
+        let mut policies = service_policy(7, "Half", [0.0, 0.0], 100.0, 0.5);
+        let doubled = DistrictPolicyRequest {
+            name: "Doubled".to_string(),
+            center: [1_000.0, 0.0],
+            radius_m: 100.0,
+            tax_multiplier: 1.0,
+            service_funding: 2.0,
+            construction_allowed: true,
+            blueprint_allowlist: BTreeSet::new(),
+        };
+        policies.create(&doubled).expect("second policy");
+        let services = service_store(
+            7,
+            &[
+                (1, [10.0, 0.0, 0.0], true),
+                (2, [1_000.0, 0.0, 0.0], true),
+                (3, [2_000.0, 0.0, 0.0], true),
+            ],
+        );
+        let first =
+            policy_service_funding_weight(Some(&policies), 7, Some(7), Some(7), Some(&services));
+        let second =
+            policy_service_funding_weight(Some(&policies), 7, Some(7), Some(7), Some(&services));
+        // (0.5 + 2.0 + neutral 1.0) / 3 completed sites.
+        assert!((first.value() - 3.5 / 3.0).abs() < 1e-9);
+        assert_eq!(first, second);
+
+        // Overlapping circles use the smallest policy id, not the newest one.
+        let mut overlapping = service_policy(7, "Outer", [0.0, 0.0], 100.0, 0.5);
+        let inner = DistrictPolicyRequest {
+            name: "Inner".to_string(),
+            center: [0.0, 0.0],
+            radius_m: 16.0,
+            tax_multiplier: 1.0,
+            service_funding: 2.0,
+            construction_allowed: true,
+            blueprint_allowlist: BTreeSet::new(),
+        };
+        overlapping.create(&inner).expect("inner");
+        let site = service_store(7, &[(1, [0.0, 0.0, 0.0], true)]);
+        assert_eq!(
+            policy_service_funding_weight(Some(&overlapping), 7, Some(7), Some(7), Some(&site)),
+            PolicyServiceWeight::new(0.5).expect("weight")
+        );
+    }
+
+    #[test]
+    fn foreign_seeds_and_outside_circles_keep_service_funding_neutral() {
+        let services = service_store(7, &[(1, [0.0, 0.0, 0.0], true)]);
+
+        let foreign_registry = service_policy(8, "Foreign", [0.0, 0.0], 100.0, 2.0);
+        assert_eq!(
+            policy_service_funding_weight(
+                Some(&foreign_registry),
+                7,
+                Some(7),
+                Some(7),
+                Some(&services),
+            ),
+            PolicyServiceWeight::ONE
+        );
+
+        let local = service_policy(7, "Local", [0.0, 0.0], 100.0, 2.0);
+        assert_eq!(
+            policy_service_funding_weight(Some(&local), 7, Some(8), Some(7), Some(&services)),
+            PolicyServiceWeight::ONE
+        );
+        assert_eq!(
+            policy_service_funding_weight(Some(&local), 7, Some(7), Some(8), Some(&services)),
+            PolicyServiceWeight::ONE
+        );
+
+        let foreign_services = service_store(8, &[(1, [0.0, 0.0, 0.0], true)]);
+        assert_eq!(
+            policy_service_funding_weight(
+                Some(&local),
+                7,
+                Some(7),
+                Some(7),
+                Some(&foreign_services),
+            ),
+            PolicyServiceWeight::ONE
+        );
+
+        let outside = service_store(7, &[(1, [5_000.0, 0.0, 0.0], true)]);
+        assert_eq!(
+            policy_service_funding_weight(Some(&local), 7, Some(7), Some(7), Some(&outside)),
+            PolicyServiceWeight::ONE
+        );
+    }
+
+    #[test]
+    fn non_finite_service_funding_falls_back_to_neutral() {
+        let mut policies = service_policy(7, "Local", [0.0, 0.0], 100.0, 1.0);
+        policies
+            .policies
+            .get_mut(&1)
+            .expect("policy")
+            .service_funding = f32::NAN;
+        let services = service_store(7, &[(1, [0.0, 0.0, 0.0], true)]);
+        assert_eq!(
+            policy_service_funding_weight(Some(&policies), 7, Some(7), Some(7), Some(&services)),
+            PolicyServiceWeight::ONE
         );
     }
 }

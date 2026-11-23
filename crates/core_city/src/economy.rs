@@ -3,8 +3,8 @@
 //! Phase 3.6 is deliberately a city-level cash-flow ledger, not a full economy.
 //! Income is a per-resident and per-job tax; expenses are gross wages from the
 //! household runtime, per-building upkeep, and loan service. Construction
-//! draw-down and simple loans are included; trade, household finance, and
-//! service funding arrive later.
+//! draw-down and simple loans are included; trade and household finance arrive
+//! later.
 
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +46,16 @@ pub const MIN_POLICY_TAX_WEIGHT: f64 = 0.25;
 ///
 /// This matches the largest stored district tax multiplier.
 pub const MAX_POLICY_TAX_WEIGHT: f64 = 4.0;
+
+/// Smallest accepted district-policy service-funding weight.
+///
+/// This matches the smallest stored district service-funding multiplier.
+pub const MIN_POLICY_SERVICE_WEIGHT: f64 = 0.0;
+
+/// Largest accepted district-policy service-funding weight.
+///
+/// This matches the largest stored district service-funding multiplier.
+pub const MAX_POLICY_SERVICE_WEIGHT: f64 = 2.0;
 
 /// Balance at or below which the city is flagged bankrupt.
 pub const BANKRUPTCY_THRESHOLD: f64 = -50_000.0;
@@ -251,6 +261,55 @@ impl PolicyTaxWeights {
     #[must_use]
     pub fn is_neutral(self) -> bool {
         self.resident == 1.0 && self.business == 1.0
+    }
+}
+
+/// Weighted service-funding multiplier derived from district policies.
+///
+/// The bridge averages the district `service_funding` values that apply to
+/// completed civic service sites, then passes the result to
+/// [`Economy::tick_with_policy_weights`]. [`Self::ONE`] is the neutral weight
+/// and keeps the legacy infrastructure expression exact. Utilities are not
+/// affected.
+///
+/// Weights are derived data: they add no field to [`Economy`] and are never
+/// persisted, so the economy save format and checksum do not move.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PolicyServiceWeight {
+    value: f64,
+}
+
+impl PolicyServiceWeight {
+    /// Neutral weight that leaves service upkeep unchanged.
+    pub const ONE: Self = Self { value: 1.0 };
+
+    /// Validate a service-funding weight.
+    ///
+    /// The value must be finite and inside `0.0..=2.0`, matching the stored
+    /// district service-funding range. Invalid values are rejected so a corrupt
+    /// bridge payload cannot zero or inflate service upkeep.
+    pub fn new(value: f64) -> Result<Self, EconomyError> {
+        if !value.is_finite()
+            || !(MIN_POLICY_SERVICE_WEIGHT..=MAX_POLICY_SERVICE_WEIGHT).contains(&value)
+        {
+            return Err(EconomyError::Invalid("policy service funding weight"));
+        }
+        Ok(Self { value })
+    }
+
+    /// Weight applied to civic service upkeep.
+    #[must_use]
+    pub fn value(self) -> f64 {
+        self.value
+    }
+
+    /// Whether the weight is exactly neutral.
+    ///
+    /// A neutral tick runs the legacy infrastructure expression instead of the
+    /// weighted one, so the pinned city-loop checksums stay byte-identical.
+    #[must_use]
+    pub fn is_neutral(self) -> bool {
+        self.value == 1.0
     }
 }
 
@@ -497,8 +556,9 @@ impl Economy {
     ///
     /// `weights` scales the resident and business tax sides separately. Neutral
     /// weights execute the legacy income expression verbatim, so a city with no
-    /// district policies keeps its existing checksums. Expenses are unaffected:
-    /// district policies do not fund services or construction in this slice.
+    /// district policies keeps its existing checksums. Service upkeep stays
+    /// neutral in this wrapper; use [`Self::tick_with_policy_weights`] when the
+    /// bridge has resolved both tax and service-funding weights.
     pub fn tick_with_policy_taxes(
         &mut self,
         dt_s: f64,
@@ -508,22 +568,57 @@ impl Economy {
         costs: InfrastructureCosts,
         weights: PolicyTaxWeights,
     ) -> EconomyTick {
+        self.tick_with_policy_weights(
+            dt_s,
+            population,
+            employed,
+            completed_buildings,
+            costs,
+            weights,
+            PolicyServiceWeight::ONE,
+        )
+    }
+
+    /// Advance taxes, wages, building upkeep, explicit infrastructure costs,
+    /// and loan service by `dt_s` seconds with district policy tax and
+    /// service-funding weights.
+    ///
+    /// `tax_weights` scales resident and business income; `service_weight`
+    /// scales only the civic service term of `costs`, leaving utility upkeep
+    /// untouched. Both neutral weights execute the legacy arithmetic verbatim,
+    /// so a city with no district policies keeps its existing ledger, save
+    /// JSON, and checksums.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tick_with_policy_weights(
+        &mut self,
+        dt_s: f64,
+        population: u64,
+        employed: u64,
+        completed_buildings: u64,
+        costs: InfrastructureCosts,
+        tax_weights: PolicyTaxWeights,
+        service_weight: PolicyServiceWeight,
+    ) -> EconomyTick {
         let dt = if dt_s.is_finite() {
             dt_s.clamp(0.0, MAX_ECONOMY_TICK_SECONDS)
         } else {
             0.0
         };
         let days = dt / DAY_SECONDS;
-        let income = if weights.is_neutral() {
+        let income = if tax_weights.is_neutral() {
             (population as f64 * self.tax_per_resident_per_day
                 + employed as f64 * self.business_tax_per_job_per_day)
                 * days
         } else {
-            ((population as f64 * self.tax_per_resident_per_day) * weights.resident()
-                + (employed as f64 * self.business_tax_per_job_per_day) * weights.business())
+            ((population as f64 * self.tax_per_resident_per_day) * tax_weights.resident()
+                + (employed as f64 * self.business_tax_per_job_per_day) * tax_weights.business())
                 * days
         };
-        let infrastructure = costs.total_per_day() * days;
+        let infrastructure = if service_weight.is_neutral() {
+            costs.total_per_day() * days
+        } else {
+            (costs.utility_per_day() + costs.service_per_day() * service_weight.value()) * days
+        };
         let operating = (employed as f64 * WAGE_PER_WORKER_PER_DAY
             + completed_buildings as f64 * self.upkeep_per_building_per_day)
             * days
@@ -948,6 +1043,147 @@ mod tests {
             serde_json::to_string(&decoded).expect("decoded json"),
             serde_json::to_string(&economy).expect("live json")
         );
+        assert_eq!(decoded.checksum(), economy.checksum());
+    }
+
+    #[test]
+    fn neutral_service_weight_matches_the_legacy_tick() {
+        let costs = InfrastructureCosts::new(386.0, 493.0).expect("costs");
+        let mut legacy = Economy::new(2026);
+        let mut weighted = Economy::new(2026);
+        let left = legacy.tick_with_infrastructure_costs(DAY_SECONDS, 100, 80, 20, costs);
+        let right = weighted.tick_with_policy_weights(
+            DAY_SECONDS,
+            100,
+            80,
+            20,
+            costs,
+            PolicyTaxWeights::ONE,
+            PolicyServiceWeight::ONE,
+        );
+        assert_eq!(left, right);
+        assert_eq!(PolicyServiceWeight::ONE.value(), 1.0);
+        assert!(PolicyServiceWeight::ONE.is_neutral());
+        assert_eq!(
+            legacy.to_json_pretty().expect("json"),
+            weighted.to_json_pretty().expect("json")
+        );
+        assert_eq!(legacy.checksum(), weighted.checksum());
+    }
+
+    #[test]
+    fn half_service_weight_halves_only_the_service_upkeep_term() {
+        let costs = InfrastructureCosts::new(386.0, 493.0).expect("costs");
+        let mut neutral = Economy::new(2026);
+        let base = neutral.tick_with_infrastructure_costs(DAY_SECONDS, 100, 80, 20, costs);
+
+        let service = PolicyServiceWeight::new(0.5).expect("weight");
+        let mut halved = Economy::new(2026);
+        let tick = halved.tick_with_policy_weights(
+            DAY_SECONDS,
+            100,
+            80,
+            20,
+            costs,
+            PolicyTaxWeights::ONE,
+            service,
+        );
+        assert!((tick.income - base.income).abs() < 0.001);
+        assert!((tick.infrastructure - (386.0 + 493.0 * 0.5)).abs() < 0.001);
+        assert!((tick.expenses - (base.expenses - 493.0 * 0.5)).abs() < 0.001);
+        assert!((tick.balance - (base.balance + 493.0 * 0.5)).abs() < 0.001);
+    }
+
+    #[test]
+    fn double_service_weight_doubles_only_the_service_upkeep_term() {
+        let costs = InfrastructureCosts::new(386.0, 493.0).expect("costs");
+        let mut neutral = Economy::new(2026);
+        let base = neutral.tick_with_infrastructure_costs(DAY_SECONDS, 100, 80, 20, costs);
+
+        let service = PolicyServiceWeight::new(2.0).expect("weight");
+        let mut doubled = Economy::new(2026);
+        let tick = doubled.tick_with_policy_weights(
+            DAY_SECONDS,
+            100,
+            80,
+            20,
+            costs,
+            PolicyTaxWeights::ONE,
+            service,
+        );
+        assert!((tick.income - base.income).abs() < 0.001);
+        assert!((tick.infrastructure - (386.0 + 493.0 * 2.0)).abs() < 0.001);
+        assert!((tick.expenses - (base.expenses + 493.0)).abs() < 0.001);
+        assert!((tick.balance - (base.balance - 493.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn zero_service_weight_removes_service_upkeep_but_keeps_utility_upkeep() {
+        let costs = InfrastructureCosts::new(386.0, 493.0).expect("costs");
+        let mut economy = Economy::new(2026);
+        let tick = economy.tick_with_policy_weights(
+            DAY_SECONDS,
+            100,
+            80,
+            20,
+            costs,
+            PolicyTaxWeights::ONE,
+            PolicyServiceWeight::new(0.0).expect("weight"),
+        );
+        assert!((tick.infrastructure - 386.0).abs() < 0.001);
+        assert!((tick.infrastructure - costs.utility_per_day()).abs() < 0.001);
+    }
+
+    #[test]
+    fn invalid_policy_service_weights_are_rejected() {
+        for value in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            MIN_POLICY_SERVICE_WEIGHT - 0.01,
+            MAX_POLICY_SERVICE_WEIGHT + 0.01,
+            -1.0,
+            3.0,
+        ] {
+            assert!(
+                PolicyServiceWeight::new(value).is_err(),
+                "service weight {value} was accepted"
+            );
+        }
+        for value in [
+            MIN_POLICY_SERVICE_WEIGHT,
+            0.5,
+            1.0,
+            MAX_POLICY_SERVICE_WEIGHT,
+        ] {
+            assert!(
+                PolicyServiceWeight::new(value).is_ok(),
+                "service weight {value} was rejected"
+            );
+        }
+        assert!(PolicyServiceWeight::new(1.0).expect("weight").is_neutral());
+        assert!(!PolicyServiceWeight::new(0.5).expect("weight").is_neutral());
+    }
+
+    #[test]
+    fn service_and_tax_weights_compose_and_are_not_serialized() {
+        let costs = InfrastructureCosts::new(386.0, 493.0).expect("costs");
+        let mut economy = Economy::new(2026);
+        let tick = economy.tick_with_policy_weights(
+            DAY_SECONDS,
+            100,
+            80,
+            20,
+            costs,
+            PolicyTaxWeights::new(2.0, 2.0).expect("tax weights"),
+            PolicyServiceWeight::new(0.5).expect("service weight"),
+        );
+        assert!((tick.income - 2240.0).abs() < 0.001);
+        assert!((tick.infrastructure - (386.0 + 493.0 * 0.5)).abs() < 0.001);
+
+        let json = economy.to_json_pretty().expect("json");
+        assert!(!json.contains("policy"));
+        let decoded = Economy::from_json(&json).expect("decode");
         assert_eq!(decoded.checksum(), economy.checksum());
     }
 
