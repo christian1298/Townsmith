@@ -53,9 +53,10 @@ use crate::protocol::{
 /// Fixed road width for v0 placement commands.
 pub const WORLD_ROAD_WIDTH_M: u8 = 6;
 
-/// Synthetic building footprint radius used by building view records.
+/// Fallback building footprint radius used by synthetic building records.
 ///
-/// A render hint only: the server has no authoritative building footprints yet.
+/// A render hint only: placement-backed records report half their larger
+/// footprint side, and only the no-placement fixture uses this constant.
 pub const INTEREST_BUILDING_RADIUS_M: f32 = 8.0;
 
 /// Spacing between synthetic building centres, in metres.
@@ -1036,19 +1037,18 @@ impl ServerWorld {
 
     /// Bounded building details for the current viewport, ascending by id.
     ///
-    /// v0 has no per-building placement store, only the static completed
-    /// `buildings` count. Records are therefore synthesized by
-    /// [`synthetic_building`] on a fixed 64 m grid anchored at the origin:
-    /// 16 per row on `z = 0`, then the next row, and so on. The approximation is
-    /// deterministic and stable per id, but it is **not** a footprint of where
-    /// the city's buildings really are. A building is included when its centre
-    /// satisfies `distance <= radius`; the list is capped at
-    /// [`MAX_INTEREST_BUILDINGS`].
+    /// When the world has an authoritative placement store with at least one
+    /// record, the view is placement-backed: every placement is a candidate
+    /// (v1 does not model completion, so a construction site is included), its
+    /// centre is `[center.x, center.z]`, and its radius is half the larger
+    /// rotated footprint side as a render hint. Records are filtered by the
+    /// same inclusive interest circle and capped at [`MAX_INTEREST_BUILDINGS`].
     ///
-    /// D-032 now stores authoritative placements, but this view stays on the
-    /// synthetic fixture in v1. Replacing it with placement-backed records is
-    /// a follow-up read-path change; the placement command and checksum are
-    /// already authoritative.
+    /// A world with no store, or an empty one, keeps the deterministic
+    /// synthetic fixture used before D-032: [`synthetic_building`] on a fixed
+    /// 64 m grid anchored at the origin, 16 per row on `z = 0`, then the next
+    /// row, and so on. The approximation is stable per id but it is **not** a
+    /// footprint of where the city's buildings really are.
     #[must_use]
     pub fn interest_buildings(&self) -> Vec<BuildingView> {
         let (mut buildings, _truncated) = self.interest_building_matches();
@@ -1081,12 +1081,59 @@ impl ServerWorld {
     }
 
     /// Building matches for the inclusive interest circle, at most
+    /// [`MAX_INTEREST_BUILDINGS`] entries plus a truncation flag.
+    ///
+    /// A non-empty placement store is authoritative and takes precedence over
+    /// the synthetic fixture. An empty store is treated exactly like no store,
+    /// so a world that never placed a blueprint keeps its previous view.
+    fn interest_building_matches(&self) -> (Vec<BuildingView>, bool) {
+        if let Some(placements) = self
+            .placements
+            .as_ref()
+            .filter(|store| !store.placements.is_empty())
+        {
+            return self.placement_building_matches(&placements.placements);
+        }
+        self.synthetic_building_matches()
+    }
+
+    /// Placement-backed matches, ascending by id and capped with a truncation
+    /// flag.
+    ///
+    /// A `BTreeMap` keeps only the lowest [`MAX_INTEREST_BUILDINGS`] ids, so an
+    /// oversized loaded store cannot inflate one viewport query. Iteration is
+    /// already in ascending id order, so the result never sorts.
+    fn placement_building_matches(&self, placements: &[Placement]) -> (Vec<BuildingView>, bool) {
+        let mut matches: BTreeMap<u64, usize> = BTreeMap::new();
+        let mut truncated = false;
+        for (index, placement) in placements.iter().enumerate() {
+            if !point_in_interest(
+                [placement.center[0], placement.center[2]],
+                self.interest_center,
+                self.interest_radius_m,
+            ) {
+                continue;
+            }
+            matches.insert(placement.id, index);
+            if matches.len() > MAX_INTEREST_BUILDINGS {
+                matches.pop_last();
+                truncated = true;
+            }
+        }
+        let buildings = matches
+            .values()
+            .map(|&index| placement_building(&placements[index]))
+            .collect();
+        (buildings, truncated)
+    }
+
+    /// Synthetic matches for the inclusive interest circle, at most
     /// [`MAX_INTEREST_BUILDINGS`] + 1 entries so truncation is observable.
     ///
     /// Candidate grid cells are derived from the circle bounds instead of
     /// iterating every possible id: an oversized loaded building count must not
     /// turn one viewport query into millions of synthesized records.
-    fn interest_building_matches(&self) -> (Vec<BuildingView>, bool) {
+    fn synthetic_building_matches(&self) -> (Vec<BuildingView>, bool) {
         let mut buildings = Vec::new();
         let Some((row_min, row_max, column_min, column_max)) = self.building_grid_bounds() else {
             return (buildings, false);
@@ -2074,8 +2121,8 @@ fn sanitize_dt(dt_s: f64) -> f64 {
 /// Whether `point` is inside the inclusive interest circle.
 ///
 /// The comparison is `distance <= radius`, so an exact boundary match is
-/// visible. Both roads and synthetic buildings use this predicate, which keeps
-/// aggregate counts and detail lists consistent.
+/// visible. Roads, placement-backed buildings, and the synthetic fallback use
+/// this predicate, which keeps aggregate counts and detail lists consistent.
 fn point_in_interest(point: [f32; 2], center: [f32; 2], radius_m: f32) -> bool {
     let radius = f64::from(radius_m);
     let radius_squared = radius * radius;
@@ -2094,12 +2141,12 @@ fn road_in_interest(road: &RoadSegment, center: [f32; 2], radius_m: f32) -> bool
 
 /// Stable synthetic record for one completed building.
 ///
-/// v0 has no per-building placement store: [`ServerWorld`] keeps only the
-/// static `buildings` count, so interest views approximate the built city on a
-/// fixed grid anchored at the origin. Ids are 1-based, 16 per row and 64 m
-/// apart, so id 1 is at `[0, 0]`, id 2 at `[64, 0]`, id 17 at `[0, 64]`, and so
-/// on. The mapping is deterministic and independent of population, so the same
-/// id always reports the same centre.
+/// This is the fallback for worlds with no placement store (or an empty one):
+/// [`ServerWorld`] then keeps only the static `buildings` count, so interest
+/// views approximate the built city on a fixed grid anchored at the origin.
+/// Ids are 1-based, 16 per row and 64 m apart, so id 1 is at `[0, 0]`, id 2 at
+/// `[64, 0]`, id 17 at `[0, 64]`, and so on. The mapping is deterministic and
+/// independent of population, so the same id always reports the same centre.
 #[must_use]
 pub fn synthetic_building(id: u64) -> BuildingView {
     let index = id.saturating_sub(1);
@@ -2112,6 +2159,25 @@ pub fn synthetic_building(id: u64) -> BuildingView {
             row as f32 * INTEREST_BUILDING_SPACING_M,
         ],
         radius_m: INTEREST_BUILDING_RADIUS_M,
+    }
+}
+
+/// One placement-backed building record for the interest view.
+///
+/// The wire shape carries a single radius, so it reports half the larger
+/// rotated footprint side. A hand-built record with a non-finite or
+/// non-positive footprint falls back to [`INTEREST_BUILDING_RADIUS_M`]; the
+/// value is a render hint and is not revalidated against the blueprint.
+fn placement_building(placement: &Placement) -> BuildingView {
+    let half = placement.footprint_m[0].max(placement.footprint_m[1]) * 0.5;
+    BuildingView {
+        id: placement.id,
+        center: [placement.center[0], placement.center[2]],
+        radius_m: if half.is_finite() && half > 0.0 {
+            half
+        } else {
+            INTEREST_BUILDING_RADIUS_M
+        },
     }
 }
 
@@ -3209,6 +3275,45 @@ mod tests {
         world
     }
 
+    /// One hand-built authoritative placement for interest-view tests.
+    ///
+    /// The interest view reads only `id`, `center`, and `footprint_m`, so the
+    /// record does not need a resolvable package. Values match what a validated
+    /// placement would carry.
+    fn interest_placement(id: u64, x: f32, z: f32, footprint_m: [f32; 2]) -> Placement {
+        Placement {
+            id,
+            blueprint_id: format!("local:interest_{id}"),
+            blueprint_hash: format!("blake3:{id:064x}"),
+            blueprint_path: format!("tsbp:blake3:{id:064x}"),
+            name: format!("Interest House {id}"),
+            center: [x, 40.0, z],
+            rotation_deg: 0,
+            footprint_m,
+            bounds_m: [footprint_m[0], 8.0, footprint_m[1]],
+            foundation_m: 0.0,
+            material_cost: 1.0,
+            resident_capacity: 1,
+            job_slots: 0,
+            solid_voxels: 1,
+            structure: None,
+        }
+    }
+
+    fn world_with_placements(placements: Vec<Placement>) -> ServerWorld {
+        let mut world = world_with_hello();
+        let mut store = PlacementStore::new(SEED);
+        store.next_id = placements
+            .iter()
+            .map(|placement| placement.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        store.placements = placements;
+        world.placements = Some(store);
+        world
+    }
+
     fn expect_reject(message: &ServerMessage, expected_code: &str) {
         match message {
             ServerMessage::Reject { code, message: _ } => assert_eq!(code, expected_code),
@@ -3717,6 +3822,212 @@ mod tests {
             first_json,
             "an identically seeded world produces the same building records"
         );
+    }
+
+    #[test]
+    fn interest_buildings_without_a_placement_store_keep_the_synthetic_pin() {
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Mayor);
+        world.apply(&loopback_hello("interest"));
+        world.apply(&ClientCommand::PlaceRoad {
+            start: [0, 0],
+            end: [8, 0],
+        });
+        world.apply(&ClientCommand::PlaceRoad {
+            start: [100, 100],
+            end: [108, 100],
+        });
+        world.apply(&set_interest(0.0, 0.0, 2_048.0));
+
+        let (buildings, truncated) = interest_building_view(&world);
+        assert_eq!(buildings.len(), MAX_INTEREST_BUILDINGS);
+        assert!(truncated, "the default viewport still exercises the cap");
+        assert_eq!(
+            buildings,
+            (1..=MAX_INTEREST_BUILDINGS as u64)
+                .map(synthetic_building)
+                .collect::<Vec<_>>(),
+            "no placement store must keep the exact synthetic fixture"
+        );
+        assert_eq!(
+            world.checksum(),
+            "6d92be74bdbc11f5",
+            "the default interest-world pin must not move"
+        );
+    }
+
+    #[test]
+    fn interest_buildings_use_placement_records_instead_of_the_fixture() {
+        let mut world = world_with_placements(vec![interest_placement(7, 12.0, -4.0, [16.0, 9.0])]);
+        assert!(
+            world.buildings > 1,
+            "the synthetic fixture would carry several records"
+        );
+        world.apply(&set_interest(0.0, 0.0, 64.0));
+
+        let (buildings, truncated) = interest_building_view(&world);
+        assert!(!truncated);
+        assert_eq!(
+            buildings,
+            vec![BuildingView {
+                id: 7,
+                center: [12.0, -4.0],
+                radius_m: 8.0,
+            }]
+        );
+        assert_eq!(world.interest_buildings(), buildings);
+    }
+
+    #[test]
+    fn interest_buildings_filter_placements_by_the_inclusive_circle() {
+        let mut world = world_with_placements(vec![
+            interest_placement(2, 10.0, 0.0, [4.0, 4.0]),
+            interest_placement(1, 100.0, 0.0, [20.0, 10.0]),
+        ]);
+
+        // A zero radius includes the placement whose centre is the viewport
+        // centre and excludes the other one.
+        world.apply(&set_interest(10.0, 0.0, 0.0));
+        let (buildings, truncated) = interest_building_view(&world);
+        assert!(!truncated);
+        assert_eq!(
+            buildings,
+            vec![BuildingView {
+                id: 2,
+                center: [10.0, 0.0],
+                radius_m: 2.0,
+            }]
+        );
+
+        // An exact boundary match is inclusive; both placements are in range
+        // and the shuffled store is reported in ascending id order.
+        world.apply(&set_interest(50.0, 0.0, 50.0));
+        let (buildings, truncated) = interest_building_view(&world);
+        assert!(!truncated);
+        assert_eq!(
+            buildings,
+            vec![
+                BuildingView {
+                    id: 1,
+                    center: [100.0, 0.0],
+                    radius_m: 10.0,
+                },
+                BuildingView {
+                    id: 2,
+                    center: [10.0, 0.0],
+                    radius_m: 2.0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn interest_buildings_cap_placement_records_and_report_truncation() {
+        let placements: Vec<Placement> = (1..=MAX_INTEREST_BUILDINGS as u64 + 1)
+            .rev()
+            .map(|id| interest_placement(id, id as f32, 0.0, [2.0, 2.0]))
+            .collect();
+        let mut world = world_with_placements(placements);
+        world.apply(&set_interest(0.0, 0.0, DEFAULT_INTEREST_RADIUS_M));
+
+        let (buildings, truncated) = interest_building_view(&world);
+        assert_eq!(buildings.len(), MAX_INTEREST_BUILDINGS);
+        assert!(truncated, "65 matches must mark the view truncated");
+        assert_eq!(
+            buildings
+                .iter()
+                .map(|building| building.id)
+                .collect::<Vec<_>>(),
+            (1..=MAX_INTEREST_BUILDINGS as u64).collect::<Vec<_>>(),
+            "the cap keeps the lowest ids in ascending order"
+        );
+
+        let mut exact = world_with_placements(
+            (1..=MAX_INTEREST_BUILDINGS as u64)
+                .rev()
+                .map(|id| interest_placement(id, id as f32, 0.0, [2.0, 2.0]))
+                .collect(),
+        );
+        exact.apply(&set_interest(0.0, 0.0, DEFAULT_INTEREST_RADIUS_M));
+        let (buildings, truncated) = interest_building_view(&exact);
+        assert_eq!(buildings.len(), MAX_INTEREST_BUILDINGS);
+        assert!(!truncated, "exactly the cap is not truncated");
+    }
+
+    #[test]
+    fn set_interest_after_a_placement_returns_it_without_moving_the_checksum() {
+        let mut world = world_with_placements(vec![interest_placement(3, 8.0, 0.0, [6.0, 6.0])]);
+        let checksum = world.checksum();
+        assert_eq!(
+            interest_building_view(&world).0,
+            vec![BuildingView {
+                id: 3,
+                center: [8.0, 0.0],
+                radius_m: 3.0,
+            }],
+            "the default viewport already reports the placement"
+        );
+
+        let messages = world.apply_all(&set_interest(4.0, 0.0, 16.0));
+        match messages.as_slice() {
+            [ServerMessage::Snapshot {
+                checksum: observed, ..
+            }, ServerMessage::InterestView { buildings, .. }] => {
+                assert_eq!(observed, &checksum);
+                assert_eq!(
+                    buildings,
+                    &vec![BuildingView {
+                        id: 3,
+                        center: [8.0, 0.0],
+                        radius_m: 3.0,
+                    }]
+                );
+            }
+            other => panic!("expected snapshot + interest view, got {other:?}"),
+        }
+        assert_eq!(world.checksum(), checksum, "set_interest is view-only");
+    }
+
+    #[test]
+    fn empty_placement_store_falls_back_to_the_synthetic_fixture() {
+        let mut no_store = world_with_hello();
+        no_store.apply(&set_interest(0.0, 0.0, 200.0));
+
+        let mut empty = world_with_hello();
+        empty.placements = Some(PlacementStore::new(SEED));
+        empty.apply(&set_interest(0.0, 0.0, 200.0));
+
+        let (buildings, truncated) = interest_building_view(&empty);
+        assert!(
+            !buildings.is_empty(),
+            "the synthetic fallback still reports"
+        );
+        assert!(!truncated);
+        assert_eq!(
+            (buildings, truncated),
+            interest_building_view(&no_store),
+            "an empty store must behave exactly like no store"
+        );
+        assert_eq!(empty.interest_view(), no_store.interest_view());
+    }
+
+    #[test]
+    fn placement_building_radius_is_finite_and_positive() {
+        let mut placement = interest_placement(1, 0.0, 0.0, [16.0, 9.0]);
+        assert_eq!(placement_building(&placement).radius_m, 8.0);
+
+        for footprint in [
+            [0.0, 0.0],
+            [-4.0, -4.0],
+            [f32::NAN, f32::NAN],
+            [f32::INFINITY, 4.0],
+        ] {
+            placement.footprint_m = footprint;
+            let radius = placement_building(&placement).radius_m;
+            assert!(
+                radius.is_finite() && radius > 0.0,
+                "footprint {footprint:?} produced an invalid radius {radius}"
+            );
+        }
     }
 
     #[test]

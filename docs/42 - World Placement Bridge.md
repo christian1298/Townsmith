@@ -173,6 +173,10 @@ The denial uses `PLACEMENT_POLICY_DENIED` rather than forwarding the bridge code
 
 `ServerSave` gains optional `placements` and `construction` objects, each skipped when `None`. Existing saves stay byte-identical and load with the stores closed. A present store is seed-checked and validated with `PlacementStore::validate_loaded` / `ConstructionStore::validate`; the library and policy registry are never saved. `ServerWorld::restore` restores both optional stores and leaves the library/policies `None`.
 
+### Interest view
+
+`interest_view.buildings` is **placement-backed whenever a non-empty authoritative placement store exists**. Each record keeps the existing `BuildingView { id, center, radius_m }` wire shape: `id` is the placement id, `center` is `[placement.center[0], placement.center[2]]`, and `radius_m` is `max(footprint_m[0], footprint_m[1]) * 0.5`, a finite-positive render hint that falls back to the 8 m fixture hint for an invalid hand-built footprint. Every placement is a candidate, including one whose construction site is still in progress: **completion is not modelled in v1**. Records are ascending by id, filtered by the same inclusive interest circle over centres, and capped at `MAX_INTEREST_BUILDINGS` (64) with `buildings_truncated = true` when more matched. A world with no placement store, or an empty store, keeps the deterministic synthetic fixture exactly as before; the wire shape and the `SERVER_INTEREST`/`--placement-smoke` pins are unchanged.
+
 ### Smoke
 
 ```bash
@@ -314,7 +318,7 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 - No collision, road access, utility access, or lot ownership yet.
 - The acceptance house's bounds are the whole 16 × 9.6 × 16 m volume, not a tight mesh bound, so its placed footprint is 16 × 16 m.
 - The world-placement scene is a developer shell. Its HUD is English-only until the Phase 2 HUD localization pass; D-022's key-based EN/DE requirement still applies to shipping UI.
-- **Multiplayer:** placement is now server-authoritative through `place_blueprint` (§2.1). The bridge remains local preview/authoring. Server v1 limits: the package library and policy registry are operator configuration, not save data; there is no package upload, fetch, or auto-download; material cost comes from the package's stored `stats.material_cost` (the server has no slice price-table recomputation); a blueprint without declared `structure` metadata is not age-gated (the bridge derives a conservative fallback); `interest_view.buildings` still uses the synthetic fixture, not placement-backed records; there is no demolition, refund, terrain streaming, per-settlement permission, or client UI in this slice.
+- **Multiplayer:** placement is now server-authoritative through `place_blueprint` (§2.1). The bridge remains local preview/authoring. Server v1 limits: the package library and policy registry are operator configuration, not save data; there is no package upload, fetch, or auto-download; material cost comes from the package's stored `stats.material_cost` (the server has no slice price-table recomputation); a blueprint without declared `structure` metadata is not age-gated (the bridge derives a conservative fallback); `interest_view.buildings` is placement-backed once a non-empty placement store exists and otherwise uses the synthetic fixture, with no completion-aware filtering; there is no demolition, refund, terrain streaming, per-settlement permission, or client UI in this slice.
 
 ## 7. Tests
 
@@ -322,15 +326,15 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 - `core_structure`: **22 tests + 1 doctest** for system tiers, story/height/span/foundation rules, and composite grounds.
 - `core_blueprint`: **40 tests** (37 integration + 3 unit), including package validation and the local content-addressed library.
 - `godot_ext`: **193 tests** total, including runtime content loading, blueprint-library insert/resolve/error mapping, portable save/load copy-and-resolve semantics, package deduplication, missing/corrupt/hash/metadata failure codes, save-path validation, resolved-path exposure and lifetime, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
-- `townsmith-server`: **153 tests**, including protocol v1 decode/result roundtrips, Mayor authorization, rate limit/audit, library/hash/package/policy/age/terrain/overlap/funds rejections without mutation, accepted charge/site, idempotent repeats, two placements, checksum movement, old/new save roundtrips, restore without configuration, and the deterministic placement smoke.
-- Workspace: **1259 tests**, all green (**1254 unit/integration + 5 doctests**). Verified on 2026-11-23 at master `61449ce`.
+- `townsmith-server`: **160 tests**, including protocol v1 decode/result roundtrips, Mayor authorization, rate limit/audit, library/hash/package/policy/age/terrain/overlap/funds rejections without mutation, accepted charge/site, idempotent repeats, two placements, checksum movement, old/new save roundtrips, restore without configuration, placement-backed interest buildings, and the deterministic placement smoke.
+- Workspace: **1266 tests**, all green (**1261 unit/integration + 5 doctests**). Verified on 2026-11-23 at master `be70940`.
 - Godot headless: `WORLD_PLACEMENT ... status=ok`, `WORLD_SCENE ... status=ok`, and `WORLD_LIBRARY ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 
 ## 8. Next
 
 1. Make the bridge ghost preview call the same server rule set (or a shared rule module) so a passing ghost cannot fail later on policy, age, or terrain. The shared policy/age/payment helpers are in place; the orchestration is still separate.
-2. Replace the synthetic `interest_view.buildings` fixture with placement-backed records and events/snapshots for other clients.
+2. Interest buildings are placement-backed for a non-empty placement store (#308). Follow up with completion-aware filtering when construction completion joins the read path, and with events/snapshots for other clients.
 3. Add an optional content-addressed library reference to the placement record so a save can resolve without the sidecar pair; keep the absolute path and the `world_save_with_library` / `world_load_with_library` compatibility path.
 4. Add settlement boundaries and ownership (2E.4).
 5. Add demolition/refunds and replacement of global construction pools with settlement crews and delivery trips.
