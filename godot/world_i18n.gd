@@ -179,6 +179,7 @@ const TABLES := {
 		# Dashboard shell.
 		"base.ui.dashboard.title": "City Dashboard",
 		"base.ui.dashboard.close_hint": "F1 or Esc to close",
+		"base.ui.dashboard.policy_hint": "P create · Shift+P remove · J construction · [ ] tax · , . funding",
 		"base.ui.dashboard.section.population": "Population",
 		"base.ui.dashboard.section.district": "District",
 		"base.ui.dashboard.section.settlements": "Settlements",
@@ -253,6 +254,14 @@ const TABLES := {
 		"base.ui.dashboard.body.construction": "{active} active · {stalled} stalled · {completed} completed",
 		"base.ui.dashboard.body.no_advice": "No advice available.",
 		"base.ui.dashboard.body.advisor_fallback": "Advisor",
+
+		# Compact dashboard policy editing. Bridge error codes, ids, and
+		# policy names stay verbatim parameters.
+		"base.ui.policies.created": "Policy {id} created: {name}",
+		"base.ui.policies.updated": "Policy {id} updated",
+		"base.ui.policies.removed": "Policy {id} removed",
+		"base.ui.policies.no_target": "No policy covers the district centre. P creates one.",
+		"base.ui.policies.failed": "Policy change failed: {code}",
 
 		# Advisor titles, keyed by the stable code from `core_city::advisor`.
 		# One title per code; the Rust detail stays English until the protocol
@@ -463,6 +472,7 @@ const TABLES := {
 		# Dashboard-Hülle.
 		"base.ui.dashboard.title": "Stadt-Dashboard",
 		"base.ui.dashboard.close_hint": "F1 oder Esc zum Schließen",
+		"base.ui.dashboard.policy_hint": "P: anlegen · Umschalt+P: entfernen · J: Bau · [ ]: Steuer · , .: Förderung",
 		"base.ui.dashboard.section.population": "Bevölkerung",
 		"base.ui.dashboard.section.district": "Stadtteil",
 		"base.ui.dashboard.section.settlements": "Siedlungen",
@@ -537,6 +547,14 @@ const TABLES := {
 		"base.ui.dashboard.body.construction": "{active} aktiv · {stalled} stockend · {completed} fertiggestellt",
 		"base.ui.dashboard.body.no_advice": "Keine Ratschläge verfügbar.",
 		"base.ui.dashboard.body.advisor_fallback": "Berater",
+
+		# Kompakte Richtlinienbearbeitung im Dashboard. Fehlercodes, IDs und
+		# Richtliniennamen bleiben unveränderte Parameter.
+		"base.ui.policies.created": "Richtlinie {id} angelegt: {name}",
+		"base.ui.policies.updated": "Richtlinie {id} aktualisiert",
+		"base.ui.policies.removed": "Richtlinie {id} entfernt",
+		"base.ui.policies.no_target": "Keine Richtlinie deckt das Stadtteilzentrum ab. P legt eine an.",
+		"base.ui.policies.failed": "Richtlinienänderung fehlgeschlagen: {code}",
 
 		# Beratertitel, nach dem stabilen Code aus `core_city::advisor`.
 		# Ein Titel pro Code; der Rust-Detailtext bleibt vorerst englisch.

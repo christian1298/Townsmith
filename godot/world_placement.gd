@@ -111,6 +111,20 @@ const TAX_POLICIES := [
 	{"name": "standard", "resident": 8.0, "business": 4.0},
 	{"name": "high", "resident": 20.0, "business": 8.0},
 ]
+# Compact dashboard policy editing (docs/57 §5.3). The dashboard edits only the
+# smallest-id policy containing the district centre, through the existing
+# bridge CRUD, and always re-sends the full record read from
+# `district_policies_state`. Defaults mirror the standalone policy editor so a
+# default create is deterministic and comparable across both consumers.
+const POLICY_DEFAULT_RADIUS_M := 64.0
+const POLICY_DEFAULT_TAX := 1.0
+const POLICY_DEFAULT_FUNDING := 1.0
+const POLICY_TAX_STEP := 0.25
+const POLICY_FUNDING_STEP := 0.25
+const POLICY_MIN_TAX := 0.25
+const POLICY_MAX_TAX := 4.0
+const POLICY_MAX_FUNDING := 2.0
+const POLICY_STEP_SNAP := 0.01
 
 var core
 var i18n
@@ -258,6 +272,7 @@ var dashboard_text: RichTextLabel
 var dashboard_visible := false
 var dashboard_title: Label
 var dashboard_hint: Label
+var dashboard_policy_hint: Label
 var dashboard_refresh_accum := 0.0
 var citizen_panel: PanelContainer
 var citizen_text: RichTextLabel
@@ -505,6 +520,27 @@ func _unhandled_input(event: InputEvent) -> void:
 						_toggle_heatmap()
 				KEY_F8:
 					_toggle_construction_clock()
+				KEY_P:
+					if dashboard_visible:
+						if event.shift_pressed:
+							_policy_remove_selected()
+						else:
+							_policy_create_default()
+				KEY_J:
+					if dashboard_visible:
+						_policy_toggle_construction()
+				KEY_BRACKETLEFT:
+					if dashboard_visible:
+						_policy_adjust_tax(-POLICY_TAX_STEP)
+				KEY_BRACKETRIGHT:
+					if dashboard_visible:
+						_policy_adjust_tax(POLICY_TAX_STEP)
+				KEY_COMMA:
+					if dashboard_visible:
+						_policy_adjust_funding(-POLICY_FUNDING_STEP)
+				KEY_PERIOD:
+					if dashboard_visible:
+						_policy_adjust_funding(POLICY_FUNDING_STEP)
 				KEY_PAGEUP:
 					if dashboard_visible:
 						_cycle_settlement(-1)
@@ -714,6 +750,11 @@ func _setup_ui() -> void:
 	dashboard_hint.text = i18n.t("base.ui.dashboard.close_hint")
 	dashboard_hint.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
 	dashboard_box.add_child(dashboard_hint)
+	dashboard_policy_hint = Label.new()
+	dashboard_policy_hint.text = i18n.t("base.ui.dashboard.policy_hint")
+	dashboard_policy_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	dashboard_policy_hint.add_theme_color_override("font_color", Color(0.62, 0.78, 0.66))
+	dashboard_box.add_child(dashboard_policy_hint)
 
 	citizen_panel = PanelContainer.new()
 	citizen_panel.name = "CitizenPanel"
@@ -3057,6 +3098,8 @@ func _update_dashboard() -> void:
 		dashboard_title.text = i18n.t("base.ui.dashboard.title")
 	if dashboard_hint != null:
 		dashboard_hint.text = i18n.t("base.ui.dashboard.close_hint")
+	if dashboard_policy_hint != null:
+		dashboard_policy_hint.text = i18n.t("base.ui.dashboard.policy_hint")
 	var city: Dictionary = core.city_summary()
 	var economy: Dictionary = core.economy_state()
 	var industry: Dictionary = core.industry_state()
@@ -3493,6 +3536,205 @@ func _policies_section(state: Dictionary) -> String:
 		"count": i18n.format_int(allowlist_count) if allowlist_count > 0 else i18n.NOT_AVAILABLE,
 	}) + "\n"
 	return section
+
+## Smallest-id policy covering the dashboard district centre, or an error.
+## `no_policy` is a local target state, never a bridge error code.
+func _policy_edit_target(seed: int) -> Dictionary:
+	var state: Dictionary = core.district_policies_state(seed)
+	if not bool(state.get("ok", false)):
+		return {"ok": false, "error_code": _policy_error_code(state)}
+	var policy := _containing_policy(_policy_array(state), _district_center_xz())
+	if policy.is_empty():
+		return {"ok": false, "error_code": "no_policy"}
+	return {"ok": true, "policy": policy}
+
+## Resolve the editable policy and report a missing/failed target once.
+func _policy_target_or_report(seed: int) -> Dictionary:
+	var target := _policy_edit_target(seed)
+	if bool(target.get("ok", false)):
+		return target
+	var code := str(target.get("error_code", "failed"))
+	if code == "no_policy":
+		_set_modal(i18n.t("base.ui.policies.no_target"), true)
+	else:
+		_set_modal(i18n.t("base.ui.policies.failed", {"code": code}), true)
+	return target
+
+## Create the deterministic default policy at the district centre: radius 64 m,
+## tax 1.0, funding 1.0, construction allowed, empty allowlist, named
+## `District {n}` for n = live count + 1. The store assigns the id.
+func _policy_create_default(seed: int = SEED) -> Dictionary:
+	var state: Dictionary = core.district_policies_state(seed)
+	if not bool(state.get("ok", false)):
+		return _policy_failure(_policy_error_code(state))
+	var index := _policy_array(state).size() + 1
+	var center: Vector2 = _district_center_xz()
+	var result: Dictionary = core.district_policy_create(
+		seed,
+		"District %d" % index,
+		center.x,
+		center.y,
+		POLICY_DEFAULT_RADIUS_M,
+		POLICY_DEFAULT_TAX,
+		POLICY_DEFAULT_FUNDING,
+		true,
+		PackedStringArray()
+	)
+	if bool(result.get("ok", false)):
+		var policy: Dictionary = result.get("policy", {})
+		_set_modal(i18n.t("base.ui.policies.created", {
+			"id": i18n.format_int(int(policy.get("id", 0))),
+			"name": str(policy.get("name", "")),
+		}), false)
+		_policy_refresh_dashboard()
+	else:
+		_policy_failure(_policy_error_code(result))
+	return result
+
+## Remove the containing policy by id.
+func _policy_remove_selected(seed: int = SEED) -> Dictionary:
+	var target := _policy_target_or_report(seed)
+	if not bool(target.get("ok", false)):
+		return target
+	var policy: Dictionary = target.get("policy", {})
+	var id := int(policy.get("id", 0))
+	if id <= 0:
+		return _policy_failure("invalid_record")
+	var result: Dictionary = core.district_policy_remove(seed, id)
+	if bool(result.get("ok", false)):
+		_set_modal(i18n.t("base.ui.policies.removed", {
+			"id": i18n.format_int(id),
+		}), false)
+		_policy_refresh_dashboard()
+	else:
+		_policy_failure(_policy_error_code(result))
+	return result
+
+## Flip `construction_allowed` on the containing policy.
+func _policy_toggle_construction(seed: int = SEED) -> Dictionary:
+	var target := _policy_target_or_report(seed)
+	if not bool(target.get("ok", false)):
+		return target
+	var policy: Dictionary = target.get("policy", {})
+	var current = policy.get("construction_allowed", null)
+	if not (current is bool):
+		return _policy_failure("invalid_record")
+	return _policy_apply_update(seed, policy, {"construction_allowed": not bool(current)})
+
+func _policy_adjust_tax(delta: float, seed: int = SEED) -> Dictionary:
+	return _policy_adjust_field(seed, "tax_multiplier", delta, POLICY_MIN_TAX, POLICY_MAX_TAX)
+
+func _policy_adjust_funding(delta: float, seed: int = SEED) -> Dictionary:
+	return _policy_adjust_field(seed, "service_funding", delta, 0.0, POLICY_MAX_FUNDING)
+
+## Step one numeric field by `delta`, clamp to the bridge bounds, and send the
+## complete record. A step that clamps back to the current value sends nothing.
+func _policy_adjust_field(
+	seed: int, field: String, delta: float, minimum: float, maximum: float
+) -> Dictionary:
+	var target := _policy_target_or_report(seed)
+	if not bool(target.get("ok", false)):
+		return target
+	var policy: Dictionary = target.get("policy", {})
+	var value = policy.get(field, null)
+	if not _policy_is_number(value):
+		return _policy_failure("invalid_record")
+	var current := float(value)
+	var next := clampf(snappedf(current + delta, POLICY_STEP_SNAP), minimum, maximum)
+	if is_equal_approx(next, current):
+		return {"ok": true, "unchanged": true, "policy": policy}
+	return _policy_apply_update(seed, policy, {field: next})
+
+## Send the full record through `district_policy_update`. Fields not named in
+## `overrides` come from the state payload unchanged; a missing or mistyped
+## field rejects locally as `invalid_record` instead of inventing a value.
+func _policy_apply_update(seed: int, policy: Dictionary, overrides: Dictionary) -> Dictionary:
+	var request := _policy_update_request(policy, overrides)
+	if not bool(request.get("ok", false)):
+		return _policy_failure(str(request.get("error_code", "invalid_record")))
+	var values: Dictionary = request["request"]
+	var result: Dictionary = core.district_policy_update(
+		seed,
+		int(values["id"]),
+		str(values["name"]),
+		float(values["center_x"]),
+		float(values["center_z"]),
+		float(values["radius_m"]),
+		float(values["tax_multiplier"]),
+		float(values["service_funding"]),
+		bool(values["construction_allowed"]),
+		values["blueprint_allowlist"]
+	)
+	if bool(result.get("ok", false)):
+		_set_modal(i18n.t("base.ui.policies.updated", {
+			"id": i18n.format_int(int(values["id"])),
+		}), false)
+		_policy_refresh_dashboard()
+	else:
+		_policy_failure(_policy_error_code(result))
+	return result
+
+## Build the exact update request from the state record plus explicit
+## overrides. Every required field must exist with the expected type; the
+## dashboard never substitutes a default for a missing field.
+func _policy_update_request(policy: Dictionary, overrides: Dictionary) -> Dictionary:
+	var center := _policy_center(policy.get("center", null))
+	var allowlist = policy.get("blueprint_allowlist", null)
+	var id := int(policy.get("id", 0))
+	var policy_name = policy.get("name", null)
+	var radius = policy.get("radius_m", null)
+	var tax = policy.get("tax_multiplier", null)
+	var funding = policy.get("service_funding", null)
+	var construction = policy.get("construction_allowed", null)
+	var valid := id > 0 and policy_name is String \
+		and is_finite(center.x) and is_finite(center.y) \
+		and _policy_is_number(radius) and _policy_is_number(tax) \
+		and _policy_is_number(funding) and construction is bool \
+		and (allowlist is Array or allowlist is PackedStringArray)
+	if not valid:
+		return {"ok": false, "error_code": "invalid_record"}
+	return {"ok": true, "request": {
+		"id": id,
+		"name": policy_name,
+		"center_x": center.x,
+		"center_z": center.y,
+		"radius_m": float(radius),
+		"tax_multiplier": float(overrides.get("tax_multiplier", tax)),
+		"service_funding": float(overrides.get("service_funding", funding)),
+		"construction_allowed": bool(overrides.get("construction_allowed", construction)),
+		"blueprint_allowlist": _policy_allowlist_copy(allowlist),
+	}}
+
+## Copy the allowlist without changing entries or order.
+func _policy_allowlist_copy(value) -> PackedStringArray:
+	var copy := PackedStringArray()
+	if value is PackedStringArray:
+		for entry in value:
+			copy.append(entry)
+	elif value is Array:
+		for entry in value:
+			copy.append(str(entry))
+	return copy
+
+func _policy_is_number(value) -> bool:
+	return value is int or value is float
+
+func _policy_array(state: Dictionary) -> Array:
+	var value = state.get("policies", [])
+	return value if value is Array else []
+
+func _policy_error_code(result: Dictionary) -> String:
+	var code := str(result.get("error_code", ""))
+	return code if not code.is_empty() else "failed"
+
+func _policy_failure(code: String) -> Dictionary:
+	_set_modal(i18n.t("base.ui.policies.failed", {"code": code}), true)
+	return {"ok": false, "error_code": code}
+
+func _policy_refresh_dashboard() -> void:
+	dashboard_refresh_accum = 0.0
+	if dashboard_visible:
+		_update_dashboard()
 
 ## Smallest-id policy whose inclusive XZ circle contains `point`.
 func _containing_policy(policies: Array, point: Vector2) -> Dictionary:
@@ -4260,6 +4502,29 @@ func _foundation_matches_bounds(node: Node) -> bool:
 	var foundation_top := foundation_node.position.y + box.size.y * 0.5
 	return absf(box.size.x - bounds[0]) < 0.001 and absf(box.size.z - bounds[2]) < 0.001 and foundation_top > 0.001
 
+## Smoke-only: dispatch one synthetic key through the real input handler so the
+## dashboard policy bindings are exercised, not just their action helpers.
+func _smoke_press_key(code: int, shift := false) -> void:
+	var event := InputEventKey.new()
+	event.physical_keycode = code
+	event.shift_pressed = shift
+	event.pressed = true
+	_unhandled_input(event)
+
+## Smoke-only contract for the compact editor: a value edit must preserve the
+## name, centre, radius, and allowlist it never edits.
+func _smoke_policy_preserved(policy: Dictionary, center: Vector2, policy_name: String) -> bool:
+	if policy.is_empty():
+		return false
+	if str(policy.get("name", "")) != policy_name:
+		return false
+	if absf(float(policy.get("radius_m", 0.0)) - POLICY_DEFAULT_RADIUS_M) > 0.001:
+		return false
+	if _policy_center(policy.get("center", null)).distance_to(center) > 0.001:
+		return false
+	var allowlist = policy.get("blueprint_allowlist", null)
+	return _policy_allowlist_count(allowlist) == 1 and str(allowlist[0]) == "base:workshop"
+
 func _run_scene_smoke() -> void:
 	var status := "ok"
 	var preview_ok := false
@@ -4307,6 +4572,7 @@ func _run_scene_smoke() -> void:
 	var dashboard_ok := false
 	var district_ui_ok := false
 	var policy_ui_ok := false
+	var policy_edit_ok := false
 	var district_select_ok := false
 	var settlement_select_ok := false
 	var settlement_detail_ok := false
@@ -5108,6 +5374,133 @@ func _run_scene_smoke() -> void:
 					district_select_ok = district_select_ok and str(core.world_placement_checksum()) == district_world_checksum
 					district_select_ok = district_select_ok and str(core.population_checksum()) == district_population_checksum
 					district_select_ok = district_select_ok and str(core.construction_checksum()) == district_construction_checksum
+				# Compact dashboard policy editing: the same bridge CRUD as the
+				# standalone editor, driven by the footer keys. The dashboard
+				# edits only the smallest-id containing policy and re-sends the
+				# full record read from `district_policies_state`.
+				policy_edit_ok = dashboard_visible and dashboard_policy_hint != null
+				policy_edit_ok = policy_edit_ok and dashboard_policy_hint.text == i18n.t("base.ui.dashboard.policy_hint")
+				policy_edit_ok = policy_edit_ok and not dashboard_policy_hint.text.contains("!base.ui.")
+				var edit_fresh: Dictionary = core.district_policies_state(SEED)
+				policy_edit_ok = policy_edit_ok and bool(edit_fresh.get("ok", false))
+				policy_edit_ok = policy_edit_ok and int(edit_fresh.get("count", -1)) == 0
+				policy_edit_ok = policy_edit_ok and str(edit_fresh.get("checksum", "")) == "0000000000000000"
+				var edit_center: Vector2 = _district_center_xz()
+				var edit_world_checksum := str(core.world_placement_checksum())
+				var edit_population_checksum := str(core.population_checksum())
+				var edit_construction_checksum := str(core.construction_checksum())
+				var edit_created: Dictionary = _policy_create_default()
+				var edit_state: Dictionary = core.district_policies_state(SEED)
+				var edit_target: Dictionary = _policy_edit_target(SEED)
+				var edit_policy: Dictionary = edit_target.get("policy", {})
+				var edit_id := int(edit_policy.get("id", 0))
+				policy_edit_ok = policy_edit_ok and bool(edit_created.get("ok", false))
+				policy_edit_ok = policy_edit_ok and bool(edit_target.get("ok", false))
+				policy_edit_ok = policy_edit_ok and int(edit_state.get("count", -1)) == 1
+				policy_edit_ok = policy_edit_ok and _policy_array(edit_state).size() == 1
+				policy_edit_ok = policy_edit_ok and edit_id == 1
+				policy_edit_ok = policy_edit_ok and str(edit_policy.get("name", "")) == "District 1"
+				policy_edit_ok = policy_edit_ok and absf(float(edit_policy.get("radius_m", 0.0)) - POLICY_DEFAULT_RADIUS_M) < 0.001
+				policy_edit_ok = policy_edit_ok and _policy_center(edit_policy.get("center", null)).distance_to(edit_center) < 0.001
+				policy_edit_ok = policy_edit_ok and absf(float(edit_policy.get("tax_multiplier", 0.0)) - POLICY_DEFAULT_TAX) < 0.001
+				policy_edit_ok = policy_edit_ok and absf(float(edit_policy.get("service_funding", 0.0)) - POLICY_DEFAULT_FUNDING) < 0.001
+				policy_edit_ok = policy_edit_ok and bool(edit_policy.get("construction_allowed", false))
+				policy_edit_ok = policy_edit_ok and _policy_allowlist_count(edit_policy.get("blueprint_allowlist", null)) == 0
+				policy_edit_ok = policy_edit_ok and modal_label.text == i18n.t("base.ui.policies.created", {
+					"id": i18n.format_int(1),
+					"name": "District 1",
+				})
+				_update_dashboard()
+				policy_edit_ok = policy_edit_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policies_count", {
+					"count": i18n.format_int(1),
+				}))
+				policy_edit_ok = policy_edit_ok and not dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policy_none"))
+				# Give the record a non-default name and allowlist so every
+				# compact edit proves it preserved both.
+				var edit_seeded: Dictionary = core.district_policy_update(
+					SEED,
+					edit_id,
+					"Compact Test",
+					edit_center.x,
+					edit_center.y,
+					POLICY_DEFAULT_RADIUS_M,
+					POLICY_DEFAULT_TAX,
+					POLICY_DEFAULT_FUNDING,
+					true,
+					PackedStringArray(["base:workshop"])
+				)
+				policy_edit_ok = policy_edit_ok and bool(edit_seeded.get("ok", false))
+				_smoke_press_key(KEY_J)
+				edit_policy = _policy_edit_target(SEED).get("policy", {})
+				policy_edit_ok = policy_edit_ok and not bool(edit_policy.get("construction_allowed", true))
+				policy_edit_ok = policy_edit_ok and _smoke_policy_preserved(edit_policy, edit_center, "Compact Test")
+				for index in 13:
+					_smoke_press_key(KEY_BRACKETRIGHT)
+				edit_policy = _policy_edit_target(SEED).get("policy", {})
+				policy_edit_ok = policy_edit_ok and absf(float(edit_policy.get("tax_multiplier", 0.0)) - POLICY_MAX_TAX) < 0.001
+				for index in 15:
+					_smoke_press_key(KEY_BRACKETLEFT)
+				_smoke_press_key(KEY_BRACKETLEFT)
+				edit_policy = _policy_edit_target(SEED).get("policy", {})
+				policy_edit_ok = policy_edit_ok and absf(float(edit_policy.get("tax_multiplier", 0.0)) - POLICY_MIN_TAX) < 0.001
+				for index in 5:
+					_smoke_press_key(KEY_PERIOD)
+				edit_policy = _policy_edit_target(SEED).get("policy", {})
+				policy_edit_ok = policy_edit_ok and absf(float(edit_policy.get("service_funding", 0.0)) - POLICY_MAX_FUNDING) < 0.001
+				for index in 9:
+					_smoke_press_key(KEY_COMMA)
+				edit_policy = _policy_edit_target(SEED).get("policy", {})
+				policy_edit_ok = policy_edit_ok and absf(float(edit_policy.get("service_funding", 0.0))) < 0.001
+				policy_edit_ok = policy_edit_ok and _smoke_policy_preserved(edit_policy, edit_center, "Compact Test")
+				# Remove through the real key path; the section falls back to
+				# the no-policy line and the count drops to zero.
+				_smoke_press_key(KEY_P, true)
+				edit_state = core.district_policies_state(SEED)
+				policy_edit_ok = policy_edit_ok and int(edit_state.get("count", -1)) == 0
+				policy_edit_ok = policy_edit_ok and _policy_array(edit_state).is_empty()
+				policy_edit_ok = policy_edit_ok and modal_label.text == i18n.t("base.ui.policies.removed", {"id": i18n.format_int(1)})
+				_update_dashboard()
+				policy_edit_ok = policy_edit_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policies_count", {
+					"count": i18n.format_int(0),
+				}))
+				policy_edit_ok = policy_edit_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policy_none"))
+				# A foreign seed and a rejected update must leave the registry,
+				# the world checksums, and the UI state unchanged.
+				var reject_created: Dictionary = _policy_create_default()
+				var reject_before: Dictionary = core.district_policies_state(SEED)
+				var reject_policy: Dictionary = _policy_edit_target(SEED).get("policy", {})
+				var reject_result: Dictionary = _policy_apply_update(SEED + 1, reject_policy, {"construction_allowed": false})
+				var reject_after: Dictionary = core.district_policies_state(SEED)
+				var reject_record: Dictionary = _policy_edit_target(SEED).get("policy", {})
+				policy_edit_ok = policy_edit_ok and bool(reject_created.get("ok", false))
+				policy_edit_ok = policy_edit_ok and not bool(reject_result.get("ok", true))
+				policy_edit_ok = policy_edit_ok and str(reject_result.get("error_code", "")) == "seed_mismatch"
+				policy_edit_ok = policy_edit_ok and modal_label.text == i18n.t("base.ui.policies.failed", {"code": "seed_mismatch"})
+				policy_edit_ok = policy_edit_ok and not modal_label.text.contains("!base.ui.")
+				policy_edit_ok = policy_edit_ok and bool(reject_record.get("construction_allowed", false))
+				policy_edit_ok = policy_edit_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policies_count", {
+					"count": i18n.format_int(1),
+				}))
+				policy_edit_ok = policy_edit_ok and str(reject_after.get("checksum", "")) == str(reject_before.get("checksum", ""))
+				policy_edit_ok = policy_edit_ok and int(reject_after.get("count", -1)) == int(reject_before.get("count", -2))
+				policy_edit_ok = policy_edit_ok and str(core.world_placement_checksum()) == edit_world_checksum
+				policy_edit_ok = policy_edit_ok and str(core.population_checksum()) == edit_population_checksum
+				policy_edit_ok = policy_edit_ok and str(core.construction_checksum()) == edit_construction_checksum
+				_smoke_press_key(KEY_P, true)
+				edit_state = core.district_policies_state(SEED)
+				policy_edit_ok = policy_edit_ok and int(edit_state.get("count", -1)) == 0
+				var edit_empty_checksum := str(edit_state.get("checksum", ""))
+				# The footer and no-target message are keyed in EN/DE.
+				i18n.set_locale("de")
+				_update_dashboard()
+				policy_edit_ok = policy_edit_ok and dashboard_policy_hint.text == i18n.t("base.ui.dashboard.policy_hint")
+				policy_edit_ok = policy_edit_ok and dashboard_policy_hint.text.contains("Umschalt+P")
+				_policy_toggle_construction(SEED)
+				policy_edit_ok = policy_edit_ok and modal_label.text == i18n.t("base.ui.policies.no_target")
+				policy_edit_ok = policy_edit_ok and not modal_label.text.contains("!base.ui.")
+				i18n.set_locale("en")
+				_set_modal("", false)
+				_update_dashboard()
 				# Policies: one read-only section driven by one
 				# `district_policies_state` call per dashboard rebuild. The
 				# bridge has no `policy_at`, so GDScript scans the inclusive
@@ -5133,7 +5526,7 @@ func _run_scene_smoke() -> void:
 				var policy_state: Dictionary = core.district_policies_state(SEED)
 				policy_ui_ok = policy_ui_ok and bool(policy_state.get("ok", false))
 				policy_ui_ok = policy_ui_ok and int(policy_state.get("count", -1)) == 0
-				policy_ui_ok = policy_ui_ok and str(policy_state.get("checksum", "")) == "0000000000000000"
+				policy_ui_ok = policy_ui_ok and str(policy_state.get("checksum", "")) == edit_empty_checksum
 				_update_dashboard()
 				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.section.policies"))
 				policy_ui_ok = policy_ui_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.policies_count", {
@@ -6014,6 +6407,8 @@ func _run_scene_smoke() -> void:
 					status = "district_ui_failed"
 				elif not policy_ui_ok:
 					status = "policy_ui_failed"
+				elif not policy_edit_ok:
+					status = "policy_edit_failed"
 				elif not heatmap_ui_ok:
 					status = "heatmap_ui_failed"
 				elif not heatmap_modes_ok:
@@ -6124,7 +6519,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s district_select=%s settlement_select=%s settlement_detail=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s policy_edit=%s district_select=%s settlement_select=%s settlement_detail=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -6166,6 +6561,7 @@ func _run_scene_smoke() -> void:
 		"ok" if dashboard_ok else "failed",
 		"ok" if district_ui_ok else "failed",
 		"ok" if policy_ui_ok else "failed",
+		"ok" if policy_edit_ok else "failed",
 		"ok" if district_select_ok else "failed",
 		"ok" if settlement_select_ok else "failed",
 		"ok" if settlement_detail_ok else "failed",
