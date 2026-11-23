@@ -230,6 +230,14 @@ var selected_id := -1
 # District focus follows the selected building when true (F6); the default is
 # the Mayor camera target. Clearing the selection resets this to camera focus.
 var district_focus_selection := false
+# Dashboard settlement selector. A non-negative id is an explicit override:
+# the 256 m District query, the Policies containment point, and the F7 heatmap
+# use that settlement's centre ahead of F6 building focus and the camera.
+# PageUp/PageDown cycle the id-sorted list through a leading "none" entry, so
+# the override is always clearable. The id is runtime UI state: it is not saved,
+# survives dashboard rebuilds, and is revalidated after a world load (a removed
+# or foreign id falls back to no settlement and the camera/selection focus).
+var selected_settlement_id := -1
 var follow_active := false
 var follow_target := Vector3.ZERO
 var follow_prev_target := Vector3.ZERO
@@ -497,6 +505,12 @@ func _unhandled_input(event: InputEvent) -> void:
 						_toggle_heatmap()
 				KEY_F8:
 					_toggle_construction_clock()
+				KEY_PAGEUP:
+					if dashboard_visible:
+						_cycle_settlement(-1)
+				KEY_PAGEDOWN:
+					if dashboard_visible:
+						_cycle_settlement(1)
 				KEY_T:
 					_cycle_tax_policy()
 				KEY_L:
@@ -1199,9 +1213,9 @@ func _clear_heatmap() -> void:
 func _refresh_heatmap() -> void:
 	if not heatmap_visible or core == null or heatmap_root == null:
 		return
-	var center := _materialization_center()
+	var center := _heatmap_center_xz()
 	var state: Dictionary = core.district_heatmap(
-		SEED, center.x, center.z, HEATMAP_RADIUS_M, HEATMAP_CELL_M
+		SEED, center.x, center.y, HEATMAP_RADIUS_M, HEATMAP_CELL_M
 	)
 	heatmap_last_state = state
 	heatmap_cells = 0
@@ -1210,7 +1224,7 @@ func _refresh_heatmap() -> void:
 	heatmap_error = ""
 	# The key includes the active metric (plus the query centre), so a mode
 	# change is a new layer rather than a stale redraw of the old colours.
-	heatmap_rebuild_key = "%s|%.1f|%.1f" % [heatmap_metric, center.x, center.z]
+	heatmap_rebuild_key = "%s|%.1f|%.1f" % [heatmap_metric, center.x, center.y]
 	if not bool(state.get("ok", false)):
 		heatmap_error = str(state.get("error_code", "unavailable"))
 		_ensure_heatmap_pool()
@@ -1302,6 +1316,15 @@ func _materialization_center() -> Vector3:
 	if mayor_camera != null:
 		return mayor_camera.target
 	return Vector3(target_x, 0.0, target_z)
+
+## F7 query centre. An explicit settlement selection wins; otherwise the
+## materialization centre (selected building, then Mayor camera target).
+func _heatmap_center_xz() -> Vector2:
+	var settlement_center := _settlement_focus_center()
+	if is_finite(settlement_center.x) and is_finite(settlement_center.y):
+		return settlement_center
+	var center := _materialization_center()
+	return Vector2(center.x, center.z)
 
 func _materialization_pin() -> int:
 	# The bridge treats 0 as "no pin"; selected_id is -1 when nothing is
@@ -2257,19 +2280,29 @@ func _found_settlement() -> bool:
 		"name": str(result.get("settlement", {}).get("name", "settlement")),
 	}), false)
 	_update_hud()
+	if dashboard_visible:
+		_update_dashboard()
 	return true
 
 func _clear_settlements() -> void:
 	core.settlement_clear()
 	_clear_settlement_nodes()
+	selected_settlement_id = -1
+	if heatmap_visible:
+		_refresh_heatmap()
 	_set_modal(i18n.t("base.ui.modal.settlements_cleared"), false)
 	_update_hud()
+	if dashboard_visible:
+		_update_dashboard()
 
 func _rebuild_settlements() -> void:
 	_clear_settlement_nodes()
 	var state: Dictionary = core.settlements()
 	for settlement in state.get("settlements", []):
 		_add_settlement_node(settlement)
+	# A load may replace the layer with different ids; keep a still-valid
+	# selection and drop a removed or foreign one.
+	_validate_settlement_selection(state)
 
 func _clear_settlement_nodes() -> void:
 	for node in settlement_nodes.values():
@@ -2357,6 +2390,106 @@ func _settlement_node_matches(settlement: Dictionary) -> bool:
 		and absf(root.position.x - center[0]) < 0.001
 		and absf(root.position.z - center[1]) < 0.001
 	)
+
+## Settlement records in stable ascending-id order (a bridge read by default).
+func _settlement_records(state: Dictionary = {}) -> Array:
+	var source: Dictionary = state
+	if source.is_empty():
+		source = core.settlements()
+	var value = source.get("settlements", [])
+	if not (value is Array):
+		return []
+	var records: Array = value.duplicate()
+	records.sort_custom(_settlement_id_less)
+	return records
+
+func _settlement_id_less(a, b) -> bool:
+	if not (a is Dictionary) or not (b is Dictionary):
+		return false
+	return int(a.get("id", 0)) < int(b.get("id", 0))
+
+func _settlement_by_id(id: int, state: Dictionary = {}) -> Dictionary:
+	if id < 0:
+		return {}
+	var records := _settlement_records(state)
+	for record in records:
+		if int(record.get("id", -1)) == id:
+			return record
+	return {}
+
+## Read an `[x, z]` centre from a plain or packed array; NAN when malformed.
+func _settlement_center(settlement: Dictionary) -> Vector2:
+	var value = settlement.get("center", null)
+	if not (value is Array or value is PackedInt32Array or value is PackedFloat32Array):
+		return Vector2(NAN, NAN)
+	if value.size() < 2:
+		return Vector2(NAN, NAN)
+	return Vector2(float(value[0]), float(value[1]))
+
+func _selected_settlement() -> Dictionary:
+	if selected_settlement_id < 0:
+		return {}
+	return _settlement_by_id(selected_settlement_id)
+
+## Current settlement override centre, or NAN when there is no valid override.
+## A missing/malformed selection is cleared so callers fall back cleanly.
+func _settlement_focus_center() -> Vector2:
+	if selected_settlement_id < 0:
+		return Vector2(NAN, NAN)
+	var settlement := _settlement_by_id(selected_settlement_id)
+	var center := _settlement_center(settlement)
+	if not settlement.is_empty() and is_finite(center.x) and is_finite(center.y):
+		return center
+	selected_settlement_id = -1
+	return Vector2(NAN, NAN)
+
+## Drop a selection whose id disappeared (load, clear, foreign id).
+func _validate_settlement_selection(state: Dictionary = {}) -> bool:
+	if selected_settlement_id < 0:
+		return true
+	var settlement := _settlement_by_id(selected_settlement_id, state)
+	var center := _settlement_center(settlement)
+	if not settlement.is_empty() and is_finite(center.x) and is_finite(center.y):
+		return true
+	selected_settlement_id = -1
+	return false
+
+## Apply a settlement id (or -1 for none) to every dependent query.
+func _apply_settlement_selection(id: int) -> int:
+	var next_id := -1
+	if id >= 0:
+		var settlement := _settlement_by_id(id)
+		var center := _settlement_center(settlement)
+		if not settlement.is_empty() and is_finite(center.x) and is_finite(center.y):
+			next_id = id
+	selected_settlement_id = next_id
+	dashboard_refresh_accum = 0.0
+	if heatmap_visible:
+		_refresh_heatmap()
+	if dashboard_visible:
+		_update_dashboard()
+	_update_hud()
+	return selected_settlement_id
+
+func _select_settlement(id: int) -> bool:
+	var applied := _apply_settlement_selection(id)
+	if id < 0:
+		return applied < 0
+	return applied == id
+
+## Step through `none, id1, id2, ...` in ascending id order, wrapping.
+func _cycle_settlement(direction: int) -> int:
+	var cycle: Array[int] = [-1]
+	for record in _settlement_records():
+		var id := int(record.get("id", -1))
+		if id >= 0:
+			cycle.append(id)
+	var index := cycle.find(selected_settlement_id)
+	if index < 0:
+		index = 0
+	var step := -1 if direction < 0 else 1
+	var next_index := (index + step + cycle.size()) % cycle.size()
+	return _apply_settlement_selection(cycle[next_index])
 
 func _ensure_blueprint() -> bool:
 	if not FileAccess.file_exists(blueprint_path):
@@ -2934,6 +3067,8 @@ func _update_dashboard() -> void:
 	var progression: Dictionary = core.progression_state(SEED)
 	var research: Dictionary = core.research_state(SEED)
 	var advice: Dictionary = core.city_advisor(SEED)
+	var settlement_state: Dictionary = core.settlements()
+	_validate_settlement_selection(settlement_state)
 	var district_focus := not _district_focus_placement().is_empty()
 	var district_center: Vector2 = _district_center_xz()
 	var district: Dictionary = core.district_summary(
@@ -3001,6 +3136,7 @@ func _update_dashboard() -> void:
 			"detailed": i18n.format_int(materialization_counts.y),
 		}) + "\n"
 	text += _district_section(district, district_focus)
+	text += _settlements_section(settlement_state)
 	text += _policies_section(policy_state)
 	var age_line := "—"
 	if bool(progression.get("ok", false)):
@@ -3116,6 +3252,14 @@ func _district_focus_placement() -> Dictionary:
 	return _selected_placement()
 
 func _district_center_xz() -> Vector2:
+	# Precedence: an explicit settlement selection wins over F6 building focus,
+	# which in turn wins over the camera target. A selected settlement id that is
+	# missing, malformed, or foreign is cleared by `_settlement_focus_center` so
+	# the section falls back to the normal camera/selection path instead of
+	# querying a stale centre.
+	var settlement_center := _settlement_focus_center()
+	if is_finite(settlement_center.x) and is_finite(settlement_center.y):
+		return settlement_center
 	var focus := _district_focus_placement()
 	if not focus.is_empty():
 		var center: PackedFloat32Array = focus.get("center", PackedFloat32Array())
@@ -3142,11 +3286,17 @@ func _toggle_district_focus() -> bool:
 func _district_section(district: Dictionary, focus_selected := false) -> String:
 	var section := "[b]%s[/b]\n" % i18n.t("base.ui.dashboard.section.district")
 	var action_key := "base.ui.dashboard.body.district_focus_action_camera" if focus_selected else "base.ui.dashboard.body.district_focus_action_selection"
-	if focus_selected:
+	var settlement := _selected_settlement()
+	var settlement_focus := not settlement.is_empty()
+	if settlement_focus:
+		section += i18n.t("base.ui.dashboard.body.settlement_focus", {
+			"name": str(settlement.get("name", "")),
+		}) + "\n"
+	elif focus_selected:
 		section += i18n.t("base.ui.dashboard.body.district_focus") + "\n"
 	if not bool(district.get("ok", false)):
 		section += i18n.t("base.ui.dashboard.body.district_unavailable") + "\n"
-		if selected_id >= 0:
+		if selected_id >= 0 and not settlement_focus:
 			section += i18n.t(action_key) + "\n"
 		return section
 	var population := int(district.get("population", 0))
@@ -3173,12 +3323,55 @@ func _district_section(district: Dictionary, focus_selected := false) -> String:
 		"needs": needs,
 		"commute": i18n.format_float(float(district.get("average_commute_m", 0.0)), 0),
 	}) + "\n"
-	section += i18n.t(
-		"base.ui.dashboard.body.district_focus_hint" if focus_selected else "base.ui.dashboard.body.district_hint",
-		{"radius": i18n.format_float(DISTRICT_RADIUS_M, 0)},
-	) + "\n"
-	if selected_id >= 0:
+	if settlement_focus:
+		section += i18n.t("base.ui.dashboard.body.settlement_focus_hint", {
+			"radius": i18n.format_float(DISTRICT_RADIUS_M, 0),
+		}) + "\n"
+	else:
+		section += i18n.t(
+			"base.ui.dashboard.body.district_focus_hint" if focus_selected else "base.ui.dashboard.body.district_hint",
+			{"radius": i18n.format_float(DISTRICT_RADIUS_M, 0)},
+		) + "\n"
+	if selected_id >= 0 and not settlement_focus:
 		section += i18n.t(action_key) + "\n"
+	return section
+
+## Dashboard settlement list. Ids are stable selectors; PageUp/PageDown cycle
+## the same id order with a leading "none" entry (see `_cycle_settlement`).
+func _settlements_section(state: Dictionary) -> String:
+	var section := "[b]%s[/b]\n" % i18n.t("base.ui.dashboard.section.settlements")
+	if not bool(state.get("ok", true)):
+		section += i18n.t("base.ui.dashboard.body.settlements_unavailable") + "\n"
+		return section
+	_validate_settlement_selection(state)
+	var records := _settlement_records(state)
+	if records.is_empty():
+		section += i18n.t("base.ui.dashboard.body.settlements_none") + "\n"
+		return section
+	var selected_name: String = i18n.t("base.ui.dashboard.body.settlement_none")
+	var selected := _settlement_by_id(selected_settlement_id, state)
+	if not selected.is_empty():
+		selected_name = str(selected.get("name", ""))
+	section += i18n.t("base.ui.dashboard.body.settlements_count", {
+		"count": i18n.format_int(records.size()),
+		"selected": selected_name,
+	}) + "\n"
+	for record in records:
+		var id := int(record.get("id", -1))
+		var center := _settlement_center(record)
+		var params := {
+			"id": id,
+			"name": str(record.get("name", "")),
+			"owner": str(record.get("owner", "")),
+			"x": int(center.x),
+			"z": int(center.y),
+			"radius": i18n.format_float(float(record.get("radius_m", 0.0)), 0),
+		}
+		if id == selected_settlement_id:
+			section += "[b]%s[/b]\n" % i18n.t("base.ui.dashboard.body.settlement_row_selected", params)
+		else:
+			section += i18n.t("base.ui.dashboard.body.settlement_row", params) + "\n"
+	section += i18n.t("base.ui.dashboard.body.settlement_hint") + "\n"
 	return section
 
 func _policies_section(state: Dictionary) -> String:
@@ -4023,6 +4216,7 @@ func _run_scene_smoke() -> void:
 	var district_ui_ok := false
 	var policy_ui_ok := false
 	var district_select_ok := false
+	var settlement_select_ok := false
 	var heatmap_ui_ok := false
 	var heatmap_modes_ok := false
 	var advisor_i18n_ok := false
@@ -4043,6 +4237,23 @@ func _run_scene_smoke() -> void:
 	# Keep the English assertions below deterministic on a German desktop;
 	# the citizen check switches to `de` explicitly and restores this locale.
 	i18n.set_locale("en")
+
+	# Empty world: no settlement store, no rows, no selection. Reading and
+	# cycling must not create a store, and the section must render the
+	# localized "none" text (plus the unavailable state on a failed read).
+	var empty_settlements: Dictionary = core.settlements()
+	settlement_select_ok = not bool(empty_settlements.get("open", true))
+	settlement_select_ok = settlement_select_ok and int(empty_settlements.get("count", -1)) == 0
+	settlement_select_ok = settlement_select_ok and _settlement_records(empty_settlements).is_empty()
+	settlement_select_ok = settlement_select_ok and not _select_settlement(1)
+	settlement_select_ok = settlement_select_ok and selected_settlement_id == -1
+	settlement_select_ok = settlement_select_ok and _cycle_settlement(1) == -1
+	settlement_select_ok = settlement_select_ok and not bool(core.settlements().get("open", true))
+	var empty_settlement_section := _settlements_section(empty_settlements)
+	settlement_select_ok = settlement_select_ok and empty_settlement_section.contains(i18n.t("base.ui.dashboard.body.settlements_none"))
+	settlement_select_ok = settlement_select_ok and not empty_settlement_section.contains("!base.ui.")
+	settlement_select_ok = settlement_select_ok and _settlements_section({"ok": false}).contains(i18n.t("base.ui.dashboard.body.settlements_unavailable"))
+	settlement_select_ok = settlement_select_ok and not _settlements_section({"ok": false}).contains("!base.ui.")
 
 	target_x = FIXTURE_X
 	target_z = FIXTURE_Z
@@ -4913,6 +5124,118 @@ func _run_scene_smoke() -> void:
 				policy_ui_ok = policy_ui_ok and str(core.world_placement_checksum()) == policy_world_checksum
 				policy_ui_ok = policy_ui_ok and str(core.population_checksum()) == policy_population_checksum
 				policy_ui_ok = policy_ui_ok and str(core.construction_checksum()) == policy_construction_checksum
+				# Settlements: a second record makes the selector observable.
+				# The id order is stable, PageUp/PageDown cycle none -> id1 ->
+				# id2 -> none, the selected row is marked, and an explicit
+				# settlement override wins over F6 building focus for the
+				# district query. A removed/foreign id falls back cleanly.
+				var second_found: Dictionary = core.settlement_found(
+					SEED, "Smoke Harbour", "player", 600, 125, 64
+				)
+				var second_record: Dictionary = second_found.get("settlement", {})
+				var second_settlement_id := int(second_record.get("id", -1))
+				var second_settlement_center := _settlement_center(second_record)
+				var settlement_records: Array = _settlement_records()
+				var first_record: Dictionary = settlement_records[0] if settlement_records.size() > 0 else {}
+				var first_settlement_id := int(first_record.get("id", -1))
+				var first_settlement_center := _settlement_center(first_record)
+				settlement_select_ok = settlement_select_ok and bool(second_found.get("ok", false))
+				settlement_select_ok = settlement_select_ok and settlement_records.size() == 2
+				settlement_select_ok = settlement_select_ok and second_settlement_id > first_settlement_id
+				settlement_select_ok = settlement_select_ok and selected_settlement_id == -1
+				settlement_select_ok = settlement_select_ok and _cycle_settlement(1) == first_settlement_id
+				settlement_select_ok = settlement_select_ok and selected_settlement_id == first_settlement_id
+				settlement_select_ok = settlement_select_ok and _cycle_settlement(1) == second_settlement_id
+				settlement_select_ok = settlement_select_ok and selected_settlement_id == second_settlement_id
+				settlement_select_ok = settlement_select_ok and _cycle_settlement(1) == -1
+				settlement_select_ok = settlement_select_ok and _cycle_settlement(-1) == second_settlement_id
+				settlement_select_ok = settlement_select_ok and _cycle_settlement(-1) == first_settlement_id
+				settlement_select_ok = settlement_select_ok and _select_settlement(second_settlement_id)
+				var settlement_district_center: Vector2 = _district_center_xz()
+				settlement_select_ok = settlement_select_ok and settlement_district_center.distance_to(second_settlement_center) < 0.001
+				var settlement_district: Dictionary = core.district_summary(
+					SEED, settlement_district_center.x, settlement_district_center.y, DISTRICT_RADIUS_M
+				)
+				settlement_select_ok = settlement_select_ok and bool(settlement_district.get("ok", false))
+				settlement_select_ok = settlement_select_ok and int(settlement_district.get("population", -1)) == 0
+				settlement_select_ok = settlement_select_ok and int(settlement_district.get("jobs", -1)) == 0
+				_update_dashboard()
+				var first_row_params := {
+					"id": first_settlement_id,
+					"name": str(first_record.get("name", "")),
+					"owner": str(first_record.get("owner", "")),
+					"x": int(first_settlement_center.x),
+					"z": int(first_settlement_center.y),
+					"radius": i18n.format_float(float(first_record.get("radius_m", 0.0)), 0),
+				}
+				var second_row_params := {
+					"id": second_settlement_id,
+					"name": "Smoke Harbour",
+					"owner": "player",
+					"x": int(second_settlement_center.x),
+					"z": int(second_settlement_center.y),
+					"radius": i18n.format_float(float(second_record.get("radius_m", 0.0)), 0),
+				}
+				var settlement_section: String = _settlements_section(core.settlements())
+				settlement_select_ok = settlement_select_ok and settlement_section.contains(i18n.t("base.ui.dashboard.body.settlements_count", {
+					"count": i18n.format_int(2),
+					"selected": "Smoke Harbour",
+				}))
+				settlement_select_ok = settlement_select_ok and settlement_section.contains(i18n.t("base.ui.dashboard.body.settlement_row_selected", second_row_params))
+				settlement_select_ok = settlement_select_ok and settlement_section.contains(i18n.t("base.ui.dashboard.body.settlement_row", first_row_params))
+				settlement_select_ok = settlement_select_ok and settlement_section.contains(i18n.t("base.ui.dashboard.body.settlement_hint"))
+				settlement_select_ok = settlement_select_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_focus", {"name": "Smoke Harbour"}))
+				settlement_select_ok = settlement_select_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_focus_hint", {
+					"radius": i18n.format_float(DISTRICT_RADIUS_M, 0),
+				}))
+				settlement_select_ok = settlement_select_ok and not dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.district_focus"))
+				print("SETTLEMENT_UI settlements=%d selected=%d centre=(%d,%d) district_population=%d" % [
+					settlement_records.size(),
+					selected_settlement_id,
+					int(second_settlement_center.x),
+					int(second_settlement_center.y),
+					int(settlement_district.get("population", 0)),
+				])
+				# F6 building focus still toggles, but the explicit settlement
+				# override keeps the district centre on the settlement.
+				settlement_select_ok = settlement_select_ok and _select_placement(1)
+				var settlement_building_focus := _toggle_district_focus()
+				_update_dashboard()
+				var override_center: Vector2 = _district_center_xz()
+				settlement_select_ok = settlement_select_ok and settlement_building_focus and district_focus_selection
+				settlement_select_ok = settlement_select_ok and override_center.distance_to(second_settlement_center) < 0.001
+				settlement_select_ok = settlement_select_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_focus", {"name": "Smoke Harbour"}))
+				settlement_select_ok = settlement_select_ok and not _toggle_district_focus()
+				# The choice survives repeated dashboard rebuilds and the
+				# load-path settlement rebuild while the id still exists.
+				_update_dashboard()
+				_update_dashboard()
+				settlement_select_ok = settlement_select_ok and selected_settlement_id == second_settlement_id
+				_rebuild_settlements()
+				_update_dashboard()
+				settlement_select_ok = settlement_select_ok and selected_settlement_id == second_settlement_id
+				settlement_select_ok = settlement_select_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_focus", {"name": "Smoke Harbour"}))
+				i18n.set_locale("de")
+				_update_dashboard()
+				settlement_select_ok = settlement_select_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.section.settlements"))
+				settlement_select_ok = settlement_select_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_row_selected", second_row_params))
+				settlement_select_ok = settlement_select_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_focus", {"name": "Smoke Harbour"}))
+				settlement_select_ok = settlement_select_ok and not dashboard_text.text.contains("!base.ui.")
+				i18n.set_locale("en")
+				_update_dashboard()
+				# A foreign id must not crash or query a stale centre: the
+				# dashboard validation clears it and the camera takes over.
+				selected_settlement_id = 999999
+				_update_dashboard()
+				settlement_select_ok = settlement_select_ok and selected_settlement_id == -1
+				var foreign_center: Vector2 = _district_center_xz()
+				settlement_select_ok = settlement_select_ok and foreign_center.distance_to(Vector2(mayor_camera.target.x, mayor_camera.target.z)) < 0.001
+				settlement_select_ok = settlement_select_ok and not _select_settlement(999999)
+				settlement_select_ok = settlement_select_ok and selected_settlement_id == -1
+				_update_dashboard()
+				settlement_select_ok = settlement_select_ok and not dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_focus", {"name": "Smoke Harbour"}))
+				settlement_select_ok = settlement_select_ok and _select_settlement(-1)
+				settlement_select_ok = settlement_select_ok and selected_settlement_id == -1
 				_toggle_dashboard()
 				dashboard_ok = dashboard_ok and not dashboard_panel.visible
 				var heatmap_checksum := ""
@@ -4971,6 +5294,21 @@ func _run_scene_smoke() -> void:
 					heatmap_ui_ok = heatmap_ui_ok and str(heatmap_repeat.get("checksum", "")) == heatmap_checksum
 				else:
 					heatmap_ui_ok = false
+				# An explicit settlement selection moves the F7 query centre;
+				# clearing it restores the camera-centred checksum pin.
+				var camera_heatmap_checksum := str(heatmap_last_state.get("checksum", ""))
+				settlement_select_ok = settlement_select_ok and _select_settlement(second_settlement_id)
+				var settlement_heatmap_center: PackedFloat32Array = heatmap_last_state.get("center", PackedFloat32Array())
+				heatmap_ui_ok = heatmap_ui_ok and bool(heatmap_last_state.get("ok", false))
+				heatmap_ui_ok = heatmap_ui_ok and settlement_heatmap_center.size() == 2
+				if settlement_heatmap_center.size() == 2:
+					heatmap_ui_ok = heatmap_ui_ok and absf(settlement_heatmap_center[0] - second_settlement_center.x) < 0.001
+					heatmap_ui_ok = heatmap_ui_ok and absf(settlement_heatmap_center[1] - second_settlement_center.y) < 0.001
+				var settlement_heatmap_checksum := str(heatmap_last_state.get("checksum", ""))
+				heatmap_ui_ok = heatmap_ui_ok and settlement_heatmap_checksum.length() == 16
+				heatmap_ui_ok = heatmap_ui_ok and settlement_heatmap_checksum != camera_heatmap_checksum
+				settlement_select_ok = settlement_select_ok and _select_settlement(-1)
+				heatmap_ui_ok = heatmap_ui_ok and str(heatmap_last_state.get("checksum", "")) == camera_heatmap_checksum
 				heatmap_ui_ok = heatmap_ui_ok and status_label.text.contains(i18n.t("base.ui.heatmap.legend"))
 				if heatmap_nonzero > 0:
 					heatmap_ui_ok = heatmap_ui_ok and not status_label.text.contains(i18n.t("base.ui.heatmap.empty"))
@@ -5455,10 +5793,13 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and not district_select_ok:
 		status = "district_select_failed"
 
+	if status == "ok" and not settlement_select_ok:
+		status = "settlement_select_failed"
+
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s district_select=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s district_select=%s settlement_select=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -5501,6 +5842,7 @@ func _run_scene_smoke() -> void:
 		"ok" if district_ui_ok else "failed",
 		"ok" if policy_ui_ok else "failed",
 		"ok" if district_select_ok else "failed",
+		"ok" if settlement_select_ok else "failed",
 		"ok" if heatmap_ui_ok else "failed",
 		"ok" if heatmap_modes_ok else "failed",
 		"ok" if hud_i18n_ok else "failed",

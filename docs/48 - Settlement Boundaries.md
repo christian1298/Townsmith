@@ -23,6 +23,7 @@ This slice proves the settlement identity half of D-019:
 - draw its boundary as a terrain-following ring plus a name/owner label;
 - find the nearest containing settlement for any world cell;
 - show the owner of a selected building in the Mayor HUD;
+- list every settlement in the dashboard and select one for the existing 256 m district, policy, and heatmap queries;
 - save and reload the settlement layer with the world.
 
 It does **not** add districts, taxes, service coverage, permissions, merging, or automatic growth. Those remain later simulation and multiplayer work.
@@ -115,7 +116,8 @@ Load:
 - A billboard `Label3D` with the settlement name and owner.
 - The selected-building line in the HUD shows `owner <name>` or `wilderness`.
 - The status line shows the settlement count.
-- Save/load rebuilds rings and labels from the store.
+- The dashboard's read-only Settlements section lists every record in ascending id order and selects one with `PageUp` / `PageDown` (or clears it through the leading `none` entry). The selection drives the dashboard's 256 m district query, containing-policy scan, and `F7` heatmap centre until cleared; `F6` building focus yields to it. See [[57 - Dashboard and Advisor]] §5.2.
+- Save/load rebuilds rings and labels from the store; the dashboard revalidates a selected id after load and falls back to no settlement when it no longer exists.
 
 The ring is a developer overlay, not final art. It samples every segment endpoint with `world_height_at`; a segment can clip a very steep slope between endpoints.
 
@@ -124,8 +126,10 @@ The ring is a developer overlay, not final art. It samples every segment endpoin
 `smoke_world_scene.sh` requires:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok chunk_cells=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok trades=ok render=ok structure=ok age=ok research=ok tutorial=ok starter=ok named=ok citizens=ok citizen_rows=ok content_i18n=ok content_ui=ok follow=ok citizen_i18n=ok materialization=ok materialization_step=ok materialization_fade=ok movement_scene=ok movement_pool=ok movement_routes=ok movement_lod=ok occupancy=ok industry=ok utilities=ok services=ok economy=ok dashboard=ok district_ui=ok settlement_select=ok policy_ui=ok district_select=ok heatmap_ui=ok heatmap_modes=ok hud_i18n=ok hud_body_i18n=ok hud_status_i18n=ok dashboard_body_i18n=ok advisor_i18n=ok advisor_detail_i18n=ok modal_i18n=ok number_i18n=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok lifecycle_scene=ok campaign_hud=ok status=ok
 ```
+
+The `settlement_select=ok` marker covers the dashboard selector: an empty layer reports none; two settlements list in id order with a marked selection that cycles deterministically; the selected settlement drives the district label and the heatmap centre; a foreign id falls back without a crash. See [[57 - Dashboard and Advisor]] §5.2 and §6.
 
 It checks:
 
@@ -144,7 +148,7 @@ It checks:
 
 ## 8. Limits
 
-- No districts, policies, taxes, services, land value, or budgets. The developer-only read-only overview in [[57 - Dashboard and Advisor]] §4.3 lists settlements and samples one fixed 256 m district around each centre; it adds no district simulation, editing, or save fields.
+- No districts, policies, taxes, services, land value, or budgets. The dashboard has a read-only settlement selector over the existing 256 m district and heatmap queries, and the developer-only read-only overview in [[57 - Dashboard and Advisor]] §4.3 lists settlements and samples one fixed 256 m district around each centre; neither adds district simulation, editing, or save fields.
 - No hard permission checks; `owner` is descriptive.
 - Overlapping settlements are allowed; nearest-centre ownership is provisional.
 - No settlement merge, rename, or owner transfer.
