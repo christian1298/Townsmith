@@ -21,5 +21,17 @@ pub const MAX_SOLID_VOXELS: u64 = 8_000_000;
 /// larger buildings are composed from multiple blueprints.
 pub const MAX_VOLUME_VOXELS: u64 = MAX_SOLID_VOXELS;
 
+/// Maximum total size of one `.tsbp` file accepted by the local library
+/// (96 MiB).
+///
+/// The v1 package format caps `blueprint.json` at 1 MiB and `voxels.bin` at
+/// 64 MiB but has no total package cap, and the optional thumbnail is uncapped.
+/// The library admits the maximum metadata plus voxel stream with room for
+/// roughly 31 MiB of zip overhead and thumbnail. A larger file is rejected
+/// before it is read into memory. This is a library policy, not a new package
+/// format limit; [`save_tsbp`](crate::save_tsbp) can still write a package the
+/// library will refuse.
+pub const MAX_PACKAGE_BYTES: u64 = 96 * 1024 * 1024;
+
 /// Maximum functional props in one package.
 pub const MAX_PROPS: usize = 10_000;

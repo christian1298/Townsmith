@@ -229,6 +229,23 @@ example_copper_age/
 - Scope: explicit local loading only. No discovery, downloads, ZIP/Workshop packages, scripts, native code, hot reload, cross-mod references, save references, migrations, or dependency/load-order resolution. D-006 remains **Proposed**.
 - Covered by 14 `godot_ext` tests: base counts and checksum, a valid merge, repeated-load determinism, clear, and the missing/non-directory/path/symlink/size/UTF-8/manifest/duplicate failure cases.
 
+### 5.2 Local blueprint library
+
+`core_blueprint::BlueprintLibrary` is the local storage foundation for sharing blueprints. It stores validated `.tsbp` packages by their **semantic** `blake3:<hex>` content hash under `<root>/<first-two-hash-hex>/<hash-hex>.tsbp`. The explicit absolute root must already exist and is canonicalized once. There is no discovery, auto-download, Workshop/ZIP packaging, script/native execution, or hot reload.
+
+| Bridge method | Returns | Purpose |
+|---|---|---|
+| `blueprint_library_summary(root_path)` | `Dictionary` | Read-only `ok`, `count`, `total_bytes`, `checksum` |
+| `blueprint_library_insert(root_path, tsbp_path)` | `Dictionary` | Validate one absolute `.tsbp` and store it; `ok`, `hash`, `path`, `inserted`, counts, checksum |
+| `blueprint_library_resolve(root_path, hash)` | `Dictionary` | `ok`, `path`, `exists` for a canonical `blake3:<hex>` hash |
+
+- The address is the package's existing content hash, so the library is compatible with the hash already recorded for placements. Disk names drop the `blake3:` prefix for Windows compatibility.
+- Identical bytes under an existing hash are a no-op; different bytes under that hash are rejected rather than overwritten, including differences in unauthenticated entries such as `thumbnail.png`. A failed insert leaves the library unchanged, removes its temp file, and removes an empty shard it created.
+- Limits: one package is capped at `MAX_PACKAGE_BYTES` = **96 MiB** before it is read. Roots and package sources must be absolute without `.`/`..`; hashes must be exactly `blake3:` plus 64 lowercase hex digits; shard and entry paths are canonicalized and symlink escapes are rejected. Publication uses a temp file plus a no-clobber hard link.
+- Errors are stable and do not throw: `invalid_blueprint_library_root`, `blueprint_library_root_missing`, `blueprint_library_not_a_directory`, `invalid_blueprint_library_hash`, `invalid_blueprint_path`, `blueprint_library_missing_file`, `blueprint_library_not_a_file`, `blueprint_library_invalid_package`, `blueprint_library_too_large`, `blueprint_library_path_escape`, `blueprint_library_collision`, and `blueprint_library_io`.
+- **No save references yet.** `world_save` still writes absolute `blueprint_path` values; `save_tsbp`/`load_tsbp` and existing package hashes are unchanged. Wiring placements to `blake3:` library references is the next slice.
+- Covered by 21 `core_blueprint` integration tests and 13 `godot_ext` bridge tests.
+
 ## 6. Resource packs
 
 Resource packs change **presentation**, not simulation.

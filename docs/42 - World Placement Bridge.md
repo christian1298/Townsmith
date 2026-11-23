@@ -28,6 +28,9 @@ tags:
 | `world_validate_placement(seed, path, x, z, rotation)` | `Dictionary` | Load and validate a `.tsbp` site without mutating, including the district policy gate; `ok`, `center`, `foundation_m`, `footprint`, `rotation_deg`, `bounds`, `blueprint_hash`, `structure` |
 | `progression_state(seed)` | `Dictionary` | Derived population age: `age`, `next_age`, `next_threshold`, `progress`, `materials` |
 | `world_blueprint_info(path)` | `Dictionary` | Metadata for the ghost/HUD: id, name, hash, bounds, rooms, capacity, jobs, cost |
+| `blueprint_library_summary(root_path)` | `Dictionary` | Read-only `ok`, `count`, `total_bytes`, `checksum` for an absolute local library root; no world-save field |
+| `blueprint_library_insert(root_path, tsbp_path)` | `Dictionary` | Validate one absolute `.tsbp` and store it by content hash; `ok`, `hash`, `path`, `inserted`, `count`, `total_bytes`, `checksum` |
+| `blueprint_library_resolve(root_path, hash)` | `Dictionary` | Resolve `blake3:<hex>` to `ok`, `path`, `exists`; a valid missing hash is `ok = true`, `exists = false` |
 | `world_place_blueprint(seed, path, x, z, rotation)` | `Dictionary` | Validate, apply the district construction/allowlist gate, and append; `ok`, `seed`, `count`, `checksum`, `placement` |
 | `world_placements()` | `Dictionary` | `open`, `seed`, `next_id`, `count`, `checksum`, `placements[]` |
 | `world_placement_count()` | `int` | Placement count |
@@ -55,6 +58,8 @@ Lot methods (`lot_validate`, `lot_add`, `lots`, `lot_count`, `lot_checksum`, `lo
 `x` and `z` are the **centre** of the rotated footprint in world metres. The blueprint mesh is volume-local with its minimum corner at `(0, 0, 0)`; a renderer offsets it by `-bounds_m / 2` on X/Z, then rotates around Y. `rotation` is normalized to 0/90/180/270.
 
 Content methods (`content_load_dir`, `content_registry_summary`, `content_registry_clear`) are bridge state only and are not written by `world_save`. The slot opens on `ContentRegistry::base()`, loads at most one absolute local mod directory at a time, and commits the merged registry only after the pack, namespace, path, size, UTF-8, and duplicate checks pass. No save field, placement, blueprint, or existing checksum changes. See [[06 - Modding and Resource Packs]] §5.1.
+
+Blueprint-library methods (`blueprint_library_summary`, `blueprint_library_insert`, `blueprint_library_resolve`) are **stateless** and local-only: each call opens the explicit absolute root, performs one operation, and returns. They do not open the world, are not written by `world_save`, and do not change placement, blueprint, or existing save checksums. `insert` validates with `load_tsbp` and stores the exact validated bytes at `<root>/<first-two-hash-hex>/<hash-hex>.tsbp`; the address is the package's semantic `blake3:` content hash. A duplicate is a no-op, a different file under the same hash is a collision, and a failed insert leaves the library unchanged. The package cap is 96 MiB (`MAX_PACKAGE_BYTES`). Roots and sources must be absolute without `.`/`..`; symlinked shards and entries are rejected. Error codes are stable: `invalid_blueprint_library_root`, `blueprint_library_root_missing`, `blueprint_library_not_a_directory`, `invalid_blueprint_library_hash`, `invalid_blueprint_path`, `blueprint_library_missing_file`, `blueprint_library_not_a_file`, `blueprint_library_invalid_package`, `blueprint_library_too_large`, `blueprint_library_path_escape`, `blueprint_library_collision`, and `blueprint_library_io`. The world save still stores absolute `blueprint_path` values; wiring the library into save references is the next slice.
 
 ## 2. Validation
 
@@ -208,7 +213,7 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 
 ## 6. Limits
 
-- The world save references **absolute package paths**. It is valid on the same machine but is not portable; a content-addressed local library is a follow-up.
+- The world save references **absolute package paths**. It is valid on the same machine but is not portable. A local content-addressed blueprint library now exists (`blueprint_library_*`), but the save does not reference it yet; that wiring is the next slice.
 - Placement creates a phased construction site; the v0 state machine and visuals are in [[45 - Construction Sites]].
 - Terrain edits use the 2B delta fields in the same JSON; see [[43 - Terrain Edits]].
 - `world_load` re-verifies package hashes and metadata (id, name, bounds, capacity, jobs, structure) but does not re-run slope/water sampling. Terrain edits can invalidate an old site; the gameplay layer will revalidate before construction.
@@ -221,14 +226,15 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 
 - `core_city`: placement persistence, construction, roads, lots, settlements, households, treasury/loans, industry, utilities, traffic, the advisor, structural placement limits, research, age gates, civic services, and district policies; **535 tests**.
 - `core_structure`: **22 tests + 1 doctest** for system tiers, story/height/span/foundation rules, and composite grounds.
-- `godot_ext`: **156 tests** total, including runtime content loading, save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
-- Workspace: **1168 tests** (1163 unit/integration + 5 doctests). Verified on 2026-11-23 on `feat/content-runtime` (base master `4822f54`).
+- `core_blueprint`: **40 tests** (37 integration + 3 unit), including package validation and the local content-addressed library.
+- `godot_ext`: **169 tests** total, including runtime content loading, blueprint-library insert/resolve/error mapping, save-path validation, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
+- Workspace: **1202 tests** (1197 unit/integration + 5 doctests). Verified on 2026-11-23 on `feat/blueprint-library` (base master `1387fc2`).
 - Godot headless: `WORLD_PLACEMENT ... status=ok` and `WORLD_SCENE ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 
 ## 8. Next
 
 1. Implement D-032 (Proposed): server-authoritative `place_blueprint`, with the bridge preview calling the same rule set. This is the prerequisite for claiming multiplayer placement enforcement.
-2. Replace absolute package paths with a content-addressed library beside the save.
+2. Replace absolute package paths with a content-addressed library reference beside the save, resolving through `blueprint_library_resolve` (the library itself is in place).
 3. Add settlement boundaries and ownership (2E.4).
 4. Replace global construction pools with settlement crews and delivery trips.

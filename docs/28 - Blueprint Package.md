@@ -114,19 +114,70 @@ blake3:9f5bcd407d25c5b5204315c873faa1321dfb5dd969c9a22d2322f7502f95a070
 - Load validates format version, metadata, declared volume capacity, declared solid count, bounds, decoded solid count, chunk coordinates, palette/RLE, hash, and trailing bytes.
 - Missing mods/resource packs are surfaced as `BlueprintError::MissingDependency`; the game version expression is parsed but not enforced in v1. The full resolver comes with the content registry.
 
-## 6. API
+## 6. Local blueprint library
+
+`core_blueprint::BlueprintLibrary` stores validated packages in an explicit absolute local directory. It is the foundation for portable save references, but **the world save still stores absolute package paths**; wiring references into the save is the next slice.
+
+### 6.1 Layout and addressing
+
+```text
+<root>/
+├── 9f/
+│   └── 9f5bcd407d25c5b5204315c873faa1321dfb5dd969c9a22d2322f7502f95a070.tsbp
+└── d0/
+    └── d0f1a92324db8c5036534d96c52aaf7194da8d8dbcb7c582de50dae6fa780095.tsbp
+```
+
+- The address is the package's validated semantic `blake3:<hex>` content hash from §4. The `blake3:` prefix is omitted from disk names so the path is valid on Windows.
+- The first two hex digits select the shard directory; the file name is the full 64-hex hash plus `.tsbp`.
+- `insert_file` reads one absolute `.tsbp` source without `.` or `..`, validates it with the existing loader, and stores the exact bytes it validated. The source is not modified or removed.
+- Identical bytes already stored under the same hash are a no-op (`inserted = false`). Different bytes under an existing hash are rejected as a collision rather than overwritten, even when the difference is only an unauthenticated entry such as `thumbnail.png`.
+- `resolve`/`resolve_checked`, `contains`, `list`, and `summary` are read-only. `list` is sorted by canonical hash; `summary` reports `count`, `total_bytes`, and a 16-hex catalog checksum over the sorted hashes and sizes, so insertion order does not matter.
+
+### 6.2 Limits and security
+
+| Rule | Value |
+|---|---|
+| Root | must already exist, be absolute, and contain no `.` or `..`; canonicalized once |
+| Package size | `MAX_PACKAGE_BYTES` = **96 MiB**, checked before the file is read |
+| Hash input | exactly `blake3:` + 64 lowercase hex digits; no paths, traversal, whitespace, or uppercase |
+| Source | absolute, regular file, `.tsbp` extension (case-insensitive), no `.` or `..` |
+| Shard/entry paths | canonicalized under the root; symlinked shards and entries are rejected |
+| Publication | temporary file in the target shard, `sync_all`, then a no-clobber hard link |
+| Overwrite | never replaces a different file; a failed insert removes its temporary file |
+
+The 96 MiB cap is a library policy, not a `.tsbp` format limit. The v1 format caps metadata at 1 MiB and the voxel stream at 64 MiB, but has no total package cap and does not cap the optional thumbnail; a package with a thumbnail larger than roughly 31 MiB is valid on its own but rejected by the library. `save_tsbp` can still write such a package.
+
+Hard-link publication requires a filesystem that supports hard links on the same volume (the temp file is in the same shard). A filesystem without hard links reports an I/O error and does not publish the package. The shard directory is not fsynced, matching `save_tsbp`; a crash immediately after publication may lose the new entry, but never leaves a partial package.
+
+### 6.3 Errors
+
+`BlueprintLibraryError` exposes stable variants: `InvalidRoot`, `RootMissing`, `RootNotDirectory`, `InvalidHash`, `InvalidPath`, `MissingFile`, `NotAFile`, `InvalidPackage`, `TooLarge`, `PathEscape`, `Collision`, and `Io`. A failed insert leaves the summary/list unchanged; an empty shard created during the attempt is removed.
+
+### 6.4 Not yet
+
+- No discovery, download, ZIP/Workshop packaging, script/native execution, or hot reload.
+- The library is not opened by `save_tsbp`/`load_tsbp`; existing package hashes and behavior are unchanged.
+- No save reference field, no placement-path migration, and no bridge placement uses the library yet.
+
+## 7. API
 
 ```rust
-use core_blueprint::{Blueprint, BlueprintMetadata, save_tsbp, load_tsbp};
+use core_blueprint::{Blueprint, BlueprintLibrary, BlueprintMetadata, save_tsbp, load_tsbp};
 
 let blueprint = Blueprint::new(BlueprintMetadata::new("local:house", "House"), volume);
 save_tsbp(path, &blueprint)?;
 let loaded = load_tsbp(path)?;
+
+let library = BlueprintLibrary::new("/absolute/blueprint-library")?;
+let insert = library.insert_file(path)?;
+assert_eq!(library.resolve(&insert.hash), Some(insert.path));
+let summary = library.summary()?;
 ```
 
-## 7. Tests
+## 8. Tests
 
-`core_blueprint` has 16 integration tests and 3 voxel-stream unit tests:
+`core_blueprint` has **37 integration tests** (16 package roundtrip/validation + 21 local-library tests) and 3 voxel-stream unit tests:
 
 - empty and non-empty roundtrip;
 - volume/hash preservation;
@@ -135,9 +186,10 @@ let loaded = load_tsbp(path)?;
 - unknown entries;
 - missing entries and bad zip;
 - bad version and hash mismatch;
-- crafted oversized volume and solid-count streams rejected before allocation.
+- crafted oversized volume and solid-count streams rejected before allocation;
+- library insert/resolve/list/summary determinism, duplicate no-op, collision rejection, size/traversal/symlink/missing-path errors, atomic insert, and unchanged existing package hashes.
 
-## 8. Limitations
+## 9. Limitations
 
 - No zstd/deflate yet; v1 uses zip `Stored`.
 - No thumbnail generation yet; the entry is allowed but ignored and has no size cap in v1.
@@ -145,11 +197,13 @@ let loaded = load_tsbp(path)?;
 - Material keys are provisional until the content registry.
 - No mod/resource-pack resolver yet.
 - No savegame-format migration yet; `format_version` is the hook.
+- The world save still stores absolute `blueprint_path` values. The local library is a storage foundation, not a save reference yet.
 
-## 9. Next
+## 10. Next
 
-1. Room detection + stats to fill `rooms`, `materials`, and `stats`.
-2. Thumbnail rendering at save time.
-3. Content registry keys and dependency resolution.
-4. Compressed voxel stream as a new format version.
-5. Editor save/load UI and atomic autosave.
+1. Wire placement records to a content-addressed library reference instead of an absolute path, resolving through `BlueprintLibrary` and keeping legacy absolute paths loadable.
+2. Room detection + stats to fill `rooms`, `materials`, and `stats`.
+3. Thumbnail rendering at save time.
+4. Content registry keys and dependency resolution.
+5. Compressed voxel stream as a new format version.
+6. Editor save/load UI and atomic autosave.
