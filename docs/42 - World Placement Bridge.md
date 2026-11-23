@@ -210,7 +210,7 @@ GODOT=/path/to/godot ./scripts/smoke_world_library.sh
 It loads with `world_load_with_library`, asserts `world_placements` reports the library path in `resolved_blueprint_path` while the recorded `blueprint_path` and placement checksum stay unchanged, builds the mesh from the resolved path, then checks that a fresh plain `world_load` fails with `missing_blueprint` and exposes no resolved field, that the loaded core keeps its previous map after a plain-load failure, that deleting the library entry leaves the stale path visible and a failed reload changes nothing, and that `world_clear_placements` empties the store. Recorded marker:
 
 ```text
-WORLD_LIBRARY resolved=ok mesh=ok plain=ok guard=ok stale=ok clear=ok checksum=... status=ok
+WORLD_LIBRARY resolved=ok mesh=ok plain=ok guard=ok stale=ok clear=ok checksum=08c0f111ef5e72d6 status=ok
 ```
 
 ## 5. Scene
@@ -248,7 +248,7 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 - `core_structure`: **22 tests + 1 doctest** for system tiers, story/height/span/foundation rules, and composite grounds.
 - `core_blueprint`: **40 tests** (37 integration + 3 unit), including package validation and the local content-addressed library.
 - `godot_ext`: **193 tests** total, including runtime content loading, blueprint-library insert/resolve/error mapping, portable save/load copy-and-resolve semantics, package deduplication, missing/corrupt/hash/metadata failure codes, save-path validation, resolved-path exposure and lifetime, hex roundtrip, delta-aware worker meshing, and world-JSON delta/road/lot roundtrips.
-- Workspace: **1226 tests** (1221 unit/integration + 5 doctests). Verified on 2026-11-23 on `feat/world-library-render` (base master `7f5aa04`).
+- Workspace: **1226 tests** (1221 unit/integration + 5 doctests). Verified on 2026-11-23 at master `a6b9641`.
 - Godot headless: `WORLD_PLACEMENT ... status=ok`, `WORLD_SCENE ... status=ok`, and `WORLD_LIBRARY ... status=ok`.
 - CI runs the smoke in the Linux Godot job.
 

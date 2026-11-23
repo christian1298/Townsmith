@@ -31,7 +31,7 @@ tags:
 | `benchmarks/` | Route JSON, results, and benchmark notes | Harness v0 |
 | `scripts/bench_core.sh` | 3-run core benchmark aggregation | Working |
 | `scripts/bench_godot.sh` | 3-run Godot flyover aggregation | Working; headless frame times are not representative |
-| `crates/godot_ext` | Godot 4.7 GDExtension bridge with terrain workers, city layout, editable volume, blueprint, room, copy-mesh, acceptance, world-placement, construction, road, lot, settlement, household, treasury, industry, utility, traffic, advisor, structure, research, civic-service, materialization, server-save, policy, content-registry, blueprint-library, and locale APIs | Working, 169 tests + headless smoke |
+| `crates/godot_ext` | Godot 4.7 GDExtension bridge with terrain workers, city layout, editable volume, blueprint, room, copy-mesh, acceptance, world-placement, construction, road, lot, settlement, household, treasury, industry, utility, traffic, advisor, structure, research, civic-service, materialization, server-save, policy, content-registry, blueprint-library, portable save/load, resolved-library-path, and locale APIs | Working, 193 tests + headless smoke |
 | `godot/` | Terrain/city previews plus the first-person editor, blueprint save/load, room overlay, EN/DE UI, and slice acceptance | Working |
 | `scripts/` | Build, check, run, smoke, and acceptance commands | Working |
 
@@ -164,7 +164,7 @@ The core is engine-agnostic. `core_voxel`, `core_world`, `core_sim`, `core_city`
 | Terrain LOD 4, 256 m chunk | 65,536 cells | — | 7,675 quads | ~0.11 ms |
 | Traffic graph, 32 × 32 grid | 64 roads | 1,024 nodes | 1,984 edges | ~0.44 ms build; 1.3 ms / 1,000 flow queries |
 
-These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, agent, and traffic paths and a baseline for regressions. The terrain counts are for the skirt-free `terrain_mesh_lod` path, which has no neighbor sampler and therefore suppresses chunk-boundary walls (F-047): step 1/2/4 lose exactly 1,024/512/256 perimeter quads versus the old "wall down to height 0" behavior. Streamed chunks pass the generator sampler and add up to 1,024 skirt quads at LOD 1 (see [[21 - LOD Seams]]). The workspace has **1202 tests** (1197 unit/integration + 5 doctests), verified on 2026-11-23 at master `61434d9`: 55 voxel, 78 world, 53 simulation, 535 city, 40 blueprint, 13 rooms, 169 bridge, 22 structure, 124 server, and 108 bench tests (18 bins with tests + bench lib: city_loop 9, cohort_1m 9, cohort_validate 9, dormant 5, financing 8, industrial 4, infra_cost 2, materialization 2, metropolis 4, metropolis_balance 4, modern 5, movement 6, placements 2, save_1m 6, save_stress 11, streaming_scale 13, traffic 4, worldgen 3, bench lib 2).
+These are **microbenchmark** numbers, not the full player-facing benchmark. They establish the core meshing, worldgen, cohort, agent, and traffic paths and a baseline for regressions. The terrain counts are for the skirt-free `terrain_mesh_lod` path, which has no neighbor sampler and therefore suppresses chunk-boundary walls (F-047): step 1/2/4 lose exactly 1,024/512/256 perimeter quads versus the old "wall down to height 0" behavior. Streamed chunks pass the generator sampler and add up to 1,024 skirt quads at LOD 1 (see [[21 - LOD Seams]]). The workspace has **1226 tests** (1221 unit/integration + 5 doctests), verified on 2026-11-23 at master `a6b9641`: 55 voxel, 78 world, 53 simulation, 535 city, 40 blueprint, 13 rooms, 193 bridge, 22 structure, 124 server, and 108 bench tests (18 bins with tests + bench lib: city_loop 9, cohort_1m 9, cohort_validate 9, dormant 5, financing 8, industrial 4, infra_cost 2, materialization 2, metropolis 4, metropolis_balance 4, modern 5, movement 6, placements 2, save_1m 6, save_stress 11, streaming_scale 13, traffic 4, worldgen 3, bench lib 2).
 
 ### Vertical slice acceptance
 
@@ -181,7 +181,7 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 - LOD is distance-based (mesh stride), not a full imposter/HLOD pipeline. A 2 m perimeter skirt hides T-junction cracks between different LOD steps; extreme height differences, lighting seams, or biome color seams can still show.
 - The benchmark quads above are for the skirt-free no-sampler `terrain_mesh_lod` path, which suppresses boundary walls; streamed chunks add up to 1,024 skirt quads at LOD 1 and use the generator sampler for seam walls (see [[21 - LOD Seams]]).
 - Boundary culling samples the deterministic generator, not live edited heights. Edited edge cells can render missing or doubled walls until the sampler reads the delta store; the no-sampler tool path never renders a boundary wall.
-- Blueprint packages use `.tsbp` v1 (zip + RLE + BLAKE3). Terrain deltas still use the phase 0 blob; a world save format is later.
+- Blueprint packages use `.tsbp` v1 (zip + RLE + BLAKE3). The #298 local library and #302/#303 portable save/load are opt-in: the world JSON still stores absolute `blueprint_path` values and has no library reference field, and a plain `world_load` stays non-portable. Terrain deltas still use the phase 0 blob; a world save format is later.
 - The Godot benchmark has terrain, streaming, and Early/Mid/Late box-city routes plus a 200-voxel-hut route; a real voxel city scene is later, and headless frame times are not render measurements.
 - Async chunk completion is staged in a ready map and committed in ring/distance/coordinate order with a 4-chunk frame budget; a fixed-center staged route is deterministic and gated by `smoke_stream_order.sh` (`STREAM_ORDER_SMOKE status=ok stream_order=ok`). The free-flight route can still change commit order when the camera crosses rings on different frames.
 - The headless server has protocol v0, an authoritative executor, dev roles, atomic save/load, and a loopback 3D world client (#293); prediction, interpolation, entity/terrain streaming, authentication, and restart persistence remain open.
@@ -192,7 +192,7 @@ These are **microbenchmark** numbers, not the full player-facing benchmark. They
 
 1. Record the 30-minute human playtest and top three usability issues (Q-101).
 2. Record reference-hardware evidence for the 1M/RTX 3060 gate. The #273 cohort harness, #279 100 km² streaming + 250k building-record layer, and #280/#290 gate-result assembler are in place; #292 records local cohort/save/streaming evidence only, assembly without a render run stays `insufficient`, and the assembler fails closed on a missing run shape or route.
-3. Replace absolute placement `blueprint_path` values with content-addressed `blake3:` library references through the #298 `BlueprintLibrary`, keeping legacy absolute paths loadable ([[28 - Blueprint Package]] §6, [[06 - Modding and Resource Packs]] §5.2).
+3. Optional blueprint follow-up: add a content-addressed library reference to the placement record, resolving `blake3:` through the #298 `BlueprintLibrary`, while keeping legacy absolute paths loadable ([[28 - Blueprint Package]] §6, [[06 - Modding and Resource Packs]] §5.2). The #302/#303 portable save/load and resolved render paths already work but are opt-in and do not add this field.
 4. Deferred Phase 2 editor work: paint/pick, brushes, selection/copy/rotate/mirror, structural v0, thumbnails, AO/texture arrays.
 
 ## 5. Commands
@@ -225,6 +225,7 @@ GODOT=/path/to/godot ./scripts/smoke_layout.sh
 GODOT=/path/to/godot ./scripts/smoke_acceptance.sh
 GODOT=/path/to/godot ./scripts/smoke_world_placement.sh
 GODOT=/path/to/godot ./scripts/smoke_world_scene.sh
+GODOT=/path/to/godot ./scripts/smoke_world_library.sh
 GODOT=/path/to/godot ./scripts/smoke_slice.sh
 cargo run --release -p townsmith-bench -- 100
 cargo run --release -p townsmith-bench --bin worldgen
