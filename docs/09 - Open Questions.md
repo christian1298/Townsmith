@@ -221,6 +221,16 @@ These support D-033 (Proposed). None is answered yet; the ADR keeps ownership an
 | **Q-038** | Shader support in resource packs? | Yes with compatibility warnings; vanilla must not depend on it | Low |
 | **Q-039** | How are modded blueprints shared? | Bundled with the mod or published separately; hash in the manifest | Normal |
 
+## Content identity questions
+
+These support D-034 (Proposed). None is answered yet; content-pack identity in world saves is **unimplemented**. Today `content_load_dir` merges one pack into the live registry, but `world_save` writes no pack identity and `world_load` verifies no pack.
+
+| ID | Question | Current assumption / recommendation | Priority |
+|---|---|---|---|
+| **Q-116** | How stable must a pack checksum be across pack versions, and can a save accept a compatible newer pack? | Exact `pack_checksum` match in v1. A pack-declared compatibility range and explicit migration can come later; never auto-accept a changed pack. | High |
+| **Q-117** | How does a content-bound world load when the required pack is missing, and what can a read-only mode safely preserve? | Fail closed by default. A future `--accept-missing-content` may open a read-only inspector that keeps unknown IDs opaque, blocks saves and content-dependent simulation, and never substitutes a fallback. | High |
+| **Q-118** | How are renamed or removed content IDs migrated in saves and blueprints, and who owns the mapping? | The pack manifest declares explicit `from -> to` migrations per content format version; base migrations ship with the game. Unmapped IDs fail the load; no silent substitution. | High |
+
 ## Construction questions
 
 | ID | Question | Current assumption / recommendation | Priority |
@@ -372,3 +382,4 @@ These support D-033 (Proposed). None is answered yet; the ADR keeps ownership an
 | Q-090–Q-100 | Materials, structure, and basements |
 | Q-107–Q-110 | Server-authoritative blueprint placement |
 | Q-111–Q-115 | Settlement ownership, membership, and permissions |
+| Q-116–Q-118 | Content-pack identity in world saves |

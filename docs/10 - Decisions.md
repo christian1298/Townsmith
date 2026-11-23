@@ -51,6 +51,7 @@ tags:
 | D-031 | District policy service funding weights civic service upkeep by completed site | Proposed | 2026-11-23 | [[07 - Simulation and AI]], [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]] |
 | D-032 | Server-authoritative blueprint placement | Proposed | 2026-11-23 | [[05 - Multiplayer]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[42 - World Placement Bridge]], [[53 - Treasury and Taxes]] |
 | D-033 | Settlement ownership, membership, and permissions | Proposed | 2026-11-23 | [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[48 - Settlement Boundaries]], [[57 - Dashboard and Advisor]] |
+| D-034 | Content-pack identity in world saves | Proposed | 2026-11-23 | [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[28 - Blueprint Package]] |
 
 ---
 
@@ -1647,6 +1648,192 @@ pub struct Settlement {
 ### Review trigger
 
 The first authoritative settlement or placement command, the first multiplayer world that needs per-player settlements, or the first save migration that carries membership. Revisit identity (Q-111) before accepting; without a stable id the checks are advisory. If membership and the D-032 placement check cannot share one resolution rule in `core_city`, split it out before accepting the ADR.
+
+---
+
+## D-034 — Content-pack identity in world saves
+
+**Status:** Proposed · **Date:** 2026-11-23 · **Affects:** [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[28 - Blueprint Package]]
+
+### Context
+
+`content_load_dir(path)` in `crates/godot_ext` merges exactly one local pack into the live registry. It validates the pack through `ContentPack::from_dir`, merges it after the bundled base content with `merged_with_base`, and replaces the live registry only after every check passes. The registry is bridge state: `world_save` and `world_load` do not read or write it, and the world save has no field that says which pack produced a content ID.
+
+Content IDs can reach a saved world by several routes:
+
+- Blueprint packages (`.tsbp`, D-027) store `materials` keys, room `type` values, prop `id` values, and a `dependencies` block. A placement stores the package hash and path, so the package is pinned, but the pack that supplied those definitions is not.
+- The world save itself stores placement records and derived state. Any future save field whose value is a content ID inherits the same problem.
+- The current pack checksum is `ad4c645869a411ed` for the example pack, and the merged registry checksum is `330a538d07805b50`; base is `c2df0f242f5e78d2`. These values exist in the runtime registry, but a save does not record them.
+
+Loading a save against a different or missing pack therefore fails late or silently remaps:
+
+- **Missing pack:** the base registry has no `example:` IDs. A blueprint that uses them fails while loading the package, or a save field that references one fails during construction/population validation, long after the file was opened.
+- **Different pack using the same namespace:** the pack identity is not recorded, so a different pack can publish the same namespaced content ID with different values. The changed definition is accepted without a warning, and the world now uses different material, room, or prop values than it was authored with.
+- **Base-only save loaded with a pack:** today this is harmless because packs cannot override base IDs, but nothing records that the save was intentionally base-only.
+
+This is the next modding step after the #295 runtime registry. It does not implement modding; it defines the identity contract that a save must carry before pack content can be treated as persistent. D-006 remains **Proposed**, and this ADR does not accept it.
+
+### Decision
+
+**Save object**
+
+A world save may carry one optional top-level `content` object:
+
+```json
+{
+  "format_version": 2,
+  "seed": 2026,
+  "next_id": 42,
+  "placements": [],
+  "content": {
+    "format_version": 1,
+    "pack_id": "example:copper_age",
+    "pack_checksum": "ad4c645869a411ed",
+    "registry_checksum": "330a538d07805b50"
+  }
+}
+```
+
+| Field | Type | Rule |
+|---|---|---|
+| `format_version` | integer | Identity format version; `1` is the only supported value. A higher value returns `content_identity_unsupported` |
+| `pack_id` | string | The manifest ID, a namespaced ID such as `example:copper_age`; `base` is never recorded as a pack |
+| `pack_checksum` | string | `ContentPack::checksum()`, 16 lowercase hex digits; identifies the pack's semantic manifest + content, not a raw-byte hash |
+| `registry_checksum` | string | Merged `ContentRegistry::checksum()`, 16 lowercase hex digits; identifies base + pack after the merge |
+
+`pack_checksum` answers "is this the same pack?" and `registry_checksum` answers "is this the same base content plus pack?". Both are needed: a pack checksum can match while a game update changes a base material, and the merged registry checksum catches that case. The object identifies the pack, not a list of referenced content IDs.
+
+**When the object is written**
+
+- **No live pack (base only):** omit `content` entirely. The outer save keeps `format_version: 1`, preserves key order, writes no `null` or empty object, and stays byte-identical to today's output. Existing save goldens and checksums do not change.
+- **One live pack:** write `content` and set the outer save to `format_version: 2`. A reader that predates D-034 rejects v2 with its existing unsupported-version error instead of silently ignoring the identity and loading against base content.
+- **More than one live pack:** refuse the save with `content_multiple_packs_unsupported`. The runtime registry is one pack at a time today (`packs` is `0` or `1`); this ADR does not invent multi-pack identity.
+- **After a content-bound load:** retain the verified identity in the live world state. A later save must write the same `pack_id` and `pack_checksum`. If the active registry is base-only, return `content_save_requires_pack`; if it is a different pack, return `content_save_pack_mismatch`. Dropping the identity is an explicit migration (Q-118), never an implicit save.
+- **Base-only world loaded with a pack:** the load is allowed because packs are additive and cannot override base IDs. The next save records the active pack, even if the world never used a pack ID. This is conservative but deterministic; clearing the pack before saving keeps the world base-only.
+
+**Verification before mutation**
+
+The load path verifies identity immediately after reading the save JSON and before constructing any store, loading any `.tsbp`, or replacing live state:
+
+1. Read the save (including the existing `.bak` recovery).
+2. Parse only the top-level `format_version` and the optional `content` object. Malformed JSON still returns the existing `corrupt_save`; malformed identity returns a content code.
+3. Read the active runtime registry summary: pack count, pack ID, pack checksum, and merged checksum.
+4. Compare using the matrix below.
+5. On success, continue the existing load order and validation. On failure, return one stable code and leave every live store, placement, construction site, and registry untouched.
+
+| Recorded state | Active registry | Result |
+|---|---|---|
+| none, outer v1 | base only | Load; log `content_identity_absent` |
+| none, outer v1 | base + pack | Load with a `legacy_unbound` warning; base IDs resolve, and any missing pack ID fails through the existing package/record validation |
+| `content` present, outer v2 | matching pack ID and both checksums | Load |
+| `content` present | different `pack_id` | `content_pack_mismatch` |
+| `content` present | same `pack_id`, different `pack_checksum` | `content_pack_checksum_mismatch` |
+| `content` present | same pack, different `registry_checksum` | `content_registry_checksum_mismatch` |
+| `content` present | base only | `content_pack_missing` |
+| malformed or unsupported `content` | any | `content_identity_invalid` or `content_identity_unsupported` |
+| outer v2 without `content` | any | `content_identity_required` |
+| outer v1 with `content` | any | `content_identity_unexpected` |
+
+- A v1 save has no recorded identity. D-034 cannot verify it retroactively; it keeps today's behavior and is logged as legacy. A pre-D-034 modded world can still be opened under a different pack and remap content IDs. The fail-closed guarantee starts with the first v2 save.
+- The codes are stable identifiers for logs, tests, and UI mapping. They are not localized strings; the UI maps them to keys under D-022.
+- The check is deliberately coarse. It guarantees that the same pack definitions are active; it does not prove that every content ID in every package resolves. Existing blueprint package validation remains the per-ID check, and a future content-aware loader should fail with `content_reference_missing` rather than substitute a fallback.
+
+**Missing-pack opt-out**
+
+The ADR reserves the names `--accept-missing-content` (server/CLI) and `world_load(path, expected_seed, accept_missing_content)` (bridge, default `false`). They are **not implemented by this proposal** and may only be added if Q-117 selects a safe read-only mode:
+
+- Load with the base registry and keep unknown content IDs as opaque strings; do not replace them with a default material, room, or prop.
+- Mark the world `content_degraded`, report the recorded pack ID/checksum and the missing IDs, and disable simulation actions that need the missing definitions.
+- Refuse every save with `content_degraded_save_refused` until the pack is restored or an explicit migration removes the references.
+- Never download, install, or fetch a pack automatically. The player or admin installs the exact pack and retries a normal load.
+
+Until that mode exists, passing the flag must return `content_degraded_unsupported`; the default and only normal path is fail-closed.
+
+**Content IDs in placements, blueprints, and saves**
+
+- A placement stores `blueprint_id`, `blueprint_hash`, and `blueprint_path`, not a copy of every material, room, and prop ID. The package contains those IDs, and the semantic `.tsbp` hash pins the package content.
+- A matching `pack_checksum` plus a matching `blueprint_hash` means the same semantic package content and the same pack definitions were active. It still does not prove that the package was not hand-edited to reference an unknown namespace; per-ID validation remains separate.
+- `dependencies.mods` in `.tsbp` metadata is parsed but the current loader rejects a non-empty list because there is no resolver. It is a hint, not a substitute for the save-level identity.
+- `local:` blueprint IDs and local packages are not pack content. They remain pinned by package hash; the world identity only covers the active pack.
+- No path in this proposal substitutes a missing material, room, prop, or blueprint. Missing content fails the load or enters the explicit read-only mode.
+
+**Checksums, versions, and migration**
+
+- Under this proposal the outer save versions are **v1 = base-only** and **v2 = content-bound**. New readers accept both. There is no v2-without-identity and no v1-with-identity. This is the top-level world-save version currently validated by `PlacementStore`; it is separate from per-store versions such as the D-033 settlement v2 and from `content.format_version`.
+- Identity matching is exact. A pack update that changes `pack_checksum` does not load an old save until Q-116 defines a compatibility window or migration. There is no version-range acceptance in v1.
+- A change to base content with the same pack produces a different `registry_checksum` and fails `content_registry_checksum_mismatch`. A registered content migration may accept the new base later; silent acceptance is not allowed.
+- `pack_checksum` and `registry_checksum` are 64-bit FNV-1a values in the existing registry, not cryptographic hashes or signatures. They detect accidental mismatch and make tests deterministic; they are not an anti-tamper boundary. The server remains authoritative (D-004).
+- The `content` object does not change `PlacementStore` records, `.tsbp` bytes, blueprint hashes, or the per-store placement/construction/economy checksums for the same records. Whole-file checksums and goldens for modded saves change by design; base-only goldens do not.
+- Downgrading a v2 save to v1 is not automatic. It requires an explicit unpin/content migration that proves no pack IDs remain (Q-118).
+
+**Load order and the single-pack limit**
+
+- Base content is always loaded first. Exactly one pack is merged after it. There is no override, no last-pack-wins, and no cross-pack reference resolution.
+- The identity check runs after that one pack is active and before world mutation.
+- A future multi-pack loader needs a new identity format version with an ordered pack list, each pack's checksum, and a final merged checksum. That is not this ADR.
+- The local bridge path is the only scope. `ServerSave` has no content-manifest enforcement today; when the server carries content-bound placements, it should use the same object and verify it before accepting commands.
+
+**Audit and logging**
+
+- Every save and load attempt emits one structured `content_identity` event with the save path, outer save version, recorded pack ID/checksums, active pack ID/checksums, and one of `match`, `absent`, `legacy_unbound`, `missing`, `mismatch`, or `degraded`.
+- Rejections log the stable code and the expected/actual values; the player-facing error names the pack ID and checksum and tells the player to install that exact pack. It never offers an automatic download.
+- Logs do not dump pack definitions, assets, or file contents. Checksums are not secrets.
+- The bridge summary should later expose `pack_id`, `pack_checksum`, and `namespace` alongside the existing counts and checksum so the save path and UI can read the identity without a second call. Those fields do not exist in `content_registry_summary()` today.
+
+### Scope for v1
+
+- **In scope:** the optional `content` object, outer v1/v2 split, exact pack/registry verification, stable error codes, fail-closed default, retention of identity across a load/save cycle, the reserved read-only opt-out, audit fields, and the single-pack rule.
+- **Out of scope:** multi-pack sets and load order, pack discovery/download/upload/Workshop/ZIP packaging, protocol or server-manifest changes, per-ID reference validation, content migrations, automatic unpinning, a recovery UI beyond the error, and `ServerSave` fields.
+- **Acceptance tests for the implementation:** byte-identical base-only output, a v2 match roundtrip, every rejection code leaving live state untouched, a legacy v1 load, identity retention across a content-bound load/save, refusal to save without the recorded pack, and refusal to save with more than one pack. Tests use fixed pack directories and checksums, not wall clocks or network access.
+- **Not implemented today.** `content_load_dir` remains bridge-only; `world_save` writes no `content` key; `world_load` accepts any registry; and no `--accept-missing-content` flag exists. This ADR changes docs only.
+
+### Consequences
+
+**Positive**
+
+- A modded world fails closed on a missing or changed pack instead of silently remapping content or failing deep in package loading.
+- Base-only saves remain byte-identical, so existing goldens, checksums, and tests are unaffected.
+- One small object covers placements, blueprints, and any future save field that carries a content ID.
+- The error codes and audit fields are testable without Godot and give a clear support path: install the exact pack or restore the save.
+- It draws the boundary that a future multiplayer content manifest (D-032, Q-107/Q-108) can reuse instead of inventing a second identity.
+
+**Negative**
+
+- Exact checksum matching pins every pack edit. A bugfix release with the same pack ID cannot load an old save until Q-116 defines compatibility or migration.
+- A missing pack makes a content-bound world unloadable by default; Q-117 may add read-only inspection, but normal play waits for the pack.
+- Old builds reject v2 saves. That is intentional fail-closed behavior, but it makes downgrading a modded world a support case.
+- One pack only. A multi-pack world cannot be saved under this format, and the format must be revised before that feature.
+- A base-only world loaded with a pack is pinned on its next save even if it uses no pack content. Clearing the pack before saving is the only current way to avoid that.
+- The object does not validate individual references; a hand-edited or corrupt package can still fail after the identity gate.
+- No auto-download means recovery is manual, and the save itself is not signed; the checksums are integrity aids, not security.
+
+**Neutral**
+
+- The registry remains explicit local bridge state; this ADR does not add discovery or a mod manager.
+- Same records produce the same per-store checksums; only content-bound whole-file output gains a key and a version.
+- Legacy v1 saves keep today's behavior. The guarantee begins with the first v2 save.
+
+### Alternatives considered
+
+- **No identity (status quo):** simplest, but it is exactly the silent-remap and late-failure problem. Rejected.
+- **Embed the pack bytes in the save:** makes the save self-contained, but duplicates assets, raises size and licensing problems, does not carry scripts or native code, and creates stale copies that cannot receive fixes. Rejected for v1.
+- **Copy resolved content definitions into the save:** preserves the values used at save time, but duplicates definitions, bloats every save, drifts from the pack, and still does not cover behavior. Rejected for v1.
+- **Record `pack_id` and version but no checksum:** smaller, but a version can be reused with different content and a local development pack has no reliable registry version. Rejected.
+- **Always record identity, including base-only worlds:** makes every save version-pinned and catches base changes, but breaks byte-identical base saves and every existing golden. Rejected for v1; a strict mode can be added later.
+- **Rely on per-blueprint `dependencies.mods`:** finer-grained in principle, but the list has no checksums, the current loader rejects non-empty lists, and save fields outside blueprints are not covered. Rejected as the primary gate; it stays a package-level hint.
+- **Require the pack at load with no recovery path:** matches the v1 default, but it forecloses a safe read-only recovery for support and inspection. This ADR keeps fail-closed behavior and reserves the opt-out until Q-117 decides whether unknown IDs can be preserved safely.
+
+### Open questions
+
+| ID | Question |
+|---|---|
+| Q-116 | How stable must `pack_checksum` be across pack versions, and can a save accept a compatible newer pack? |
+| Q-117 | How does a content-bound world load when the required pack is missing, and what can a read-only mode safely preserve? |
+| Q-118 | How are renamed or removed content IDs migrated in saves and blueprints, and who owns the mapping? |
+
+### Review trigger
+
+The first implementation that writes or reads `content`, the first outer save-version bump, the first multi-pack loader, or the first pack update that wants to keep old saves. Revisit when Q-116–Q-118 are answered. If base content changes frequently enough that `registry_checksum` blocks ordinary game updates, split base compatibility out of this object before accepting the ADR. If D-006 is accepted, update the status and links; this ADR does not accept it.
 
 ---
 
