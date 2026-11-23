@@ -1397,9 +1397,9 @@ Human sign-off on the campaign default, then a measured financing run using the 
 
 ### Context
 
-`world_place_blueprint(seed, path, x, z, rotation)` in `crates/godot_ext` is the only blueprint placement path. It loads and validates the local `.tsbp`, applies the district construction/allowlist gate, checks seed, age, structure, terrain, and overlap, appends to the client-side `PlacementStore`, creates the construction site, and charges the first D-028 installment from the local treasury. The authoritative server (`ServerWorld` in `crates/server`) models roads, taxes and the economy, pause/time votes, sessions, save/load, and interest viewports. Its command set is `hello`, `resume`, `ping`, `time_control`, `time_vote`, `set_tax`, `place_road`, `set_interest`, and `disconnect`; it has **no blueprint placement command and no placement store**. `interest_view.buildings` is a deterministic fixture, not placement data.
+At the time of this decision (before #306), `world_place_blueprint(seed, path, x, z, rotation)` in `crates/godot_ext` was the only blueprint placement path. It loads and validates the local `.tsbp`, applies the district construction/allowlist gate, checks seed, age, structure, terrain, and overlap, appends to the client-side `PlacementStore`, creates the construction site, and charges the first D-028 installment from the local treasury. At that point the authoritative server (`ServerWorld` in `crates/server`) modelled roads, taxes and the economy, pause/time votes, sessions, save/load, and interest viewports. Its command set was `hello`, `resume`, `ping`, `time_control`, `time_vote`, `set_tax`, `place_road`, `set_interest`, and `disconnect`; it had **no blueprint placement command and no placement store**. `interest_view.buildings` is a deterministic fixture, not placement data.
 
-The result is a split placement model in multiplayer: a client can run the bridge and change only its local world, while the server's treasury, district policy enforcement, construction state, save, and checksum never see the placement. `construction_allowed`, the blueprint allowlist, and the D-028 charge are therefore enforced only against the single-player/dev local stores. D-004 says the server is authoritative, and D-023/D-028 make construction server-owned in multiplayer; the placement command is the missing piece. This is a post-audit product gap, not an open finding in [[78 - Code Audit Findings]].
+The result is a split placement model in multiplayer: a client can run the bridge and change only its local world, while the server's treasury, district policy enforcement, construction state, save, and checksum never see the placement. `construction_allowed`, the blueprint allowlist, and the D-028 charge are therefore enforced only against the single-player/dev local stores. D-004 says the server is authoritative, and D-023/D-028 make construction server-owned in multiplayer; the placement command is the missing piece. This is a post-audit product gap, not an open finding in [[78 - Code Audit Findings]]. That gap is closed by #306; this Context describes the pre-decision state.
 
 ### Decision
 
@@ -1425,7 +1425,7 @@ The result is a split placement model in multiplayer: a client can run the bridg
   place_blueprint_result { tick, placement_id, blueprint_hash, placement_checksum, world_checksum, placement }
   ```
 
-  Other clients receive the placement through the normal event/snapshot path. Replacing the synthetic `interest_view.buildings` fixtures with placement-backed records is part of the read path, but it is not required for the command itself to be authoritative.
+  Other clients are intended to receive the placement through the normal event/snapshot path; the current slice returns the result to the placing client only. Replacing the synthetic `interest_view.buildings` fixtures with placement-backed records is part of the read path, but it is not required for the command itself to be authoritative.
 - Clients may predict a ghost preview with the same rules, but prediction is advisory: the client never appends an authoritative record, never charges the treasury, and discards a predicted placement that the server rejects. `world_validate_placement` stays the preview path and must mirror the server rule order and outcomes, so a passing ghost cannot fail later on a deterministic rule.
 - Rejections use stable codes, never mutate state, never charge, and never leave a partial construction site. Repeating the same request is idempotent by exact placement identity (hash + centre + rotation); a repeat returns the existing placement without a second charge (Q-109).
 
@@ -1438,19 +1438,20 @@ Accepted 2026-11-23 for a staged v1 implementation. The following defaults bound
 - **Terrain:** v1 validates against the server's deterministic placeholder ground, the same constant ground used by roads. Full terrain sampling stays in the local preview until the server streams terrain.
 - **Persistence:** v1 stores placements and construction in optional `ServerSave` fields; older saves without them load unchanged. There is no rollback, history, or garbage collection in v1 (Q-110).
 - **Idempotency and limits:** v1 idempotency is exact placement identity (hash + centre + rotation); a repeat returns the existing placement without a second charge. Rate limiting and audit reuse the existing per-session token bucket and audit ring (Q-109).
-- **Bridge:** the local `world_place_blueprint` remains the single-player/dev path; it is not removed. Protocol v1 adds `place_blueprint`; protocol v0 is unchanged.
+- **Bridge:** the local `world_place_blueprint` remains the single-player/dev path; it is not removed. Protocol v1 adds `place_blueprint` and is the current version; clients that announce version 0 are version-gated.
+- **Implementation status (2026-11-23):** implemented by #306 at master `61449ce`. `cargo test --workspace` reports **1259 tests** (**1254 unit/integration + 5 doctests**), and the placement smoke prints `SERVER_PLACEMENT placed=1 duplicate=1 policy=1 funds=1 overlap=1 save=1 reload=1 checksum=d26569ec3dc6b464 status=ok`. The authoritative record stores the content-addressed `tsbp:blake3:<hex>` reference; the bridge/world save still records absolute `blueprint_path` values and portable load (#302) remains opt-in. There is no package upload/fetch, Godot placement UI, per-settlement permission, demolition, or refund in this slice.
 
 ### Scope for v1
 
 - **In scope:** blueprint placement through the server command, package validation, authorization, the policy gate, the D-028 charge, the authoritative record/save/checksum, and the result to the placing client.
 - **Out of scope:** utility, civic-service, and road placement commands (they keep their current paths); package upload/transfer; mod auto-download; live-city voxel editing; demolition and refunds; offline/dormant progression.
-- The single-player/dev bridge remains the local implementation until the in-process server path lands; this ADR does not remove `world_place_blueprint`.
+- The single-player/dev bridge remains the local placement path and is not removed; the server path is implemented in #306 and does not make the bridge a client of the command.
 
 ### Consequences
 
 **Positive**
 - Blueprint placement becomes server-authoritative and consistent with D-004/D-023/D-028: a client cannot invent a building, skip the policy gate, or spend money it does not have.
-- Save, checksum, interest view, construction sites, and the ledger share one placement record.
+- Save, checksum, construction sites, and the ledger share one placement record; the interest view remains a synthetic fixture until the read path is replaced.
 - District policy and construction charges become testable headlessly, without Godot.
 - Multiplayer clients converge on the same city after reconnect or restart.
 
@@ -1485,7 +1486,7 @@ Accepted 2026-11-23 for a staged v1 implementation. The following defaults bound
 
 ### Review trigger
 
-Accepted 2026-11-23 for the staged v1 above. Review when the server placement path lands, before package upload/fetch is enabled, or when `ServerSave` first needs a real placement migration. Remaining follow-ups: upload/fetch provenance and quotas (Q-107), mod removal policy (Q-108), per-player quotas and rollback (Q-109), and rollback/history/GC (Q-110). If the in-process server path cannot reuse the bridge rule set without divergence, split the shared validation into `core_city` before enabling it.
+Accepted 2026-11-23 for the staged v1 above and implemented in #306 at master `61449ce`. Review before package upload/fetch is enabled, when `ServerSave` first needs a real placement migration, or when per-settlement permissions (D-033) become available. Remaining follow-ups: upload/fetch provenance and quotas (Q-107), mod removal policy (Q-108), per-player quotas and rollback (Q-109), and rollback/history/GC (Q-110). If a future server path cannot reuse the bridge rule set without divergence, split the shared validation into `core_city` before extending it.
 
 ---
 
@@ -1497,7 +1498,7 @@ Accepted 2026-11-23 for the staged v1 above. Review when the server placement pa
 
 D-019 accepts settlements as soft simulation units, says each player may manage their own settlement(s), and says ownership and permissions are configurable. The Phase 2E implementation is **identity-only**. `core_city::settlement::Settlement` carries `owner: String` (1–48 trimmed characters), `center`, and `radius_m`. `SettlementStore::found` accepts the owner string from the caller and `settlement_remove` removes a record by id. The bridge exposes `settlement_found`, `settlements`, `settlement_remove`, `settlement_clear`, and `settlement_at`; `settlement_found` takes the owner as a free-form `GString`. Nothing checks that string. `owner_at` is a nearest-containing-centre lookup used for display and district queries, not authorization.
 
-There is no membership, role, permission, transfer, claim, or audit model, and no save field for any of them. The dashboard Settlements section is a read-only selector with a read-only detail block; the standalone district overview is also read-only. Multiplayer has global dev roles only (`viewer`, `mayor`, `admin`) assigned by the server process, and the authoritative `ServerWorld` has no settlement store at all. Protocol v0 has no settlement command. D-032 (Accepted 2026-11-23) adds server-authoritative blueprint placement and says the server record carries "owner/settlement when those exist", but it defines neither.
+There is no membership, role, permission, transfer, claim, or audit model, and no save field for any of them. The dashboard Settlements section is a read-only selector with a read-only detail block; the standalone district overview is also read-only. Multiplayer has global dev roles only (`viewer`, `mayor`, `admin`) assigned by the server process, and the authoritative `ServerWorld` has no settlement store at all. Protocol v1 has no settlement command. D-032 (Accepted 2026-11-23, implemented by #306) adds server-authoritative blueprint placement and says the server record carries "owner/settlement when those exist", but it defines neither.
 
 The result: a multiplayer client can write any owner label it likes, a Mayor can place and (once policies are editable) edit inside any settlement, and no player can invite a collaborator, transfer a settlement, or claim an unowned one. This ADR defines the missing contract. It does not implement it.
 
@@ -1555,7 +1556,7 @@ The effective permission set is derived from the role; the runtime represents it
 - The claimant must hold the global Mayor or Admin role and must name a settlement id; there is no automatic claim by entering the radius.
 - A successful claim sets the claimant as owner with all bits, increments the membership revision, writes an audit entry, and updates the save/checksum.
 - The claim is rejected on an unknown id, an owned settlement, a stale `expected_revision`, or a missing global role.
-- Proximity, cooldown, and abandonment are open (Q-112). v1 does not require the claimant to stand in the settlement because protocol v0 carries no player position.
+- Proximity, cooldown, and abandonment are open (Q-112). v1 does not require the claimant to stand in the settlement because protocol v1 carries no player position.
 
 **Transfer rules (proposed)**
 
