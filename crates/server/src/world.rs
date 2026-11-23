@@ -1,8 +1,13 @@
 //! First authoritative command executor on top of protocol v0.
 //!
-//! [`ServerWorld`] owns the mutable server state for one session: the clock,
-//! static population counters, the treasury, and the road store. It applies
-//! decoded [`ClientCommand`]s and answers with one [`ServerMessage`].
+//! [`ServerWorld`] owns the mutable server state shared by every connection:
+//! the clock, static population counters, the treasury, the road store, the
+//! time vote, and the online roster. Per-connection state (handshake, role,
+//! reconnect window, interest viewport, rate bucket, audit ring) lives in a
+//! [`SessionState`] table keyed by a process-local connection id. The legacy
+//! single-session methods ([`ServerWorld::apply`] and
+//! [`ServerWorld::apply_all`]) keep operating on a default session slot, so a
+//! one-connection world behaves exactly as before.
 //!
 //! Persistence lives in [`crate::save`] and is opt-in: one world to one JSON
 //! file, with atomic writes and a single `.bak` rotation. The executor itself
@@ -16,7 +21,7 @@
 //! simulation, never advances the tick, and is excluded from
 //! [`ServerWorld::checksum`].
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::thread;
@@ -352,7 +357,76 @@ impl ResumeWindow {
     }
 }
 
-/// Authoritative state for one protocol v0 session.
+/// Per-connection session state for a shared [`ServerWorld`].
+///
+/// Simulation state (tick, pause, economy, roads, vote, and the online roster)
+/// stays on the world and is shared by every connection. Everything a client
+/// owns lives here: handshake and close flags, player name, role, reconnect
+/// window, interest viewport, deterministic rate bucket, audit ring, last-seen
+/// tick, and the last checksum the session observed.
+///
+/// A connection id is a process-local `u64`. Connection `1` keeps the
+/// seed-derived session id so a single-connection world (and the legacy
+/// [`ServerWorld::apply`] path) is byte-identical to previous releases; later
+/// connections append `-<id>` to the token. The token still identifies a
+/// session, not a player, and is **not** authentication.
+#[derive(Debug, Clone)]
+struct SessionState {
+    hello: bool,
+    player: Option<String>,
+    role: ClientRole,
+    closed: bool,
+    resume_window: Option<ResumeWindow>,
+    session_id: String,
+    interest_center: [f32; 2],
+    interest_radius_m: f32,
+    rate: RateBucket,
+    audit: VecDeque<AuditEntry>,
+    last_seen_tick: u64,
+    session_checksum: String,
+    commands: u64,
+}
+
+impl SessionState {
+    fn new(session_id: String, role: ClientRole, tick: u64) -> Self {
+        Self {
+            hello: false,
+            player: None,
+            role,
+            closed: false,
+            resume_window: None,
+            session_id,
+            interest_center: [0.0, 0.0],
+            interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
+            rate: RateBucket::full(),
+            audit: VecDeque::with_capacity(AUDIT_CAPACITY),
+            last_seen_tick: tick,
+            session_checksum: String::new(),
+            commands: 0,
+        }
+    }
+}
+
+/// Session identifier for a connection in a shared world.
+///
+/// Connection `1` uses [`session_id_for_seed`] unchanged so existing loopback
+/// transcripts and reconnect tokens stay pinned. Every later connection gets a
+/// deterministic suffix, so two online players never share a resume token.
+fn session_id_for_connection(seed: u64, connection_id: u64) -> String {
+    let base = session_id_for_seed(seed);
+    if connection_id <= 1 {
+        base
+    } else {
+        format!("{base}-{connection_id}")
+    }
+}
+
+/// Authoritative state for one protocol v0 server process.
+///
+/// Simulation fields are shared by every connection. Per-connection fields
+/// belong to the active [`SessionState`] slot; use [`Self::apply_session`] for
+/// a multi-connection harness and [`Self::apply`] for the legacy
+/// single-session path.
 #[derive(Debug, Clone)]
 pub struct ServerWorld {
     /// World seed; also seeds the treasury.
@@ -386,6 +460,10 @@ pub struct ServerWorld {
     /// Checksum of the last accepted state, refreshed after each mutation.
     pub session_checksum: String,
     role: ClientRole,
+    /// Role new connections receive from the server process.
+    ///
+    /// [`Self::set_role`] updates both this default and the active session.
+    default_role: ClientRole,
     /// Monotonic count of applied commands, including rejections.
     commands: u64,
     rate: RateBucket,
@@ -395,6 +473,18 @@ pub struct ServerWorld {
     resume_window: Option<ResumeWindow>,
     last_seen_tick: u64,
     session_id: String,
+    /// Parked per-connection state, keyed by connection id.
+    ///
+    /// The active connection's state lives in the fields above; it is parked
+    /// here when another connection is activated. Excluded from the world
+    /// checksum and from [`crate::save::ServerSave`].
+    sessions: BTreeMap<u64, SessionState>,
+    /// Connection id currently installed in the per-session fields.
+    ///
+    /// `None` is the legacy default slot used by [`Self::apply`].
+    active_connection: Option<u64>,
+    /// Last connection id issued by [`Self::open_connection`].
+    next_connection: u64,
 }
 
 impl ServerWorld {
@@ -447,6 +537,7 @@ impl ServerWorld {
             player: None,
             session_checksum: String::new(),
             role,
+            default_role: role,
             commands: 0,
             rate: RateBucket::full(),
             audit: VecDeque::with_capacity(AUDIT_CAPACITY),
@@ -455,6 +546,9 @@ impl ServerWorld {
             resume_window: None,
             last_seen_tick: 0,
             session_id: session_id_for_seed(seed),
+            sessions: BTreeMap::new(),
+            active_connection: None,
+            next_connection: 0,
         };
         world.refresh_checksum();
         world
@@ -472,8 +566,33 @@ impl ServerWorld {
         self.commands
     }
     /// Override the dev-session role. Not authentication.
+    ///
+    /// Sets the role of the active session and the default for connections
+    /// opened later. Parked sessions keep the role they were assigned.
     pub fn set_role(&mut self, role: ClientRole) {
         self.role = role;
+        self.default_role = role;
+    }
+
+    /// Role of a connection's session. Not authentication.
+    ///
+    /// Activates the session to read it, which is also how a harness can seed a
+    /// role before the connection's first command.
+    pub fn session_role(&mut self, connection_id: u64) -> ClientRole {
+        self.activate_session(connection_id);
+        self.role
+    }
+
+    /// Override one connection's dev-session role. Not authentication.
+    pub fn set_session_role(&mut self, connection_id: u64, role: ClientRole) {
+        self.activate_session(connection_id);
+        self.role = role;
+    }
+
+    /// Whether a connection's session has been closed by `disconnect`.
+    pub fn session_closed(&mut self, connection_id: u64) -> bool {
+        self.activate_session(connection_id);
+        self.closed
     }
 
     /// Rebuild a world from an already validated [`crate::save::ServerSave`].
@@ -503,6 +622,7 @@ impl ServerWorld {
             player: None,
             session_checksum: String::new(),
             role: ClientRole::Mayor,
+            default_role: ClientRole::Mayor,
             commands: 0,
             rate: RateBucket::full(),
             audit: VecDeque::with_capacity(AUDIT_CAPACITY),
@@ -511,6 +631,9 @@ impl ServerWorld {
             resume_window: None,
             last_seen_tick: save.tick,
             session_id: session_id_for_seed(save.seed),
+            sessions: BTreeMap::new(),
+            active_connection: None,
+            next_connection: 0,
         };
         world.refresh_checksum();
         world
@@ -524,8 +647,10 @@ impl ServerWorld {
 
     /// Stable reconnect token returned in `welcome`.
     ///
-    /// v0 derives it from the seed and keeps it equal to [`Self::session_id`].
-    /// It identifies a session; it is **not** an authentication credential.
+    /// Connection `1` derives it from the seed and keeps it equal to
+    /// [`Self::session_id`]; later connections append their connection id so
+    /// two players never share a token. It identifies a session; it is **not**
+    /// an authentication credential.
     #[must_use]
     pub fn session_token(&self) -> &str {
         &self.session_id
@@ -566,6 +691,119 @@ impl ServerWorld {
         }
         self.hello = false;
         self.closed = false;
+    }
+
+    /// Issue a connection id and install a fresh per-connection session.
+    ///
+    /// This is the multi-connection counterpart of [`Self::begin_connection`].
+    /// The first id is `1` and keeps the seed-derived session token; later ids
+    /// get a deterministic suffix. Any session left in the active slot is
+    /// parked in the session table first.
+    pub fn open_connection(&mut self) -> u64 {
+        self.next_connection = self.next_connection.saturating_add(1);
+        let connection_id = self.next_connection;
+        self.activate_session(connection_id);
+        connection_id
+    }
+
+    /// Apply a command for one connection and return every response.
+    ///
+    /// The shared simulation (tick, pause, economy, roads, vote, online roster)
+    /// is common to all connections. The handshake, role, interest viewport,
+    /// rate bucket, audit ring, last-seen tick, and checksum are swapped in for
+    /// this connection and saved back when another connection runs.
+    pub fn apply_session(
+        &mut self,
+        connection_id: u64,
+        command: &ClientCommand,
+    ) -> Vec<ServerMessage> {
+        self.activate_session(connection_id);
+        self.apply_all(command)
+    }
+
+    /// Finish a connection, remembering a disconnect for a later resume.
+    ///
+    /// A clean `disconnect` already closed the session and opened its window;
+    /// this handles EOF, reset, timeout, and write failures too. Other
+    /// connections keep their sessions, online roster entries, and votes.
+    pub fn close_connection(&mut self, connection_id: u64) {
+        self.activate_session(connection_id);
+        if self.hello {
+            self.remember_disconnect();
+        }
+        self.hello = false;
+        self.closed = false;
+    }
+
+    /// Install the state for `connection_id`, parking the previous session.
+    ///
+    /// The legacy [`Self::apply`] path never calls this function, so it keeps
+    /// operating on the untouched default slot (`active_connection == None`).
+    fn activate_session(&mut self, connection_id: u64) {
+        if self.active_connection == Some(connection_id) {
+            return;
+        }
+        if let Some(previous) = self.active_connection.take() {
+            let state = self.take_session();
+            self.sessions.insert(previous, state);
+        }
+        let state = self.sessions.remove(&connection_id).unwrap_or_else(|| {
+            SessionState::new(
+                session_id_for_connection(self.seed, connection_id),
+                self.default_role,
+                self.tick,
+            )
+        });
+        self.install_session(state);
+        self.active_connection = Some(connection_id);
+    }
+
+    /// Move the active per-session fields into a [`SessionState`].
+    ///
+    /// Shared fields are left untouched; the per-session fields are reset to
+    /// their defaults and immediately replaced by [`Self::install_session`].
+    fn take_session(&mut self) -> SessionState {
+        SessionState {
+            hello: self.hello,
+            player: self.player.take(),
+            role: self.role,
+            closed: self.closed,
+            resume_window: self.resume_window.take(),
+            session_id: std::mem::take(&mut self.session_id),
+            interest_center: self.interest_center,
+            interest_radius_m: self.interest_radius_m,
+            rate: std::mem::replace(&mut self.rate, RateBucket::full()),
+            audit: std::mem::take(&mut self.audit),
+            last_seen_tick: self.last_seen_tick,
+            session_checksum: std::mem::take(&mut self.session_checksum),
+            commands: self.commands,
+        }
+    }
+
+    /// Restore per-session fields from a [`SessionState`].
+    fn install_session(&mut self, state: SessionState) {
+        self.hello = state.hello;
+        self.player = state.player;
+        self.role = state.role;
+        self.closed = state.closed;
+        self.resume_window = state.resume_window;
+        self.session_id = state.session_id;
+        self.interest_center = state.interest_center;
+        self.interest_radius_m = state.interest_radius_m;
+        self.rate = state.rate;
+        self.audit = state.audit;
+        self.last_seen_tick = state.last_seen_tick;
+        self.session_checksum = state.session_checksum;
+        self.commands = state.commands;
+    }
+
+    /// Connection id whose session carries `token`, looking only at parked
+    /// sessions. The active session is matched through [`Self::session_token`].
+    fn parked_session_by_token(&self, token: &str) -> Option<u64> {
+        self.sessions
+            .iter()
+            .find(|(_, state)| state.session_id == token)
+            .map(|(connection_id, _)| *connection_id)
     }
 
     fn remember_disconnect(&mut self) {
@@ -847,13 +1085,16 @@ impl ServerWorld {
         }
     }
 
-    /// Validate and apply one command, returning exactly one response.
+    /// Validate and apply one command on the default session, returning exactly
+    /// one response.
     ///
-    /// This is the single-message convenience wrapper used by tests and the
-    /// authority loopback. A successful `resume` produces two messages
-    /// (`welcome`, then `snapshot`); a successful `set_interest` produces
-    /// `snapshot`, then `interest_view`. This method returns the first message
-    /// and drops the rest. Transport code must use [`Self::apply_all`].
+    /// This is the single-session convenience wrapper used by tests and the
+    /// single-connection loopbacks. It operates on the default session slot; a
+    /// multi-connection harness must use [`Self::apply_session`] instead. A
+    /// successful `resume` produces two messages (`welcome`, then `snapshot`);
+    /// a successful `set_interest` produces `snapshot`, then `interest_view`.
+    /// This method returns the first message and drops the rest. Transport code
+    /// must use [`Self::apply_all`] or [`Self::apply_session`].
     ///
     /// The batch order is fixed:
     ///
@@ -1059,7 +1300,12 @@ impl ServerWorld {
     }
 
     fn tick_vote(&mut self) {
-        if let Some(outcome) = self.vote.tick(self.tick, self.online.iter().cloned()) {
+        // `TimeVote::tick` resolves an open vote; a ballot cast through
+        // `TimeVote::vote` can resolve immediately instead, in which case
+        // `tick` is already a no-op. Drain the queued outcome so a passed
+        // pause/resume is applied exactly once in both paths.
+        let _ = self.vote.tick(self.tick, self.online.iter().cloned());
+        if let Some(outcome) = self.vote.take_outcome() {
             self.apply_vote_outcome(&outcome);
         }
     }
@@ -1102,9 +1348,11 @@ impl ServerWorld {
     /// Validate a reconnect claim without changing simulation state.
     ///
     /// The token is checked before the grace window so a wrong token never
-    /// reveals whether a session is resumable. The role is not part of the
-    /// claim: it is the role the world already holds, so a resumed session
-    /// keeps the role assigned by the server process.
+    /// reveals whether a session is resumable. A token can name the active
+    /// session (the legacy single-slot path) or a session parked under another
+    /// connection id; adopting a parked session moves only that session's
+    /// player, role, viewport, audit ring, and rate bucket onto this
+    /// connection. Other online players keep their sessions.
     fn apply_resume(&mut self, token: &str, last_tick: u64) -> (Vec<ServerMessage>, &'static str) {
         if self.hello {
             return reject_with(
@@ -1116,10 +1364,7 @@ impl ServerWorld {
             return reject_with(codes::RESUME_UNKNOWN, "resume token must not be empty");
         }
         if token != self.session_token() {
-            return reject_with(
-                codes::RESUME_UNKNOWN,
-                "resume token does not match this world",
-            );
+            return self.adopt_parked_session(token, last_tick);
         }
         let Some((deadline_tick, player)) = self
             .resume_window
@@ -1152,6 +1397,85 @@ impl ServerWorld {
         }
 
         self.resume_window = None;
+        if let Some(player) = player {
+            self.player = Some(player.clone());
+            self.online.insert(player);
+        }
+        self.hello = true;
+        self.closed = false;
+        self.last_seen_tick = self.tick;
+        accepted_all(vec![welcome(self, true), self.snapshot()])
+    }
+
+    /// Adopt a disconnected session parked under a different connection id.
+    ///
+    /// Rejections leave every session untouched except for clearing an expired
+    /// window, matching the single-slot path. A successful claim removes the
+    /// parked record and installs it on the calling connection, so the old
+    /// connection id can no longer resume or vote as that player.
+    fn adopt_parked_session(
+        &mut self,
+        token: &str,
+        last_tick: u64,
+    ) -> (Vec<ServerMessage>, &'static str) {
+        let Some(connection_id) = self.parked_session_by_token(token) else {
+            return reject_with(
+                codes::RESUME_UNKNOWN,
+                "resume token does not match any session in this world",
+            );
+        };
+        let state = self.sessions.get(&connection_id).expect("token was found");
+        if state.hello {
+            return reject_with(
+                codes::RESUME_DUPLICATE,
+                "that session is already active on another connection",
+            );
+        }
+        let Some(deadline_tick) = state
+            .resume_window
+            .as_ref()
+            .map(|window| window.deadline_tick)
+        else {
+            return reject_with(
+                codes::RESUME_UNKNOWN,
+                "no disconnected session is waiting to resume",
+            );
+        };
+        if self.tick > deadline_tick {
+            if let Some(state) = self.sessions.get_mut(&connection_id) {
+                state.resume_window = None;
+            }
+            return reject_with(
+                codes::RESUME_EXPIRED,
+                format!(
+                    "the reconnect window closed at tick {deadline_tick}; the current tick is {}",
+                    self.tick
+                ),
+            );
+        }
+        if last_tick > self.tick {
+            return reject_with(
+                codes::RESUME_STALE,
+                format!(
+                    "last_tick {last_tick} is ahead of the authoritative tick {}",
+                    self.tick
+                ),
+            );
+        }
+
+        let mut state = self
+            .sessions
+            .remove(&connection_id)
+            .expect("token was found");
+        let player = state
+            .resume_window
+            .as_ref()
+            .and_then(|window| window.player.clone());
+        state.resume_window = None;
+        state.hello = true;
+        state.closed = false;
+        state.last_seen_tick = self.tick;
+        self.install_session(state);
         if let Some(player) = player {
             self.player = Some(player.clone());
             self.online.insert(player);
@@ -2377,6 +2701,32 @@ mod tests {
             content_hash: "0123456789abcdef".repeat(4),
             player_name: "mayor".to_string(),
         }
+    }
+
+    fn hello_named(player_name: &str) -> ClientCommand {
+        ClientCommand::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            content_hash: "0123456789abcdef".repeat(4),
+            player_name: player_name.to_string(),
+        }
+    }
+
+    fn first_response(messages: Vec<ServerMessage>) -> ServerMessage {
+        messages
+            .into_iter()
+            .next()
+            .expect("every command yields a response")
+    }
+
+    fn welcome_token(message: &ServerMessage) -> String {
+        match message {
+            ServerMessage::Welcome { session_token, .. } => session_token.clone(),
+            other => panic!("expected welcome, got {other:?}"),
+        }
+    }
+
+    fn vote(action: crate::protocol::VoteAction, time: Option<TimeAction>) -> ClientCommand {
+        ClientCommand::TimeVote { action, time }
     }
 
     fn world_with_hello() -> ServerWorld {
@@ -3817,5 +4167,311 @@ mod tests {
         replay.apply(&ClientCommand::Disconnect);
         assert_eq!(report.checksum, replay.checksum());
         assert_eq!(report.tick, replay.tick);
+    }
+
+    #[test]
+    fn connections_hello_independently_and_reject_duplicate_names() {
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Viewer);
+        let alice_connection = world.open_connection();
+        let bob_connection = world.open_connection();
+        assert_eq!((alice_connection, bob_connection), (1, 2));
+
+        let alice = first_response(world.apply_session(alice_connection, &hello_named("alice")));
+        let bob = first_response(world.apply_session(bob_connection, &hello_named("bob")));
+        let alice_token = welcome_token(&alice);
+        let bob_token = welcome_token(&bob);
+
+        assert_eq!(
+            alice_token,
+            session_id_for_seed(SEED),
+            "connection 1 keeps the pinned seed-derived token"
+        );
+        assert_ne!(alice_token, bob_token, "connections must not share a token");
+
+        let third_connection = world.open_connection();
+        expect_reject(
+            &first_response(world.apply_session(third_connection, &hello_named("alice"))),
+            codes::PLAYER_NAME_DUPLICATE,
+        );
+        assert_eq!(world.online.len(), 2);
+        assert!(world.online.contains("alice"));
+        assert!(world.online.contains("bob"));
+    }
+
+    #[test]
+    fn per_connection_roles_interest_and_audit_are_isolated() {
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Mayor);
+        // Assign the weaker role before the connection's first command so its
+        // whole audit ring (including `hello`) carries that role.
+        world.set_session_role(2, ClientRole::Viewer);
+        first_response(world.apply_session(1, &hello_named("alice")));
+        first_response(world.apply_session(2, &hello_named("bob")));
+        assert_eq!(world.session_role(1), ClientRole::Mayor);
+        assert_eq!(world.session_role(2), ClientRole::Viewer);
+
+        assert!(matches!(
+            first_response(world.apply_session(
+                1,
+                &ClientCommand::SetTax {
+                    resident_rate: 12,
+                    business_rate: 8,
+                },
+            )),
+            ServerMessage::Snapshot { tick: 1, .. }
+        ));
+        expect_reject(
+            &first_response(world.apply_session(
+                2,
+                &ClientCommand::SetTax {
+                    resident_rate: 12,
+                    business_rate: 8,
+                },
+            )),
+            codes::FORBIDDEN,
+        );
+
+        first_response(world.apply_session(1, &set_interest(10.0, 0.0, 16.0)));
+        first_response(world.apply_session(2, &set_interest(0.0, 5.0, 1.0)));
+
+        first_response(world.apply_session(1, &ClientCommand::Ping { nonce: 1 }));
+        match world.snapshot() {
+            ServerMessage::Snapshot {
+                interest_center,
+                interest_radius_m,
+                ..
+            } => {
+                assert_eq!(interest_center, [10.0, 0.0]);
+                assert_eq!(interest_radius_m, 16.0);
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        first_response(world.apply_session(2, &ClientCommand::Ping { nonce: 2 }));
+        match world.snapshot() {
+            ServerMessage::Snapshot {
+                interest_center,
+                interest_radius_m,
+                ..
+            } => {
+                assert_eq!(interest_center, [0.0, 5.0]);
+                assert_eq!(interest_radius_m, 1.0);
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+
+        // Activate each session and read its own audit ring.
+        first_response(world.apply_session(1, &ClientCommand::Ping { nonce: 3 }));
+        let alice_audit = world.audit_state();
+        assert_eq!(alice_audit.len(), 5);
+        assert!(alice_audit
+            .iter()
+            .all(|entry| entry.role == ClientRole::Mayor));
+        assert!(alice_audit
+            .iter()
+            .any(|entry| entry.tag == "set_tax" && entry.accepted()));
+
+        first_response(world.apply_session(2, &ClientCommand::Ping { nonce: 4 }));
+        let bob_audit = world.audit_state();
+        assert_eq!(bob_audit.len(), 5);
+        assert!(bob_audit
+            .iter()
+            .all(|entry| entry.role == ClientRole::Viewer));
+        assert!(bob_audit
+            .iter()
+            .any(|entry| entry.tag == "set_tax" && entry.code == codes::FORBIDDEN));
+        assert!(!bob_audit
+            .iter()
+            .any(|entry| entry.tag == "set_tax" && entry.accepted()));
+    }
+
+    #[test]
+    fn disconnecting_one_connection_keeps_others_online() {
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Viewer);
+        first_response(world.apply_session(1, &hello_named("alice")));
+        first_response(world.apply_session(2, &hello_named("bob")));
+
+        assert_eq!(
+            first_response(world.apply_session(1, &ClientCommand::Disconnect)),
+            ServerMessage::Goodbye
+        );
+        assert!(!world.online.contains("alice"));
+        assert!(world.online.contains("bob"));
+
+        assert_eq!(
+            first_response(world.apply_session(2, &ClientCommand::Ping { nonce: 9 })),
+            ServerMessage::Pong { nonce: 9 }
+        );
+        // One player online is below the D-021 quorum; alice's departure did
+        // not remove bob from the roster.
+        expect_reject(
+            &first_response(world.apply_session(
+                2,
+                &vote(crate::protocol::VoteAction::Call, Some(TimeAction::Pause)),
+            )),
+            crate::vote::codes::MIN_ONLINE,
+        );
+    }
+
+    #[test]
+    fn a_vote_is_shared_across_connections_and_counts_once() {
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Viewer);
+        first_response(world.apply_session(1, &hello_named("alice")));
+        first_response(world.apply_session(2, &hello_named("bob")));
+
+        let opened = first_response(world.apply_session(
+            1,
+            &vote(crate::protocol::VoteAction::Call, Some(TimeAction::Pause)),
+        ));
+        match opened {
+            ServerMessage::TimeVoteStatus {
+                vote_id,
+                ref state,
+                yes,
+                no,
+                online,
+                ref initiator,
+                paused,
+                ..
+            } => {
+                assert_eq!(vote_id, 1);
+                assert_eq!(state, "open");
+                assert_eq!((yes, no, online), (1, 0, 2));
+                assert_eq!(initiator, "alice");
+                assert!(!paused);
+            }
+            other => panic!("expected open vote status, got {other:?}"),
+        }
+
+        let passed =
+            first_response(world.apply_session(2, &vote(crate::protocol::VoteAction::Yes, None)));
+        match passed {
+            ServerMessage::TimeVoteStatus {
+                vote_id,
+                ref state,
+                yes,
+                no,
+                paused,
+                ..
+            } => {
+                assert_eq!(vote_id, 1, "both connections see the same vote");
+                assert_eq!(state, "passed");
+                assert_eq!((yes, no), (2, 0));
+                assert!(paused);
+            }
+            other => panic!("expected passed vote status, got {other:?}"),
+        }
+        assert!(world.paused, "a passed pause vote freezes the shared world");
+        assert_eq!(
+            world.vote.votes_cast(),
+            1,
+            "only Bob's cast was accepted; Alice's initiator ballot is shared, not a second cast"
+        );
+
+        // Alice's initiator ballot is shared, so her own second yes cannot be
+        // counted; the vote is already resolved, which is the stable rejection.
+        expect_reject(
+            &first_response(world.apply_session(1, &vote(crate::protocol::VoteAction::Yes, None))),
+            crate::vote::codes::CLOSED,
+        );
+    }
+
+    #[test]
+    fn resume_adopts_only_the_requested_session() {
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Mayor);
+        let alice_token = welcome_token(&first_response(
+            world.apply_session(1, &hello_named("alice")),
+        ));
+        let bob_token = welcome_token(&first_response(world.apply_session(2, &hello_named("bob"))));
+        first_response(world.apply_session(1, &set_interest(10.0, 0.0, 16.0)));
+        first_response(world.apply_session(1, &ClientCommand::Disconnect));
+        first_response(world.apply_session(2, &ClientCommand::Ping { nonce: 1 }));
+
+        let resumed = world.apply_session(
+            3,
+            &ClientCommand::Resume {
+                session_id: alice_token.clone(),
+                last_tick: world.tick,
+            },
+        );
+        match resumed.as_slice() {
+            [ServerMessage::Welcome {
+                resumed: true,
+                session_token,
+                ..
+            }, ServerMessage::Snapshot { .. }] => assert_eq!(session_token, &alice_token),
+            other => panic!("expected resumed welcome + snapshot, got {other:?}"),
+        }
+
+        // Alice's viewport and identity moved to connection 3; Bob's session
+        // was not touched and is still online.
+        first_response(world.apply_session(3, &ClientCommand::Ping { nonce: 2 }));
+        match world.snapshot() {
+            ServerMessage::Snapshot {
+                interest_center, ..
+            } => assert_eq!(interest_center, [10.0, 0.0]),
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        first_response(world.apply_session(2, &ClientCommand::Ping { nonce: 3 }));
+        match world.snapshot() {
+            ServerMessage::Snapshot {
+                interest_center, ..
+            } => assert_eq!(interest_center, [0.0, 0.0]),
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        assert!(world.online.contains("alice"));
+        assert!(world.online.contains("bob"));
+
+        // Bob is active, so a fourth connection cannot claim his token.
+        expect_reject(
+            &first_response(world.apply_session(
+                4,
+                &ClientCommand::Resume {
+                    session_id: bob_token,
+                    last_tick: world.tick,
+                },
+            )),
+            codes::RESUME_DUPLICATE,
+        );
+    }
+
+    #[test]
+    fn single_session_apply_path_matches_connection_one() {
+        fn transcript(world: &mut ServerWorld, connection: Option<u64>) -> Vec<ServerMessage> {
+            let commands = [
+                hello(),
+                ClientCommand::Ping { nonce: 5 },
+                ClientCommand::SetTax {
+                    resident_rate: 12,
+                    business_rate: 8,
+                },
+                ClientCommand::PlaceRoad {
+                    start: [0, 0],
+                    end: [8, 0],
+                },
+                set_interest(4.0, 0.0, 16.0),
+                ClientCommand::TimeControl {
+                    action: TimeAction::Resume,
+                },
+                ClientCommand::Disconnect,
+            ];
+            let mut responses = Vec::new();
+            for command in &commands {
+                let batch = match connection {
+                    Some(connection_id) => world.apply_session(connection_id, command),
+                    None => world.apply_all(command),
+                };
+                responses.extend(batch);
+            }
+            responses
+        }
+
+        let mut legacy = ServerWorld::with_role(SEED, ClientRole::Admin);
+        let mut connection = ServerWorld::with_role(SEED, ClientRole::Admin);
+        assert_eq!(
+            transcript(&mut legacy, None),
+            transcript(&mut connection, Some(1)),
+            "the legacy default slot and connection 1 must be byte-identical"
+        );
+        assert_eq!(legacy.checksum(), connection.checksum());
+        assert_eq!(legacy.audit_state(), connection.audit_state());
     }
 }

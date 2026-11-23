@@ -13,6 +13,7 @@ use core_sim::{Cohort, CohortSimulation};
 use townsmith_server::listen::{run_listen, run_save_load_smoke, ListenConfig};
 use townsmith_server::protocol::{run_loopback_smoke, LOOPBACK_SEED};
 use townsmith_server::save::LoadedWorld;
+use townsmith_server::vote::run_time_vote_loopback;
 use townsmith_server::world::{
     run_authority_loopback, run_interest_loopback, run_resume_loopback, run_roles_loopback,
     ClientRole, ServerWorld,
@@ -132,6 +133,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        match run_time_vote_loopback() {
+            Ok(report) => print_time_vote(&report),
+            Err(error) => {
+                eprintln!("SERVER_TIME_VOTE status=error error={error}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
 
@@ -140,6 +148,17 @@ fn main() {
             Ok(report) => print_interest(&report),
             Err(error) => {
                 eprintln!("SERVER_INTEREST status=error error={error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if has_flag("--vote-smoke") {
+        match run_time_vote_loopback() {
+            Ok(report) => print_time_vote(&report),
+            Err(error) => {
+                eprintln!("SERVER_TIME_VOTE status=error error={error}");
                 std::process::exit(1);
             }
         }
@@ -335,6 +354,19 @@ fn print_interest(report: &townsmith_server::world::InterestReport) {
         report.view_buildings,
         report.view_buildings_truncated,
         report.tick,
+        report.checksum
+    );
+}
+
+fn print_time_vote(report: &townsmith_server::vote::TimeVoteReport) {
+    println!(
+        "SERVER_TIME_VOTE sessions={} votes={} passed={} failed={} cancelled={} paused={} checksum={} status=ok",
+        report.sessions,
+        report.votes,
+        report.passed,
+        report.failed,
+        report.cancelled,
+        report.paused,
         report.checksum
     );
 }
