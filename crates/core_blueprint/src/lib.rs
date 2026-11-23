@@ -14,6 +14,7 @@
 pub mod error;
 pub mod format;
 pub mod hash;
+pub mod library;
 pub mod limits;
 pub mod metadata;
 pub mod package;
@@ -22,8 +23,12 @@ pub use core_structure::{StructuralSystem, StructureError, StructureSpec, Struct
 pub use error::BlueprintError;
 pub use format::{decode_voxels, encode_voxels, DecodedVoxels};
 pub use hash::compute_hash;
+pub use library::{
+    BlueprintLibrary, BlueprintLibraryError, LibraryEntry, LibraryInsert, LibrarySummary,
+};
 pub use limits::{
-    MAX_CHUNKS, MAX_METADATA_BYTES, MAX_SOLID_VOXELS, MAX_VOLUME_VOXELS, MAX_VOXEL_STREAM_BYTES,
+    MAX_CHUNKS, MAX_METADATA_BYTES, MAX_PACKAGE_BYTES, MAX_SOLID_VOXELS, MAX_VOLUME_VOXELS,
+    MAX_VOXEL_STREAM_BYTES,
 };
 pub use metadata::{
     BlueprintMetadata, BlueprintStats, Dependencies, PropRecord, RoomRecord, FORMAT_VERSION,

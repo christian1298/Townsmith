@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::{self, JoinHandle};
@@ -23,7 +23,8 @@ use godot::classes::{ArrayMesh, SurfaceTool};
 use godot::prelude::*;
 
 use core_blueprint::{
-    load_tsbp, save_tsbp_with_hash, Blueprint, BlueprintError, BlueprintMetadata, BlueprintStats,
+    load_tsbp, save_tsbp_with_hash, Blueprint, BlueprintError, BlueprintLibrary,
+    BlueprintLibraryError, BlueprintMetadata, BlueprintStats, LibraryInsert, LibrarySummary,
     PropRecord, RoomRecord,
 };
 use core_city::named::{age_years_from_days, slot_is_employed, MAX_AGE_DAYS};
@@ -1361,6 +1362,88 @@ impl TownsmithCore {
                 .to_variant(),
         );
         result
+    }
+
+    /// Summarize a local content-addressed blueprint library.
+    ///
+    /// `root_path` must be an absolute directory without `..`. The directory
+    /// must already exist. The result is read-only and stateless; it is not
+    /// part of the world save and no world, placement, or blueprint checksum
+    /// changes. Returns:
+    ///
+    /// - `ok` (bool)
+    /// - `count` (int)
+    /// - `total_bytes` (int)
+    /// - `checksum` (String, 16 lowercase hex digits)
+    ///
+    /// On failure, returns `{ ok: false, error_code, error }`.
+    #[func]
+    fn blueprint_library_summary(&self, root_path: GString) -> VarDictionary {
+        match blueprint_library_summary_from_arg(&root_path.to_string()) {
+            Ok(summary) => blueprint_library_summary_dictionary(&summary),
+            Err((code, message)) => placement_simple_error(code, message),
+        }
+    }
+
+    /// Insert one local `.tsbp` package into a blueprint library.
+    ///
+    /// `root_path` must be an absolute existing directory without `..`.
+    /// `tsbp_path` must be an absolute `.tsbp` file without `..`. The package
+    /// is validated by the existing loader and stored by its BLAKE3 content
+    /// hash under `<root>/<first-two-hex>/<hash>.tsbp`. Identical bytes under
+    /// an existing hash are a no-op; different bytes under the same hash are
+    /// rejected. A failed insert leaves the library unchanged.
+    ///
+    /// This is local storage only: no discovery, download, ZIP/Workshop
+    /// packaging, script execution, or world-save reference is added.
+    ///
+    /// On success, returns `ok`, `hash`, `path`, `inserted`, `count`,
+    /// `total_bytes`, and `checksum`. On failure, returns
+    /// `{ ok: false, error_code, error }`.
+    #[func]
+    fn blueprint_library_insert(&self, root_path: GString, tsbp_path: GString) -> VarDictionary {
+        match blueprint_library_insert_from_args(&root_path.to_string(), &tsbp_path.to_string()) {
+            Ok((insert, summary)) => {
+                let mut result = blueprint_library_summary_dictionary(&summary);
+                result.set("hash", &GString::from(insert.hash.as_str()));
+                result.set(
+                    "path",
+                    &GString::from(insert.path.to_string_lossy().as_ref()),
+                );
+                result.set("inserted", insert.inserted);
+                result
+            }
+            Err((code, message)) => placement_simple_error(code, message),
+        }
+    }
+
+    /// Resolve a content hash in a local blueprint library.
+    ///
+    /// `root_path` must be an absolute existing directory without `..`.
+    /// `hash` must be canonical `blake3:<64 lowercase hex>`. A valid but
+    /// missing hash returns `ok = true`, `exists = false`, and an empty
+    /// `path`. A malformed hash, unsafe path, or unreadable library returns
+    /// `{ ok: false, error_code, error }`. This is a read-only local lookup;
+    /// the world save still stores absolute package paths.
+    #[func]
+    fn blueprint_library_resolve(&self, root_path: GString, hash: GString) -> VarDictionary {
+        match blueprint_library_resolve_from_args(&root_path.to_string(), &hash.to_string()) {
+            Ok(Some(path)) => {
+                let mut result = VarDictionary::new();
+                result.set("ok", true);
+                result.set("path", &GString::from(path.to_string_lossy().as_ref()));
+                result.set("exists", true);
+                result
+            }
+            Ok(None) => {
+                let mut result = VarDictionary::new();
+                result.set("ok", true);
+                result.set("path", &GString::from(""));
+                result.set("exists", false);
+                result
+            }
+            Err((code, message)) => placement_simple_error(code, message),
+        }
     }
 
     /// Place a `.tsbp` blueprint in the world after validation.
@@ -8016,6 +8099,103 @@ fn blueprint_error_code(error: &BlueprintError) -> &'static str {
     }
 }
 
+/// Validate a GDScript blueprint library root.
+fn blueprint_library_root_from_arg(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("blueprint library root is empty".to_string());
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err("blueprint library root must be absolute".to_string());
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return Err("blueprint library root must not contain '.' or '..'".to_string());
+    }
+    Ok(path)
+}
+
+/// Map a library failure to a stable bridge error code.
+fn blueprint_library_error_code(error: &BlueprintLibraryError) -> &'static str {
+    match error {
+        BlueprintLibraryError::InvalidRoot { .. } => "invalid_blueprint_library_root",
+        BlueprintLibraryError::RootMissing { .. } => "blueprint_library_root_missing",
+        BlueprintLibraryError::RootNotDirectory { .. } => "blueprint_library_not_a_directory",
+        BlueprintLibraryError::InvalidHash { .. } => "invalid_blueprint_library_hash",
+        BlueprintLibraryError::InvalidPath { .. } => "invalid_blueprint_path",
+        BlueprintLibraryError::MissingFile { .. } => "blueprint_library_missing_file",
+        BlueprintLibraryError::NotAFile { .. } => "blueprint_library_not_a_file",
+        BlueprintLibraryError::InvalidPackage { .. } => "blueprint_library_invalid_package",
+        BlueprintLibraryError::TooLarge { .. } => "blueprint_library_too_large",
+        BlueprintLibraryError::PathEscape { .. } => "blueprint_library_path_escape",
+        BlueprintLibraryError::Collision { .. } => "blueprint_library_collision",
+        BlueprintLibraryError::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            "blueprint_library_missing_file"
+        }
+        BlueprintLibraryError::Io { .. } => "blueprint_library_io",
+    }
+}
+
+fn blueprint_library_error_pair(error: &BlueprintLibraryError) -> (&'static str, String) {
+    (blueprint_library_error_code(error), error.to_string())
+}
+
+fn blueprint_library_open(raw_root: &str) -> Result<BlueprintLibrary, (&'static str, String)> {
+    let root = blueprint_library_root_from_arg(raw_root)
+        .map_err(|message| ("invalid_blueprint_library_root", message))?;
+    BlueprintLibrary::new(root).map_err(|error| blueprint_library_error_pair(&error))
+}
+
+fn blueprint_library_summary_from_arg(
+    raw_root: &str,
+) -> Result<LibrarySummary, (&'static str, String)> {
+    blueprint_library_open(raw_root)?
+        .summary()
+        .map_err(|error| blueprint_library_error_pair(&error))
+}
+
+fn blueprint_library_insert_from_args(
+    raw_root: &str,
+    raw_package: &str,
+) -> Result<(LibraryInsert, LibrarySummary), (&'static str, String)> {
+    let library = blueprint_library_open(raw_root)?;
+    let package = blueprint_path_from_arg(raw_package)
+        .map_err(|message| ("invalid_blueprint_path", message))?;
+    let insert = library
+        .insert_file(&package)
+        .map_err(|error| blueprint_library_error_pair(&error))?;
+    let summary = library
+        .summary()
+        .map_err(|error| blueprint_library_error_pair(&error))?;
+    Ok((insert, summary))
+}
+
+fn blueprint_library_resolve_from_args(
+    raw_root: &str,
+    hash: &str,
+) -> Result<Option<PathBuf>, (&'static str, String)> {
+    blueprint_library_open(raw_root)?
+        .resolve_checked(hash)
+        .map_err(|error| blueprint_library_error_pair(&error))
+}
+
+fn blueprint_library_summary_dictionary(summary: &LibrarySummary) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set("count", summary.count as i64);
+    result.set("total_bytes", summary.total_bytes as i64);
+    result.set(
+        "checksum",
+        &GString::from(&format!("{:016x}", summary.checksum)),
+    );
+    result
+}
+
 fn placement_error_result(error: &PlacementError) -> VarDictionary {
     placement_simple_error(error.code(), error.to_string())
 }
@@ -14586,5 +14766,398 @@ mod tests {
         assert_eq!(summary.total, BASE_TOTAL);
         assert_eq!(summary.packs, 0);
         assert_eq!(summary.checksum, BASE_CHECKSUM);
+    }
+
+    /// Self-cleaning root and package directory under the OS temp directory.
+    struct TempBlueprintLibrary {
+        path: PathBuf,
+    }
+
+    impl TempBlueprintLibrary {
+        fn new(label: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos());
+            let path = std::env::temp_dir().join(format!(
+                "townsmith-blueprint-library-{}-{stamp}-{unique}-{label}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("create temp blueprint directory");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn root(&self) -> PathBuf {
+            self.path.join("library")
+        }
+
+        fn root_str(&self) -> String {
+            self.root().to_string_lossy().into_owned()
+        }
+
+        fn create_root(&self) -> PathBuf {
+            let root = self.root();
+            std::fs::create_dir_all(&root).expect("create library root");
+            root
+        }
+
+        fn package(&self, name: &str) -> PathBuf {
+            self.path.join(name)
+        }
+    }
+
+    impl Drop for TempBlueprintLibrary {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn write_bridge_package(path: &Path, id: &str) -> String {
+        let mut volume =
+            VoxelVolume::new(VolumeConfig::new(1, 1, 1).expect("config")).expect("volume");
+        volume
+            .fill_box(
+                VolumePos::new(0, 0, 0),
+                VolumePos::new(4, 1, 4),
+                EDITOR_FLOOR,
+            )
+            .expect("fill floor");
+        let blueprint = Blueprint::new(BlueprintMetadata::new(id, "Bridge Library House"), volume);
+        save_tsbp_with_hash(path, &blueprint).expect("save package")
+    }
+
+    #[test]
+    fn blueprint_library_root_requires_an_absolute_path() {
+        let abs = std::env::temp_dir().join("townsmith-library-root");
+        assert!(blueprint_library_root_from_arg(&abs.to_string_lossy()).is_ok());
+        assert_eq!(
+            blueprint_library_root_from_arg("").expect_err("empty"),
+            "blueprint library root is empty"
+        );
+        assert_eq!(
+            blueprint_library_root_from_arg("   ").expect_err("blank"),
+            "blueprint library root is empty"
+        );
+        assert_eq!(
+            blueprint_library_root_from_arg("relative/library").expect_err("relative"),
+            "blueprint library root must be absolute"
+        );
+        let traversal = std::env::temp_dir().join("one").join("..").join("two");
+        assert_eq!(
+            blueprint_library_root_from_arg(&traversal.to_string_lossy()).expect_err("traversal"),
+            "blueprint library root must not contain '.' or '..'"
+        );
+    }
+
+    #[test]
+    fn blueprint_library_error_codes_are_stable() {
+        let cases = [
+            (
+                BlueprintLibraryError::InvalidRoot {
+                    path: PathBuf::from("x"),
+                    reason: "test",
+                },
+                "invalid_blueprint_library_root",
+            ),
+            (
+                BlueprintLibraryError::RootMissing {
+                    path: PathBuf::from("x"),
+                },
+                "blueprint_library_root_missing",
+            ),
+            (
+                BlueprintLibraryError::RootNotDirectory {
+                    path: PathBuf::from("x"),
+                },
+                "blueprint_library_not_a_directory",
+            ),
+            (
+                BlueprintLibraryError::InvalidHash {
+                    hash: "x".to_string(),
+                    reason: "test",
+                },
+                "invalid_blueprint_library_hash",
+            ),
+            (
+                BlueprintLibraryError::InvalidPath {
+                    path: PathBuf::from("x"),
+                    reason: "test",
+                },
+                "invalid_blueprint_path",
+            ),
+            (
+                BlueprintLibraryError::MissingFile {
+                    path: PathBuf::from("x"),
+                },
+                "blueprint_library_missing_file",
+            ),
+            (
+                BlueprintLibraryError::NotAFile {
+                    path: PathBuf::from("x"),
+                },
+                "blueprint_library_not_a_file",
+            ),
+            (
+                BlueprintLibraryError::InvalidPackage {
+                    path: PathBuf::from("x"),
+                    source: BlueprintError::Format("test".to_string()),
+                },
+                "blueprint_library_invalid_package",
+            ),
+            (
+                BlueprintLibraryError::TooLarge {
+                    path: PathBuf::from("x"),
+                    bytes: 1,
+                    limit: 0,
+                },
+                "blueprint_library_too_large",
+            ),
+            (
+                BlueprintLibraryError::PathEscape {
+                    path: PathBuf::from("x"),
+                },
+                "blueprint_library_path_escape",
+            ),
+            (
+                BlueprintLibraryError::Collision {
+                    hash: "blake3:test".to_string(),
+                    path: PathBuf::from("x"),
+                },
+                "blueprint_library_collision",
+            ),
+            (
+                BlueprintLibraryError::Io {
+                    path: PathBuf::from("x"),
+                    source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+                },
+                "blueprint_library_missing_file",
+            ),
+            (
+                BlueprintLibraryError::Io {
+                    path: PathBuf::from("x"),
+                    source: std::io::Error::other("io"),
+                },
+                "blueprint_library_io",
+            ),
+        ];
+        for (error, code) in cases {
+            assert_eq!(blueprint_library_error_code(&error), code, "{error}");
+        }
+    }
+
+    #[test]
+    fn blueprint_library_insert_then_resolve_and_summary() {
+        let dir = TempBlueprintLibrary::new("insert");
+        let root = dir.create_root();
+        let package = dir.package("house.tsbp");
+        let hash = write_bridge_package(&package, "local:bridge_house");
+
+        let (insert, summary) =
+            blueprint_library_insert_from_args(&dir.root_str(), &package.to_string_lossy())
+                .expect("insert");
+        assert!(insert.inserted);
+        assert_eq!(insert.hash, hash);
+        assert_eq!(
+            insert.path,
+            root.join(&hash[7..9]).join(format!("{}.tsbp", &hash[7..]))
+        );
+        assert!(insert.path.is_file());
+        assert_eq!(summary.count, 1);
+        assert_eq!(
+            summary.total_bytes,
+            std::fs::metadata(&insert.path).unwrap().len()
+        );
+        assert_eq!(format!("{:016x}", summary.checksum).len(), 16);
+
+        let resolved = blueprint_library_resolve_from_args(&dir.root_str(), &hash)
+            .expect("resolve")
+            .expect("stored");
+        assert_eq!(resolved, insert.path);
+
+        let read_back = blueprint_library_summary_from_arg(&dir.root_str()).expect("summary");
+        assert_eq!(read_back, summary);
+    }
+
+    #[test]
+    fn blueprint_library_duplicate_insert_is_a_noop() {
+        let dir = TempBlueprintLibrary::new("duplicate");
+        dir.create_root();
+        let package = dir.package("house.tsbp");
+        write_bridge_package(&package, "local:bridge_house");
+
+        let (first, _) =
+            blueprint_library_insert_from_args(&dir.root_str(), &package.to_string_lossy())
+                .expect("first");
+        let (second, summary) =
+            blueprint_library_insert_from_args(&dir.root_str(), &package.to_string_lossy())
+                .expect("second");
+        assert!(first.inserted);
+        assert!(!second.inserted);
+        assert_eq!(first.hash, second.hash);
+        assert_eq!(first.path, second.path);
+        assert_eq!(summary.count, 1);
+    }
+
+    #[test]
+    fn blueprint_library_missing_root_reports_a_stable_code() {
+        let dir = TempBlueprintLibrary::new("missing-root");
+        let root = dir.root();
+        assert!(!root.exists());
+        let (code, _) = blueprint_library_summary_from_arg(&dir.root_str()).expect_err("missing");
+        assert_eq!(code, "blueprint_library_root_missing");
+        let (code, _) = blueprint_library_insert_from_args(
+            &dir.root_str(),
+            &dir.package("house.tsbp").to_string_lossy(),
+        )
+        .expect_err("missing");
+        assert_eq!(code, "blueprint_library_root_missing");
+    }
+
+    #[test]
+    fn blueprint_library_non_directory_root_reports_a_stable_code() {
+        let dir = TempBlueprintLibrary::new("file-root");
+        let file = dir.path().join("not-a-directory");
+        std::fs::write(&file, b"file").expect("file root");
+        let (code, _) =
+            blueprint_library_summary_from_arg(&file.to_string_lossy()).expect_err("non-directory");
+        assert_eq!(code, "blueprint_library_not_a_directory");
+    }
+
+    #[test]
+    fn blueprint_library_insert_rejects_missing_and_non_tsbp_packages() {
+        let dir = TempBlueprintLibrary::new("bad-package-path");
+        dir.create_root();
+        let (code, _) = blueprint_library_insert_from_args(
+            &dir.root_str(),
+            &dir.package("missing.tsbp").to_string_lossy(),
+        )
+        .expect_err("missing package");
+        assert_eq!(code, "blueprint_library_missing_file");
+
+        let package = dir.package("house.tsbp");
+        write_bridge_package(&package, "local:bridge_house");
+        let renamed = dir.package("house.zip");
+        std::fs::rename(&package, &renamed).expect("rename");
+        let (code, _) =
+            blueprint_library_insert_from_args(&dir.root_str(), &renamed.to_string_lossy())
+                .expect_err("extension");
+        assert_eq!(code, "invalid_blueprint_path");
+    }
+
+    #[test]
+    fn blueprint_library_insert_rejects_an_invalid_package() {
+        let dir = TempBlueprintLibrary::new("invalid-package");
+        let root = dir.create_root();
+        let package = dir.package("invalid.tsbp");
+        std::fs::write(&package, b"not a zip").expect("invalid package");
+        let (code, _) =
+            blueprint_library_insert_from_args(&dir.root_str(), &package.to_string_lossy())
+                .expect_err("invalid package");
+        assert_eq!(code, "blueprint_library_invalid_package");
+        let summary = blueprint_library_summary_from_arg(&dir.root_str()).expect("summary");
+        assert_eq!(summary.count, 0);
+        assert!(std::fs::read_dir(&root).expect("root").next().is_none());
+    }
+
+    #[test]
+    fn blueprint_library_insert_rejects_an_oversized_package() {
+        let dir = TempBlueprintLibrary::new("oversized");
+        dir.create_root();
+        let package = dir.package("oversized.tsbp");
+        let file = std::fs::File::create(&package).expect("oversized package");
+        file.set_len(core_blueprint::MAX_PACKAGE_BYTES + 1)
+            .expect("set length");
+        drop(file);
+        let (code, _) =
+            blueprint_library_insert_from_args(&dir.root_str(), &package.to_string_lossy())
+                .expect_err("too large");
+        assert_eq!(code, "blueprint_library_too_large");
+        let summary = blueprint_library_summary_from_arg(&dir.root_str()).expect("summary");
+        assert_eq!(summary.count, 0);
+    }
+
+    #[test]
+    fn blueprint_library_resolve_rejects_invalid_hashes() {
+        let dir = TempBlueprintLibrary::new("bad-hash");
+        dir.create_root();
+        let package = dir.package("house.tsbp");
+        let hash = write_bridge_package(&package, "local:bridge_house");
+        let hex = &hash[7..];
+        let uppercase = format!("blake3:{}", hex.to_uppercase());
+        let outside = package.to_string_lossy().into_owned();
+        for bad in [
+            String::new(),
+            "blake3:".to_string(),
+            format!("../{hex}"),
+            format!("blake3:../{hex}"),
+            hex.to_string(),
+            uppercase,
+            outside,
+        ] {
+            let (code, _) = blueprint_library_resolve_from_args(&dir.root_str(), &bad)
+                .expect_err("invalid hash");
+            assert_eq!(code, "invalid_blueprint_library_hash", "hash {bad:?}");
+        }
+    }
+
+    #[test]
+    fn blueprint_library_resolve_missing_hash_is_ok() {
+        let dir = TempBlueprintLibrary::new("absent-hash");
+        dir.create_root();
+        let package = dir.package("house.tsbp");
+        let hash = write_bridge_package(&package, "local:bridge_house");
+        let resolved =
+            blueprint_library_resolve_from_args(&dir.root_str(), &hash).expect("valid hash");
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn blueprint_library_collision_is_reported() {
+        let dir = TempBlueprintLibrary::new("collision");
+        dir.create_root();
+        let first = dir.package("first.tsbp");
+        let second = dir.package("second.tsbp");
+        write_bridge_package(&first, "local:first");
+        write_bridge_package(&second, "local:second");
+        let (insert, _) =
+            blueprint_library_insert_from_args(&dir.root_str(), &first.to_string_lossy())
+                .expect("insert");
+        std::fs::copy(&second, &insert.path).expect("different bytes");
+        let (code, _) =
+            blueprint_library_insert_from_args(&dir.root_str(), &first.to_string_lossy())
+                .expect_err("collision");
+        assert_eq!(code, "blueprint_library_collision");
+    }
+
+    #[test]
+    fn blueprint_library_summary_is_stable_across_insertion_order() {
+        let first = TempBlueprintLibrary::new("order-a");
+        let second = TempBlueprintLibrary::new("order-b");
+        first.create_root();
+        second.create_root();
+        let package_a = first.package("a.tsbp");
+        let package_b = first.package("b.tsbp");
+        write_bridge_package(&package_a, "local:a");
+        write_bridge_package(&package_b, "local:b");
+
+        blueprint_library_insert_from_args(&first.root_str(), &package_a.to_string_lossy())
+            .expect("a first");
+        blueprint_library_insert_from_args(&first.root_str(), &package_b.to_string_lossy())
+            .expect("b second");
+        blueprint_library_insert_from_args(&second.root_str(), &package_b.to_string_lossy())
+            .expect("b first");
+        blueprint_library_insert_from_args(&second.root_str(), &package_a.to_string_lossy())
+            .expect("a second");
+
+        let summary_a = blueprint_library_summary_from_arg(&first.root_str()).expect("a");
+        let summary_b = blueprint_library_summary_from_arg(&second.root_str()).expect("b");
+        assert_eq!(summary_a, summary_b);
+        assert_eq!(summary_a.count, 2);
     }
 }

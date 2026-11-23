@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use core_voxel::volume::VoxelVolume;
@@ -113,7 +113,24 @@ fn write_package(path: &Path, json: &[u8], voxels: &[u8]) -> Result<(), Blueprin
 /// Load a `.tsbp` package and verify its hash and metadata.
 pub fn load_tsbp(path: &Path) -> Result<Blueprint, BlueprintError> {
     let file = File::open(path)?;
-    let mut archive = zip::ZipArchive::new(file)?;
+    let archive = zip::ZipArchive::new(file)?;
+    load_archive(archive)
+}
+
+/// Load and verify a `.tsbp` package from bytes already held in memory.
+///
+/// This is the same validation as [`load_tsbp`], used by the local blueprint
+/// library so the bytes it hashes and stores are exactly the bytes it
+/// validated. The caller owns the size cap; this function does not copy the
+/// input.
+pub(crate) fn load_tsbp_bytes(bytes: &[u8]) -> Result<Blueprint, BlueprintError> {
+    let archive = zip::ZipArchive::new(Cursor::new(bytes))?;
+    load_archive(archive)
+}
+
+fn load_archive<R: Read + Seek>(
+    mut archive: zip::ZipArchive<R>,
+) -> Result<Blueprint, BlueprintError> {
     if archive.has_duplicate_names() {
         return Err(BlueprintError::DuplicateEntry(
             "duplicate package entry".to_string(),
@@ -253,8 +270,8 @@ fn validate_metadata(metadata: &BlueprintMetadata) -> Result<(), BlueprintError>
     Ok(())
 }
 
-fn read_entry(
-    archive: &mut zip::ZipArchive<File>,
+fn read_entry<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
     name: &'static str,
     limit: u64,
 ) -> Result<Vec<u8>, BlueprintError> {
