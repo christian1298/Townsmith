@@ -116,7 +116,7 @@ blake3:9f5bcd407d25c5b5204315c873faa1321dfb5dd969c9a22d2322f7502f95a070
 
 ## 6. Local blueprint library
 
-`core_blueprint::BlueprintLibrary` stores validated packages in an explicit absolute local directory. **The world save keeps the recorded absolute `blueprint_path`** and can additionally carry an optional content-addressed `blueprint_ref` (`tsbp:blake3:<64hex>`) when written by the opt-in bridge save (§6.5). Legacy records omit the field and stay byte-identical.
+`core_blueprint::BlueprintLibrary` stores validated packages in an explicit absolute local directory. **The world save keeps the recorded absolute `blueprint_path`** and can additionally carry an optional content-addressed `blueprint_ref` (`tsbp:blake3:<64hex>`) when written by the opt-in bridge save (§6.5). Legacy records omit the field and stay byte-identical. Since D-034, a bridge save made while one content pack is live is outer `format_version: 2` with a top-level `content` identity object (§6.7); that envelope does not change package bytes, `blueprint_hash`, or `blueprint_ref`.
 
 ### 6.1 Layout and addressing
 
@@ -216,6 +216,16 @@ townsmith-server --listen 47015 --blueprint-library /srv/townsmith/blueprints
 
 This does not change the `.tsbp` format, public library API, existing package hashes, or bridge save bytes. Mod dependencies still fail `load_tsbp` (`MissingDependency`), and there is no mod auto-download.
 
+### 6.7 World content identity (D-034)
+
+A `.tsbp` stores material, room, prop, and dependency IDs but not the content pack that defined them. D-034 (accepted, bridge v1) adds one top-level `content` object to the world save when one `content_load_dir` pack is live, and outer `format_version: 2`; a base-only save stays v1 and byte-identical.
+
+- The package side is unchanged: `blueprint_hash` still identifies the semantic package, and `dependencies.mods` remains a hint. The world identity is a coarse pack gate and does not replace per-ID validation.
+- A matching pack checksum plus matching `blueprint_hash` means the same package content and the same active pack definitions, but not that a hand-edited package resolves every ID.
+- Loading a v2 save verifies `pack_id`, `pack_checksum`, and `registry_checksum` before any `.tsbp` is loaded. A missing or different pack fails closed with a stable `content_*` code; no path substitution or download occurs. The v2 envelope is normalized to v1 in memory for the existing package/store parsers and the save is not rewritten.
+- The identity object never contains a library root, package path, or content definition. `world_load_content_checked(..., true)` is reserved and returns `content_degraded_unsupported`.
+- The server does not carry this object in `ServerSave` yet; see [[10 - Decisions]] D-034 and [[42 - World Placement Bridge]] §3.1.
+
 ## 7. API
 
 ```rust
@@ -245,7 +255,7 @@ let summary = library.summary()?;
 - crafted oversized volume and solid-count streams rejected before allocation;
 - library insert/resolve/list/summary determinism, duplicate no-op, collision rejection, size/traversal/symlink/missing-path errors, atomic insert, and unchanged existing package hashes.
 
-The bridge-side portable save tests (unique-package copy, repeat-save dedup, deleted-source resolution, reference-first resolution with a working legacy path, and stable failure codes) are listed in [[42 - World Placement Bridge]] §7. They pin the legacy placement JSON/checksum `c552e58d3d060904` and the full plain world JSON hash `ba0281614bbf8304`, so a default plain save stays byte-identical.
+The bridge-side portable save tests (unique-package copy, repeat-save dedup, deleted-source resolution, reference-first resolution with a working legacy path, and stable failure codes) are listed in [[42 - World Placement Bridge]] §7. They pin the legacy placement JSON/checksum `c552e58d3d060904` and the full plain world JSON hash `ba0281614bbf8304`, so a default plain save stays byte-identical. The D-034 content-bound fixture pin is `1c74187ca20ce289`; base-only output keeps its own pin.
 
 ## 9. Limitations
 
@@ -254,6 +264,7 @@ The bridge-side portable save tests (unique-package copy, repeat-save dedup, del
 - Room/prop data is schema-ready, not generated.
 - Material keys are provisional until the content registry.
 - No mod/resource-pack resolver yet.
+- Content identity is a bridge-only envelope (D-034): it records the active pack checksums, not the definitions; it does not migrate pack versions, read degraded worlds, or reach the server save yet.
 - No savegame-format migration yet; `format_version` is the hook.
 - The world save still stores absolute `blueprint_path` values alongside an optional content-addressed `blueprint_ref`. The opt-in `world_save_with_library` / `world_load_with_library` bridge path travels with a sidecar library; the root is explicit and never saved or discovered. A portable load makes resolved packages renderable through bridge-only `resolved_blueprint_path`; the JSON is not rewritten. A plain `world_load` uses the recorded path, while reference resolution requires `world_load_with_library`; the recorded path remains the legacy fallback.
 - The server library is pre-seeded and read-only at serve time. There is no package upload, remote fetch, content manifest negotiation, or mod auto-download; the server cannot resolve a package the operator did not install. The server save records the stable content-addressed reference `tsbp:blake3:<hex>` in its placement records, not the resolved library path.

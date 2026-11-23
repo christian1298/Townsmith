@@ -214,20 +214,20 @@ example_copper_age/
 
 ### 5.1 Runtime registry (bridge, local only)
 
-`TownsmithCore` owns a bridge-only content slot that opens on `ContentRegistry::base()`. It is **not** part of the world save today: `world_save` does not read or write it, and no save field, placement, blueprint, or existing checksum changes. D-034 (Proposed) would add an optional `content` identity object; see §5.3. Nothing in that section is implemented.
+`TownsmithCore` owns a bridge-only content slot that opens on `ContentRegistry::base()`. D-034 (accepted 2026-11-23) records one summary identity in a content-bound world save; no content definition or path is written. The pack, merged registry, and base checksums are exposed by the summary and unchanged by save/load. See §5.3.
 
 | Method | Returns | Purpose |
 |---|---|---|
 | `content_load_dir(path)` | `Dictionary` | Load one absolute local mod directory through `ContentPack::from_dir` + `merged_with_base`; replace the live registry only after the pack and merge validate |
-| `content_registry_summary()` | `Dictionary` | Read-only `ok`, `format_version`, `materials`, `rooms`, `props`, `total`, `packs`, `checksum` |
+| `content_registry_summary()` | `Dictionary` | Read-only `ok`, `format_version`, `materials`, `rooms`, `props`, `total`, `packs`, `checksum`, `pack_id`, `namespace`, `pack_checksum`, `registry_checksum`, `base_checksum` |
 | `content_registry_clear()` | `bool` | Drop the live pack and restore the bundled base registry |
 
 - `content_load_dir` requires a non-empty absolute path with no `..`. The pack loader then confines every manifest content path under the mod directory, rejects symlink escapes before reading, requires UTF-8, caps one file at 2 MiB and the manifest plus three documents at 8 MiB, and enforces the manifest namespace plus base-collision rules.
 - A failed load returns `{ ok: false, error_code, error }` with a stable code (`content_directory_missing`, `content_not_a_directory`, `content_invalid_manifest`, `content_path_escape`, `content_file_too_large`, `content_not_utf8`, `content_duplicate_id`, …) and leaves the previous registry untouched, including a failed first load.
-- The checksum is the existing `ContentRegistry::checksum()` of the live registry, 16 lowercase hex digits. Base is `c2df0f242f5e78d2`; the example pack merged after base is `330a538d07805b50`.
+- The checksum is the existing `ContentRegistry::checksum()` of the live registry, 16 lowercase hex digits. Base is `c2df0f242f5e78d2`; the example pack merged after base is `330a538d07805b50`; the example pack's own checksum is `ad4c645869a411ed`. The summary also exposes `pack_id`, `namespace`, `pack_checksum`, `registry_checksum` (alias of `checksum`), and `base_checksum`.
 - One local pack is live at a time (`packs` is `0` or `1`); a successful load replaces the previous pack rather than stacking. A later mod-set loader can own multiple packs and load order.
-- Scope: explicit local loading only. No discovery, downloads, ZIP/Workshop packages, scripts, native code, hot reload, cross-mod references, save references (proposed in D-034, not implemented), migrations, or dependency/load-order resolution. D-006 remains **Proposed**.
-- Covered by 14 `godot_ext` tests: base counts and checksum, a valid merge, repeated-load determinism, clear, and the missing/non-directory/path/symlink/size/UTF-8/manifest/duplicate failure cases.
+- Scope: explicit local loading only. No discovery, downloads, ZIP/Workshop packages, scripts, native code, hot reload, cross-mod references, migrations, or dependency/load-order resolution. The save identity is covered in §5.3; it records checksums only, not content. D-006 remains **Proposed**.
+- Covered by the 14 runtime-registry `godot_ext` tests (base counts and checksum, a valid merge, repeated-load determinism, clear, and the missing/non-directory/path/symlink/size/UTF-8/manifest/duplicate failure cases) plus the §5.3 identity tests.
 
 ### 5.2 Local blueprint library
 
@@ -246,12 +246,12 @@ example_copper_age/
 - **Optional save references (opt-in).** A plain `world_save` still writes the absolute `blueprint_path` and no reference, so legacy JSON stays byte-identical. `world_save_with_library(path, library_root)` copies every unique placement package into the explicit absolute sidecar library and stamps each saved record with `blueprint_ref = "tsbp:blake3:<64hex>"`; the recorded path remains as the legacy fallback and the library root never enters the JSON. `world_load_with_library` resolves reference-first — a valid `blueprint_ref` that resolves in the library is used even when the recorded path also works — and a reference is never treated as a path. A legacy record without a reference uses `blueprint_path`, then the library by `blueprint_hash`. It never rewrites the save and reports `resolved_references` / `legacy_path_fallbacks`. There is no discovery, auto-download, root inference, or automatic path migration; a plain `world_load` stays non-portable.
 - Covered by 21 `core_blueprint` integration tests and the `godot_ext` bridge suite, including 13 library insert/resolve tests and 17 reference save/load tests added by #311.
 
-### 5.3 Save references (proposed, D-034)
+### 5.3 Save references (D-034, accepted; bridge v1)
 
-> [!warning] Proposed, not implemented
-> The runtime registry is still bridge state. `world_save` writes no content identity, `world_load` verifies no pack, and no flag or bridge argument below exists. This subsection records the proposed contract only.
+> [!success] Implemented at the bridge level (2026-11-23)
+> The runtime registry stays bridge state, but a world save written while one pack is live now carries a summary identity. Base-only saves remain byte-identical. The server, protocol, and `ServerSave` are unchanged.
 
-A world save would carry one optional top-level object when a pack is live:
+A world save carries one optional top-level object when a pack is live:
 
 ```json
 "content": {
@@ -262,14 +262,17 @@ A world save would carry one optional top-level object when a pack is live:
 }
 ```
 
-- **Base-only saves omit the key** and keep outer `format_version: 1`, so their bytes, goldens, and checksums do not change. A save with a pack uses outer `format_version: 2`; a pre-D-034 reader rejects it instead of ignoring the identity.
-- On load, the pack ID and both checksums must match the live registry before any store or placement is mutated. Missing, different, or changed packs fail closed with stable `content_*` codes. There is no substitution and no auto-download.
-- A content-bound world keeps its identity across a load/save cycle. Saving without the pack, or with a different pack, is refused rather than silently unpinned.
-- **Packs remain one at a time.** The save object describes the single `content_load_dir` pack merged after base; it is not a multi-pack list or load order. Multi-pack saving needs a new identity format version.
-- The reserved `--accept-missing-content`/bridge opt-out is only for a future read-only inspector that preserves unknown IDs and blocks saves; it is not part of this proposal (Q-117). Pack-version compatibility and content-ID migration are open in Q-116 and Q-118.
-- The identity object does not replace per-package `dependencies.mods` or per-ID validation. `.tsbp` metadata remains the package-level hint, and its current loader still rejects non-empty mod dependencies.
+- **Base-only saves omit the key** and keep outer `format_version: 1`, so their bytes, goldens, and checksums do not change. A save with a pack uses outer `format_version: 2`; a pre-D-034 reader rejects v2 instead of ignoring the identity. `pack_id` is the manifest ID in either form (`mymod` or `mymod:pack`); `base` is never recorded.
+- On load, the pack ID and both checksums must match the live registry before any store or placement is mutated. The v2 object is removed and `format_version` is set back to `1` in memory for the existing parsers; the file is not rewritten, and the same records produce the same placement/store checksums.
+- A content-bound world keeps its identity across a load/save cycle. Saving without the pack, or with a different pack, is refused rather than silently unpinned. `world_clear_placements` also clears the remembered identity.
+- **Packs remain one at a time.** The save object describes the single `content_load_dir` pack merged after base; it is not a multi-pack list or load order. `content_multiple_packs_unsupported` blocks save/load if the registry ever reports more than one.
+- **Stable rejection codes.** `content_save_requires_pack`, `content_save_pack_mismatch`, `content_pack_mismatch`, `content_pack_checksum_mismatch`, `content_registry_checksum_mismatch`, `content_pack_missing`, `content_multiple_packs_unsupported`, `content_identity_required`, `content_identity_unexpected`, `content_identity_unsupported`, `content_identity_invalid`, and `content_degraded_unsupported`. Malformed save JSON keeps `corrupt_save`. There is no substitution and no auto-download.
+- **Read-only opt-out is reserved, not implemented.** `world_load_content_checked(path, expected_seed, accept_missing_content)` delegates to normal `world_load` when `false`; `true` returns `content_degraded_unsupported` until Q-117 defines a safe mode. Pack-version compatibility and content-ID migration remain open in Q-116 and Q-118.
+- The save result adds `content_bound`, `content_identity_status` (`absent`/`new`/`match`), `content_pack_id`, `content_pack_checksum`, `content_registry_checksum`, and `content_format_version`. The load result adds `content_identity_status` (`absent`/`legacy_unbound`/`match`), the same pack/checksum fields, and `content_format_version` (`0` when none is recorded).
+- A **legacy v1** save loaded with a pack is allowed as `legacy_unbound`; the next save records the active pack. A v1 save with `content` is `content_identity_unexpected`; a v2 save without it is `content_identity_required`.
+- The identity object does not replace per-package `dependencies.mods` or per-ID validation. `.tsbp` metadata remains the package-level hint, and its current loader still rejects non-empty mod dependencies. No path is written or inferred.
 
-See [[10 - Decisions]] D-034 and [[12 - Technical Architecture]] §7.
+See [[10 - Decisions]] D-034 and [[12 - Technical Architecture]] §7; bridge details are in [[42 - World Placement Bridge]] §3.
 
 ## 6. Resource packs
 

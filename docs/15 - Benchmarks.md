@@ -363,6 +363,8 @@ Pin the seven booleans and the 16-hex checksum `d26569ec3dc6b464`. The checksum 
 
 The bridge-side portable-save pin is tracked in [[42 - World Placement Bridge]] (`WORLD_LIBRARY ... checksum=31cc92cee8fc7624`). It moved from `08c0f111ef5e72d6` when `world_save_with_library` began stamping `blueprint_ref` on the saved records. The same test slice pins the legacy placement JSON/checksum `c552e58d3d060904` and the FNV-1a hash of the full plain world JSON `ba0281614bbf8304`; the legacy plain `world_save` JSON and checksum are unchanged.
 
+D-034 content identity leaves those base-only pins unchanged: a save with no live pack keeps outer `format_version: 1`, writes no `content` member, and is byte-identical. The content-bound one-house fixture (example pack `ad4c645869a411ed`, merged registry `330a538d07805b50`, outer v2) pins FNV-1a `1c74187ca20ce289` in the `godot_ext` identity tests. That pin covers whole-file bytes only; placement records and the placement checksum are identical to the same v1 records.
+
 #### 3D client placement smoke (D-032)
 
 ```bash

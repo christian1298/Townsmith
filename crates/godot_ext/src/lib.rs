@@ -62,6 +62,13 @@ use core_world::{
     WorldGenerator, DEFAULT_SKIRT_DEPTH_M, MAX_HEIGHT_M, WORLD_CHUNK_SIZE,
 };
 
+mod content_identity;
+
+use content_identity::{
+    stamp_world_content, verify_world_content, ActiveContentIdentity, ContentIdentityError,
+    WorldContentIdentity,
+};
+
 const MAX_TERRAIN_WORKERS: usize = 4;
 
 /// Material ids used by the Phase 1 editor palette and room detector.
@@ -546,11 +553,16 @@ impl EditorState {
 /// content; the live registry is replaced only after every check passes, so a
 /// failed load leaves the previous registry untouched.
 ///
-/// The slot is bridge state only. It is not part of [`PlacementStore`] or the
-/// world save, adds no save field, and does not change any existing checksum.
+/// The slot is bridge state only: no content definition is embedded in
+/// [`PlacementStore`] or the world save. D-034 records only a summary
+/// identity in the top-level world JSON; [`Self::active_identity`] feeds that
+/// summary. Registry, pack, and base checksums are unchanged by a world save
+/// or load.
 struct RuntimeContent {
     registry: Option<ContentRegistry>,
     pack: Option<RuntimePackInfo>,
+    /// Stable checksum of the bundled base registry captured at creation.
+    base_checksum: Option<u64>,
     base_error: Option<String>,
 }
 
@@ -565,7 +577,7 @@ struct RuntimePackInfo {
     checksum: u64,
 }
 
-/// Read-only counts for the live runtime registry.
+/// Read-only counts and identity for the live runtime registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ContentSummary {
     format_version: u32,
@@ -575,6 +587,14 @@ struct ContentSummary {
     total: usize,
     packs: usize,
     checksum: u64,
+    /// Manifest ID of the live pack; empty when base only.
+    pack_id: String,
+    /// Content namespace owned by the live pack; empty when base only.
+    namespace: String,
+    /// Stable pack checksum; zero when base only.
+    pack_checksum: u64,
+    /// Stable bundled base checksum.
+    base_checksum: u64,
 }
 
 /// Stable error from a runtime content operation.
@@ -597,6 +617,7 @@ impl RuntimeContent {
     fn base() -> Self {
         match ContentRegistry::base() {
             Ok(registry) => Self {
+                base_checksum: Some(registry.checksum()),
                 registry: Some(registry),
                 pack: None,
                 base_error: None,
@@ -604,16 +625,18 @@ impl RuntimeContent {
             Err(error) => Self {
                 registry: None,
                 pack: None,
+                base_checksum: None,
                 base_error: Some(error.to_string()),
             },
         }
     }
 
-    /// Current registry counts and checksum.
+    /// Current registry counts, identity fields, and checksum.
     fn summary(&self) -> Result<ContentSummary, ContentLoadError> {
         let Some(registry) = self.registry.as_ref() else {
             return Err(self.base_error());
         };
+        let base_checksum = self.base_checksum.ok_or_else(|| self.base_error())?;
         Ok(ContentSummary {
             format_version: registry.format_version(),
             materials: registry.material_count(),
@@ -622,7 +645,40 @@ impl RuntimeContent {
             total: registry.len(),
             packs: if self.pack.is_some() { 1 } else { 0 },
             checksum: registry.checksum(),
+            pack_id: self
+                .pack
+                .as_ref()
+                .map_or_else(String::new, |pack| pack.id.clone()),
+            namespace: self
+                .pack
+                .as_ref()
+                .map_or_else(String::new, |pack| pack.namespace.clone()),
+            pack_checksum: self.pack.as_ref().map_or(0, |pack| pack.checksum),
+            base_checksum,
         })
+    }
+
+    /// Summary identity for the world-save contract.
+    ///
+    /// Base-only registries report `packs = 0` and an empty pack ID. The
+    /// merged registry checksum is the live [`ContentRegistry::checksum`];
+    /// the base checksum is captured when the slot opens. This never reads a
+    /// save and does not change any registry state.
+    fn active_identity(&self) -> Result<ActiveContentIdentity, ContentLoadError> {
+        let summary = self.summary()?;
+        if summary.packs == 0 {
+            Ok(ActiveContentIdentity::base(
+                summary.checksum,
+                summary.base_checksum,
+            ))
+        } else {
+            Ok(ActiveContentIdentity::pack(
+                summary.pack_id,
+                summary.pack_checksum,
+                summary.checksum,
+                summary.base_checksum,
+            ))
+        }
     }
 
     /// Validate one absolute local mod directory and merge it after base.
@@ -654,6 +710,7 @@ impl RuntimeContent {
     fn clear(&mut self) -> Result<(), ContentLoadError> {
         match ContentRegistry::base() {
             Ok(registry) => {
+                self.base_checksum = Some(registry.checksum());
                 self.registry = Some(registry);
                 self.pack = None;
                 self.base_error = None;
@@ -663,6 +720,7 @@ impl RuntimeContent {
                 let message = error.to_string();
                 self.registry = None;
                 self.pack = None;
+                self.base_checksum = None;
                 self.base_error = Some(message.clone());
                 Err(ContentLoadError {
                     code: "content_base_invalid",
@@ -755,6 +813,20 @@ fn content_summary_dictionary(summary: &ContentSummary) -> VarDictionary {
         "checksum",
         &GString::from(&format!("{:016x}", summary.checksum)),
     );
+    result.set("pack_id", &GString::from(&summary.pack_id));
+    result.set("namespace", &GString::from(&summary.namespace));
+    result.set(
+        "pack_checksum",
+        &GString::from(&format!("{:016x}", summary.pack_checksum)),
+    );
+    result.set(
+        "registry_checksum",
+        &GString::from(&format!("{:016x}", summary.checksum)),
+    );
+    result.set(
+        "base_checksum",
+        &GString::from(&format!("{:016x}", summary.base_checksum)),
+    );
     result
 }
 
@@ -819,6 +891,10 @@ impl ResolvedBlueprintPaths {
 #[class(init, base=RefCounted)]
 struct TownsmithCore {
     content: Mutex<RuntimeContent>,
+    /// Verified D-034 identity of the open world. Bridge-only: committed after
+    /// a durable content-bound save or a fully successful load, cleared by a
+    /// base-only save/load and by `world_clear_placements`.
+    world_content: Mutex<Option<WorldContentIdentity>>,
     terrain: Mutex<Option<TerrainBridge>>,
     editor: Mutex<Option<EditorState>>,
     world: Mutex<Option<PlacementStore>>,
@@ -849,6 +925,7 @@ impl Default for TownsmithCore {
     fn default() -> Self {
         Self {
             content: Mutex::new(RuntimeContent::base()),
+            world_content: Mutex::new(None),
             terrain: Mutex::new(None),
             editor: Mutex::new(None),
             world: Mutex::new(None),
@@ -885,15 +962,19 @@ impl TownsmithCore {
 
     /// Read-only summary of the live runtime content registry.
     ///
-    /// The registry starts at the bundled base content and is bridge state
-    /// only: [`TownsmithCore::world_save`] never reads or writes it, and no
-    /// save field references it. Returns:
+    /// The registry starts at the bundled base content. D-034 records only
+    /// the pack ID and checksums in a content-bound world save; no content
+    /// definition or path is written. Returns:
     ///
     /// - `ok` (bool)
     /// - `format_version` (int)
     /// - `materials` / `rooms` / `props` / `total` (int counts)
     /// - `packs` (int; `0` for base only, `1` after `content_load_dir`)
-    /// - `checksum` (String, 16 lowercase hex digits)
+    /// - `checksum` (String, merged registry checksum, 16 lowercase hex digits)
+    /// - `pack_id` / `namespace` (String; empty for base only)
+    /// - `pack_checksum` (String; `0000000000000000` for base only)
+    /// - `registry_checksum` (String; same value as `checksum`)
+    /// - `base_checksum` (String, bundled base registry checksum)
     ///
     /// On failure, returns `{ ok: false, error_code, error }`.
     #[func]
@@ -938,9 +1019,9 @@ impl TownsmithCore {
 
     /// Drop the live mod pack and restore the bundled base registry.
     ///
-    /// Returns `true` when the base registry loaded. The content registry is
-    /// bridge state only; this does not touch the world save, placements,
-    /// blueprints, or any existing checksum.
+    /// Returns `true` when the base registry loaded. This does not touch the
+    /// world save, placements, blueprints, the recorded world content
+    /// identity, or any existing checksum.
     #[func]
     fn content_registry_clear(&self) -> bool {
         self.content
@@ -2649,6 +2730,10 @@ impl TownsmithCore {
             .unwrap_or_else(|error| error.into_inner())
             .as_mut()
             .map(ServiceStore::clear);
+        *self
+            .world_content
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
         true
     }
 
@@ -5986,6 +6071,15 @@ impl TownsmithCore {
     }
 
     /// Write the placement store as JSON.
+    ///
+    /// With no live content pack the output keeps outer `format_version: 1`,
+    /// writes no `content` member, and is byte-identical to the pre-D-034
+    /// format. One live pack writes outer `format_version: 2` and a top-level
+    /// `content` identity object after the whole JSON is assembled and before
+    /// the durable write; the identity is committed to the live world only
+    /// after that write succeeds. The result adds `content_bound`,
+    /// `content_identity_status`, `content_pack_id`, `content_pack_checksum`,
+    /// `content_registry_checksum`, and `content_format_version`.
     #[func]
     fn world_save(&self, path: GString) -> VarDictionary {
         self.world_save_impl(path, None)
@@ -6349,6 +6443,48 @@ impl TownsmithCore {
             Ok(json) => json,
             Err((code, error)) => return placement_simple_error(code, error),
         };
+        // D-034: decide the content identity before the file is written. A
+        // base-only world returns the assembled JSON untouched; a bound world
+        // gets outer v2 and the one `content` object. Nothing is committed
+        // until the write is durable.
+        let active_content = {
+            let content = self
+                .content
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match content.active_identity() {
+                Ok(identity) => identity,
+                Err(error) => return placement_simple_error(error.code, error.message),
+            }
+        };
+        let recorded_content = self
+            .world_content
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let content_stamp =
+            match stamp_world_content(&json, &active_content, recorded_content.as_ref()) {
+                Ok(stamp) => stamp,
+                Err(error) => return content_identity_error_result(&error),
+            };
+        let content_commit = content_stamp.identity.clone();
+        let content_bound = content_stamp.content_bound();
+        let content_status = content_stamp.status_str();
+        let content_format_version = content_stamp.format_version();
+        let (content_pack_id, content_pack_checksum, content_registry_checksum) =
+            match content_stamp.identity.as_ref() {
+                Some(identity) => (
+                    identity.pack_id.clone(),
+                    format!("{:016x}", identity.pack_checksum),
+                    format!("{:016x}", identity.registry_checksum),
+                ),
+                None => (
+                    String::new(),
+                    "0000000000000000".to_string(),
+                    "0000000000000000".to_string(),
+                ),
+            };
+        let json = content_stamp.json;
         if json.len() > MAX_WORLD_SAVE_BYTES as usize {
             return placement_simple_error(
                 "save_too_large",
@@ -6435,12 +6571,28 @@ impl TownsmithCore {
                 *guard = Some(store.clone());
             }
         }
+        // D-034: the new or verified identity is committed only after the
+        // write is durable. A base-only save clears it (reachable only when no
+        // identity was recorded, since a bound world refuses that save).
+        *self
+            .world_content
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = content_commit;
         let (policy_count, policy_checksum) = policy_summary(policies.as_ref());
         let mut result = VarDictionary::new();
         result.set("ok", true);
         result.set("path", &GString::from(path.to_string_lossy().as_ref()));
         result.set("bytes", json.len() as i64);
         result.set("backup_rotated", backup_rotated);
+        result.set("content_bound", content_bound);
+        set_content_identity_fields(
+            &mut result,
+            content_status,
+            &content_pack_id,
+            &content_pack_checksum,
+            &content_registry_checksum,
+            content_format_version,
+        );
         result.set("seed", store.seed as i64);
         result.set("count", store.placements.len() as i64);
         result.set("terrain_edits", deltas_count as i64);
@@ -6584,8 +6736,34 @@ impl TownsmithCore {
     }
 
     /// Read a world placement save for `expected_seed` and verify its packages.
+    ///
+    /// The content identity is checked immediately after the JSON is read and
+    /// before terrain, stores, or packages are parsed. A v2 match is
+    /// normalized to v1 in memory for the existing parsers and the file is
+    /// not rewritten. The result adds `content_identity_status`,
+    /// `content_pack_id`, `content_pack_checksum`, `content_registry_checksum`,
+    /// and `content_format_version`.
     #[func]
     fn world_load(&self, path: GString, expected_seed: i64) -> VarDictionary {
+        self.world_load_impl(path, expected_seed, None)
+    }
+
+    /// Reserved D-034 load entry point with an explicit missing-content opt-out.
+    ///
+    /// v1 has no degraded read mode: `accept_missing_content = true` always
+    /// returns `content_degraded_unsupported` before touching any state. With
+    /// `false` this is exactly [`Self::world_load`], including the fail-closed
+    /// content identity check. There is no auto-download or path substitution.
+    #[func]
+    fn world_load_content_checked(
+        &self,
+        path: GString,
+        expected_seed: i64,
+        accept_missing_content: bool,
+    ) -> VarDictionary {
+        if accept_missing_content {
+            return content_identity_error_result(&content_degraded_error());
+        }
         self.world_load_impl(path, expected_seed, None)
     }
 
@@ -6635,6 +6813,44 @@ impl TownsmithCore {
             Err(error) => return placement_simple_error("corrupt_save", error),
         };
         let json = read.json;
+        // D-034: verify the content identity immediately after reading,
+        // before terrain, stores, or any `.tsbp` is parsed. A v2 match is
+        // normalized to the v1 shape for the existing parsers; the file is
+        // never rewritten here.
+        let active_content = {
+            let content = self
+                .content
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match content.active_identity() {
+                Ok(identity) => identity,
+                Err(error) => return placement_simple_error(error.code, error.message),
+            }
+        };
+        let content_verification = match verify_world_content(&json, &active_content) {
+            Ok(verification) => verification,
+            Err(error) => return content_identity_error_result(&error),
+        };
+        let content_commit = content_verification.identity.clone();
+        let content_status = content_verification.status_str();
+        let content_format_version = content_verification.format_version;
+        let (content_pack_id, content_pack_checksum, content_registry_checksum) =
+            match content_verification.identity.as_ref() {
+                Some(identity) => (
+                    identity.pack_id.clone(),
+                    format!("{:016x}", identity.pack_checksum),
+                    format!("{:016x}", identity.registry_checksum),
+                ),
+                None => (
+                    String::new(),
+                    "0000000000000000".to_string(),
+                    "0000000000000000".to_string(),
+                ),
+            };
+        let json = match content_verification.normalized_json {
+            Some(normalized) => normalized,
+            None => json,
+        };
         let deltas = match terrain_deltas_from_world_json(&json) {
             Ok(deltas) => deltas,
             Err((code, error)) => return placement_simple_error(code, error),
@@ -7054,10 +7270,24 @@ impl TownsmithCore {
             .lock()
             .unwrap_or_else(|error| error.into_inner()) =
             if deltas_count > 0 { Some(seed) } else { None };
+        // D-034: commit the verified identity only after the whole load has
+        // succeeded. Absent, legacy, and base-only loads clear it.
+        *self
+            .world_content
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = content_commit;
         let mut result = VarDictionary::new();
         result.set("ok", true);
         result.set("path", &GString::from(path.to_string_lossy().as_ref()));
         result.set("recovered_from_backup", read.recovered_from_backup);
+        set_content_identity_fields(
+            &mut result,
+            content_status,
+            &content_pack_id,
+            &content_pack_checksum,
+            &content_registry_checksum,
+            content_format_version,
+        );
         result.set(
             "backup",
             &GString::from(
@@ -8222,6 +8452,39 @@ fn placement_simple_error(code: &str, message: impl Into<String>) -> VarDictiona
     result.set("error_code", code);
     result.set("error", &GString::from(message.as_str()));
     result
+}
+
+/// Map a D-034 content-identity failure to the usual bridge error shape.
+fn content_identity_error_result(error: &ContentIdentityError) -> VarDictionary {
+    placement_simple_error(error.code, error.message.as_str())
+}
+
+/// Reserved D-034 degraded-load refusal.
+fn content_degraded_error() -> ContentIdentityError {
+    ContentIdentityError {
+        code: "content_degraded_unsupported",
+        message: "degraded content loads are not implemented; install the recorded pack and retry"
+            .to_string(),
+    }
+}
+
+/// Add the D-034 identity result fields shared by save and load.
+fn set_content_identity_fields(
+    result: &mut VarDictionary,
+    status: &str,
+    pack_id: &str,
+    pack_checksum: &str,
+    registry_checksum: &str,
+    format_version: u32,
+) {
+    result.set("content_identity_status", status);
+    result.set("content_pack_id", &GString::from(pack_id));
+    result.set("content_pack_checksum", &GString::from(pack_checksum));
+    result.set(
+        "content_registry_checksum",
+        &GString::from(registry_checksum),
+    );
+    result.set("content_format_version", i64::from(format_version));
 }
 
 fn blueprint_error_code(error: &BlueprintError) -> &'static str {
@@ -14932,6 +15195,10 @@ mod tests {
         assert_eq!(summary.total, BASE_TOTAL);
         assert_eq!(summary.packs, 0);
         assert_eq!(summary.checksum, BASE_CHECKSUM);
+        assert!(summary.pack_id.is_empty());
+        assert!(summary.namespace.is_empty());
+        assert_eq!(summary.pack_checksum, 0);
+        assert_eq!(summary.base_checksum, BASE_CHECKSUM);
         assert_eq!(
             summary.checksum,
             ContentRegistry::base().expect("base registry").checksum()
@@ -14959,11 +15226,105 @@ mod tests {
         assert_eq!(summary.total, EXAMPLE_MERGED_TOTAL);
         assert_eq!(summary.packs, 1);
         assert_eq!(summary.checksum, EXAMPLE_MERGED_CHECKSUM);
+        assert_eq!(summary.pack_id, "example:copper_age");
+        assert_eq!(summary.namespace, "example");
+        assert_eq!(summary.pack_checksum, EXAMPLE_PACK_CHECKSUM);
+        assert_eq!(summary.base_checksum, BASE_CHECKSUM);
         let registry = content.registry.as_ref().expect("merged registry");
         assert!(registry.material("base:oak_plank").is_some());
         assert!(registry.material("example:copper_sheet").is_some());
         assert!(registry.room("example:smelter_hall").is_some());
         assert!(registry.prop("example:copper_smelter").is_some());
+    }
+
+    #[test]
+    fn content_active_identity_reports_base_and_one_pack() {
+        let base = RuntimeContent::base();
+        let identity = base.active_identity().expect("base identity");
+        assert_eq!(identity.packs, 0);
+        assert!(identity.pack_id.is_empty());
+        assert_eq!(identity.pack_checksum, 0);
+        assert_eq!(identity.registry_checksum, BASE_CHECKSUM);
+        assert_eq!(identity.base_checksum, BASE_CHECKSUM);
+
+        let dir = TempContentDir::new("identity-active");
+        write_example_pack(dir.path());
+        let mut content = RuntimeContent::base();
+        content.load_dir(dir.as_str()).expect("pack loads");
+        let identity = content.active_identity().expect("pack identity");
+        assert_eq!(identity.packs, 1);
+        assert_eq!(identity.pack_id, "example:copper_age");
+        assert_eq!(identity.pack_checksum, EXAMPLE_PACK_CHECKSUM);
+        assert_eq!(identity.registry_checksum, EXAMPLE_MERGED_CHECKSUM);
+        assert_eq!(identity.base_checksum, BASE_CHECKSUM);
+
+        content.clear().expect("clear");
+        let identity = content.active_identity().expect("cleared identity");
+        assert_eq!(identity.packs, 0);
+        assert_eq!(identity.registry_checksum, BASE_CHECKSUM);
+    }
+
+    #[test]
+    fn content_identity_save_load_cycle_retains_the_pack_binding() {
+        let dir = TempContentDir::new("identity-cycle");
+        write_example_pack(dir.path());
+        let mut content = RuntimeContent::base();
+        content.load_dir(dir.as_str()).expect("pack loads");
+        let active = content.active_identity().expect("active identity");
+        let store = PlacementStore::new(2026);
+        let json = store.to_json_pretty().expect("world json");
+        let saved = stamp_world_content(&json, &active, None).expect("content save");
+        assert_eq!(saved.status_str(), "new");
+        let value: serde_json::Value = serde_json::from_str(&saved.json).expect("v2 json");
+        assert_eq!(value["format_version"], 2);
+        assert_eq!(value["content"]["pack_id"], "example:copper_age");
+        assert_eq!(value["content"]["pack_checksum"], "ad4c645869a411ed");
+        assert_eq!(value["content"]["registry_checksum"], "330a538d07805b50");
+
+        let verified = verify_world_content(&saved.json, &active).expect("matching load");
+        assert_eq!(verified.status_str(), "match");
+        assert_eq!(verified.identity.as_ref(), saved.identity.as_ref());
+        let normalized = verified.normalized_json.as_deref().expect("v1 json");
+        let reloaded = PlacementStore::from_json(normalized).expect("v1 records");
+        assert_eq!(reloaded, store);
+        assert_eq!(reloaded.checksum(), store.checksum());
+
+        let base = RuntimeContent::base().active_identity().expect("base");
+        let error = verify_world_content(&saved.json, &base).expect_err("base refuses the pack");
+        assert_eq!(error.code, "content_pack_missing");
+
+        let resaved =
+            stamp_world_content(normalized, &active, verified.identity.as_ref()).expect("re-save");
+        assert_eq!(resaved.status_str(), "match");
+        assert_eq!(resaved.json, saved.json);
+    }
+
+    #[test]
+    fn content_identity_save_requires_the_recorded_pack_after_clear() {
+        let dir = TempContentDir::new("identity-clear");
+        write_example_pack(dir.path());
+        let mut content = RuntimeContent::base();
+        content.load_dir(dir.as_str()).expect("pack loads");
+        let active = content.active_identity().expect("active identity");
+        let saved = stamp_world_content(
+            &PlacementStore::new(2026).to_json_pretty().expect("json"),
+            &active,
+            None,
+        )
+        .expect("content save");
+
+        content.clear().expect("clear the pack");
+        let base = content.active_identity().expect("base identity");
+        let error = stamp_world_content(&saved.json, &base, saved.identity.as_ref())
+            .expect_err("base save must be refused");
+        assert_eq!(error.code, "content_save_requires_pack");
+    }
+
+    #[test]
+    fn content_degraded_loads_are_reserved_and_unimplemented() {
+        let error = content_degraded_error();
+        assert_eq!(error.code, "content_degraded_unsupported");
+        assert!(error.message.contains("not implemented"));
     }
 
     #[test]
