@@ -905,6 +905,11 @@ impl TownsmithCore {
         None
     }
 
+    /// Validate a `.tsbp` site for the ghost preview without mutating.
+    ///
+    /// Applies the same district-policy gate as
+    /// [`Self::world_place_blueprint`] after package validation, so a passing
+    /// preview cannot be denied later on policy.
     #[func]
     fn world_validate_placement(
         &self,
@@ -919,6 +924,20 @@ impl TownsmithCore {
             Ok(value) => value,
             Err(error) => return error,
         };
+        {
+            let policies = self
+                .policies
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(error) = placement_policy_error(
+                policies.as_ref(),
+                seed,
+                [request.center_x, request.center_z],
+                &request.blueprint_id,
+            ) {
+                return error;
+            }
+        }
         if let Some(error) = self.world_seed_error(seed) {
             return error;
         }
@@ -1060,19 +1079,13 @@ impl TownsmithCore {
                 .policies
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            if let Some(denial) = placement_policy_denial(
+            if let Some(error) = placement_policy_error(
                 policies.as_ref(),
                 seed,
                 [request.center_x, request.center_z],
                 &request.blueprint_id,
             ) {
-                return placement_simple_error(
-                    denial.kind.code(),
-                    format!(
-                        "district policy {} blocks placing blueprint {} here",
-                        denial.policy_id, request.blueprint_id
-                    ),
-                );
+                return error;
             }
         }
         if let Some(error) = self.world_seed_error(seed) {
@@ -9963,6 +9976,40 @@ fn placement_policy_denial(
     })
 }
 
+/// Resolve the district-policy denial for one placement request.
+///
+/// [`TownsmithCore::world_place_blueprint`] and
+/// [`TownsmithCore::world_validate_placement`] both call this after
+/// [`world_placement_request`], so a ghost preview and the commit path report
+/// the same stable code and message. The check is read-only: it borrows the
+/// optional registry and never mutates a store.
+fn placement_policy_failure(
+    policies: Option<&DistrictPolicyStore>,
+    seed: u64,
+    center: [f32; 2],
+    blueprint_id: &str,
+) -> Option<(&'static str, String)> {
+    let denial = placement_policy_denial(policies, seed, center, blueprint_id)?;
+    Some((
+        denial.kind.code(),
+        format!(
+            "district policy {} blocks placing blueprint {} here",
+            denial.policy_id, blueprint_id
+        ),
+    ))
+}
+
+/// Bridge error dictionary for one placement policy denial.
+fn placement_policy_error(
+    policies: Option<&DistrictPolicyStore>,
+    seed: u64,
+    center: [f32; 2],
+    blueprint_id: &str,
+) -> Option<VarDictionary> {
+    let (code, message) = placement_policy_failure(policies, seed, center, blueprint_id)?;
+    Some(placement_simple_error(code, message))
+}
+
 fn attach_economy(json: &str, economy: &Economy) -> Result<String, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(json).map_err(|error| error.to_string())?;
@@ -10851,6 +10898,169 @@ mod tests {
             .expect("construction is disabled");
         assert_eq!(denial.kind, PolicyPlacementDenial::ConstructionDisabled);
         assert_eq!(placements.checksum(), placement_checksum);
+        assert_eq!(placements.placements.len(), 0);
+        assert_eq!(economy.balance, balance);
+    }
+
+    #[test]
+    fn placement_policy_failure_denies_disabled_construction_on_validation() {
+        let mut store = DistrictPolicyStore::new(2026);
+        let mut request = district_policy_request("Riverside");
+        request.construction_allowed = false;
+        let policy = store.create(&request).expect("create");
+
+        let (code, message) =
+            placement_policy_failure(Some(&store), 2026, [100.0, 100.0], "townsmith:hut")
+                .expect("the preview must be denied");
+        assert_eq!(code, "policy_construction_disabled");
+        assert_eq!(
+            message,
+            format!(
+                "district policy {} blocks placing blueprint townsmith:hut here",
+                policy.id
+            )
+        );
+    }
+
+    #[test]
+    fn placement_policy_failure_denies_an_allowlist_miss_on_validation() {
+        let mut store = DistrictPolicyStore::new(2026);
+        let mut request = district_policy_request("Old Town");
+        request.blueprint_allowlist =
+            std::collections::BTreeSet::from(["townsmith:shop".to_string()]);
+        let policy = store.create(&request).expect("create");
+
+        let (code, message) =
+            placement_policy_failure(Some(&store), 2026, [100.0, 100.0], "townsmith:hut")
+                .expect("the preview must be denied");
+        assert_eq!(code, "policy_blueprint_not_allowed");
+        assert_eq!(
+            message,
+            format!(
+                "district policy {} blocks placing blueprint townsmith:hut here",
+                policy.id
+            )
+        );
+
+        // The exact allowlisted id still previews.
+        assert_eq!(
+            placement_policy_failure(Some(&store), 2026, [100.0, 100.0], "townsmith:shop"),
+            None
+        );
+    }
+
+    #[test]
+    fn placement_policy_failure_permits_an_allowlisted_blueprint_on_validation() {
+        let mut store = DistrictPolicyStore::new(2026);
+        let mut request = district_policy_request("Riverside");
+        request.blueprint_allowlist =
+            std::collections::BTreeSet::from(["townsmith:hut".to_string()]);
+        store.create(&request).expect("create");
+
+        assert_eq!(
+            placement_policy_failure(Some(&store), 2026, [100.0, 100.0], "townsmith:hut"),
+            None
+        );
+        // An empty allowlist is unrestricted.
+        let mut unrestricted = DistrictPolicyStore::new(2026);
+        unrestricted
+            .create(&district_policy_request("Unrestricted"))
+            .expect("create");
+        assert_eq!(
+            placement_policy_failure(Some(&unrestricted), 2026, [100.0, 100.0], "townsmith:hut"),
+            None
+        );
+    }
+
+    #[test]
+    fn placement_policy_failure_is_neutral_without_a_store_or_a_containing_policy() {
+        // No registry.
+        assert_eq!(
+            placement_policy_failure(None, 2026, [100.0, 100.0], "townsmith:hut"),
+            None
+        );
+        // Open but empty registry.
+        let empty = DistrictPolicyStore::new(2026);
+        assert_eq!(
+            placement_policy_failure(Some(&empty), 2026, [100.0, 100.0], "townsmith:hut"),
+            None
+        );
+
+        let mut store = DistrictPolicyStore::new(2026);
+        let mut request = district_policy_request("Riverside");
+        request.construction_allowed = false;
+        store.create(&request).expect("create");
+
+        // Outside every circle.
+        assert_eq!(
+            placement_policy_failure(Some(&store), 2026, [500.0, 500.0], "townsmith:hut"),
+            None
+        );
+        // Foreign seed.
+        assert_eq!(
+            placement_policy_failure(Some(&store), 2027, [100.0, 100.0], "townsmith:hut"),
+            None
+        );
+    }
+
+    #[test]
+    fn placement_policy_failure_prefers_the_smallest_overlapping_id() {
+        let mut denying_first = DistrictPolicyStore::new(2026);
+        let mut denying = district_policy_request("Riverside");
+        denying.construction_allowed = false;
+        let first = denying_first.create(&denying).expect("first");
+        let second = denying_first
+            .create(&district_policy_request("Old Town"))
+            .expect("second");
+        assert!(first.id < second.id);
+
+        let (code, message) =
+            placement_policy_failure(Some(&denying_first), 2026, [100.0, 100.0], "townsmith:hut")
+                .expect("the smaller denying policy wins");
+        assert_eq!(code, "policy_construction_disabled");
+        assert_eq!(
+            message,
+            format!(
+                "district policy {} blocks placing blueprint townsmith:hut here",
+                first.id
+            )
+        );
+
+        let mut allowing_first = DistrictPolicyStore::new(2026);
+        let first = allowing_first
+            .create(&district_policy_request("Riverside"))
+            .expect("first");
+        let mut restrict_second = district_policy_request("Old Town");
+        restrict_second.construction_allowed = false;
+        let second = allowing_first.create(&restrict_second).expect("second");
+        assert!(first.id < second.id);
+        assert_eq!(
+            placement_policy_failure(Some(&allowing_first), 2026, [100.0, 100.0], "townsmith:hut"),
+            None,
+            "the smaller permissive policy decides the overlap"
+        );
+    }
+
+    #[test]
+    fn denied_validation_leaves_placements_economy_and_checksum_untouched() {
+        let mut store = DistrictPolicyStore::new(2026);
+        let mut request = district_policy_request("Riverside");
+        request.construction_allowed = false;
+        store.create(&request).expect("create");
+
+        let placements = PlacementStore::new(2026);
+        let placement_checksum = placements.checksum();
+        let economy = Economy::new(2026);
+        let balance = economy.balance;
+
+        let (code, _) =
+            placement_policy_failure(Some(&store), 2026, [100.0, 100.0], "townsmith:hut")
+                .expect("the preview must be denied");
+        assert_eq!(code, "policy_construction_disabled");
+
+        // Validation stays read-only: no placement, charge, or checksum move.
+        assert_eq!(placements.checksum(), placement_checksum);
+        assert_eq!(placements.checksum(), PlacementStore::new(2026).checksum());
         assert_eq!(placements.placements.len(), 0);
         assert_eq!(economy.balance, balance);
     }
