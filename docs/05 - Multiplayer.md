@@ -73,6 +73,9 @@ The client never simulates the authoritative city. It predicts local movement an
 
 ⚙️ = configurable; admin-only by default. All players can start a time vote by default (`time.vote`). The **Builder** role is a player permission role, not the NPC construction trade; construction crews are simulation jobs.
 
+> [!warning] Blueprint placement is not server-authoritative yet
+> Protocol v0 has no `place_blueprint` command and `ServerWorld` has no placement store. The bridge path (`world_place_blueprint` in `crates/godot_ext`) is the single-player/developer path: it applies the district construction/allowlist gate and charges the first construction installment against local stores. A multiplayer client cannot rely on the server to enforce placement, policy, or cost today. D-032 (Proposed) defines the authoritative command; until it lands, the **Place buildings** column describes intended policy, not protocol-v0 enforcement, and blueprint editing has the same gap.
+
 - Permissions are configurable per player and per role.
 - The server owner can disable roles entirely for a "everyone is mayor" casual server.
 - **Blueprint locks:** only one player can edit a given blueprint at a time. Others can view it read-only. The lock is released on save, cancel, or timeout.
@@ -175,6 +178,17 @@ The server validates every command:
 8. **Construction:** `PlaceBuilding` creates a **construction site**, not a finished instance. The server reserves/consumes materials, validates access, and assigns crews; the site is saved and synced like any other entity.
 
 Accepted commands produce **events** (construction site created, phase changed, building completed, tax changed, blueprint updated) that are broadcast to interested clients. Rejected commands return a reason for UI feedback.
+
+> [!note] Proposed command: server-authoritative blueprint placement (D-032)
+> **Not implemented.** Protocol v0 has no placement command, and the authoritative executor has no placement store. D-032 proposes the next-version command:
+>
+> ```text
+> place_blueprint { blueprint_hash, x, z, rotation }
+> ```
+>
+> The server would resolve the hash in its own content-addressed `.tsbp` library (the path never crosses the wire), validate role, package hash/size, seed/age, terrain/overlap, and the district policy gate (`construction_allowed` + allowlist, smallest containing id), then charge the D-028 installment through the authoritative ledger and return `place_blueprint_result { tick, placement_id, blueprint_hash, placement_checksum, world_checksum, placement }`. Clients may predict a preview but never commit. Package transfer, modded content, rate limits, and save migration are Q-107–Q-110.
+>
+> Until D-032 lands, `world_place_blueprint` remains a client-side single-player/dev path and the server does not enforce placement, policy, or construction charges.
 
 ### Protocol v0 (Phase 6 foundation)
 
@@ -505,8 +519,12 @@ Multiplayer + modding is a trust problem. The server is the authority.
 - **Q-030:** Is host migration required? Default: no; dedicated servers are the durable option.
 - **Q-031:** Voice chat at launch, or text only? Default: text only.
 - **Q-032:** Steam networking (lobbies, server browser) or direct IP first? Default: direct IP + invite codes first, Steam later.
+- **Q-107:** How does a `.tsbp` package reach the authoritative server?
+- **Q-108:** How are modded blueprints resolved when the server lacks the mod?
+- **Q-109:** Placement rate limits, quotas, idempotency, and audit?
+- **Q-110:** Placement save migration and rollback/history?
 
-See [[09 - Open Questions]] and [[10 - Decisions]].
+See [[09 - Open Questions]] and [[10 - Decisions]]. D-032 (Proposed) is the server-authoritative blueprint placement ADR.
 
 ### Session resume v0
 

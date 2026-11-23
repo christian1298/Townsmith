@@ -16,6 +16,9 @@ tags:
 > [!info] What this note is
 > The GDExtension API that stores placed blueprints, validates a site against terrain, and saves/loads the placement layer. The rules and data model are in [[41 - Phase 2 Slice Plan]]; this note records the bridge and headless smoke.
 
+> [!warning] Multiplayer authority
+> This bridge is the **single-player/developer placement path**. The authoritative server does not yet accept a blueprint placement command and has no placement store, so `world_place_blueprint` cannot enforce district policy or treasury charges in multiplayer. D-032 (Proposed) defines the server command; this note keeps documenting the bridge until that lands and does not claim server enforcement.
+
 ## 1. API
 
 `TownsmithCore` owns an optional `PlacementStore` alongside the terrain pool and editor volume. All methods are **main-thread only**.
@@ -86,6 +89,9 @@ The sampler uses `WorldGenerator::height_at` on the 1 m grid, not the currently 
 | Containing policy is not enforceable (hand-built record) | Neutral; placement continues |
 
 Both errors use the usual `{ ok: false, error_code, error }` shape and the message `district policy <id> blocks placing blueprint <id> here`. `world_validate_placement` returns the same codes and message from the same shared check after its `.tsbp` request is validated, so a ghost preview that passes cannot fail later on policy. The rule is additive: a world without a registry places exactly as before, and the gate neither reads nor mutates the placement, construction, or economy checksums. Validation stays read-only: it never appends a placement, charges the treasury, or changes a checksum, and package, seed, age, terrain, and overlap validation keep their existing order and outcomes. It covers blueprint placement and its ghost preview only — utility and service placement and roads are not gated. Tax and service-funding multipliers are read by the treasury through `PolicyTaxWeights` (D-030) and `PolicyServiceWeight` (D-031); every other policy effect stays unwired. See [[57 - Dashboard and Advisor]] §4.1 for the registry and save contract.
+
+> [!warning] Scope of enforcement
+> This gate runs in the client process. It is authoritative only for the local single-player/dev world; the multiplayer server does not run it until D-032 (Proposed) adds `place_blueprint`. Do not describe the district policy gate or the D-028 charge as server-enforced.
 
 ## 3. Save format
 
@@ -202,6 +208,7 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 - No collision, road access, utility access, or lot ownership yet.
 - The acceptance house's bounds are the whole 16 × 9.6 × 16 m volume, not a tight mesh bound, so its placed footprint is 16 × 16 m.
 - The world-placement scene is a developer shell. Its HUD is English-only until the Phase 2 HUD localization pass; D-022's key-based EN/DE requirement still applies to shipping UI.
+- **Multiplayer:** placement is not server-authoritative. The server has no `place_blueprint` command or placement store, so district policy and construction charges are enforced only in this local bridge. D-032 (Proposed) is the follow-up; until it lands, do not treat a bridge placement as accepted by a multiplayer server.
 
 ## 7. Tests
 
@@ -214,6 +221,7 @@ The scene is intentionally outside the editor: it tests the open-world path, not
 
 ## 8. Next
 
-1. Replace absolute package paths with a content-addressed library beside the save.
-2. Add settlement boundaries and ownership (2E.4).
-3. Replace global construction pools with settlement crews and delivery trips.
+1. Implement D-032 (Proposed): server-authoritative `place_blueprint`, with the bridge preview calling the same rule set. This is the prerequisite for claiming multiplayer placement enforcement.
+2. Replace absolute package paths with a content-addressed library beside the save.
+3. Add settlement boundaries and ownership (2E.4).
+4. Replace global construction pools with settlement crews and delivery trips.
