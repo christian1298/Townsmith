@@ -1709,6 +1709,8 @@ A world save may carry one optional top-level `content` object:
 }
 ```
 
+`serde_json` serializes object members in sorted order, so a content-bound file writes `content` first; the order above is illustrative. Base-only output is returned unmodified and keeps its existing key order.
+
 | Field | Type | Rule |
 |---|---|---|
 | `format_version` | integer | Identity format version; `1` is the only supported value. A higher value returns `content_identity_unsupported` |

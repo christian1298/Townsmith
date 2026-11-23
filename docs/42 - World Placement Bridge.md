@@ -264,20 +264,20 @@ A base-only world keeps the JSON above: outer `format_version: 1` and no `conten
 
 ```json
 {
-  "format_version": 2,
-  "seed": 2026,
-  "next_id": 2,
-  "placements": [ ... ],
   "content": {
     "format_version": 1,
     "pack_id": "example:copper_age",
     "pack_checksum": "ad4c645869a411ed",
     "registry_checksum": "330a538d07805b50"
-  }
+  },
+  "format_version": 2,
+  "next_id": 2,
+  "placements": [ ... ],
+  "seed": 2026
 }
 ```
 
-The identity is added after every existing member and before the durable write; the content-bound output is deterministic pretty JSON. No library root, pack directory, namespace list, or content definition is written. `pack_checksum` and `registry_checksum` are 16 lowercase hex digits from the live registry (FNV-1a, an integrity aid, not a signature). More than one pack returns `content_multiple_packs_unsupported`.
+The identity is added to the assembled JSON before the durable write; `serde_json` map ordering makes the content-bound output deterministic. No library root, pack directory, namespace list, or content definition is written. `pack_checksum` and `registry_checksum` are 16 lowercase hex digits from `ContentPack::checksum` and the merged `ContentRegistry::checksum` (FNV-1a integrity aids, not signatures). More than one pack returns `content_multiple_packs_unsupported`.
 
 The bridge remembers the verified identity in a bridge-only slot. A later save must write the same pack ID and both checksums; with base content it fails `content_save_requires_pack`, and with another pack `content_save_pack_mismatch`, `content_pack_checksum_mismatch`, or `content_registry_checksum_mismatch`. The new/verified identity is committed only after the durable write, and a base-only save clears it. `world_clear_placements` also clears it.
 
