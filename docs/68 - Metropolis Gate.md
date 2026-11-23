@@ -519,11 +519,32 @@ The route is `benchmarks/routes/metropolis_gate_v1.json`; setup is deterministic
 
 ### 7.9 Streaming-scale data harness
 
-`cargo run --release -p townsmith-bench --bin streaming_scale` models a deterministic 10 km × 10 km (100 km²) area on a 10.24 km out-and-back route. It keeps a bounded resident set with near/mid/far rings (1/4/7 chunks, LOD steps 1/4/8), a 256-chunk resident cap, a 32-chunk generation budget per step, and a 384-entry mesh cache.
+`cargo run --release -p townsmith-bench --bin streaming_scale` models a deterministic 10 km × 10 km nominal area on a 10.24 km out-and-back route. It keeps a bounded resident set with near/mid/far rings (1/4/7 chunks, LOD steps 1/4/8), a 256-chunk resident cap, a 32-chunk generation budget per step, and a 384-entry mesh cache. A second deterministic layer carries up to 250,000 compact building records over the same area (§7.9.1).
 
-Current developer-machine result: 525 chunks visited, 775 generated, 833 skipped by the generation budget, peak resident 225, peak mesh bytes 280,900,200 (~281 MB), resident bytes peak 325,137,000, generate mean 280.3 ms, mesh mean 17.4 ms, step p95 517.5 ms, elapsed 12.35 s, checksum `4dfb48204244e377`. The full 100 km² extrapolation is ~1,526 chunks / ~22 s single-threaded. The harness reports `status=capped` when the generation budget skips chunks; that is the measured bounded behaviour, not a failure.
+Current developer-machine result (Ryzen 9 7950X, release, shared host): 525 chunks visited, 775 generated, 833 skipped by the generation budget, peak resident 225, peak mesh bytes 280,900,200 (~281 MB), terrain resident bytes peak 325,137,000, generate mean 286–297 ms, mesh mean 14–17 ms, step p95 520–538 ms, elapsed 12.49–12.66 s, terrain checksum `4dfb48204244e377`. The full 100 km² extrapolation is ~1,526 chunks / ~22 s single-threaded. The harness reports `status=capped` when the generation budget skips chunks; that is the measured bounded behaviour, not a failure.
 
-This is a **data harness**: no renderer, GPU, frame pacing, buildings, or simulation. It is not the 1M/30 FPS gate and does not close G-11.
+This is a **data harness**: no renderer, GPU, frame pacing, or simulation. It is not the 1M/30 FPS gate and does not close G-11.
+
+#### 7.9.1 Building-record layer
+
+The scene places up to 250,000 compact building records (8 bytes each: `x_m`, `z_m`, D-024 tier, height class, footprint m²) on a near-square grid across a 39 × 39 chunk area — 9.984 km per side, 99.68 km² of full chunks out of the nominal 100 km². Records are generated per grid index, so layout does not depend on chunk visit order. A record is resident only while its chunk is resident: it enters with the chunk and is evicted with it. The grid side for 250k records is 500 × 500; the smoke scene uses 159 × 159.
+
+| Run | Records | Resident peak | Resident bytes peak | Entries / evictions | Building checksum |
+|---|---:|---:|---:|---|---|
+| default (`--buildings 250000`) | 250,000 | 37,249 | 297,992 B (~291 KiB) | 127,976 / 90,920 | `0703a5d4d5baa31c` |
+| `--buildings 0` | 0 | 0 | 0 B | 0 / 0 | `ef3e7c114a4a008e` |
+| `--smoke` | 25,000 | 400 | 3,200 B | — | `68f62468d8b46b6b` |
+
+The full 250,000-record grid is 2,000,000 B (2 MB) only if every record were materialised; the resident set is the real cost — peak ~291 KiB at 225 resident chunks, 0.03 ms mean per step against ~286 ms of chunk generation. Total resident bytes peak is 325,434,992 B (terrain 325,137,000 B + buildings 297,992 B). `--buildings 0` reproduces the terrain-only scene with the terrain checksum unchanged at `4dfb48204244e377`; the terrain checksum deliberately does not cover the building layer, and the building checksum is separate. `status=capped` is unchanged: the generation budget, not buildings, drives skips.
+
+The layer is **fixture data**: no building meshes, instance buffers, LOD, impostors, save/load, or render path. It proves record volume, eviction coupling, and memory shape at the gate's building count; it does not close G-03 or G-11.
+
+```bash
+cargo run --release -p townsmith-bench --bin streaming_scale
+cargo run --release -p townsmith-bench --bin streaming_scale -- --buildings 250000
+cargo run --release -p townsmith-bench --bin streaming_scale -- --buildings 0
+cargo run --release -p townsmith-bench --bin streaming_scale -- --smoke
+```
 
 ### 7.7 Voxel-proxy setup and frame-budget harness
 
