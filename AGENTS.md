@@ -327,6 +327,7 @@ cargo run --release -p townsmith-server -- --interest-smoke   # viewport + bound
 cargo run --release -p townsmith-server -- --vote-smoke   # 7-connection D-021 vote pass/fail/cancel loopback
 GODOT=/path/to/godot ./scripts/smoke_interest_preview.sh   # headless 3D interest-view road preview, two runs, same checksum
 GODOT=/path/to/godot ./scripts/smoke_mp_client.sh   # normal path (frames 7/8) + reconnect resume via --sessions 2
+GODOT=/path/to/godot ./scripts/smoke_mp_world_client.sh   # loopback server -> 3D world client; two fresh runs, identical checksums
 GODOT=/path/to/godot ./scripts/smoke_movement_stress.sh
 GODOT=/path/to/godot "${GODOT:-godot}" --headless --path godot res://movement_stress.tscn -- --agents 2000
 
@@ -410,6 +411,9 @@ GODOT=/path/to/godot ./scripts/smoke_district_panel.sh
 # Standalone 3D interest-view preview (debug harness; no server, no gate)
 "${GODOT:-godot}" --path godot res://interest_preview.tscn
 "${GODOT:-godot}" --path godot res://interest_preview.tscn -- --input path/to/interest_view.json
+
+# Standalone 3D multiplayer world client (debug render integration; needs a server)
+"${GODOT:-godot}" --path godot res://mp_world_client.tscn -- --port 47015
 
 # 200 real voxel-hut instances
 VOXEL_INSTANCES=200 GODOT=/path/to/godot ./scripts/bench_godot.sh 3 5 benchmarks/routes/phase0_voxel_instances.json
