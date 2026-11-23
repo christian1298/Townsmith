@@ -3136,7 +3136,7 @@ func _update_dashboard() -> void:
 			"detailed": i18n.format_int(materialization_counts.y),
 		}) + "\n"
 	text += _district_section(district, district_focus)
-	text += _settlements_section(settlement_state)
+	text += _settlements_section(settlement_state, district, policy_state)
 	text += _policies_section(policy_state)
 	var age_line := "—"
 	if bool(progression.get("ok", false)):
@@ -3338,7 +3338,10 @@ func _district_section(district: Dictionary, focus_selected := false) -> String:
 
 ## Dashboard settlement list. Ids are stable selectors; PageUp/PageDown cycle
 ## the same id order with a leading "none" entry (see `_cycle_settlement`).
-func _settlements_section(state: Dictionary) -> String:
+## When a settlement is selected, a read-only detail block follows the list:
+## it reuses the dashboard's existing 256 m `district_summary` payload and the
+## `district_policies_state` result, so it never adds a bridge call or save field.
+func _settlements_section(state: Dictionary, district: Dictionary = {}, policy_state: Dictionary = {}) -> String:
 	var section := "[b]%s[/b]\n" % i18n.t("base.ui.dashboard.section.settlements")
 	if not bool(state.get("ok", true)):
 		section += i18n.t("base.ui.dashboard.body.settlements_unavailable") + "\n"
@@ -3372,7 +3375,96 @@ func _settlements_section(state: Dictionary) -> String:
 		else:
 			section += i18n.t("base.ui.dashboard.body.settlement_row", params) + "\n"
 	section += i18n.t("base.ui.dashboard.body.settlement_hint") + "\n"
+	if not selected.is_empty():
+		section += _settlement_detail_section(selected, district, policy_state)
 	return section
+
+## Read-only per-settlement detail block under the Settlements list. The caller
+## passes the payloads the dashboard already queried this rebuild, so this adds
+## no bridge call. Missing, malformed, foreign-seed, or `ok=false` district data
+## clears every derived value and falls back to the existing unavailable line.
+func _settlement_detail_section(settlement: Dictionary, district: Dictionary, policy_state: Dictionary) -> String:
+	var center := _settlement_center(settlement)
+	if settlement.is_empty() or not is_finite(center.x) or not is_finite(center.y):
+		return ""
+	var block := "[b]%s[/b]\n" % i18n.t("base.ui.dashboard.body.settlement_detail_title")
+	block += i18n.t("base.ui.dashboard.body.settlement_detail", {
+		"name": str(settlement.get("name", "")),
+		"owner": str(settlement.get("owner", "")),
+		"id": int(settlement.get("id", 0)),
+		"x": int(center.x),
+		"z": int(center.y),
+		"radius": i18n.format_float(float(settlement.get("radius_m", 0.0)), 0),
+	}) + "\n"
+	var district_center := _xz_from_pair(district.get("center", null))
+	if not bool(district.get("ok", false)) or not is_finite(district_center.x) \
+		or not is_finite(district_center.y) or district_center.distance_to(center) >= 0.001:
+		block += i18n.t("base.ui.dashboard.body.district_unavailable") + "\n"
+		return block
+	var population := int(district.get("population", 0))
+	var happiness: String = i18n.NOT_AVAILABLE
+	var needs: String = i18n.NOT_AVAILABLE
+	if population > 0:
+		happiness = i18n.format_float(float(district.get("happiness", 0.0)) * 100.0, 0) + "%"
+		needs = i18n.t("base.ui.dashboard.body.needs_values", {
+			"food": i18n.format_float(float(district.get("food", 0.0)) * 100.0, 0),
+			"water": i18n.format_float(float(district.get("water", 0.0)) * 100.0, 0),
+			"rest": i18n.format_float(float(district.get("rest", 0.0)) * 100.0, 0),
+		})
+	block += i18n.t("base.ui.dashboard.body.settlement_detail_district", {
+		"radius": i18n.format_float(DISTRICT_RADIUS_M, 0),
+		"residents": i18n.format_int(population),
+		"housing": i18n.format_int(int(district.get("housing_capacity", 0))),
+		"vacant": i18n.format_int(int(district.get("vacancies", 0))),
+	}) + "\n"
+	block += i18n.t("base.ui.dashboard.body.settlement_detail_jobs", {
+		"jobs": i18n.format_int(int(district.get("jobs", 0))),
+		"employed": i18n.format_int(int(district.get("employed", 0))),
+		"unemployed": i18n.format_int(int(district.get("unemployed", 0))),
+	}) + "\n"
+	block += i18n.t("base.ui.dashboard.body.district_needs", {
+		"happiness": happiness,
+		"needs": needs,
+		"commute": i18n.format_float(float(district.get("average_commute_m", 0.0)), 0),
+	}) + "\n"
+	# `district_summary` always reports both counts; if a payload ever omits
+	# them, drop the line instead of inventing zeros.
+	if district.has("completed_buildings") and district.has("construction_sites"):
+		block += i18n.t("base.ui.dashboard.body.settlement_detail_buildings", {
+			"completed": i18n.format_int(int(district.get("completed_buildings", 0))),
+			"sites": i18n.format_int(int(district.get("construction_sites", 0))),
+		}) + "\n"
+	if not bool(policy_state.get("ok", false)):
+		block += i18n.t("base.ui.dashboard.body.policies_unavailable") + "\n"
+		return block
+	var policies_value = policy_state.get("policies", [])
+	var policies: Array = policies_value if policies_value is Array else []
+	var policy := _containing_policy(policies, center)
+	if policy.is_empty():
+		block += i18n.t("base.ui.dashboard.body.settlement_detail_policy_none") + "\n"
+		return block
+	block += i18n.t("base.ui.dashboard.body.settlement_detail_policy", {
+		"name": str(policy.get("name", "")),
+		"tax": i18n.format_float(float(policy.get("tax_multiplier", 0.0)), 2),
+		"funding": i18n.format_float(float(policy.get("service_funding", 0.0)), 2),
+	}) + "\n"
+	block += i18n.t(
+		"base.ui.dashboard.body.policy_construction_allowed" if bool(policy.get("construction_allowed", false)) else "base.ui.dashboard.body.policy_construction_blocked"
+	) + "\n"
+	var allowlist_count := _policy_allowlist_count(policy.get("blueprint_allowlist", null))
+	block += i18n.t("base.ui.dashboard.body.policy_allowlist", {
+		"count": i18n.format_int(allowlist_count) if allowlist_count > 0 else i18n.NOT_AVAILABLE,
+	}) + "\n"
+	return block
+
+## Read an `[x, z]` pair from a plain or packed array; NAN when malformed.
+## A detail-only helper: it never converts missing values into a fake zero.
+func _xz_from_pair(value) -> Vector2:
+	if not (value is Array or value is PackedInt32Array or value is PackedFloat32Array):
+		return Vector2(NAN, NAN)
+	if value.size() < 2:
+		return Vector2(NAN, NAN)
+	return Vector2(float(value[0]), float(value[1]))
 
 func _policies_section(state: Dictionary) -> String:
 	var section := "[b]%s[/b]\n" % i18n.t("base.ui.dashboard.section.policies")
@@ -4217,6 +4309,7 @@ func _run_scene_smoke() -> void:
 	var policy_ui_ok := false
 	var district_select_ok := false
 	var settlement_select_ok := false
+	var settlement_detail_ok := false
 	var heatmap_ui_ok := false
 	var heatmap_modes_ok := false
 	var advisor_i18n_ok := false
@@ -4254,6 +4347,13 @@ func _run_scene_smoke() -> void:
 	settlement_select_ok = settlement_select_ok and not empty_settlement_section.contains("!base.ui.")
 	settlement_select_ok = settlement_select_ok and _settlements_section({"ok": false}).contains(i18n.t("base.ui.dashboard.body.settlements_unavailable"))
 	settlement_select_ok = settlement_select_ok and not _settlements_section({"ok": false}).contains("!base.ui.")
+	# Detail block: zero settlements means no block at all; an unavailable read
+	# keeps the existing unavailable line and never invents a record.
+	settlement_detail_ok = not empty_settlement_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail_title"))
+	settlement_detail_ok = settlement_detail_ok and not empty_settlement_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail_policy_none"))
+	settlement_detail_ok = settlement_detail_ok and _settlement_detail_section({}, {}, {}).is_empty()
+	settlement_detail_ok = settlement_detail_ok and not _settlements_section({"ok": false}, {}, {}).contains(i18n.t("base.ui.dashboard.body.settlement_detail_title"))
+	settlement_detail_ok = settlement_detail_ok and not _settlements_section({"ok": false}, {}, {}).contains("!base.ui.")
 
 	target_x = FIXTURE_X
 	target_z = FIXTURE_Z
@@ -5196,6 +5296,216 @@ func _run_scene_smoke() -> void:
 					int(second_settlement_center.y),
 					int(settlement_district.get("population", 0)),
 				])
+				# Per-settlement detail block. It reuses the same 256 m district
+				# payload and policy state the dashboard already queried. The two
+				# centres are 431 m apart, so population, jobs, and the containing
+				# policy must differ and must never bleed between records.
+				var detail_policy: Dictionary = core.district_policy_create(
+					SEED,
+					"Smoke Detail",
+					first_settlement_center.x,
+					first_settlement_center.y,
+					96.0,
+					1.5,
+					1.2,
+					false,
+					PackedStringArray(["base:cottage"])
+				)
+				var detail_policy_id := int(detail_policy.get("policy", {}).get("id", -1))
+				settlement_detail_ok = bool(detail_policy.get("ok", false)) and detail_policy_id >= 0
+				var detail_policy_outer: Dictionary = core.district_policy_create(
+					SEED,
+					"Smoke Detail Outer",
+					first_settlement_center.x + 10.0,
+					first_settlement_center.y,
+					200.0,
+					0.5,
+					0.5,
+					true,
+					PackedStringArray()
+				)
+				var detail_outer_id := int(detail_policy_outer.get("policy", {}).get("id", -1))
+				settlement_detail_ok = settlement_detail_ok and bool(detail_policy_outer.get("ok", false))
+				settlement_detail_ok = settlement_detail_ok and detail_outer_id > detail_policy_id
+				var first_district: Dictionary = core.district_summary(
+					SEED, first_settlement_center.x, first_settlement_center.y, DISTRICT_RADIUS_M
+				)
+				var second_district: Dictionary = core.district_summary(
+					SEED, second_settlement_center.x, second_settlement_center.y, DISTRICT_RADIUS_M
+				)
+				settlement_detail_ok = settlement_detail_ok and bool(first_district.get("ok", false))
+				settlement_detail_ok = settlement_detail_ok and bool(second_district.get("ok", false))
+				settlement_detail_ok = settlement_detail_ok and first_district.has("completed_buildings")
+				settlement_detail_ok = settlement_detail_ok and first_district.has("construction_sites")
+				var first_detail_params := {
+					"name": str(first_record.get("name", "")),
+					"owner": str(first_record.get("owner", "")),
+					"id": first_settlement_id,
+					"x": int(first_settlement_center.x),
+					"z": int(first_settlement_center.y),
+					"radius": i18n.format_float(float(first_record.get("radius_m", 0.0)), 0),
+				}
+				var second_detail_params := {
+					"name": "Smoke Harbour",
+					"owner": "player",
+					"id": second_settlement_id,
+					"x": int(second_settlement_center.x),
+					"z": int(second_settlement_center.y),
+					"radius": i18n.format_float(float(second_record.get("radius_m", 0.0)), 0),
+				}
+				settlement_detail_ok = settlement_detail_ok and _select_settlement(first_settlement_id)
+				_update_dashboard()
+				var first_detail_section: String = _settlements_section(
+					core.settlements(), first_district, core.district_policies_state(SEED)
+				)
+				settlement_detail_ok = settlement_detail_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_detail_title"))
+				settlement_detail_ok = settlement_detail_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_detail", first_detail_params))
+				settlement_detail_ok = settlement_detail_ok and first_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail", first_detail_params))
+				settlement_detail_ok = settlement_detail_ok and first_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail_district", {
+					"radius": i18n.format_float(DISTRICT_RADIUS_M, 0),
+					"residents": i18n.format_int(int(first_district.get("population", 0))),
+					"housing": i18n.format_int(int(first_district.get("housing_capacity", 0))),
+					"vacant": i18n.format_int(int(first_district.get("vacancies", 0))),
+				}))
+				settlement_detail_ok = settlement_detail_ok and first_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail_jobs", {
+					"jobs": i18n.format_int(int(first_district.get("jobs", 0))),
+					"employed": i18n.format_int(int(first_district.get("employed", 0))),
+					"unemployed": i18n.format_int(int(first_district.get("unemployed", 0))),
+				}))
+				settlement_detail_ok = settlement_detail_ok and first_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail_buildings", {
+					"completed": i18n.format_int(int(first_district.get("completed_buildings", 0))),
+					"sites": i18n.format_int(int(first_district.get("construction_sites", 0))),
+				}))
+				settlement_detail_ok = settlement_detail_ok and first_detail_section.contains(i18n.t("base.ui.dashboard.body.district_needs", {
+					"happiness": i18n.format_float(float(first_district.get("happiness", 0.0)) * 100.0, 0) + "%",
+					"needs": i18n.t("base.ui.dashboard.body.needs_values", {
+						"food": i18n.format_float(float(first_district.get("food", 0.0)) * 100.0, 0),
+						"water": i18n.format_float(float(first_district.get("water", 0.0)) * 100.0, 0),
+						"rest": i18n.format_float(float(first_district.get("rest", 0.0)) * 100.0, 0),
+					}),
+					"commute": i18n.format_float(float(first_district.get("average_commute_m", 0.0)), 0),
+				}))
+				settlement_detail_ok = settlement_detail_ok and first_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail_policy", {
+					"name": "Smoke Detail",
+					"tax": i18n.format_float(1.5, 2),
+					"funding": i18n.format_float(1.2, 2),
+				}))
+				settlement_detail_ok = settlement_detail_ok and first_detail_section.contains(i18n.t("base.ui.dashboard.body.policy_construction_blocked"))
+				settlement_detail_ok = settlement_detail_ok and first_detail_section.contains(i18n.t("base.ui.dashboard.body.policy_allowlist", {
+					"count": i18n.format_int(1),
+				}))
+				# Smallest id wins even though the outer policy also contains
+				# the settlement centre.
+				settlement_detail_ok = settlement_detail_ok and first_detail_section.contains("Smoke Detail")
+				settlement_detail_ok = settlement_detail_ok and not first_detail_section.contains("Smoke Detail Outer")
+				settlement_detail_ok = settlement_detail_ok and not first_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail", second_detail_params))
+				settlement_detail_ok = settlement_detail_ok and not first_detail_section.contains("!base.ui.")
+				settlement_detail_ok = settlement_detail_ok and int(first_district.get("population", -1)) == 2
+				settlement_detail_ok = settlement_detail_ok and int(first_district.get("jobs", -1)) == 2
+				settlement_detail_ok = settlement_detail_ok and int(first_district.get("completed_buildings", 0)) >= 1
+				settlement_detail_ok = settlement_detail_ok and int(second_district.get("population", -1)) == 0
+				# Selecting the other settlement swaps every derived value; no
+				# identity, district, or policy from the first record survives.
+				settlement_detail_ok = settlement_detail_ok and _select_settlement(second_settlement_id)
+				_update_dashboard()
+				var second_detail_section: String = _settlements_section(
+					core.settlements(), second_district, core.district_policies_state(SEED)
+				)
+				settlement_detail_ok = settlement_detail_ok and second_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail", second_detail_params))
+				settlement_detail_ok = settlement_detail_ok and second_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail_district", {
+					"radius": i18n.format_float(DISTRICT_RADIUS_M, 0),
+					"residents": i18n.format_int(int(second_district.get("population", 0))),
+					"housing": i18n.format_int(int(second_district.get("housing_capacity", 0))),
+					"vacant": i18n.format_int(int(second_district.get("vacancies", 0))),
+				}))
+				settlement_detail_ok = settlement_detail_ok and second_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail_jobs", {
+					"jobs": i18n.format_int(int(second_district.get("jobs", 0))),
+					"employed": i18n.format_int(int(second_district.get("employed", 0))),
+					"unemployed": i18n.format_int(int(second_district.get("unemployed", 0))),
+				}))
+				settlement_detail_ok = settlement_detail_ok and second_detail_section.contains(i18n.t("base.ui.dashboard.body.district_needs", {
+					"happiness": i18n.NOT_AVAILABLE,
+					"needs": i18n.NOT_AVAILABLE,
+					"commute": i18n.format_float(float(second_district.get("average_commute_m", 0.0)), 0),
+				}))
+				settlement_detail_ok = settlement_detail_ok and second_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail_policy_none"))
+				settlement_detail_ok = settlement_detail_ok and not second_detail_section.contains("Smoke Detail")
+				settlement_detail_ok = settlement_detail_ok and not second_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail", first_detail_params))
+				settlement_detail_ok = settlement_detail_ok and not second_detail_section.contains("!base.ui.")
+				# A foreign seed is a bridge `seed_mismatch`: the block keeps
+				# the record identity and clears every derived value.
+				var foreign_district: Dictionary = core.district_summary(
+					SEED + 1, first_settlement_center.x, first_settlement_center.y, DISTRICT_RADIUS_M
+				)
+				settlement_detail_ok = settlement_detail_ok and not bool(foreign_district.get("ok", true))
+				var foreign_detail_section: String = _settlements_section(
+					core.settlements(), foreign_district, core.district_policies_state(SEED)
+				)
+				settlement_detail_ok = settlement_detail_ok and foreign_detail_section.contains(i18n.t("base.ui.dashboard.body.district_unavailable"))
+				settlement_detail_ok = settlement_detail_ok and foreign_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail", second_detail_params))
+				settlement_detail_ok = settlement_detail_ok and not foreign_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail_district", {
+					"radius": i18n.format_float(DISTRICT_RADIUS_M, 0),
+					"residents": i18n.format_int(int(second_district.get("population", 0))),
+					"housing": i18n.format_int(int(second_district.get("housing_capacity", 0))),
+					"vacant": i18n.format_int(int(second_district.get("vacancies", 0))),
+				}))
+				settlement_detail_ok = settlement_detail_ok and not foreign_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail_policy_none"))
+				settlement_detail_ok = settlement_detail_ok and not foreign_detail_section.contains("!base.ui.")
+				# A malformed centre yields no block; an `ok=false` payload with
+				# a matching centre keeps the identity and the unavailable line.
+				var malformed_detail: String = _settlement_detail_section(
+					{
+						"id": first_settlement_id,
+						"name": "Malformed",
+						"owner": "player",
+						"center": [NAN, 0.0],
+						"radius_m": 64.0,
+					},
+					first_district,
+					core.district_policies_state(SEED)
+				)
+				settlement_detail_ok = settlement_detail_ok and malformed_detail.is_empty()
+				var failed_detail: String = _settlement_detail_section(
+					second_record,
+					{
+						"ok": false,
+						"center": PackedFloat32Array([second_settlement_center.x, second_settlement_center.y]),
+					},
+					core.district_policies_state(SEED)
+				)
+				settlement_detail_ok = settlement_detail_ok and failed_detail.contains(i18n.t("base.ui.dashboard.body.district_unavailable"))
+				settlement_detail_ok = settlement_detail_ok and not failed_detail.contains("residents")
+				settlement_detail_ok = settlement_detail_ok and not failed_detail.contains("!base.ui.")
+				# Removing both policies restores the containing-policy miss and
+				# leaves the placement/checksum state untouched.
+				var detail_outer_removed: Dictionary = core.district_policy_remove(SEED, detail_outer_id)
+				var detail_removed: Dictionary = core.district_policy_remove(SEED, detail_policy_id)
+				settlement_detail_ok = settlement_detail_ok and bool(detail_outer_removed.get("ok", false))
+				settlement_detail_ok = settlement_detail_ok and bool(detail_removed.get("ok", false))
+				settlement_detail_ok = settlement_detail_ok and int(detail_removed.get("count", -1)) == 0
+				settlement_detail_ok = settlement_detail_ok and str(core.world_placement_checksum()) == policy_world_checksum
+				settlement_detail_ok = settlement_detail_ok and _select_settlement(first_settlement_id)
+				_update_dashboard()
+				var clean_detail_text := dashboard_text.text
+				settlement_detail_ok = settlement_detail_ok and not clean_detail_text.contains("Smoke Detail")
+				settlement_detail_ok = settlement_detail_ok and clean_detail_text.contains(i18n.t("base.ui.dashboard.body.settlement_detail_policy_none"))
+				settlement_detail_ok = settlement_detail_ok and clean_detail_text.contains(i18n.t("base.ui.dashboard.body.settlement_detail", first_detail_params))
+				# Deterministic repeat: none -> same settlement rebuilds the
+				# identical block.
+				settlement_detail_ok = settlement_detail_ok and _select_settlement(-1)
+				settlement_detail_ok = settlement_detail_ok and _select_settlement(first_settlement_id)
+				_update_dashboard()
+				settlement_detail_ok = settlement_detail_ok and dashboard_text.text == clean_detail_text
+				settlement_detail_ok = settlement_detail_ok and _select_settlement(second_settlement_id)
+				_update_dashboard()
+				print("SETTLEMENT_DETAIL first_id=%d first_population=%d second_id=%d second_population=%d first_completed=%d policies=%d" % [
+					first_settlement_id,
+					int(first_district.get("population", -1)),
+					second_settlement_id,
+					int(second_district.get("population", -1)),
+					int(first_district.get("completed_buildings", -1)),
+					int(core.district_policies_state(SEED).get("count", -1)),
+				])
 				# F6 building focus still toggles, but the explicit settlement
 				# override keeps the district centre on the settlement.
 				settlement_select_ok = settlement_select_ok and _select_placement(1)
@@ -5221,19 +5531,27 @@ func _run_scene_smoke() -> void:
 				settlement_select_ok = settlement_select_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_row_selected", second_row_params))
 				settlement_select_ok = settlement_select_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_focus", {"name": "Smoke Harbour"}))
 				settlement_select_ok = settlement_select_ok and not dashboard_text.text.contains("!base.ui.")
+				settlement_detail_ok = settlement_detail_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_detail_title"))
+				settlement_detail_ok = settlement_detail_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_detail", second_detail_params))
+				settlement_detail_ok = settlement_detail_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_detail_policy_none"))
+				settlement_detail_ok = settlement_detail_ok and not dashboard_text.text.contains("!base.ui.")
 				i18n.set_locale("en")
 				_update_dashboard()
 				# A foreign id must not crash or query a stale centre: the
-				# dashboard validation clears it and the camera takes over.
+				# dashboard validation clears it and the camera takes over. The
+				# detail block disappears with the selection.
 				selected_settlement_id = 999999
 				_update_dashboard()
 				settlement_select_ok = settlement_select_ok and selected_settlement_id == -1
+				settlement_detail_ok = settlement_detail_ok and not dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_detail_title"))
 				var foreign_center: Vector2 = _district_center_xz()
 				settlement_select_ok = settlement_select_ok and foreign_center.distance_to(Vector2(mayor_camera.target.x, mayor_camera.target.z)) < 0.001
 				settlement_select_ok = settlement_select_ok and not _select_settlement(999999)
 				settlement_select_ok = settlement_select_ok and selected_settlement_id == -1
 				_update_dashboard()
 				settlement_select_ok = settlement_select_ok and not dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_focus", {"name": "Smoke Harbour"}))
+				settlement_detail_ok = settlement_detail_ok and not dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_detail_title"))
+				settlement_detail_ok = settlement_detail_ok and not dashboard_text.text.contains("!base.ui.")
 				settlement_select_ok = settlement_select_ok and _select_settlement(-1)
 				settlement_select_ok = settlement_select_ok and selected_settlement_id == -1
 				_toggle_dashboard()
@@ -5297,6 +5615,10 @@ func _run_scene_smoke() -> void:
 				# An explicit settlement selection moves the F7 query centre;
 				# clearing it restores the camera-centred checksum pin.
 				var camera_heatmap_checksum := str(heatmap_last_state.get("checksum", ""))
+				# Camera-centred fixture pin. It depends only on the fixture
+				# placements and the fixed 512 m / 32 m query, so a change here
+				# means the fixture or the query drifted.
+				heatmap_ui_ok = heatmap_ui_ok and camera_heatmap_checksum == "3cba652232a478a0"
 				settlement_select_ok = settlement_select_ok and _select_settlement(second_settlement_id)
 				var settlement_heatmap_center: PackedFloat32Array = heatmap_last_state.get("center", PackedFloat32Array())
 				heatmap_ui_ok = heatmap_ui_ok and bool(heatmap_last_state.get("ok", false))
@@ -5796,10 +6118,13 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and not settlement_select_ok:
 		status = "settlement_select_failed"
 
+	if status == "ok" and not settlement_detail_ok:
+		status = "settlement_detail_failed"
+
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s district_select=%s settlement_select=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s district_select=%s settlement_select=%s settlement_detail=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -5843,6 +6168,7 @@ func _run_scene_smoke() -> void:
 		"ok" if policy_ui_ok else "failed",
 		"ok" if district_select_ok else "failed",
 		"ok" if settlement_select_ok else "failed",
+		"ok" if settlement_detail_ok else "failed",
 		"ok" if heatmap_ui_ok else "failed",
 		"ok" if heatmap_modes_ok else "failed",
 		"ok" if hud_i18n_ok else "failed",
