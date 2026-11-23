@@ -29,23 +29,24 @@ use core_blueprint::{
 };
 use core_city::named::{age_years_from_days, slot_is_employed, MAX_AGE_DAYS};
 use core_city::{
-    advise, diff_selection, evaluate_tutorial, heatmap_grid, normalize_rotation,
-    policy_placement_denial, starter, summarize, summarize_district, summarize_heatmap,
-    AdvisorInput, AdvisorReport, Age, AgeState, CitizenDeath, CitizenMotion, CitizenPosition,
-    CityLayout, CityRuntime, CitySummary, CityTier, ConstructionPhase, ConstructionSite,
-    ConstructionStore, ConstructionTimeScale, ContentPack, ContentRegistry, DistrictHeatmap,
-    DistrictPolicy, DistrictPolicyError, DistrictPolicyRequest, DistrictPolicyStore,
-    DistrictSummary, Economy, Home, Household, IndustryKind, IndustryStore, InfrastructureCosts,
-    LifecycleTick, Lot, LotError, LotRequest, LotStore, MaterializationBudget,
-    MaterializationSelection, MaterializedCitizen, MotionLeg, NamedCitizens, NamedSave, PackError,
-    Placement, PlacementError, PlacementRequest, PlacementStore, PolicyPlacementDenial,
-    PolicyServiceWeight, PolicyTaxWeights, ResearchStore, RoadError, RoadGraph, RoadRequest,
-    RoadSegment, RoadStore, RouteCache, ServiceConsumer, ServiceKind, ServiceReport, ServiceStore,
-    ServiceTier, Settlement, SettlementError, SettlementRequest, SettlementStore, TechTree, Trade,
-    TradePool, TutorialInput, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace,
-    Zone, DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY,
-    MAX_HEATMAP_CELLS, MAX_HEATMAP_CELL_M, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M,
-    MIN_HEATMAP_CELL_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    advise, diff_selection, evaluate_tutorial, first_construction_payment, heatmap_grid,
+    normalize_rotation, policy_placement_denial, settle_first_installment, starter,
+    structure_age_error, summarize, summarize_district, summarize_heatmap, AdvisorInput,
+    AdvisorReport, Age, AgeState, CitizenDeath, CitizenMotion, CitizenPosition, CityLayout,
+    CityRuntime, CitySummary, CityTier, ConstructionSite, ConstructionStore, ConstructionTimeScale,
+    ContentPack, ContentRegistry, DistrictHeatmap, DistrictPolicy, DistrictPolicyError,
+    DistrictPolicyRequest, DistrictPolicyStore, DistrictSummary, Economy, Home, Household,
+    IndustryKind, IndustryStore, InfrastructureCosts, LifecycleTick, Lot, LotError, LotRequest,
+    LotStore, MaterializationBudget, MaterializationSelection, MaterializedCitizen, MotionLeg,
+    NamedCitizens, NamedSave, PackError, Placement, PlacementError, PlacementRequest,
+    PlacementStore, PolicyPlacementDenial, PolicyServiceWeight, PolicyTaxWeights, ResearchStore,
+    RoadError, RoadGraph, RoadRequest, RoadSegment, RoadStore, RouteCache, ServiceConsumer,
+    ServiceKind, ServiceReport, ServiceStore, ServiceTier, Settlement, SettlementError,
+    SettlementRequest, SettlementStore, TechTree, Trade, TradePool, TutorialInput, UtilityConsumer,
+    UtilityKind, UtilityReport, UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY,
+    DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY, MAX_HEATMAP_CELLS, MAX_HEATMAP_CELL_M,
+    MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M, MIN_HEATMAP_CELL_M,
+    RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -8587,38 +8588,6 @@ fn placement_to_dictionary_with_resolved(
     result
 }
 
-/// First construction installment (Survey) for a placement price.
-fn first_construction_payment(material_cost: f64) -> f64 {
-    if !material_cost.is_finite() || material_cost <= 0.0 {
-        return 0.0;
-    }
-    (material_cost * ConstructionPhase::Survey.billing_weight() * 100.0).round() / 100.0
-}
-
-/// Charge the first construction installment and mark its site paid.
-///
-/// Returns `true` only when the treasury accepted the charge and the site
-/// accepted the payment. A failed charge moves nothing; a site that rejects
-/// the installment after the charge is refunded, so a rolled-back placement
-/// cannot keep the money without a site (F-015).
-fn settle_first_installment(
-    economy: &mut Economy,
-    construction: &mut ConstructionStore,
-    placement_id: u64,
-    amount: f64,
-) -> bool {
-    if !economy.try_charge_construction(amount) {
-        return false;
-    }
-    let marked_paid = construction
-        .site_mut(placement_id)
-        .is_some_and(|site| site.mark_paid(amount).is_ok());
-    if !marked_paid {
-        economy.refund_construction(amount);
-    }
-    marked_paid
-}
-
 /// Lead time assigned to a new utility or civic site under a construction clock.
 ///
 /// Developer mode keeps the legacy immediate behavior; campaign mode assigns
@@ -8919,37 +8888,6 @@ fn age_rank(age: Age) -> usize {
         .iter()
         .position(|candidate| *candidate == age)
         .unwrap_or(0)
-}
-
-fn structure_required_age(spec: &StructureSpec) -> (Age, StructuralSystem) {
-    let mut required_system = spec.system;
-    let mut required =
-        Age::parse(spec.system.min_age()).expect("compiled structural systems have a known age");
-    if let Some(ground) = spec.ground_system {
-        let ground_age =
-            Age::parse(ground.min_age()).expect("compiled structural systems have a known age");
-        if age_rank(ground_age) > age_rank(required) {
-            required = ground_age;
-            required_system = ground;
-        }
-    }
-    (required, required_system)
-}
-
-fn structure_age_error(spec: &StructureSpec, current: Age) -> Option<(&'static str, String)> {
-    let (required, required_system) = structure_required_age(spec);
-    if age_rank(current) >= age_rank(required) {
-        return None;
-    }
-    Some((
-        "age_locked",
-        format!(
-            "{} requires the {} age; the city is in the {} age",
-            required_system.name(),
-            required.name(),
-            current.name()
-        ),
-    ))
 }
 
 fn research_payload(

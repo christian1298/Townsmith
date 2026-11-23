@@ -6,6 +6,7 @@
 //! keeps the existing Phase 0 tick harness.
 
 pub mod listen;
+pub mod placement;
 pub mod protocol;
 pub mod save;
 pub mod vote;

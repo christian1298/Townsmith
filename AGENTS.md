@@ -318,13 +318,18 @@ cargo run --release -p townsmith-bench --bin rooms
 # Headless server tick harness (no GPU)
 cargo run --release -p townsmith-server -- --cohorts 10000 --ticks 100
 
-# Protocol v0 + authoritative executor loopback smoke (length-prefixed JSON over TCP)
+# Protocol v1 + authoritative executor loopback smoke (length-prefixed JSON over TCP)
 cargo run --release -p townsmith-server -- --loopback-smoke
 # Prints SERVER_PROTOCOL and SERVER_AUTHORITY status lines; deterministic, no sleeps
 cargo test -p townsmith-server
 cargo run --release -p townsmith-server -- --loopback-smoke   # protocol + authority + roles + resume + interest + time-vote goldens
 cargo run --release -p townsmith-server -- --interest-smoke   # viewport + bounded 64-road / 64-building interest view loopback
 cargo run --release -p townsmith-server -- --vote-smoke   # 7-connection D-021 vote pass/fail/cancel loopback
+# D-032 authoritative blueprint placement (temp library, policy, charge, save/load)
+cargo run --release -p townsmith-server -- --placement-smoke
+# Prints SERVER_PLACEMENT placed=1 duplicate=1 policy=1 funds=1 overlap=1 save=1 reload=1 checksum=<hex> status=ok
+# Listen with an operator-supplied placement configuration (both optional; no upload/fetch)
+cargo run --release -p townsmith-server -- --listen 47015 --blueprint-library /abs/blueprints --policies /abs/policies.json
 GODOT=/path/to/godot ./scripts/smoke_interest_preview.sh   # headless 3D interest-view road preview, two runs, same checksum
 GODOT=/path/to/godot ./scripts/smoke_mp_client.sh   # normal path (frames 7/8) + reconnect resume via --sessions 2
 GODOT=/path/to/godot ./scripts/smoke_mp_world_client.sh   # loopback server -> 3D world client; two fresh runs, identical checksums

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Headless Townsmith server tick harness and protocol v0"
+description = "Headless Townsmith server tick harness and protocol v1"
 
 [lib]
 name = "townsmith_server"
@@ -15,7 +15,9 @@ name = "townsmith-server"
 path = "src/main.rs"
 
 [dependencies]
+core_blueprint.workspace = true
 core_city.workspace = true
 core_sim.workspace = true
+core_voxel.workspace = true
 serde.workspace = true
 serde_json.workspace = true

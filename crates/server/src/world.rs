@@ -1,4 +1,4 @@
-//! First authoritative command executor on top of protocol v0.
+//! First authoritative command executor on protocol v1.
 //!
 //! [`ServerWorld`] owns the mutable server state shared by every connection:
 //! the clock, static population counters, the treasury, the road store, the
@@ -24,16 +24,29 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::thread;
 
+use core_blueprint::{load_tsbp, BlueprintLibrary, BlueprintLibraryError};
+use core_city::construction::{
+    first_construction_payment, settle_first_installment, ConstructionError, ConstructionStore,
+};
 use core_city::economy::{Economy, EconomyTick, DAY_SECONDS, STARTING_BALANCE};
+use core_city::placement::{
+    normalize_rotation, validate_placement, Placement, PlacementError, PlacementRequest,
+    PlacementStore,
+};
+use core_city::policy::{policy_placement_denial, DistrictPolicyError, DistrictPolicyStore};
+use core_city::progression::AgeState;
 use core_city::road::{RoadError, RoadRequest, RoadSegment, RoadStore};
+use core_city::structure_age_error;
 
 use crate::protocol::{
-    configure_stream, decode_client_command, frame_to_io, read_frame, read_json_frame,
-    session_id_for_seed, validate_hello, validate_interest, validate_road, validate_tax_rates,
-    write_json_frame, BuildingView, ClientCommand, FrameError, Rejection, RoadView, ServerMessage,
-    SessionConfig, TimeAction, DEFAULT_INTEREST_RADIUS_M, LOOPBACK_SEED, MAX_INTEREST_BUILDINGS,
+    configure_stream, decode_client_command, frame_to_io, normalize_blueprint_hash, read_frame,
+    read_json_frame, session_id_for_seed, validate_hello, validate_interest,
+    validate_place_blueprint, validate_road, validate_tax_rates, write_json_frame, BuildingView,
+    ClientCommand, FrameError, PlacementView, Rejection, RoadView, ServerMessage, SessionConfig,
+    TimeAction, DEFAULT_INTEREST_RADIUS_M, LOOPBACK_SEED, MAX_INTEREST_BUILDINGS,
     MAX_INTEREST_ROADS, PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
 };
 
@@ -59,6 +72,17 @@ pub const MAX_WORLD_ROAD_LENGTH: i32 = 512;
 /// The server has no terrain yet. This is above `WATER_LEVEL_M` (24 m) and
 /// constant, so only geometry, bounds, and length rules can fail.
 pub const PLACEHOLDER_GROUND_M: u16 = 40;
+
+/// Crew slots in a server-created construction store.
+///
+/// Matches [`ConstructionStore::default`], so a server placement and a bridge
+/// placement start the same site state.
+pub const SERVER_CONSTRUCTION_CREW_CAPACITY: u16 = 4;
+
+/// Material litres in a server-created construction store.
+///
+/// Matches [`ConstructionStore::default`].
+pub const SERVER_CONSTRUCTION_MATERIALS_STOCK: u64 = 1_000_000;
 
 /// Deterministic client commands exchanged by the authority loopback.
 pub const AUTHORITY_COMMANDS: u64 = 6;
@@ -175,7 +199,8 @@ pub enum ClientRole {
     /// Read-only: `hello`, `ping`, `disconnect`, and its own `set_interest`.
     #[default]
     Viewer,
-    /// Viewer plus economy and placement commands (`set_tax`, `place_road`).
+    /// Viewer plus economy and placement commands (`set_tax`, `place_road`,
+    /// `place_blueprint`).
     Mayor,
     /// Mayor plus `time_control`.
     Admin,
@@ -213,7 +238,7 @@ impl ClientRole {
             "hello" | "resume" | "ping" | "disconnect" | "time_vote" | "set_interest" => {
                 Self::Viewer
             }
-            "set_tax" | "place_road" => Self::Mayor,
+            "set_tax" | "place_road" | "place_blueprint" => Self::Mayor,
             // Time control is admin-only in D-021; unknown tags fail closed.
             "time_control" => Self::Admin,
             _ => Self::Admin,
@@ -443,6 +468,24 @@ pub struct ServerWorld {
     pub economy: Economy,
     /// Road network.
     pub roads: RoadStore,
+    /// Authoritative blueprint placements (D-032).
+    ///
+    /// `None` until the first accepted `place_blueprint` or a save/load that
+    /// carries placements, so existing worlds and their checksums are
+    /// untouched.
+    pub placements: Option<PlacementStore>,
+    /// Authoritative construction sites (D-023/D-028).
+    ///
+    /// `None` until the first accepted placement or a save/load that carries a
+    /// construction store.
+    pub construction: Option<ConstructionStore>,
+    /// Pre-seeded content-addressed package library (server config, not save
+    /// data). `None` makes `place_blueprint` reject with
+    /// `PLACEMENT_LIBRARY_UNAVAILABLE`.
+    pub blueprint_library: Option<BlueprintLibrary>,
+    /// District policy registry used by the placement gate (server config, not
+    /// save data). A foreign-seed registry is never installed.
+    pub policies: Option<DistrictPolicyStore>,
     /// Per-session interest viewport centre `[x, z]` in metres.
     ///
     /// View state only: excluded from [`Self::checksum`] and not saved.
@@ -529,6 +572,10 @@ impl ServerWorld {
             buildings,
             economy: Economy::new(seed),
             roads: RoadStore::new(seed),
+            placements: None,
+            construction: None,
+            blueprint_library: None,
+            policies: None,
             interest_center: [0.0, 0.0],
             interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
             paused: false,
@@ -574,6 +621,62 @@ impl ServerWorld {
         self.default_role = role;
     }
 
+    /// Configure the pre-seeded content-addressed blueprint library.
+    ///
+    /// The root must be an absolute, existing directory without `.` or `..`
+    /// components; [`BlueprintLibrary::new`] performs the validation. This is
+    /// process configuration: it is not part of [`crate::save::ServerSave`] and
+    /// a loaded world starts without a library.
+    ///
+    /// # Errors
+    ///
+    /// Returns the library root/open error; a failed call leaves the previous
+    /// library untouched.
+    pub fn set_blueprint_library(&mut self, root: PathBuf) -> Result<(), BlueprintLibraryError> {
+        let library = BlueprintLibrary::new(root)?;
+        self.blueprint_library = Some(library);
+        Ok(())
+    }
+
+    /// Drop the configured blueprint library.
+    ///
+    /// `place_blueprint` then rejects with `PLACEMENT_LIBRARY_UNAVAILABLE`.
+    /// Existing placements are untouched.
+    pub fn clear_blueprint_library(&mut self) {
+        self.blueprint_library = None;
+    }
+
+    /// Configure the district policy registry used by the placement gate.
+    ///
+    /// The registry is validated and must belong to this world's seed; a
+    /// foreign-seed or invalid registry is rejected without replacing the
+    /// current one. Like the library, it is process configuration and is not
+    /// saved or restored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DistrictPolicyError::SeedMismatch`] for a foreign-seed
+    /// registry or the registry validation error.
+    pub fn set_policy_registry(
+        &mut self,
+        store: DistrictPolicyStore,
+    ) -> Result<(), DistrictPolicyError> {
+        store.validate()?;
+        if store.seed != self.seed {
+            return Err(DistrictPolicyError::SeedMismatch {
+                expected: self.seed,
+                found: store.seed,
+            });
+        }
+        self.policies = Some(store);
+        Ok(())
+    }
+
+    /// Drop the configured policy registry; placement policy is then neutral.
+    pub fn clear_policy_registry(&mut self) {
+        self.policies = None;
+    }
+
     /// Role of a connection's session. Not authentication.
     ///
     /// Activates the session to read it, which is also how a harness can seed a
@@ -614,6 +717,13 @@ impl ServerWorld {
             buildings: save.buildings,
             economy: save.economy,
             roads: save.roads,
+            placements: save.placements,
+            construction: save.construction,
+            // The package library and policy registry are process
+            // configuration, not save data: a loaded world starts without
+            // them and the caller reconfigures placement before use.
+            blueprint_library: None,
+            policies: None,
             interest_center: [0.0, 0.0],
             interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
             paused: save.paused,
@@ -934,6 +1044,11 @@ impl ServerWorld {
     /// the city's buildings really are. A building is included when its centre
     /// satisfies `distance <= radius`; the list is capped at
     /// [`MAX_INTEREST_BUILDINGS`].
+    ///
+    /// D-032 now stores authoritative placements, but this view stays on the
+    /// synthetic fixture in v1. Replacing it with placement-backed records is
+    /// a follow-up read-path change; the placement command and checksum are
+    /// already authoritative.
     #[must_use]
     pub fn interest_buildings(&self) -> Vec<BuildingView> {
         let (mut buildings, _truncated) = self.interest_building_matches();
@@ -1054,7 +1169,12 @@ impl ServerWorld {
     }
 
     /// Stable FNV-1a checksum over tick, population, balance, road checksum,
-    /// and economy checksum. No wall clock or seed is mixed in.
+    /// economy checksum, and — only when a store exists — the placement and
+    /// construction checksums. No wall clock or seed is mixed in.
+    ///
+    /// A world without placements and construction hashes exactly as it did
+    /// before D-032; the optional stores are appended only when `Some`, so old
+    /// pins stay put until the first placement.
     ///
     /// The interest viewport is deliberately excluded: it is per-session view
     /// state, so a client changing its camera must not move the world golden.
@@ -1065,6 +1185,12 @@ impl ServerWorld {
         hash = fnv_update(hash, &self.balance_units().to_le_bytes());
         hash = fnv_update(hash, &self.roads.checksum().to_le_bytes());
         hash = fnv_update(hash, &self.economy.checksum().to_le_bytes());
+        if let Some(placements) = &self.placements {
+            hash = fnv_update(hash, &placements.checksum().to_le_bytes());
+        }
+        if let Some(construction) = &self.construction {
+            hash = fnv_update(hash, &construction.checksum().to_le_bytes());
+        }
         format!("{hash:016x}")
     }
 
@@ -1263,6 +1389,12 @@ impl ServerWorld {
                 accepted(self.snapshot())
             }
             ClientCommand::PlaceRoad { start, end } => self.apply_place_road(*start, *end),
+            ClientCommand::PlaceBlueprint {
+                blueprint_hash,
+                x,
+                z,
+                rotation,
+            } => self.apply_place_blueprint(blueprint_hash, *x, *z, *rotation),
             ClientCommand::SetInterest {
                 center_x,
                 center_z,
@@ -1549,8 +1681,263 @@ impl ServerWorld {
         }
     }
 
-    /// Update this session's interest viewport and answer with the bounded view.
+    /// Authoritative `place_blueprint` (D-032).
     ///
+    /// The validation order is fixed and nothing mutates until every check has
+    /// passed:
+    ///
+    /// 1. payload: hash shape, finite coordinates, rotation multiple of 90;
+    /// 2. server library configured, hash resolves, the stored package loads
+    ///    and its metadata is consistent;
+    /// 3. idempotency: an exact existing placement (same canonical hash,
+    ///    centre rounded to the millimetre, and rotation) returns its result
+    ///    without a second charge;
+    /// 4. district policy at the placement centre, when a same-seed registry
+    ///    is configured;
+    /// 5. settlement age against the blueprint's declared structure;
+    /// 6. terrain/geometry/overlap against the placeholder flat sampler;
+    /// 7. treasury affordability of the first D-028 installment.
+    ///
+    /// Only then are the placement, construction site, charge, tick, and
+    /// checksum committed. Every rejection leaves all state unchanged,
+    /// including a placement or construction store created by this call.
+    fn apply_place_blueprint(
+        &mut self,
+        blueprint_hash: &str,
+        x: f64,
+        z: f64,
+        rotation: i32,
+    ) -> (Vec<ServerMessage>, &'static str) {
+        if let Err(rejection) = validate_place_blueprint(blueprint_hash, x, z, rotation) {
+            return from_rejection(rejection);
+        }
+        let hash = normalize_blueprint_hash(blueprint_hash)
+            .expect("validate_place_blueprint checked the hash");
+        let Ok(rotation_deg) = normalize_rotation(i64::from(rotation)) else {
+            return reject_with(
+                crate::protocol::codes::PLACEMENT_ROTATION_INVALID,
+                format!("placement rotation {rotation} is not a multiple of 90 degrees"),
+            );
+        };
+        let Some(library) = self.blueprint_library.as_ref() else {
+            return reject_with(
+                crate::protocol::codes::PLACEMENT_LIBRARY_UNAVAILABLE,
+                "no blueprint library is configured on this server",
+            );
+        };
+        let path = match library.resolve_checked(&hash) {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                return reject_with(
+                    crate::protocol::codes::PLACEMENT_PACKAGE_MISSING,
+                    format!("blueprint package {hash} is not stored on this server"),
+                )
+            }
+            Err(_) => {
+                return reject_with(
+                    crate::protocol::codes::PLACEMENT_PACKAGE_INVALID,
+                    format!("blueprint package {hash} could not be resolved safely"),
+                )
+            }
+        };
+        let blueprint = match load_tsbp(&path) {
+            Ok(blueprint) => blueprint,
+            Err(error) => {
+                return reject_with(
+                    crate::protocol::codes::PLACEMENT_PACKAGE_INVALID,
+                    format!("blueprint package {hash} failed validation: {error}"),
+                )
+            }
+        };
+        let metadata = &blueprint.metadata;
+        let metadata_error = if metadata.content_hash != hash {
+            Some("the stored package content hash does not match its library address")
+        } else if metadata.id.trim().is_empty() {
+            Some("the blueprint id is empty")
+        } else if metadata.name.trim().is_empty() {
+            Some("the blueprint name is empty")
+        } else if metadata
+            .bounds_m
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+        {
+            Some("the blueprint bounds must be finite and positive")
+        } else if metadata.solid_voxels == 0 {
+            Some("the blueprint has no solid voxels")
+        } else if !metadata.stats.material_cost.is_finite() || metadata.stats.material_cost < 0.0 {
+            Some("the blueprint material cost must be finite and non-negative")
+        } else {
+            None
+        };
+        if let Some(message) = metadata_error {
+            return reject_with(
+                crate::protocol::codes::PLACEMENT_PACKAGE_INVALID,
+                format!("blueprint package {hash} is inconsistent: {message}"),
+            );
+        }
+        let request = PlacementRequest {
+            blueprint_id: metadata.id.clone(),
+            blueprint_hash: hash.clone(),
+            blueprint_path: placement_package_reference(&hash),
+            name: metadata.name.clone(),
+            bounds_m: metadata.bounds_m,
+            center_x: x as f32,
+            center_z: z as f32,
+            rotation_deg,
+            material_cost: metadata.stats.material_cost,
+            resident_capacity: metadata.stats.resident_capacity,
+            job_slots: metadata.stats.job_slots,
+            solid_voxels: metadata.solid_voxels,
+            structure: metadata.structure,
+        };
+
+        // Idempotency comes before policy, age, terrain, and overlap: a repeat
+        // of the same accepted request is a success, not a second charge.
+        if let Some(store) = self.placements.as_ref() {
+            if let Some(existing) = store
+                .placements
+                .iter()
+                .find(|placement| same_placement(placement, &request))
+            {
+                return accepted(ServerMessage::PlaceBlueprintResult {
+                    tick: self.tick,
+                    placement_id: existing.id,
+                    blueprint_hash: existing.blueprint_hash.clone(),
+                    placement_checksum: format!("{:016x}", store.checksum()),
+                    world_checksum: self.checksum(),
+                    placement: placement_view(existing),
+                });
+            }
+        }
+
+        if let Some(policies) = self.policies.as_ref() {
+            if policies.seed == self.seed {
+                if let Some(policy) = policies.policy_at([request.center_x, request.center_z]) {
+                    if let Some(denial) = policy_placement_denial(policy, &request.blueprint_id) {
+                        return reject_with(
+                            crate::protocol::codes::PLACEMENT_POLICY_DENIED,
+                            format!(
+                                "district policy {} blocks placing blueprint {} here ({})",
+                                policy.id,
+                                request.blueprint_id,
+                                denial.code()
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Some(structure) = request.structure.as_ref() {
+            let age = AgeState::from_population(u64::from(self.population)).age;
+            if let Some((_code, message)) = structure_age_error(structure, age) {
+                return reject_with(crate::protocol::codes::PLACEMENT_AGE_LOCKED, message);
+            }
+        }
+
+        let height_at = |_, _| PLACEHOLDER_GROUND_M;
+        let plan = match self.placements.as_ref() {
+            Some(store) => store.validate(&request, height_at),
+            None => validate_placement(&request, &[], height_at),
+        };
+        if let Err(error) = plan {
+            return reject_placement_error(error);
+        }
+
+        let first_installment = first_construction_payment(request.material_cost);
+        if !self.economy.can_afford(first_installment) {
+            return reject_with(
+                crate::protocol::codes::PLACEMENT_INSUFFICIENT_FUNDS,
+                format!(
+                    "the first construction installment needs {first_installment:.2} but the treasury has {:.2}",
+                    self.economy.balance
+                ),
+            );
+        }
+
+        let created_placements = self.placements.is_none();
+        let created_construction = self.construction.is_none();
+        let placement = {
+            let store = self
+                .placements
+                .get_or_insert_with(|| PlacementStore::new(self.seed));
+            match store.place(&request, height_at) {
+                Ok(placement) => placement,
+                Err(error) => {
+                    if created_placements {
+                        self.placements = None;
+                    }
+                    return reject_placement_error(error);
+                }
+            }
+        };
+        let site = self
+            .construction
+            .get_or_insert_with(|| {
+                ConstructionStore::new(
+                    SERVER_CONSTRUCTION_CREW_CAPACITY,
+                    SERVER_CONSTRUCTION_MATERIALS_STOCK,
+                )
+            })
+            .add_priced_site(placement.id, request.solid_voxels, request.material_cost)
+            .map(|_| ());
+        if let Err(error) = site {
+            if let Some(store) = self.placements.as_mut() {
+                store.remove(placement.id);
+            }
+            if created_placements {
+                self.placements = None;
+            }
+            if created_construction {
+                self.construction = None;
+            }
+            return reject_construction_error(error);
+        }
+        let paid = {
+            let construction = self
+                .construction
+                .as_mut()
+                .expect("the construction site was just created");
+            settle_first_installment(
+                &mut self.economy,
+                construction,
+                placement.id,
+                first_installment,
+            )
+        };
+        if !paid {
+            if let Some(construction) = self.construction.as_mut() {
+                construction.remove_site(placement.id);
+            }
+            if let Some(store) = self.placements.as_mut() {
+                store.remove(placement.id);
+            }
+            if created_placements {
+                self.placements = None;
+            }
+            if created_construction {
+                self.construction = None;
+            }
+            return reject_with(
+                crate::protocol::codes::PLACEMENT_INSUFFICIENT_FUNDS,
+                "the treasury changed while placing; construction was cancelled",
+            );
+        }
+
+        self.tick = self.tick.saturating_add(1);
+        self.refresh_checksum();
+        let placement_checksum = self.placements.as_ref().map_or(0, PlacementStore::checksum);
+        accepted(ServerMessage::PlaceBlueprintResult {
+            tick: self.tick,
+            placement_id: placement.id,
+            blueprint_hash: placement.blueprint_hash.clone(),
+            placement_checksum: format!("{placement_checksum:016x}"),
+            world_checksum: self.checksum(),
+            placement: placement_view(&placement),
+        })
+    }
+
+    /// Update this session's interest viewport and answer with the bounded view.
     /// The batch is `snapshot` followed by `interest_view`, so a client gets the
     /// filtered road details immediately instead of waiting for another
     /// command. This is view-only: it does not change the tick, treasury,
@@ -1782,6 +2169,79 @@ fn reject_road_error(error: RoadError) -> (Vec<ServerMessage>, &'static str) {
         RoadError::TooLong { .. } => crate::protocol::codes::ROAD_TOO_LONG,
         RoadError::CoordinateOutOfRange => crate::protocol::codes::ROAD_OUT_OF_BOUNDS,
         _ => codes::ROAD_REJECTED,
+    };
+    reject_with(code, error.to_string())
+}
+
+/// Stable content-addressed package reference stored in a server placement.
+///
+/// The canonical hash identifies the package; the server library root is
+/// process configuration and must never enter a save record or checksum. The
+/// `tsbp:` prefix keeps the reference distinct from the canonical
+/// `blueprint_hash` field while staying stable across roots and machines.
+#[must_use]
+pub fn placement_package_reference(canonical_hash: &str) -> String {
+    format!("tsbp:{canonical_hash}")
+}
+
+/// Read-only wire copy of one authoritative placement.
+///
+/// The server-local `blueprint_path` is deliberately omitted; a remote client
+/// only needs the content hash.
+#[must_use]
+pub fn placement_view(placement: &Placement) -> PlacementView {
+    PlacementView {
+        id: placement.id,
+        blueprint_id: placement.blueprint_id.clone(),
+        blueprint_hash: placement.blueprint_hash.clone(),
+        name: placement.name.clone(),
+        center: placement.center,
+        rotation_deg: placement.rotation_deg,
+        footprint_m: placement.footprint_m,
+        bounds_m: placement.bounds_m,
+        foundation_m: placement.foundation_m,
+        material_cost: placement.material_cost,
+        resident_capacity: placement.resident_capacity,
+        job_slots: placement.job_slots,
+        solid_voxels: placement.solid_voxels,
+    }
+}
+
+/// Whether an existing placement is the exact request, for idempotency.
+///
+/// The hash and rotation must match exactly and the centre must match to the
+/// nearest millimetre on X and Z. The result is independent of the stored Y,
+/// foundation, and cost.
+fn same_placement(placement: &Placement, request: &PlacementRequest) -> bool {
+    placement.blueprint_hash == request.blueprint_hash
+        && placement.rotation_deg == request.rotation_deg
+        && centre_mm(placement.center[0]) == centre_mm(request.center_x)
+        && centre_mm(placement.center[2]) == centre_mm(request.center_z)
+}
+
+fn centre_mm(value: f32) -> i64 {
+    (f64::from(value) * 1_000.0).round() as i64
+}
+
+fn reject_placement_error(error: PlacementError) -> (Vec<ServerMessage>, &'static str) {
+    let code = match &error {
+        PlacementError::Overlap { .. } => crate::protocol::codes::PLACEMENT_OVERLAP,
+        PlacementError::CoordinateOutOfRange { .. } | PlacementError::InvalidCoordinate { .. } => {
+            crate::protocol::codes::PLACEMENT_OUT_OF_RANGE
+        }
+        PlacementError::InvalidRotation { .. } => {
+            crate::protocol::codes::PLACEMENT_ROTATION_INVALID
+        }
+        PlacementError::IdExhausted => crate::protocol::codes::PLACEMENT_STORE_FULL,
+        _ => crate::protocol::codes::PLACEMENT_REJECTED,
+    };
+    reject_with(code, error.to_string())
+}
+
+fn reject_construction_error(error: ConstructionError) -> (Vec<ServerMessage>, &'static str) {
+    let code = match &error {
+        ConstructionError::TooManySites(_) => crate::protocol::codes::PLACEMENT_STORE_FULL,
+        _ => crate::protocol::codes::PLACEMENT_REJECTED,
     };
     reject_with(code, error.to_string())
 }
@@ -4473,5 +4933,617 @@ mod tests {
         );
         assert_eq!(legacy.checksum(), connection.checksum());
         assert_eq!(legacy.audit_state(), connection.audit_state());
+    }
+
+    // ---- D-032 authoritative blueprint placement ----
+
+    use core_blueprint::{
+        save_tsbp_with_hash, Blueprint, BlueprintMetadata, StructuralSystem, StructureSpec,
+    };
+    use core_city::construction::ConstructionPhase;
+    use core_city::policy::DistrictPolicyRequest;
+    use core_voxel::volume::{VolumeConfig, VolumePos, VoxelVolume};
+    use std::path::Path;
+
+    static PLACEMENT_TEMP_COUNTER: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    struct PlacementTempDir(PathBuf);
+
+    impl PlacementTempDir {
+        fn new(label: &str) -> Self {
+            let unique = PLACEMENT_TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "townsmith-server-placement-world-{label}-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("temp dir");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        fn library(&self) -> PathBuf {
+            self.0.join("library")
+        }
+    }
+
+    impl Drop for PlacementTempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_test_package(
+        dir: &PlacementTempDir,
+        id: &str,
+        cost: f64,
+        structure: Option<StructureSpec>,
+    ) -> String {
+        let library_root = dir.library();
+        std::fs::create_dir_all(&library_root).expect("library root");
+        let mut volume =
+            VoxelVolume::new(VolumeConfig::new(1, 1, 1).expect("config")).expect("volume");
+        volume
+            .fill_box(VolumePos::new(0, 0, 0), VolumePos::new(1, 1, 1), 1)
+            .expect("fill");
+        let mut metadata = BlueprintMetadata::new(id, "Server Test House");
+        metadata.stats.material_cost = cost;
+        metadata.stats.resident_capacity = 2;
+        metadata.stats.job_slots = 1;
+        metadata.structure = structure;
+        let blueprint = Blueprint::new(metadata, volume);
+        let package = dir.path().join(format!("{}.tsbp", id.replace(':', "_")));
+        let hash = save_tsbp_with_hash(&package, &blueprint).expect("save package");
+        BlueprintLibrary::new(&library_root)
+            .expect("open library")
+            .insert_file(&package)
+            .expect("insert package");
+        hash
+    }
+
+    fn placement_world(dir: &PlacementTempDir) -> ServerWorld {
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Mayor);
+        world.set_blueprint_library(dir.library()).expect("library");
+        assert!(matches!(
+            world.apply(&hello()),
+            ServerMessage::Welcome { .. }
+        ));
+        world
+    }
+
+    fn place(hash: &str, x: f64, z: f64, rotation: i32) -> ClientCommand {
+        ClientCommand::PlaceBlueprint {
+            blueprint_hash: hash.to_string(),
+            x,
+            z,
+            rotation,
+        }
+    }
+
+    fn placement_state(world: &ServerWorld) -> (String, u64, i64, u64, usize, usize) {
+        (
+            world.checksum(),
+            world.tick,
+            world.balance_units(),
+            world
+                .placements
+                .as_ref()
+                .map_or(0, PlacementStore::checksum),
+            world
+                .placements
+                .as_ref()
+                .map_or(0, |store| store.placements.len()),
+            world
+                .construction
+                .as_ref()
+                .map_or(0, ConstructionStore::site_count),
+        )
+    }
+
+    fn expect_placement_result(message: &ServerMessage) -> (&PlacementView, u64, &str, &str) {
+        match message {
+            ServerMessage::PlaceBlueprintResult {
+                tick,
+                placement_id: _,
+                placement_checksum,
+                world_checksum,
+                placement,
+                ..
+            } => (placement, *tick, placement_checksum, world_checksum),
+            other => panic!("expected place_blueprint_result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn blueprint_library_and_policy_builders_validate_their_inputs() {
+        let dir = PlacementTempDir::new("builders");
+        write_test_package(&dir, "townsmith:builders", 1_000.0, None);
+        let mut world = ServerWorld::new(SEED);
+        let checksum = world.checksum();
+
+        let relative = PathBuf::from("relative-blueprints");
+        assert!(world.set_blueprint_library(relative).is_err());
+        assert!(world.blueprint_library.is_none());
+        let missing = std::env::temp_dir().join(format!(
+            "townsmith-server-placement-missing-{}-{}",
+            std::process::id(),
+            PLACEMENT_TEMP_COUNTER.load(std::sync::atomic::Ordering::Relaxed)
+        ));
+        assert!(world.set_blueprint_library(missing).is_err());
+        assert!(world.blueprint_library.is_none());
+        world
+            .set_blueprint_library(dir.library())
+            .expect("valid library");
+        assert!(world.blueprint_library.is_some());
+
+        let mut invalid = DistrictPolicyStore::new(SEED);
+        invalid.next_id = 0;
+        assert!(world.set_policy_registry(invalid).is_err());
+        assert!(world.policies.is_none());
+        assert_eq!(world.checksum(), checksum);
+    }
+
+    #[test]
+    fn place_blueprint_requires_the_mayor_role() {
+        assert_eq!(
+            ClientRole::required_role("place_blueprint"),
+            ClientRole::Mayor
+        );
+        assert_eq!(
+            ClientRole::required_role_for(&place("blake3:00", 0.0, 0.0, 0)),
+            ClientRole::Mayor
+        );
+
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Viewer);
+        assert!(matches!(
+            world.apply(&hello()),
+            ServerMessage::Welcome { .. }
+        ));
+        let checksum = world.checksum();
+        let message = world.apply(&place("blake3:00", 0.0, 0.0, 0));
+        expect_reject(&message, codes::FORBIDDEN);
+        assert_eq!(world.checksum(), checksum);
+    }
+
+    #[test]
+    fn place_blueprint_is_rate_limited_and_audited() {
+        let dir = PlacementTempDir::new("rate");
+        let hash = write_test_package(&dir, "townsmith:rate", 1_000.0, None);
+        let mut world = placement_world(&dir);
+
+        let mut limited = false;
+        for _ in 0..(RATE_BURST_CREDITS * 4) {
+            match world.apply(&place(&hash, 0.0, 0.0, 0)) {
+                ServerMessage::PlaceBlueprintResult { .. } => {
+                    // The first command is accepted and every repeat is the
+                    // idempotent success; both consume a credit.
+                }
+                ServerMessage::Reject { code, .. } if code == codes::RATE_LIMITED => {
+                    limited = true;
+                    break;
+                }
+                other => panic!("unexpected response {other:?}"),
+            }
+        }
+        assert!(limited, "placement must consume the shared rate budget");
+        let audit = world.audit_state();
+        assert!(audit
+            .iter()
+            .any(|entry| entry.tag == "place_blueprint" && entry.code == AUDIT_ACCEPTED));
+        assert!(audit
+            .iter()
+            .any(|entry| entry.tag == "place_blueprint" && entry.code == codes::RATE_LIMITED));
+    }
+
+    #[test]
+    fn place_blueprint_rejects_without_a_configured_library() {
+        let dir = PlacementTempDir::new("no-library");
+        let hash = write_test_package(&dir, "townsmith:no_library", 1_000.0, None);
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Mayor);
+        assert!(matches!(
+            world.apply(&hello()),
+            ServerMessage::Welcome { .. }
+        ));
+        let before = placement_state(&world);
+        expect_reject(
+            &world.apply(&place(&hash, 0.0, 0.0, 0)),
+            protocol_codes::PLACEMENT_LIBRARY_UNAVAILABLE,
+        );
+        assert_eq!(placement_state(&world), before);
+        assert!(world.placements.is_none() && world.construction.is_none());
+
+        // The same world still rejects after the library is cleared again.
+        world.set_blueprint_library(dir.library()).expect("library");
+        world.clear_blueprint_library();
+        expect_reject(
+            &world.apply(&place(&hash, 0.0, 0.0, 0)),
+            protocol_codes::PLACEMENT_LIBRARY_UNAVAILABLE,
+        );
+        assert_eq!(placement_state(&world), before);
+    }
+
+    #[test]
+    fn place_blueprint_rejects_invalid_hashes_and_missing_packages() {
+        let dir = PlacementTempDir::new("hash");
+        write_test_package(&dir, "townsmith:hash", 1_000.0, None);
+        let mut world = placement_world(&dir);
+        let before = placement_state(&world);
+
+        let uppercase = "AB".repeat(32);
+        for bad in ["", "nope", "blake3:abc", uppercase.as_str()] {
+            expect_reject(
+                &world.apply(&place(bad, 0.0, 0.0, 0)),
+                protocol_codes::PLACEMENT_HASH_INVALID,
+            );
+        }
+        let missing = format!("blake3:{}", "a".repeat(64));
+        expect_reject(
+            &world.apply(&place(&missing, 0.0, 0.0, 0)),
+            protocol_codes::PLACEMENT_PACKAGE_MISSING,
+        );
+        assert_eq!(placement_state(&world), before);
+    }
+
+    #[test]
+    fn place_blueprint_rejects_a_corrupt_stored_package() {
+        let dir = PlacementTempDir::new("corrupt");
+        let hash = write_test_package(&dir, "townsmith:corrupt", 1_000.0, None);
+        let hex = hash.strip_prefix("blake3:").expect("canonical hash");
+        let stored = dir.library().join(&hex[..2]).join(format!("{hex}.tsbp"));
+        std::fs::write(&stored, b"not a package").expect("corrupt package");
+        let mut world = placement_world(&dir);
+        let before = placement_state(&world);
+        expect_reject(
+            &world.apply(&place(&hash, 0.0, 0.0, 0)),
+            protocol_codes::PLACEMENT_PACKAGE_INVALID,
+        );
+        assert_eq!(placement_state(&world), before);
+    }
+
+    #[test]
+    fn place_blueprint_applies_the_district_policy_gate() {
+        let dir = PlacementTempDir::new("policy");
+        let hash = write_test_package(&dir, "townsmith:policy", 1_000.0, None);
+        let mut world = placement_world(&dir);
+        let mut policies = DistrictPolicyStore::new(SEED);
+        policies
+            .create(&DistrictPolicyRequest {
+                name: "No Build".to_string(),
+                center: [0.0, 0.0],
+                radius_m: 16.0,
+                tax_multiplier: 1.0,
+                service_funding: 1.0,
+                construction_allowed: false,
+                blueprint_allowlist: BTreeSet::new(),
+            })
+            .expect("policy");
+        world.set_policy_registry(policies).expect("registry");
+        let before = placement_state(&world);
+
+        match world.apply(&place(&hash, 0.0, 0.0, 0)) {
+            ServerMessage::Reject { code, message } => {
+                assert_eq!(code, protocol_codes::PLACEMENT_POLICY_DENIED);
+                assert!(message.contains("policy_construction_disabled"));
+            }
+            other => panic!("expected policy denial, got {other:?}"),
+        }
+        assert_eq!(placement_state(&world), before);
+
+        // The same place outside the denying circle succeeds.
+        assert!(matches!(
+            world.apply(&place(&hash, 64.0, 0.0, 0)),
+            ServerMessage::PlaceBlueprintResult { .. }
+        ));
+    }
+
+    #[test]
+    fn place_blueprint_rejects_a_foreign_seed_policy_registry() {
+        let dir = PlacementTempDir::new("foreign-policy");
+        let hash = write_test_package(&dir, "townsmith:foreign", 1_000.0, None);
+        let mut world = placement_world(&dir);
+        let before = placement_state(&world);
+        let error = world
+            .set_policy_registry(DistrictPolicyStore::new(SEED + 1))
+            .expect_err("foreign registry");
+        assert!(error.to_string().contains("does not match"));
+        assert!(world.policies.is_none());
+        assert_eq!(placement_state(&world), before);
+        // A neutral world still places.
+        assert!(matches!(
+            world.apply(&place(&hash, 0.0, 0.0, 0)),
+            ServerMessage::PlaceBlueprintResult { .. }
+        ));
+    }
+
+    #[test]
+    fn place_blueprint_rejects_a_structure_locked_by_age() {
+        let dir = PlacementTempDir::new("age");
+        let brick = StructureSpec::new(StructuralSystem::LoadBearingBrick, 1, 3.2, 0.0);
+        let hash = write_test_package(&dir, "townsmith:brick", 1_000.0, Some(brick));
+        let mut world = ServerWorld::with_population_and_role(SEED, 10, ClientRole::Mayor);
+        world.set_blueprint_library(dir.library()).expect("library");
+        assert!(matches!(
+            world.apply(&hello()),
+            ServerMessage::Welcome { .. }
+        ));
+        assert_eq!(
+            core_city::progression::AgeState::from_population(u64::from(world.population)).age,
+            core_city::progression::Age::Wood
+        );
+        let before = placement_state(&world);
+        match world.apply(&place(&hash, 0.0, 0.0, 0)) {
+            ServerMessage::Reject { code, message } => {
+                assert_eq!(code, protocol_codes::PLACEMENT_AGE_LOCKED);
+                assert!(message.contains("masonry age"));
+            }
+            other => panic!("expected age lock, got {other:?}"),
+        }
+        assert_eq!(placement_state(&world), before);
+
+        // A late-age city unlocks the same package.
+        let mut late = ServerWorld::with_population_and_role(SEED, 300, ClientRole::Mayor);
+        late.set_blueprint_library(dir.library()).expect("library");
+        assert!(matches!(
+            late.apply(&hello()),
+            ServerMessage::Welcome { .. }
+        ));
+        assert!(matches!(
+            late.apply(&place(&hash, 0.0, 0.0, 0)),
+            ServerMessage::PlaceBlueprintResult { .. }
+        ));
+    }
+
+    #[test]
+    fn place_blueprint_rejects_out_of_range_and_bad_rotation() {
+        let dir = PlacementTempDir::new("bounds");
+        let hash = write_test_package(&dir, "townsmith:bounds", 1_000.0, None);
+        let mut world = placement_world(&dir);
+        let before = placement_state(&world);
+
+        expect_reject(
+            &world.apply(&place(&hash, 1_000_001.0, 0.0, 0)),
+            protocol_codes::PLACEMENT_OUT_OF_RANGE,
+        );
+        expect_reject(
+            &world.apply(&place(&hash, 0.0, f64::NEG_INFINITY, 0)),
+            protocol_codes::PLACEMENT_OUT_OF_RANGE,
+        );
+        expect_reject(
+            &world.apply(&place(&hash, 0.0, 0.0, 45)),
+            protocol_codes::PLACEMENT_ROTATION_INVALID,
+        );
+        assert_eq!(placement_state(&world), before);
+    }
+
+    #[test]
+    fn place_blueprint_rejects_overlap_and_insufficient_funds_without_mutation() {
+        let dir = PlacementTempDir::new("overlap");
+        let hash = write_test_package(&dir, "townsmith:overlap", 1_000.0, None);
+        let mut world = placement_world(&dir);
+        assert!(matches!(
+            world.apply(&place(&hash, 0.0, 0.0, 0)),
+            ServerMessage::PlaceBlueprintResult { .. }
+        ));
+        let after_first = placement_state(&world);
+
+        match world.apply(&place(&hash, 2.0, 0.0, 0)) {
+            ServerMessage::Reject { code, .. } => {
+                assert_eq!(code, protocol_codes::PLACEMENT_OVERLAP)
+            }
+            other => panic!("expected overlap, got {other:?}"),
+        }
+        assert_eq!(placement_state(&world), after_first);
+
+        let balance = world.economy.balance;
+        world.economy.balance = 1.0;
+        match world.apply(&place(&hash, 32.0, 0.0, 0)) {
+            ServerMessage::Reject { code, .. } => {
+                assert_eq!(code, protocol_codes::PLACEMENT_INSUFFICIENT_FUNDS)
+            }
+            other => panic!("expected insufficient funds, got {other:?}"),
+        }
+        world.economy.balance = balance;
+        assert_eq!(placement_state(&world), after_first);
+    }
+
+    #[test]
+    fn place_blueprint_charges_the_first_installment_and_creates_a_site() {
+        let dir = PlacementTempDir::new("accept");
+        let hash = write_test_package(&dir, "townsmith:accept", 1_000.0, None);
+        let mut world = placement_world(&dir);
+        let before = placement_state(&world);
+
+        let message = world.apply(&place(&hash, 0.0, 0.0, 0));
+        let (view, tick, placement_checksum, world_checksum) = expect_placement_result(&message);
+        assert_eq!(tick, 1);
+        assert_eq!(view.id, 1);
+        assert_eq!(view.blueprint_id, "townsmith:accept");
+        assert_eq!(view.blueprint_hash, hash);
+        assert_eq!(view.center, [0.0, 40.0, 0.0]);
+        assert_eq!(view.rotation_deg, 0);
+        assert_eq!(view.footprint_m, [3.2, 3.2]);
+        assert_eq!(view.material_cost, 1_000.0);
+        assert_eq!(view.solid_voxels, 1);
+        assert_eq!(placement_checksum.len(), 16);
+        assert_eq!(world_checksum, world.checksum());
+        assert_ne!(world.checksum(), before.0);
+
+        let installment = first_construction_payment(1_000.0);
+        assert!((world.economy.balance - (STARTING_BALANCE - installment)).abs() < 1.0e-9);
+        let placements = world.placements.as_ref().expect("placements");
+        assert_eq!(placements.placements.len(), 1);
+        let stored = &placements.placements[0];
+        assert_eq!(stored.blueprint_path, placement_package_reference(&hash));
+        assert!(!stored.blueprint_path.contains('/'));
+        let construction = world.construction.as_ref().expect("construction");
+        let site = construction.site(1).expect("site");
+        assert!((site.cost_total - 1_000.0).abs() < 1.0e-9);
+        assert!((site.cost_paid - installment).abs() < 1.0e-9);
+        assert_eq!(site.phase, ConstructionPhase::Survey);
+    }
+
+    #[test]
+    fn place_blueprint_is_idempotent_for_an_exact_repeat() {
+        let dir = PlacementTempDir::new("idempotent");
+        let hash = write_test_package(&dir, "townsmith:idempotent", 1_000.0, None);
+        let mut world = placement_world(&dir);
+
+        let first = world.apply(&place(&hash, 0.0, 0.0, 0));
+        let (view, _, placement_checksum, world_checksum) = expect_placement_result(&first);
+        let placement_id = view.id;
+        let tick = world.tick;
+        let balance = world.economy.balance;
+
+        for _ in 0..3 {
+            let repeat = world.apply(&place(&hash, 0.0, 0.0, 0));
+            let (repeat_view, repeat_tick, repeat_placement, repeat_world) =
+                expect_placement_result(&repeat);
+            assert_eq!(repeat_view.id, placement_id);
+            assert_eq!(repeat_tick, tick);
+            assert_eq!(repeat_placement, placement_checksum);
+            assert_eq!(repeat_world, world_checksum);
+            assert_eq!(world.economy.balance, balance);
+            assert_eq!(world.tick, tick);
+            assert_eq!(world.placements.as_ref().unwrap().placements.len(), 1);
+            assert_eq!(world.construction.as_ref().unwrap().site_count(), 1);
+        }
+
+        // A different centre is a new placement, not a duplicate.
+        assert!(matches!(
+            world.apply(&place(&hash, 16.0, 0.0, 0)),
+            ServerMessage::PlaceBlueprintResult { .. }
+        ));
+        assert_eq!(world.placements.as_ref().unwrap().placements.len(), 2);
+    }
+
+    #[test]
+    fn place_blueprint_stores_two_sequential_placements() {
+        let dir = PlacementTempDir::new("sequential");
+        let hash = write_test_package(&dir, "townsmith:sequential", 1_000.0, None);
+        let mut world = placement_world(&dir);
+        let installment = first_construction_payment(1_000.0);
+
+        for (x, expected_id) in [(0.0, 1), (16.0, 2)] {
+            match world.apply(&place(&hash, x, 0.0, 0)) {
+                ServerMessage::PlaceBlueprintResult {
+                    placement_id,
+                    placement,
+                    ..
+                } => {
+                    assert_eq!(placement_id, expected_id);
+                    assert_eq!(placement.id, expected_id);
+                }
+                other => panic!("expected placement {expected_id}, got {other:?}"),
+            }
+        }
+        assert_eq!(world.placements.as_ref().unwrap().placements.len(), 2);
+        assert_eq!(world.construction.as_ref().unwrap().site_count(), 2);
+        assert!((world.economy.balance - (STARTING_BALANCE - 2.0 * installment)).abs() < 1.0e-9);
+        assert_eq!(world.tick, 2);
+    }
+
+    #[test]
+    fn restore_without_library_rejects_placement_until_reconfigured() {
+        let dir = PlacementTempDir::new("restore");
+        let hash = write_test_package(&dir, "townsmith:restore", 1_000.0, None);
+        let mut world = placement_world(&dir);
+        let first = world.apply(&place(&hash, 0.0, 0.0, 0));
+        let (view, _, _, _) = expect_placement_result(&first);
+        let placement_id = view.id;
+        let checksum = world.checksum();
+
+        let json = world.to_save_json_pretty().expect("json");
+        let mut loaded = ServerWorld::from_save_json(&json).expect("load");
+        assert!(loaded.blueprint_library.is_none());
+        assert!(loaded.policies.is_none());
+        assert_eq!(loaded.checksum(), checksum);
+        assert!(matches!(
+            loaded.apply(&hello()),
+            ServerMessage::Welcome { .. }
+        ));
+        expect_reject(
+            &loaded.apply(&place(&hash, 0.0, 0.0, 0)),
+            protocol_codes::PLACEMENT_LIBRARY_UNAVAILABLE,
+        );
+        assert_eq!(loaded.checksum(), checksum);
+
+        loaded
+            .set_blueprint_library(dir.library())
+            .expect("library");
+        let repeat = loaded.apply(&place(&hash, 0.0, 0.0, 0));
+        let (repeat_view, _, _, repeat_world) = expect_placement_result(&repeat);
+        assert_eq!(repeat_view.id, placement_id);
+        assert_eq!(repeat_world, checksum);
+    }
+
+    #[test]
+    fn placement_stores_move_the_checksum_only_when_present() {
+        let dir = PlacementTempDir::new("checksum");
+        let hash = write_test_package(&dir, "townsmith:checksum", 1_000.0, None);
+        let mut world = placement_world(&dir);
+        let without = world.checksum();
+
+        assert!(matches!(
+            world.apply(&place(&hash, 0.0, 0.0, 0)),
+            ServerMessage::PlaceBlueprintResult { .. }
+        ));
+        let with = world.checksum();
+        assert_ne!(with, without);
+
+        // A fresh world with the same state but no placement store hashes the
+        // old way; the optional fields are appended only when present.
+        let mut fresh = placement_world(&dir);
+        assert_eq!(fresh.checksum(), without);
+        assert!(matches!(
+            fresh.apply(&place(&hash, 0.0, 0.0, 0)),
+            ServerMessage::PlaceBlueprintResult { .. }
+        ));
+        assert_eq!(fresh.checksum(), with);
+    }
+
+    #[test]
+    fn placement_checksums_are_root_independent_and_path_free() {
+        let first = PlacementTempDir::new("root-a");
+        let second = PlacementTempDir::new("root-b");
+        let hash = write_test_package(&first, "townsmith:root_independent", 1_000.0, None);
+        assert_eq!(
+            hash,
+            write_test_package(&second, "townsmith:root_independent", 1_000.0, None)
+        );
+
+        let mut world_a = placement_world(&first);
+        let mut world_b = placement_world(&second);
+        let message_a = world_a.apply(&place(&hash, 0.0, 0.0, 0));
+        let message_b = world_b.apply(&place(&hash, 0.0, 0.0, 0));
+        let (view_a, _, placement_checksum_a, world_checksum_a) =
+            expect_placement_result(&message_a);
+        let (view_b, _, placement_checksum_b, world_checksum_b) =
+            expect_placement_result(&message_b);
+        assert_eq!(placement_checksum_a, placement_checksum_b);
+        assert_eq!(world_checksum_a, world_checksum_b);
+        assert_eq!(world_a.checksum(), world_b.checksum());
+        assert_eq!(view_a, view_b);
+
+        let json = world_a.to_save_json_pretty().expect("save json");
+        assert!(!json.contains(first.path().to_string_lossy().as_ref()));
+        assert!(!json.contains(second.path().to_string_lossy().as_ref()));
+        assert!(!json.contains("/tmp"));
+        assert!(!json.contains("/media"));
+        let value: serde_json::Value = serde_json::from_str(&json).expect("save value");
+        let stored = value["placements"]["placements"][0]["blueprint_path"]
+            .as_str()
+            .expect("stored reference");
+        assert_eq!(stored, placement_package_reference(&hash));
+        assert!(!stored.contains('/'));
+
+        for message in [&message_a, &message_b] {
+            let wire = serde_json::to_string(message).expect("wire json");
+            assert!(!wire.contains("blueprint_path"));
+            assert!(!wire.contains("/tmp"));
+            assert!(!wire.contains("/media"));
+        }
     }
 }

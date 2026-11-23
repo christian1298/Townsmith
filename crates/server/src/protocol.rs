@@ -1,4 +1,4 @@
-//! Authoritative server protocol v0.
+//! Authoritative server protocol v1.
 //!
 //! This is the Phase 6 foundation: transport framing, the first client/server
 //! message set, stable validation codes, and a deterministic loopback smoke.
@@ -19,7 +19,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// Protocol revision carried by `Hello` and `Welcome`.
-pub const PROTOCOL_VERSION: u16 = 0;
+pub const PROTOCOL_VERSION: u16 = 1;
+
+/// Canonical prefix of a `.tsbp` BLAKE3 content hash.
+pub const BLUEPRINT_HASH_PREFIX: &str = "blake3:";
 
 /// Maximum accepted frame payload, including the JSON body.
 pub const MAX_FRAME_LEN: usize = 1024 * 1024;
@@ -111,6 +114,36 @@ pub mod codes {
     pub const ROAD_EMPTY: &str = "road.empty";
     pub const ROAD_OUT_OF_BOUNDS: &str = "road.out_of_bounds";
     pub const ROAD_TOO_LONG: &str = "road.too_long";
+
+    // Blueprint placement (D-032). These are the stable wire codes for the
+    // `place_blueprint` command and its rejections.
+    /// The transport-only reference session has no package library.
+    pub const PLACEMENT_UNAVAILABLE: &str = "PLACEMENT_UNAVAILABLE";
+    /// The authoritative world has no blueprint library configured.
+    pub const PLACEMENT_LIBRARY_UNAVAILABLE: &str = "PLACEMENT_LIBRARY_UNAVAILABLE";
+    /// The requested hash is not `blake3:<64 lowercase hex>` (or bare 64 hex).
+    pub const PLACEMENT_HASH_INVALID: &str = "PLACEMENT_HASH_INVALID";
+    /// A valid hash that the server library does not store.
+    pub const PLACEMENT_PACKAGE_MISSING: &str = "PLACEMENT_PACKAGE_MISSING";
+    /// The stored package failed `.tsbp` validation or metadata checks.
+    pub const PLACEMENT_PACKAGE_INVALID: &str = "PLACEMENT_PACKAGE_INVALID";
+    /// A district policy blocks the placement; the bridge policy code is in
+    /// the message.
+    pub const PLACEMENT_POLICY_DENIED: &str = "PLACEMENT_POLICY_DENIED";
+    /// A coordinate is non-finite or outside the world range.
+    pub const PLACEMENT_OUT_OF_RANGE: &str = "PLACEMENT_OUT_OF_RANGE";
+    /// The rotation is not a multiple of 90 degrees.
+    pub const PLACEMENT_ROTATION_INVALID: &str = "PLACEMENT_ROTATION_INVALID";
+    /// The rotated footprint overlaps an existing placement.
+    pub const PLACEMENT_OVERLAP: &str = "PLACEMENT_OVERLAP";
+    /// The settlement age has not unlocked the blueprint's structure.
+    pub const PLACEMENT_AGE_LOCKED: &str = "PLACEMENT_AGE_LOCKED";
+    /// The treasury cannot afford the first construction installment.
+    pub const PLACEMENT_INSUFFICIENT_FUNDS: &str = "PLACEMENT_INSUFFICIENT_FUNDS";
+    /// The placement or construction store is at capacity.
+    pub const PLACEMENT_STORE_FULL: &str = "PLACEMENT_STORE_FULL";
+    /// A placement or construction failure not covered by a narrower code.
+    pub const PLACEMENT_REJECTED: &str = "PLACEMENT_REJECTED";
 
     // Time votes. The state-machine codes live in `vote::codes`; this one is
     // specific to the transport-only session, which has no vote state.
@@ -263,6 +296,23 @@ pub enum ClientCommand {
         center_z: f64,
         radius_m: f64,
     },
+    /// D-032 authoritative blueprint placement.
+    ///
+    /// The wire carries only the content-addressed package hash, the rotated
+    /// footprint centre in metres, and a rotation in degrees. The package path
+    /// never crosses the wire: the server resolves the hash in its own
+    /// pre-seeded content-addressed library. Requires the Mayor role.
+    PlaceBlueprint {
+        /// `blake3:<64 lowercase hex>` or bare 64 lowercase hex. Normalized to
+        /// the canonical prefixed form before lookup.
+        blueprint_hash: String,
+        /// Footprint centre X in world metres.
+        x: f64,
+        /// Footprint centre Z in world metres.
+        z: f64,
+        /// Rotation around Y in degrees; must be a multiple of 90.
+        rotation: i32,
+    },
     Disconnect,
 }
 
@@ -277,6 +327,7 @@ impl ClientCommand {
             ClientCommand::SetTax { .. } => "set_tax",
             ClientCommand::PlaceRoad { .. } => "place_road",
             ClientCommand::SetInterest { .. } => "set_interest",
+            ClientCommand::PlaceBlueprint { .. } => "place_blueprint",
             ClientCommand::Disconnect => "disconnect",
         }
     }
@@ -346,6 +397,41 @@ pub struct BuildingView {
     pub center: [f32; 2],
     /// Building footprint radius in metres (a render hint, not authoritative).
     pub radius_m: f32,
+}
+
+/// One authoritative placement returned by `place_blueprint`.
+///
+/// The view is a copy of the server-owned [`core_city::placement::Placement`]
+/// record without the server-local `blueprint_path`. A remote client never
+/// receives a filesystem path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementView {
+    /// Stable placement id within the world save.
+    pub id: u64,
+    /// Stable blueprint id.
+    pub blueprint_id: String,
+    /// Canonical `blake3:<hex>` content hash.
+    pub blueprint_hash: String,
+    /// Human-readable blueprint name.
+    pub name: String,
+    /// Building base centre; `y` is the foundation top.
+    pub center: [f32; 3],
+    /// Normalized rotation around Y, 0/90/180/270.
+    pub rotation_deg: u16,
+    /// Rotated footprint: x, z.
+    pub footprint_m: [f32; 2],
+    /// Full volume bounds: width, height, depth.
+    pub bounds_m: [f32; 3],
+    /// Vertical distance from the lowest sampled terrain to `center.y`.
+    pub foundation_m: f32,
+    /// Blueprint material cost.
+    pub material_cost: f64,
+    /// Blueprint resident capacity.
+    pub resident_capacity: u32,
+    /// Blueprint job slots.
+    pub job_slots: u32,
+    /// Blueprint solid voxels, used as construction material litres.
+    pub solid_voxels: u64,
 }
 
 /// Messages the authoritative server sends.
@@ -428,6 +514,26 @@ pub enum ServerMessage {
     Reject {
         code: String,
         message: String,
+    },
+    /// Accepted authoritative blueprint placement (D-032).
+    ///
+    /// Sent only when the whole command succeeded: the package resolved and
+    /// validated, policy/age/terrain passed, and the treasury accepted the
+    /// first D-028 installment. `placement_checksum` covers the placement store
+    /// and `world_checksum` covers the whole world, both as stable hex.
+    PlaceBlueprintResult {
+        /// Authoritative tick after the accepted placement.
+        tick: u64,
+        /// Id of the stored placement.
+        placement_id: u64,
+        /// Canonical `blake3:<hex>` hash that was placed.
+        blueprint_hash: String,
+        /// Stable checksum of the server placement store.
+        placement_checksum: String,
+        /// Stable checksum of the whole world.
+        world_checksum: String,
+        /// Copy of the stored placement without any server filesystem path.
+        placement: PlacementView,
     },
     /// Vote snapshot/status, sent after every accepted vote command.
     ///
@@ -567,6 +673,7 @@ pub fn decode_client_command(payload: &[u8]) -> Result<ClientCommand, Rejection>
         "set_tax",
         "place_road",
         "set_interest",
+        "place_blueprint",
         "disconnect",
     ];
     if !KNOWN_TAGS.contains(&tag) {
@@ -712,6 +819,63 @@ pub fn validate_interest(center_x: f64, center_z: f64, radius_m: f64) -> Result<
         return Err(Rejection::new(
             codes::INTEREST_RADIUS_OUT_OF_RANGE,
             format!("interest radius must be within 0..={MAX_INTEREST_RADIUS_M} m"),
+        ));
+    }
+    Ok(())
+}
+
+/// Normalize a `place_blueprint` package hash.
+///
+/// Accepts the canonical `blake3:<64 lowercase hex>` form used by the library
+/// and the bare 64-lowercase-hex form for convenience. Uppercase hex, paths,
+/// traversal, and any other shape are rejected. The returned string is the
+/// canonical prefixed form used as the library address.
+pub fn normalize_blueprint_hash(hash: &str) -> Result<String, Rejection> {
+    let hex = hash.strip_prefix(BLUEPRINT_HASH_PREFIX).unwrap_or(hash);
+    let valid = hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if !valid {
+        return Err(Rejection::new(
+            codes::PLACEMENT_HASH_INVALID,
+            "blueprint hash must be `blake3:` followed by 64 lowercase hexadecimal characters",
+        ));
+    }
+    Ok(format!("{BLUEPRINT_HASH_PREFIX}{hex}"))
+}
+
+/// Validate a `place_blueprint` payload before the executor touches a store.
+///
+/// The package hash is normalized; coordinates must be finite, fit in `f32`,
+/// and stay within [`MAX_WORLD_COORD`]; the rotation must be a multiple of 90
+/// degrees. Payload validation is store-independent, so it runs before the
+/// library lookup.
+pub fn validate_place_blueprint(
+    blueprint_hash: &str,
+    x: f64,
+    z: f64,
+    rotation: i32,
+) -> Result<(), Rejection> {
+    normalize_blueprint_hash(blueprint_hash)?;
+    for (axis, value) in [("x", x), ("z", z)] {
+        if !value.is_finite() || !(value as f32).is_finite() {
+            return Err(Rejection::new(
+                codes::PLACEMENT_OUT_OF_RANGE,
+                format!("placement {axis} must be finite"),
+            ));
+        }
+        if value.abs() > f64::from(MAX_WORLD_COORD) {
+            return Err(Rejection::new(
+                codes::PLACEMENT_OUT_OF_RANGE,
+                format!("placement {axis} {value} is outside ±{MAX_WORLD_COORD} m"),
+            ));
+        }
+    }
+    if rotation.rem_euclid(90) != 0 {
+        return Err(Rejection::new(
+            codes::PLACEMENT_ROTATION_INVALID,
+            format!("placement rotation {rotation} is not a multiple of 90 degrees"),
         ));
     }
     Ok(())
@@ -914,6 +1078,10 @@ impl Session {
             ClientCommand::SetInterest { .. } => reject(
                 codes::INTEREST_UNAVAILABLE,
                 "interest filtering requires the authoritative executor, not the transport-only session",
+            ),
+            ClientCommand::PlaceBlueprint { .. } => reject(
+                codes::PLACEMENT_UNAVAILABLE,
+                "blueprint placement requires the authoritative executor with a package library, not the transport-only session",
             ),
         }
     }
@@ -1352,6 +1520,152 @@ mod tests {
         assert!(
             validate_hello(PROTOCOL_VERSION, &hash, &"a".repeat(MAX_PLAYER_NAME_CHARS)).is_ok()
         );
+    }
+
+    #[test]
+    fn place_blueprint_decodes_and_validates_its_payload() {
+        let hash = format!("{BLUEPRINT_HASH_PREFIX}{}", "ab".repeat(32));
+        let payload = format!(
+            r#"{{"type":"place_blueprint","blueprint_hash":"{hash}","x":16.5,"z":-4.0,"rotation":-90}}"#
+        );
+        let decoded = decode_client_command(payload.as_bytes()).expect("place_blueprint decodes");
+        assert_eq!(
+            decoded,
+            ClientCommand::PlaceBlueprint {
+                blueprint_hash: hash.clone(),
+                x: 16.5,
+                z: -4.0,
+                rotation: -90,
+            }
+        );
+        assert_eq!(decoded.tag(), "place_blueprint");
+        assert!(validate_place_blueprint(&hash, 16.5, -4.0, -90).is_ok());
+
+        // Bare lowercase hex is accepted and normalized to the canonical form.
+        let bare = "ab".repeat(32);
+        assert_eq!(normalize_blueprint_hash(&bare).expect("bare hash"), hash);
+        assert_eq!(normalize_blueprint_hash(&hash).expect("prefixed"), hash);
+
+        // Non-JSON fields are a decode error.
+        let rejection = decode_client_command(
+            br#"{"type":"place_blueprint","blueprint_hash":1,"x":0,"z":0,"rotation":0}"#,
+        )
+        .expect_err("numeric hash must not decode");
+        assert_eq!(rejection.code, codes::COMMAND_INVALID_FIELDS);
+    }
+
+    #[test]
+    fn place_blueprint_rejects_malformed_hashes_and_rotations() {
+        let valid = format!("{BLUEPRINT_HASH_PREFIX}{}", "ab".repeat(32));
+        let bad_hashes = [
+            String::new(),
+            "blake3:".to_string(),
+            "ab".to_string(),
+            "AB".repeat(32),
+            format!("blake3:{}", "AB".repeat(32)),
+            format!("{valid}/../x"),
+            format!("sha256:{}", "ab".repeat(32)),
+        ];
+        for bad in &bad_hashes {
+            assert_eq!(
+                validate_place_blueprint(bad, 0.0, 0.0, 0).unwrap_err().code,
+                codes::PLACEMENT_HASH_INVALID,
+                "hash `{bad}` must be rejected"
+            );
+        }
+
+        for rotation in [1, 45, 89, 91, -45, i32::MAX] {
+            assert_eq!(
+                validate_place_blueprint(&valid, 0.0, 0.0, rotation)
+                    .unwrap_err()
+                    .code,
+                codes::PLACEMENT_ROTATION_INVALID,
+                "rotation {rotation} must be rejected"
+            );
+        }
+        for rotation in [0, 90, 180, 270, -90, 360, -270] {
+            assert!(
+                validate_place_blueprint(&valid, 0.0, 0.0, rotation).is_ok(),
+                "rotation {rotation} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn place_blueprint_rejects_non_finite_and_out_of_range_coordinates() {
+        let valid = format!("{BLUEPRINT_HASH_PREFIX}{}", "ab".repeat(32));
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
+            assert_eq!(
+                validate_place_blueprint(&valid, value, 0.0, 0)
+                    .unwrap_err()
+                    .code,
+                codes::PLACEMENT_OUT_OF_RANGE
+            );
+            assert_eq!(
+                validate_place_blueprint(&valid, 0.0, value, 0)
+                    .unwrap_err()
+                    .code,
+                codes::PLACEMENT_OUT_OF_RANGE
+            );
+        }
+        assert_eq!(
+            validate_place_blueprint(&valid, 1_000_001.0, 0.0, 0)
+                .unwrap_err()
+                .code,
+            codes::PLACEMENT_OUT_OF_RANGE
+        );
+        assert!(validate_place_blueprint(&valid, -1_000_000.0, 1_000_000.0, 0).is_ok());
+    }
+
+    #[test]
+    fn place_blueprint_result_round_trips_without_a_server_path() {
+        let message = ServerMessage::PlaceBlueprintResult {
+            tick: 7,
+            placement_id: 3,
+            blueprint_hash: format!("{BLUEPRINT_HASH_PREFIX}{}", "cd".repeat(32)),
+            placement_checksum: "0123456789abcdef".to_string(),
+            world_checksum: "fedcba9876543210".to_string(),
+            placement: PlacementView {
+                id: 3,
+                blueprint_id: "townsmith:villa".to_string(),
+                blueprint_hash: format!("{BLUEPRINT_HASH_PREFIX}{}", "cd".repeat(32)),
+                name: "Villa".to_string(),
+                center: [16.0, 41.0, 32.0],
+                rotation_deg: 90,
+                footprint_m: [8.0, 12.0],
+                bounds_m: [12.0, 9.6, 8.0],
+                foundation_m: 1.0,
+                material_cost: 38_028.8,
+                resident_capacity: 2,
+                job_slots: 2,
+                solid_voxels: 64_224,
+            },
+        };
+        let mut buffer = Vec::new();
+        write_json_frame(&mut buffer, &message).expect("encode");
+        let decoded: ServerMessage = read_json_frame(&mut buffer.as_slice()).expect("decode");
+        assert_eq!(decoded, message);
+
+        let json = serde_json::to_string(&message).expect("json");
+        assert!(!json.contains("blueprint_path"));
+        assert!(json.contains("\"type\":\"place_blueprint_result\""));
+    }
+
+    #[test]
+    fn transport_session_rejects_place_blueprint_without_mutation() {
+        let mut session = Session::new(LOOPBACK_SEED);
+        session.handle(hello());
+        let tick = session.tick();
+        let checksum = session.checksum();
+        let messages = session.handle(ClientCommand::PlaceBlueprint {
+            blueprint_hash: format!("{BLUEPRINT_HASH_PREFIX}{}", "ab".repeat(32)),
+            x: 0.0,
+            z: 0.0,
+            rotation: 0,
+        });
+        expect_reject(&messages, codes::PLACEMENT_UNAVAILABLE);
+        assert_eq!(session.tick(), tick);
+        assert_eq!(session.checksum(), checksum);
     }
 
     #[test]

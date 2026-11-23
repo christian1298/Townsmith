@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use core_sim::{Cohort, CohortSimulation};
 use townsmith_server::listen::{run_listen, run_save_load_smoke, ListenConfig};
+use townsmith_server::placement::run_placement_smoke;
 use townsmith_server::protocol::{run_loopback_smoke, LOOPBACK_SEED};
 use townsmith_server::save::LoadedWorld;
 use townsmith_server::vote::run_time_vote_loopback;
@@ -198,6 +199,27 @@ fn main() {
         return;
     }
 
+    if has_flag("--placement-smoke") {
+        match run_placement_smoke() {
+            Ok(report) => println!(
+                "SERVER_PLACEMENT placed={} duplicate={} policy={} funds={} overlap={} save={} reload={} checksum={} status=ok",
+                u8::from(report.placed),
+                u8::from(report.duplicate),
+                u8::from(report.policy),
+                u8::from(report.funds),
+                u8::from(report.overlap),
+                u8::from(report.save),
+                u8::from(report.reload),
+                report.checksum
+            ),
+            Err(error) => {
+                eprintln!("SERVER_PLACEMENT status=error error={error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     if let Some(port) = arg_value("--listen") {
         run_listen_mode(&port);
         return;
@@ -297,6 +319,7 @@ fn run_listen_mode(port: &str) {
 
     let mut world = world;
     world.set_role(role);
+    configure_placement(&mut world);
 
     let listener = match TcpListener::bind(address) {
         Ok(listener) => listener,
@@ -337,6 +360,54 @@ fn run_listen_mode(port: &str) {
         ),
         Err(error) => {
             eprintln!("SERVER_SAVE status=error action=save error={error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Apply the optional placement configuration flags to a served world.
+///
+/// Both flags are opt-in process configuration, never save data:
+/// `--blueprint-library <dir>` opens an existing absolute content-addressed
+/// package library, and `--policies <json>` loads a district policy registry
+/// that must belong to the world seed. A failed flag exits the process before
+/// the listener is bound.
+fn configure_placement(world: &mut ServerWorld) {
+    if let Some(root) = arg_value("--blueprint-library") {
+        let path = PathBuf::from(&root);
+        if !path.is_absolute() {
+            eprintln!(
+                "SERVER_LISTEN status=error error=--blueprint-library must be an absolute path, got `{root}`"
+            );
+            std::process::exit(2);
+        }
+        if let Err(error) = world.set_blueprint_library(path) {
+            eprintln!("SERVER_LISTEN status=error error=blueprint library: {error}");
+            std::process::exit(1);
+        }
+    }
+    if let Some(policies) = arg_value("--policies") {
+        let path = PathBuf::from(&policies);
+        let json = match std::fs::read_to_string(&path) {
+            Ok(json) => json,
+            Err(error) => {
+                eprintln!(
+                    "SERVER_LISTEN status=error error=read policies {}: {error}",
+                    path.display()
+                );
+                std::process::exit(1);
+            }
+        };
+        let store =
+            match core_city::policy::DistrictPolicyStore::from_json_for_seed(&json, world.seed) {
+                Ok(store) => store,
+                Err(error) => {
+                    eprintln!("SERVER_LISTEN status=error error=district policies: {error}");
+                    std::process::exit(1);
+                }
+            };
+        if let Err(error) = world.set_policy_registry(store) {
+            eprintln!("SERVER_LISTEN status=error error=district policies: {error}");
             std::process::exit(1);
         }
     }

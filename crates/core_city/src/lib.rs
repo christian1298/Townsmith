@@ -44,6 +44,7 @@ pub mod movement;
 pub mod named;
 pub mod pack;
 pub mod placement;
+pub mod placement_rule;
 pub mod policy;
 pub mod policy_effect;
 pub mod population;
@@ -66,14 +67,14 @@ pub use advisor::{
     advise, AdvisorInput, AdvisorMessage, AdvisorReport, Severity, MAX_ADVISOR_MESSAGES,
 };
 pub use construction::{
-    campaign_phase_days_for, campaign_total_days_for, total_seconds_for, ConstructionError,
-    ConstructionPhase, ConstructionSite, ConstructionStore, ConstructionTick,
-    ConstructionTimeScale, CAMPAIGN_COTTAGE_DAYS, CAMPAIGN_COTTAGE_VOXELS,
-    CAMPAIGN_DEFAULT_SECONDS_PER_GAME_DAY, CAMPAIGN_MATERIAL_LEAD_FRACTION,
-    CAMPAIGN_MAX_BUILD_DAYS, CAMPAIGN_MAX_PHASE_DAYS, CAMPAIGN_MAX_SECONDS_PER_GAME_DAY,
-    CAMPAIGN_MIN_BUILD_DAYS, CAMPAIGN_MIN_SECONDS_PER_GAME_DAY, CAMPAIGN_SIZE_EXPONENT,
-    CONSTRUCTION_FORMAT_VERSION, MAX_SITES as MAX_CONSTRUCTION_SITES, MAX_SITE_COST,
-    MAX_TICK_SECONDS,
+    campaign_phase_days_for, campaign_total_days_for, first_construction_payment,
+    settle_first_installment, total_seconds_for, ConstructionError, ConstructionPhase,
+    ConstructionSite, ConstructionStore, ConstructionTick, ConstructionTimeScale,
+    CAMPAIGN_COTTAGE_DAYS, CAMPAIGN_COTTAGE_VOXELS, CAMPAIGN_DEFAULT_SECONDS_PER_GAME_DAY,
+    CAMPAIGN_MATERIAL_LEAD_FRACTION, CAMPAIGN_MAX_BUILD_DAYS, CAMPAIGN_MAX_PHASE_DAYS,
+    CAMPAIGN_MAX_SECONDS_PER_GAME_DAY, CAMPAIGN_MIN_BUILD_DAYS, CAMPAIGN_MIN_SECONDS_PER_GAME_DAY,
+    CAMPAIGN_SIZE_EXPONENT, CONSTRUCTION_FORMAT_VERSION, MAX_SITES as MAX_CONSTRUCTION_SITES,
+    MAX_SITE_COST, MAX_TICK_SECONDS,
 };
 pub use core_structure::{StructuralSystem, StructureError, StructureSpec, StructureSummary};
 pub use district::{
@@ -127,6 +128,7 @@ pub use placement::{
     MAX_FOOTPRINT_M, MAX_SLOPE_M, MAX_WORLD_COORD_M, PLACEMENT_GAP_M, PLACEMENT_INDEX_CELL_M,
     WATER_LEVEL_M, WORLD_SAVE_FORMAT_VERSION,
 };
+pub use placement_rule::{structure_age_error, structure_required_age};
 pub use policy::{
     policy_allows_placement, policy_placement_denial, DistrictPolicy, DistrictPolicyError,
     DistrictPolicyRequest, DistrictPolicyStore, PolicyPlacementDenial,

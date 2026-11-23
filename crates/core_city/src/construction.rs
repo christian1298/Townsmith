@@ -11,7 +11,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::economy::DAY_SECONDS;
+use crate::economy::{Economy, DAY_SECONDS};
 use crate::trades::{Trade, TradeError, TradePool};
 
 /// Current construction save format.
@@ -367,6 +367,44 @@ pub fn campaign_phase_days_for(phase: ConstructionPhase, solid_voxels: u64) -> f
         return 0.0;
     }
     (campaign_total_days_for(solid_voxels) * f64::from(phase.weight())).min(CAMPAIGN_MAX_PHASE_DAYS)
+}
+
+/// First construction installment (Survey) for a placement price.
+///
+/// The bridge and the authoritative server share this rounding so a placement
+/// is charged the same amount on both paths. A non-finite or non-positive
+/// price is free.
+#[must_use]
+pub fn first_construction_payment(material_cost: f64) -> f64 {
+    if !material_cost.is_finite() || material_cost <= 0.0 {
+        return 0.0;
+    }
+    (material_cost * ConstructionPhase::Survey.billing_weight() * 100.0).round() / 100.0
+}
+
+/// Charge the first construction installment and mark its site paid.
+///
+/// Returns `true` only when the treasury accepted the charge and the site
+/// accepted the payment. A failed charge moves nothing; a site that rejects
+/// the installment after the charge is refunded, so a rolled-back placement
+/// cannot keep the money without a site (F-015). This is the shared rule for
+/// the bridge and the server `place_blueprint` command.
+pub fn settle_first_installment(
+    economy: &mut Economy,
+    construction: &mut ConstructionStore,
+    placement_id: u64,
+    amount: f64,
+) -> bool {
+    if !economy.try_charge_construction(amount) {
+        return false;
+    }
+    let marked_paid = construction
+        .site_mut(placement_id)
+        .is_some_and(|site| site.mark_paid(amount).is_ok());
+    if !marked_paid {
+        economy.refund_construction(amount);
+    }
+    marked_paid
 }
 
 /// One construction site created by a placement.
