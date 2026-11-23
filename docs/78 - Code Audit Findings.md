@@ -39,7 +39,7 @@ tags:
 | Terrain boundary walls and f32 bound | F-047, F-048 | Fixed | PR #251; terrain quads 82,970 / 24,815 / 7,675 |
 | Infrastructure seed treasury | F-016 | Fixed | PR #252; initial due charged, rollback restores only a created treasury |
 | ID range, seed bound, named-age docs | F-050, F-051, F-053 | Fixed | PR #253 |
-| Operational: extension rebuild and smoke re-run | F-082, F-084 | Verified for the fix-session tree | Extension rebuilt and world/bench/stream/movement/MP smokes run in the 2026-11-23 fix session on Godot 4.7.2. Not re-run at master `a39a6bd` in the docs reconciliation (no Godot binary on this machine; `godot/bin/libtownsmith_core.so` is gitignored and absent in a fresh worktree). |
+| Operational: extension rebuild and smoke re-run | F-082, F-084 | Verified for the fix-session tree | Extension rebuilt and world/bench/stream/movement/MP smokes run in the 2026-11-23 fix session on Godot 4.7.2. Not re-run at master `61434d9` in the docs reconciliation (no Godot binary on this machine; `godot/bin/libtownsmith_core.so` is gitignored and absent in a fresh worktree). |
 | Multi-connection sessions and vote loopback | F-003 | Fixed | PR #287; 7 new server tests; `SERVER_TIME_VOTE ... checksum=ec840a35bac5065a`; existing protocol/authority/roles/resume/interest pins unchanged |
 
 ### Deferred
@@ -47,9 +47,9 @@ tags:
 No audited finding remains deferred. F-003 was the last item; it is fixed in PR #287 (see the row above).
 
 > [!info] Post-audit tooling and product slices
-> The post-audit slices #257–#269 and #277–#290 followed this audit: #257 `F6` district selection focus, #258 1M gate-result evaluator (`scripts/check_metropolis_gate.py`), #259 Q-101 capture form, #260 district policy registry/bridge, #261 benchmark-screen frame-time graphs, #262 server `InterestView` road list, #263 F7 heatmap metric modes, #265 data-only `DistrictPolicyEffect`, #266 Godot interest preview, #267 Q-101 capture summarizer, #268 standalone policy editor, #269 MP reconnect (`--reconnect`, server `--sessions N`), #277 district construction/allowlist placement gate, #278 district policy tax weighting (D-030, Proposed), #279 100 km² streaming with 250k building records, #280 gate-result assembler (hardened by #290), #283 dashboard settlement selector, #284 bounded interest-view building records, #285 district service funding (D-031, Proposed), #286 validation-preview placement parity, #287 multi-connection sessions and `--vote-smoke` (fixes F-003), #288 interest-preview building boxes (replaces closed #281), and #289 policy-circle spatial index. #282 is this docs-only reconciliation. They are workflow and product capabilities, not additional audit fixes.
+> The post-audit slices #257–#298 followed this audit: #257 `F6` district selection focus, #258 1M gate-result evaluator (`scripts/check_metropolis_gate.py`), #259 Q-101 capture form, #260 district policy registry/bridge, #261 benchmark-screen frame-time graphs, #262 server `InterestView` road list, #263 F7 heatmap metric modes, #265 data-only `DistrictPolicyEffect`, #266 Godot interest preview, #267 Q-101 capture summarizer, #268 standalone policy editor, #269 MP reconnect (`--reconnect`, server `--sessions N`), #277 district construction/allowlist placement gate, #278 district policy tax weighting (D-030, Proposed), #279 100 km² streaming with 250k building records, #280 gate-result assembler (hardened by #290), #283 dashboard settlement selector, #284 bounded interest-view building records, #285 district service funding (D-031, Proposed), #286 validation-preview placement parity, #287 multi-connection sessions and `--vote-smoke` (fixes F-003), #288 interest-preview building boxes (replaces closed #281), #289 policy-circle spatial index, #291 server-authoritative blueprint placement (D-032, Proposed), #292 local 1M cohort/save/streaming evidence (assembled result stays `insufficient` without a render run), #293 3D multiplayer world client, #294 read-only per-settlement dashboard panels, #295 runtime content registry, #296 settlement ownership and permissions (D-033, Proposed), #297 compact dashboard policy editing, and #298 content-addressed local blueprint library. #282 and this slice are docs-only reconciliations. They are workflow and product capabilities, not additional audit fixes.
 >
-> No audited finding remains deferred: F-003 is fixed by #287. Still open on the product/hardware side: reference-hardware evidence for the 1M cohort/render gate (the #273 harness and #280/#290 assembler compose recorded evidence; neither substitutes for a run) and the Q-101 human playtest.
+> No audited finding remains deferred: F-003 is fixed by #287. Still open on the product/hardware side: reference-hardware evidence for the 1M cohort/render gate (the #273 harness, #292 local record, and #280/#290 assembler compose recorded evidence; none substitutes for a reference-hardware run) and the Q-101 human playtest.
 
 ## How to use this document
 
@@ -66,11 +66,11 @@ No audited finding remains deferred. F-003 was the last item; it is fixed in PR 
 | `cargo test --workspace` | **909 passed, 0 failed** |
 | `content/` schema (`check_content_schema.py`) | ok (4 files, 32 entries) |
 | `scripts/*.sh` `bash -n`, `scripts/*.py` compile | clean |
-| Godot headless smokes | run 2026-11-23 on Godot 4.7.2 for the fix-session tree: world scene, bench screen/live, stream order, movement stress, and MP client all `status=ok` (markers in the status table above). Not re-run at master `a39a6bd` in this docs pass. |
-| Docs frontmatter / wikilinks / D-Q-A IDs | zero broken wikilinks; D-001..D-031, Q-001..Q-102, A-001..A-016 gap/duplicate-free |
+| Godot headless smokes | run 2026-11-23 on Godot 4.7.2 for the fix-session tree: world scene, bench screen/live, stream order, movement stress, and MP client all `status=ok` (markers in the status table above). Not re-run at master `61434d9` in this docs pass. |
+| Docs frontmatter / wikilinks / D-Q-A IDs | zero broken wikilinks; D-001..D-033, Q-001..Q-115, A-001..A-016 gap/duplicate-free |
 
 > [!note] Current suite total
-> The **909 passed** row above is the audit baseline. At master `a39a6bd` on 2026-11-23, `cargo test --workspace` reports **1154 tests** (1149 unit/integration + 5 doctests), all passing; fmt and clippy are clean. [[00 - Start Here]] and [[18 - Phase 0 Implementation]] carry the per-crate split.
+> The **909 passed** row above is the audit baseline. At master `61434d9` on 2026-11-23, `cargo test --workspace` reports **1202 tests** (1197 unit/integration + 5 doctests), all passing; fmt and clippy are clean. [[00 - Start Here]] and [[18 - Phase 0 Implementation]] carry the per-crate split.
 
 Nine parallel deep reviews covered: `godot_ext`, `core_voxel`+`core_world`, `core_city` (two halves), `core_sim`+`core_blueprint`+`core_rooms`+`core_structure`, `server`, `bench` (all 25 bins), `godot/` scripts+scenes, `scripts/`+CI+docs. Full read of ~68k lines Rust and ~15k lines GDScript/scenes.
 
