@@ -283,7 +283,7 @@ flowchart LR
 save_001/
 ├── world.db            # SQLite: settlements, districts, roads, buildings, citizens, economy
 ├── world.db-wal        # write-ahead log
-├── world.json          # seed, worldgen version, game version, content hash
+├── world.json          # seed, worldgen version, game version; content identity when a pack is active (proposed, D-034)
 ├── deltas/
 │   ├── terrain/        # per-chunk height/edit deltas
 │   ├── resources/      # harvested trees, deposits, wildlife changes
@@ -330,6 +330,28 @@ save_001/
 - The library can live in the save, a shared folder, or a server cache.
 - Missing blueprint on load → placeholder massing + warning; never delete the instance silently.
 
+### Content identity (proposed, D-034)
+
+Not implemented. The current `world.json` has no pack identity, and `world_load` accepts whatever registry is live. D-034 (Proposed) would add one optional top-level object:
+
+```json
+"content": {
+  "format_version": 1,
+  "pack_id": "example:copper_age",
+  "pack_checksum": "ad4c645869a411ed",
+  "registry_checksum": "330a538d07805b50"
+}
+```
+
+- **Base-only saves omit it** and stay outer `format_version: 1` and byte-identical. A save written with a live pack uses outer `format_version: 2` and the object; an older reader rejects v2 with its existing unsupported-version error instead of silently loading base content.
+- **Load verification runs before store construction or any `.tsbp` load**, immediately after the save JSON is read. The active pack ID, pack checksum, and merged registry checksum must match; missing or changed packs return a stable `content_*` code and leave live state untouched.
+- **One pack only.** The object describes the single `content_load_dir` pack merged after base, not a list or load order. Multi-pack saves need a new identity format version. `content_multiple_packs_unsupported` blocks a save if the registry ever reports more than one.
+- **Identity survives a load/save cycle.** A content-bound world cannot be saved without its pack or with a different pack; unpinning is an explicit content migration (Q-118), not a normal save.
+- **No auto-download, no substitution.** `--accept-missing-content`/the bridge opt-out is reserved for a future read-only inspector that preserves unknown IDs and refuses saves (Q-117). It is not implemented.
+- Per-blueprint hashes and `dependencies.mods` remain separate; the world object is the coarse pack gate, not a per-ID reference list.
+
+The same object should be reused by `ServerSave` when the authoritative server carries content-bound placements (D-032); `ServerSave` has no content-manifest enforcement today.
+
 ### Migrations
 
 - `schema_version` in `world`.
@@ -363,7 +385,7 @@ Details: [[05 - Multiplayer]].
 - The base game uses the `base:` namespace; mods use their own.
 - **Resource packs** are applied at the shell/render layer by material ID; the core never sees texture paths.
 - **Scripts** run through a sandbox with a capability API; simulation-affecting scripts run on the server.
-- **Content hash** is computed after loading and stored in the save/manifest.
+- **Content hash** is computed after loading and stored in the save/manifest. D-034 (Proposed) would store the active pack ID and checksums in `world.json`; the save/load contract is in §7 and remains unimplemented.
 
 Details: [[06 - Modding and Resource Packs]].
 
