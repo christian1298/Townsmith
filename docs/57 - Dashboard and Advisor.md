@@ -25,20 +25,21 @@ In:
 - rules for food, water, power, jobs, vacancies, happiness, commute, roads, construction, debt, and bankruptcy;
 - a `City Dashboard` overlay with population, district, policies, work, wellbeing, services, treasury, industry, roads, and construction sections;
 - a District section that queries `district_summary` around the Mayor camera target or the selected building with a 256 m radius once per dashboard rebuild;
-- a read-only Policies section that calls `district_policies_state` once per dashboard rebuild and reports the registered policy count plus the smallest-id policy whose inclusive XZ circle contains the same camera/selection centre;
-- an `F6` District focus toggle: camera focus by default, selection focus when a building is selected, with the selected placement's centre as the query centre and an F6 return action;
+- a Settlements section that lists every founded settlement in stable ascending-id order with name, owner, centre, radius, and a selected marker; `PageUp` / `PageDown` cycle a leading "none" entry plus every settlement, and an explicit selection overrides the District, Policies, and `F7` heatmap centres until cleared;
+- a read-only Policies section that calls `district_policies_state` once per dashboard rebuild and reports the registered policy count plus the smallest-id policy whose inclusive XZ circle contains the same settlement/building/camera centre;
+- an `F6` District focus toggle: camera focus by default, selection focus when a building is selected, with the selected placement's centre as the query centre and an F6 return action; an explicit settlement selection takes precedence over building focus;
 - an `F7` district heatmap overlay that queries `district_heatmap` at 512 m / 32 m around the same focus, renders up to 1,024 pooled cells, and shows a localized status/legend line; `Shift+F7` cycles Population, Jobs, and Happiness with metric-aware colours and peak values;
 - `F1` toggles the dashboard; `Esc` closes it; entering Architect Mode closes it;
-- a world-scene smoke that checks the advisor warning, dashboard text, district values and labels, the camera/selection focus toggle, policy count/name/tax/funding/allowlist rendering, localized advisor titles, and the heatmap grid/instance/teardown contract;
-- markers `dashboard=ok`, `district_ui=ok`, `policy_ui=ok`, `district_select=ok`, `heatmap_ui=ok`, and `heatmap_modes=ok`, enforced by `scripts/smoke_world_scene.sh`.
+- a world-scene smoke that checks the advisor warning, dashboard text, district values and labels, the camera/selection focus toggle, settlement list/selection/precedence/fallback, policy count/name/tax/funding/allowlist rendering, localized advisor titles, and the heatmap grid/instance/teardown contract;
+- markers `dashboard=ok`, `district_ui=ok`, `settlement_select=ok`, `policy_ui=ok`, `district_select=ok`, `heatmap_ui=ok`, and `heatmap_modes=ok`, enforced by `scripts/smoke_world_scene.sh`.
 
 Out:
 
-- player-facing standalone district or per-settlement panels (the dashboard has one city-level District section with camera/selection focus and one read-only Policies section; the developer-only policy editor in §4.2 and read-only district overview in §4.3 are separate scenes, not dashboard panels);
+- player-facing standalone district or per-settlement panels beyond the dashboard selector (the dashboard has one read-only Settlements section that selects one record for the existing 256 m District, Policies, and heatmap queries; per-settlement budgets, policies, rename/merge, and drill-down remain later; the developer-only policy editor in §4.2 and read-only district overview in §4.3 are separate scenes, not dashboard panels);
 - clickable advice that selects or centres a building;
 - acknowledged, dismissed, or persisted notifications;
 - charts, history, trend lines, or time-series;
-- a new dashboard panel or window; the focus controls live inside the existing District section, and the read-only Policies section adds eight localized strings (the world table is now 242 keys); developer-only debug text stays English;
+- a new dashboard panel or window; the focus and settlement controls live inside the existing District and Settlements sections, and the read-only Policies section adds eight localized strings while the settlement section adds ten (the world table is now 252 keys); developer-only debug text stays English;
 - automated pause, advisor actions, or policy changes;
 - per-citizen or per-household advice.
 
@@ -279,6 +280,9 @@ District     2 residents · 2 housing (0 vacant)
              2 jobs · 2 employed
              happiness 100% · food 100% · water 100% · rest 100% · commute 0 m
              Within 256 m of the camera target · completed buildings only
+Settlements  1 founded · selected: none
+             1. Settlement 1 · player · centre 169, 125 · radius 64 m
+             PageUp / PageDown: cycle settlements, including none
 Policies     0 registered
              No policy covers this point.
 Jobs         2 (2 employed, 0 unemployed)
@@ -298,7 +302,9 @@ The District section is local, not city-wide: by default it uses the Mayor camer
 
 Colors: critical red, warning amber, info green. `Esc` closes the panel before other modes; entering Architect Mode closes it. While the panel is visible, `_process` drives a refresh accumulator and rebuilds the panel at most every `0.5` s (2 Hz); opening still refreshes immediately, and closing resets the accumulator so a reopen is never stale. This keeps a world HUD update from triggering the full snapshot plus advisor while the panel is visible. A closed dashboard adds no snapshot cost. The advisor is still computed on demand by `city_advisor` on each refresh and is not cached, so dashboard advice can trail the HUD by up to about `0.5` s.
 
-The **Policies** section is read-only and follows the same centre as the District query (`_district_center_xz`: camera target by default, selected placement under `F6`). `_update_dashboard` calls `district_policies_state(SEED)` exactly once per rebuild and passes the state to `_policies_section`. With no registry the bridge reports `ok=true`, `count=0`, and checksum `0000000000000000`; the section renders the localized count and the no-policy line. When `ok=false` (for example a seed mismatch) it renders the localized `base.ui.dashboard.body.policies_unavailable` line and does not log or retry. Otherwise it scans the returned array for the smallest-id policy whose **inclusive** XZ circle contains the centre (the bridge has no containment call; non-finite centres and radii are skipped), then shows the name, tax multiplier, service funding, construction allowed/blocked, and allowlist count (`—` when the allowlist is empty). The district context stays 256 m for population and jobs; policy containment uses each policy's own radius, so a policy entirely inside that district can be shown or omitted independently of the district counts. All eight policy strings are keyed in EN/DE; policy names, ids, and allowlist entries stay verbatim. Editing, overlap priority beyond smallest-id, and applying policy values to simulation, tax, or funding remain out of scope. The construction switch and allowlist are enforced by `world_place_blueprint` (see [[42 - World Placement Bridge]]), not by the dashboard.
+The **Settlements** section is a read-only selector over `settlements()`, rendered directly after the District section. It is not a separate panel and never creates, renames, removes, or saves a settlement. See §5.2 for the list, keys, precedence, and fallback rules.
+
+The **Policies** section is read-only and follows the same centre as the District query (`_district_center_xz`: explicit settlement, then selected placement under `F6`, then camera target). `_update_dashboard` calls `district_policies_state(SEED)` exactly once per rebuild and passes the state to `_policies_section`. With no registry the bridge reports `ok=true`, `count=0`, and checksum `0000000000000000`; the section renders the localized count and the no-policy line. When `ok=false` (for example a seed mismatch) it renders the localized `base.ui.dashboard.body.policies_unavailable` line and does not log or retry. Otherwise it scans the returned array for the smallest-id policy whose **inclusive** XZ circle contains the centre (the bridge has no containment call; non-finite centres and radii are skipped), then shows the name, tax multiplier, service funding, construction allowed/blocked, and allowlist count (`—` when the allowlist is empty). The district context stays 256 m for population and jobs; policy containment uses each policy's own radius, so a policy entirely inside that district can be shown or omitted independently of the district counts. All eight policy strings are keyed in EN/DE; policy names, ids, and allowlist entries stay verbatim. Editing, overlap priority beyond smallest-id, and applying policy values to simulation, tax, or funding remain out of scope. The construction switch and allowlist are enforced by `world_place_blueprint` (see [[42 - World Placement Bridge]]), not by the dashboard.
 
 ### 5.1 District heatmap overlay (`F7`)
 
@@ -307,7 +313,7 @@ The **Policies** section is read-only and follows the same centre as the Distric
 **Metric modes.** `Shift+F7` cycles the displayed metric in the order **Population → Jobs → Happiness**. Population and jobs are counted per cell; happiness is resident-weighted and shown as a percentage. The query radius/cell size stay fixed, and each mode uses its own normalisation and rebuild key, so switching never reuses the previous mode's colours. The legend reports the active metric and peak. The smoke checks all three modes, distinct rebuild keys, EN/DE labels, and teardown.
 
 
-- **Query:** `district_heatmap(SEED, center.x, center.z, 512.0, 32.0)`, where the centre is `_materialization_center()` (the selected building or the Mayor camera target). `ceil(1024 / 32) = 32`, so the grid is 32 × 32 = **1,024 cells**, exactly the renderer cap.
+- **Query:** `district_heatmap(SEED, center.x, center.z, 512.0, 32.0)`, where the centre is `_heatmap_center_xz()`: the explicitly selected settlement first, then `_materialization_center()` (the selected building or the Mayor camera target). `ceil(1024 / 32) = 32`, so the grid is 32 × 32 = **1,024 cells**, exactly the renderer cap.
 - **Refresh:** opening queries immediately; while visible `_process` refreshes on a `0.5 s` accumulator. Closing frees the pooled node and clears the height/state caches.
 - **Render:** one `DistrictHeatmap` root owns one `MultiMeshInstance3D` with a flat `BoxMesh` (`31 m × 0.05 m × 31 m`). The pool grows `instance_count` once and uses `visible_instance_count` for the current nonzero cells, so panning reuses the same buffer. `use_colors` and an unshaded, translucent, vertex-color material tint each cell.
 - **Cells:** only cells with `population > 0` are instanced; zero cells stay hidden. Cells whose sampled `world_height_at` is negative are skipped. Each visible cell sits at `ground + 0.15 m`.
@@ -315,6 +321,24 @@ The **Policies** section is read-only and follows the same centre as the Distric
 - **Bounds:** the pool is capped at `HEATMAP_MAX_CELLS = 1024` instances. The ground cache is keyed by rounded cell centre, capped at 2 × 1,024 entries, and invalidated by `terrain_delta_checksum` so terrain edits cannot leave stale heights.
 - **Metrics:** `F7` opens on Population; `Shift+F7` cycles Population → Jobs → Happiness. Each mode normalises by that metric's peak positive cell value, uses the same blue→yellow→red ramp, and names the active metric in the HUD. Happiness is shown as a percentage and is already clamped to 0–1 by the bridge; population and jobs use integer counts. The rebuild key includes the metric, so switching modes redraws the bounded pool without leaking instances. Hiding the overlay keeps the chosen metric for the next open.
 - **HUD:** one localized status line is always present: `District heatmap: on/off · {cells} cells · peak {peak}` (`cells` is the number of rendered, nonzero cells), plus a metric line such as `Metric: Population · peak 2 · Shift+F7`. When on, a legend line gives the blue/yellow/red scale and the `512 m / 32 m` query. With no residents in range the localized empty line replaces the legend detail; a bridge error shows the localized `unavailable` line with its code.
+
+### 5.2 Selectable settlements
+
+The dashboard **Settlements** section is a read-only selector over the bridge's `settlements()` list. Rows are ordered by ascending settlement id (the stable selector) and show id, name, owner, centre, and radius; the selected row is bold, prefixed with `▸`, and ends with the localized `selected`. The section also shows the founded count and the selected name, or localized none/unavailable lines. It never creates, renames, removes, or saves a settlement, and it adds no save field or bridge call beyond the existing `settlements()` read.
+
+`PageUp` / `PageDown` cycle a `none, id1, id2, ...` list in id order and wrap; the keys work only while the dashboard is visible. The leading `none` entry is how the explicit override is cleared. There is no click selection because the dashboard body is a `RichTextLabel`, not a clickable list.
+
+Selection precedence, highest first:
+
+1. **Explicit settlement selection** (dashboard Settlements section).
+2. **`F6` building focus** (selection focus) when no settlement is selected.
+3. **Mayor camera target**.
+
+The selected settlement drives `_district_center_xz()`, so the 256 m `district_summary` and the smallest-id containing-policy scan use its centre. `F6` still toggles building focus, but while a settlement is selected the district and policy centres stay on the settlement, the localized `Settlement focus: {name}` lineage replaces the building-focus lineage, and the `F6` action line is suppressed. Clearing the settlement restores the previous building/camera focus. `F7`, when visible, uses `_heatmap_center_xz()`: settlement centre first, then the selected building, then the camera; the `512 m / 32 m` query is unchanged. Selecting or clearing a settlement refreshes an open dashboard and an open heatmap immediately.
+
+Selection is runtime UI state, not a save field. It survives dashboard rebuilds (2 Hz) and `F6` while the id exists. After a world load, `_rebuild_settlements` revalidates the id: a settlement that was removed, or a foreign or malformed id, clears to no settlement and the query falls back to `F6`/camera without a stale centre. `Shift+N` (clear settlements) also clears the selection.
+
+All ten strings are keyed in EN/DE: section title, founded count, none/unavailable, row, selected row, focus line, focus hint, and the `PageUp`/`PageDown` hint. Settlement names, owners, ids, and centres stay verbatim.
 
 ## 6. Smoke
 
@@ -330,17 +354,22 @@ The **Policies** section is read-only and follows the same centre as the Distric
 - `F6` starts in camera focus, switches to selection focus for the fixture building, and the query centre then equals the placement centre with the same population/jobs;
 - the EN and DE focus lineage, selected-building hint, and camera-return action render, and a second `F6` restores the camera centre and camera hint;
 - clearing the selection while in selection focus returns the query to the camera centre, and the world/population/construction checksums still match;
+- an empty world reports a closed settlement layer, zero rows, no selection, the localized `No settlements founded.` line, and the localized unavailable line for a failed read; reading and cycling do not create a store;
+- two settlements render in stable ascending-id order, the selected row is marked, and `PageUp`/`PageDown` cycle `none → id1 → id2 → none` deterministically;
+- selecting the second settlement moves `_district_center_xz()` and the 256 m district to its centre (population/jobs 0, away from the fixture house), renders the settlement focus line/hint instead of the building-focus lineage, and keeps that centre while `F6` building focus is toggled;
+- the selection survives repeated dashboard rebuilds and the load-path settlement rebuild, renders in EN and DE without `!base.ui.` leaks, and a foreign id (or selecting a missing id) clears to no settlement and falls back to the camera centre without crashing;
+- `F7` uses the selected settlement centre when one is active, then returns to the pinned camera-centred checksum `3cba652232a478a0` when the selection is cleared;
 - `F7` starts hidden (zero `DistrictHeatmap` children), opens with no error, and returns a 32 × 32 grid with 1,024 cells, a 512 m radius, and 32 m cells;
 - the nonzero cell count equals `heatmap_cells`, the peak matches the bridge cells, the single pooled `DistrictHeatmapPool` node reports the same `visible_instance_count`, the pool stays at or below 1,024 instances, and the checksum is 16 hex characters and repeatable;
 - the HUD shows the EN and DE on/off status, the legend, the `F7` help text, and the localized empty line when the fixture has no populated cell;
 - a second `F7` frees the pool and caches and returns the root to zero children;
 - `Shift+F7` cycles jobs and happiness; each mode asserts the metric name, a distinct metric-prefixed rebuild key, the payload-derived peak and cell/instance counts, deterministic colour-helper output, and EN/DE labels before wrapping back to population;
-- markers include `dashboard=ok`, `district_ui=ok`, `district_select=ok`, `heatmap_ui=ok`, and `heatmap_modes=ok`; the script requires all five.
+- markers include `dashboard=ok`, `district_ui=ok`, `settlement_select=ok`, `district_select=ok`, `heatmap_ui=ok`, and `heatmap_modes=ok`; the script requires all six.
 
 Final marker:
 
 ```text
-WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok trades=ok render=ok structure=ok age=ok research=ok starter=ok named=ok occupancy=ok industry=ok utilities=ok services=ok economy=ok dashboard=ok district_ui=ok policy_ui=ok district_select=ok heatmap_ui=ok heatmap_modes=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok status=ok
+WORLD_SCENE rooms=4 preview=ok water=ok rotate=ok edits=ok chunk_cells=ok place=ok roads=ok lots=ok settlements=ok build=ok done=ok trades=ok render=ok structure=ok age=ok research=ok tutorial=ok starter=ok named=ok citizens=ok citizen_rows=ok content_i18n=ok content_ui=ok follow=ok citizen_i18n=ok materialization=ok materialization_step=ok materialization_fade=ok movement_scene=ok movement_pool=ok movement_routes=ok movement_lod=ok occupancy=ok industry=ok utilities=ok services=ok economy=ok dashboard=ok district_ui=ok settlement_select=ok policy_ui=ok district_select=ok heatmap_ui=ok heatmap_modes=ok hud_i18n=ok hud_body_i18n=ok hud_status_i18n=ok dashboard_body_i18n=ok advisor_i18n=ok advisor_detail_i18n=ok modal_i18n=ok number_i18n=ok traffic=ok select=ok enter=ok return=ok save=ok load=ok guard=ok lifecycle_scene=ok campaign_hud=ok status=ok
 ```
 
 `smoke_policy_editor.sh` is a separate smoke for the standalone §4.2 scene; it does not run the world scene. It requires the bridge CRUD walkthrough (invalid create, create two, list, update, reject an invalid radius, remove both, reject a missing id), deterministic `POLICY_EDITOR*` lines across two runs, and these markers:
@@ -372,10 +401,11 @@ The script requires `settlements=2 selected=1 population=0 policy=1` for `--smok
 
 ## 8. Limits
 
-- Advisor advice is city-wide; the dashboard District section is read-only and camera- or selection-centred (256 m), not a selectable settlement/district panel. It follows the selected building but does not persist the focus choice or follow a moving citizen. No building drill-down from advice.
-- The heatmap is camera/selection-centred (`_materialization_center`, 512 m), read-only, and does not aggregate cohorts, settlements, or off-screen districts. It renders Population, Jobs, or Happiness (one at a time) and only nonzero cells; food, water, rest, employment, and housing are not heatmap modes. Headless Godot returns default MultiMesh transform/colour readback, so the smoke validates the deterministic payload-derived value/peak and colour helper instead of reading instance colours. The F7 overlay, metric line, status line, legend, and unavailable/empty text are localized and pooled through one `MultiMesh`.
+- Advisor advice is city-wide; the dashboard District section is read-only and centred by the explicit settlement selector, else `F6` building focus, else the camera (256 m). The Settlements section is a selector, not a per-settlement panel: no budgets, policies, rename/merge, map view, or drill-down. It does not persist the choice in saves and does not follow a moving citizen. No building drill-down from advice.
+- The heatmap is settlement/building/camera-centred (`_heatmap_center_xz`, 512 m), read-only, and does not aggregate cohorts or off-screen districts. It renders Population, Jobs, or Happiness (one at a time) and only nonzero cells; food, water, rest, employment, and housing are not heatmap modes. Headless Godot returns default MultiMesh transform/colour readback, so the smoke validates the deterministic payload-derived value/peak and colour helper instead of reading instance colours. The F7 overlay, metric line, status line, legend, and unavailable/empty text are localized and pooled through one `MultiMesh`.
 - District policies remain a developer-facing data surface plus one placement rule. The standalone scene in §4.2 can create, update, remove, and list them, and the bridge world save persists the registry as an optional `policies` object; the scene itself does not save or load, and `New session` discards its in-memory registry. It is a separate scene from the world and the dashboard, and the dashboard shows the containing policy but does not edit one. No simulation, household, advisor, treasury, or economy code reads a policy, and saving or loading one applies no tax or funding effect. The only enforcement is the `world_place_blueprint` construction/allowlist gate, which uses the smallest containing id; utility and service placement, roads, and `world_validate_placement` are unaffected. There is no policy overlay and no selection rule beyond smallest-id.
 - The §4.3 district overview is a read-only developer scene, not the dashboard. It lists settlements and samples one fixed 256 m district around each settlement centre; it cannot found, edit, or remove a settlement or policy, does not save or load, and adds no save field, checksum, network message, or simulation effect. Its fixture data exists only in memory, and its panel digest is presentation-only. There is no map view, district selection on the world, per-settlement budget, or drill-down.
+- The dashboard settlement selector is presentation-only: it changes which existing derived query is displayed and adds no save field, checksum, network message, simulation effect, permission, or ownership change. It cannot select a settlement on the world map, and settlement names are not localized.
 - Thresholds are fixed; no difficulty, policy, or player preference.
 - Advice is not persisted, acknowledged, or suppressed.
 - No click-to-select, camera focus, or one-click policy action.
@@ -391,5 +421,5 @@ The script requires `settlements=2 selected=1 population=0 policy=1` for `--smok
 2. Make advice clickable to select the relevant building or district.
 3. Add persisted acknowledgement and a notification history.
 4. Finish number formatting, remaining content names, and error-code display.
-5. Add selectable district/settlement panels with per-settlement budgets and policies; the current District section now has camera and selection focus but is not a settlement panel.
+5. Add per-settlement budgets and policies on top of the dashboard settlement selector; the selector ships here and is presentation-only.
 6. Optionally integrate the §4.3 read-only settlement overview into the dashboard once policies have simulation effects; the standalone scene remains the developer harness and is not the dashboard.
