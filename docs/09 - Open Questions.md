@@ -186,17 +186,6 @@ These must be answered before or during Phase 0. They change the architecture, t
 | **Q-032** | Steam networking/lobbies, or direct IP first? | Direct IP + invite codes first; Steam later | Normal |
 | **Q-078** | Time-vote tuning: duration, cooldown, and quorum? | 60 s vote, 5 min failed-vote cooldown, 2 min success cooldown; simple majority of online players; tune in playtests | Normal |
 
-## Server placement questions
-
-These support D-032 (Proposed). None is answered yet; the ADR keeps placement off the server until each has a v1 default.
-
-| ID | Question | Current assumption / recommendation | Priority |
-|---|---|---|---|
-| **Q-107** | How does a `.tsbp` package reach the authoritative server? | Pre-seeded content-addressed library first; an upload or fetch path later. Never accept a client filesystem path. Provenance, quotas, and transit integrity need their own decision. | High |
-| **Q-108** | How are modded blueprints and dependencies resolved when the server lacks the mod? | Resolve against the server content manifest before placement; reject with a stable code; never auto-download mods. Existing placements degrade to a placeholder or refuse to load. | High |
-| **Q-109** | Placement rate limits, quotas, idempotency, and audit? | Per-connection token bucket, per-player placement quota, request id for retries, and an audit entry for every accepted and rejected placement. | Normal |
-| **Q-110** | Server placement save migration and rollback/history? | Additive versioned `ServerSave` placement object; migrate existing worlds in order; keep a rollback snapshot before destructive admin actions. | High |
-
 ## Settlement ownership questions
 
 These support D-033 (Proposed). None is answered yet; the ADR keeps ownership and permissions **unimplemented** until each has a v1 default. Today `Settlement.owner` is an unenforced display string, `ServerWorld` has no settlement store, and the only roles are global dev roles.
@@ -353,6 +342,10 @@ These support D-034 (Proposed). None is answered yet; content-pack identity in w
 | **Q-004** | Terrain resolution? | 1 m terrain + 10 cm buildings; 10 cm terrain is out. | 2026-11-19 | D-002 |
 | **Q-005** | Where does blueprint authoring happen? | Workshop/creative authoring first; build anywhere for placement; permissioned live editing after multiplayer stabilizes. | 2026-11-19 | D-026 |
 | **Q-006** | Is destruction required? | None in v1; cosmetic damage and repair later. | 2026-11-19 | D-008 |
+| **Q-107** | How does a `.tsbp` package reach the authoritative server? | Pre-seeded absolute content-addressed server library for v1; the client sends only the hash. No upload, fetch, or auto-download. Provenance, quotas, and transit integrity remain future work. | 2026-11-23 | D-032 |
+| **Q-108** | How are modded blueprints and dependencies resolved when the server lacks the mod? | The server must already hold the pack and its dependencies; unknown packages are rejected with a stable code and never auto-downloaded. Removal policy remains future work. | 2026-11-23 | D-032 |
+| **Q-109** | Placement rate limits, quotas, idempotency, and audit? | Exact placement identity (hash + centre + rotation) is the idempotency key; a repeat returns the existing placement without a second charge. Reuses the existing per-session token bucket and audit ring; per-player quotas remain future work. | 2026-11-23 | D-032 |
+| **Q-110** | Server placement save migration and rollback/history? | Optional `ServerSave` placement/construction fields with serde defaults; older saves without them load unchanged. No migration beyond load-old/ignore-missing; rollback, history, and GC remain future work. | 2026-11-23 | D-032 |
 
 ## How to answer a question
 
