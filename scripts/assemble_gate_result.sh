@@ -6,6 +6,11 @@
 # renders or invents FPS/VRAM/draw-call values. Missing render evidence stays
 # null and the result is `status=insufficient`.
 #
+# `status=complete` also requires the late_metropolis_v1 scene on the
+# documented late_flyover_v1 route and the §5.5 run shape on that route. A
+# missing shape field, dev late_* route, or wrapper with no gate route is
+# `insufficient`, with render.scene/render.route in `missing`.
+#
 # Examples:
 #   ./scripts/assemble_gate_result.sh \
 #     --cohort /tmp/cohort_1m_v1.json \

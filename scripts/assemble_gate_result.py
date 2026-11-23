@@ -12,9 +12,18 @@ synthesises a number:
 
 A field with no recorded evidence is ``null`` and, when the gate needs it, is
 listed in ``missing``. ``status=complete`` means the required late fields are
-present and the run has the §5.5 shape (90 s+, 15 s warm-up, 3 runs, not
-headless). It does **not** mean the gate passed: the evaluator still decides
-pass/fail, and the signed report is still required.
+present, the render record is the evaluator scene (``late_metropolis_v1``) on
+the documented gate route (``late_flyover_v1``), and the run has the §5.5 shape
+(90 s+, 15 s warm-up, 3 runs, not headless). A missing shape field or any other
+route is recorded in ``missing``/warnings and keeps the status ``insufficient``.
+``status=complete`` does **not** mean the gate passed: the evaluator still
+decides pass/fail, and the signed report is still required.
+
+A multi-route summary contributes only the selected route's metrics; wrapper
+level metric/result/route/shape keys are discarded so they cannot stand in for
+route evidence. Writing a non-complete artifact under
+``benchmarks/results/gate/`` prints a warning because the shell evaluator picks
+the newest file.
 
 The flat fields are the assembled evidence. ``results`` mirrors them under the
 canonical docs/68 §6.3 evaluator names so ``check_metropolis_gate.py`` can read
@@ -53,6 +62,7 @@ import io
 import json
 import math
 import os
+import subprocess
 import sys
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
@@ -61,6 +71,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 SCENE = "late_metropolis_v1"
+GATE_RENDER_ROUTE = "late_flyover_v1"
 GATE = "G5"
 FORMAT_VERSION = 1
 MARKER = "GATE_RESULT_ASSEMBLE"
@@ -354,9 +365,39 @@ INPUT_SCENES = {
     "save": ("save_1m",),
     "streaming": ("streaming_scale",),
 }
-RENDER_SCENES = ("late_metropolis_v1", "late_metropolis")
 REQUIRED_SKIP = {"scene", "format_version", "seed"}
 HARDWARE_FIELDS = ("cpu", "ram_gb", "gpu", "display")
+
+# docs/68 §5.5 run shape. These must come from the selected render route; a
+# wrapper-level or settings-level value is not route evidence.
+SHAPE_FIELDS = ("duration_s", "warmup_s", "runs", "headless")
+SAVE_SIZE_ALIASES = (
+    "save_size_mb",
+    "save_mb",
+    "save_size_gb",
+    "save_gb",
+    "save_bytes",
+    "world_save_bytes",
+    "json_bytes",
+)
+
+
+def _render_metric_aliases() -> frozenset[str]:
+    aliases = set(SAVE_SIZE_ALIASES)
+    for metric in RENDER_METRICS:
+        aliases.update(metric.aliases)
+    return frozenset(aliases)
+
+
+RENDER_METRIC_ALIASES = _render_metric_aliases()
+WRAPPER_STRIP_FIELDS = RENDER_METRIC_ALIASES | frozenset(SHAPE_FIELDS) | {
+    "results",
+    "route",
+    "route_id",
+}
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+GATE_RESULTS_DIR = REPO_ROOT / "benchmarks" / "results" / "gate"
 
 
 def _number(value: Any) -> float | None:
@@ -514,57 +555,130 @@ def _load_input(path: Path, role: str) -> dict[str, Any]:
     return document
 
 
+def _render_route_id(value: dict[str, Any]) -> str | None:
+    """Return a route id from a route summary entry."""
+
+    route = value.get("route")
+    if route is None:
+        route = value.get("route_id")
+    if isinstance(route, dict):
+        route = route.get("id") or route.get("name") or route.get("route")
+    return _text(route)
+
+
+def _strip_wrapper_evidence(document: dict[str, Any]) -> dict[str, Any]:
+    """Drop wrapper-level render evidence that cannot be attributed to a route.
+
+    A multi-route summary's top-level metric, results, route, and shape keys
+    may belong to another route. Only the selected route may supply them.
+    """
+
+    merged: dict[str, Any] = {}
+    for field, value in document.items():
+        if field in WRAPPER_STRIP_FIELDS:
+            continue
+        if field == "settings" and isinstance(value, dict):
+            value = {
+                key: item
+                for key, item in value.items()
+                if key not in SHAPE_FIELDS
+            }
+        merged[field] = value
+    return merged
+
+
 def _select_render_route(
     document: dict[str, Any], path: Path
 ) -> dict[str, Any]:
-    """Pick the one late route from a multi-route summary, if needed."""
+    """Pick the documented late gate route from a multi-route summary.
+
+    A route is acceptable only when its id is the docs/68 gate route
+    (``late_flyover_v1``). A non-gate ``late_*`` route is selected for honest
+    provenance but never reaches ``status=complete``; a summary with no gate
+    route keeps no route evidence and fails closed.
+    """
 
     routes = document.get("routes")
+    if routes is None:
+        return document
     if not isinstance(routes, dict):
-        return document
-    if isinstance(document.get("results"), dict):
-        return document
+        raise AssemblyError(f"render input routes must be an object: {path}")
 
-    candidates: list[tuple[str, dict[str, Any]]] = []
+    gate_candidates: list[tuple[str, dict[str, Any]]] = []
+    late_candidates: list[tuple[str, dict[str, Any]]] = []
     for key, value in routes.items():
         if not isinstance(value, dict):
             continue
-        route_id = str(value.get("route", ""))
-        if "late" in key.lower() or "late" in route_id.lower():
-            candidates.append((key, value))
-    if len(candidates) == 1:
-        key, route = candidates[0]
-        merged = {
-            field: value
-            for field, value in document.items()
-            if field != "routes"
-        }
-        merged.update(route)
-        merged["_assembly_render_route"] = key
-        return merged
-    if candidates:
-        names = ",".join(key for key, _ in candidates)
+        route_id = _render_route_id(value)
+        if route_id == GATE_RENDER_ROUTE:
+            gate_candidates.append((key, value))
+        elif "late" in key.lower() or "late" in (route_id or "").lower():
+            late_candidates.append((key, value))
+
+    if len(gate_candidates) > 1:
+        names = ",".join(key for key, _ in gate_candidates)
         raise AssemblyError(
-            f"render input has multiple late routes ({names}); pass one "
-            f"single-run summary: {path}"
+            f"render input has multiple {GATE_RENDER_ROUTE} routes ({names}); "
+            f"pass one single-run summary: {path}"
         )
-    raise AssemblyError(
-        f"render input has no late route; pass one single-run summary: {path}"
-    )
+    if gate_candidates:
+        key, route = gate_candidates[0]
+    elif len(late_candidates) == 1:
+        # Keep the recorded evidence and selected-route provenance, but the
+        # route gate below keeps status=insufficient.
+        key, route = late_candidates[0]
+    else:
+        if late_candidates:
+            names = ",".join(key for key, _ in late_candidates)
+            raise AssemblyError(
+                f"render input has multiple late routes ({names}); pass one "
+                f"single-run summary: {path}"
+            )
+        merged = _strip_wrapper_evidence(document)
+        merged["_assembly_render_route_error"] = (
+            f"render input has no {GATE_RENDER_ROUTE} route; pass one gate "
+            f"route summary: {path}"
+        )
+        return merged
+
+    merged = _strip_wrapper_evidence(document)
+    merged.update(route)
+    merged["_assembly_render_route"] = key
+    return merged
 
 
 def _validate_render(document: dict[str, Any], path: Path) -> None:
-    scene = _text(document.get("scene"))
-    if scene is not None and scene not in RENDER_SCENES:
-        raise AssemblyError(
-            f"render input scene={scene!r} is not a late render scene: {path}"
-        )
     results = document.get("results")
     if results is not None and not isinstance(results, dict):
         raise AssemblyError(f"render input results must be an object: {path}")
     routes = document.get("routes")
     if routes is not None and not isinstance(routes, dict):
         raise AssemblyError(f"render input routes must be an object: {path}")
+
+
+def _render_problems(render: dict[str, Any] | None) -> dict[str, str]:
+    """Return missing gate evidence, keyed by a ``missing`` entry name."""
+
+    problems: dict[str, str] = {}
+    if render is None:
+        return problems
+
+    scene = _text(render.get("scene"))
+    if scene != SCENE:
+        problems["render.scene"] = (
+            f"render scene is not {SCENE}: {scene or 'absent'}"
+        )
+
+    route = _render_route_id(render)
+    error = render.get("_assembly_render_route_error")
+    if isinstance(error, str) and error:
+        problems["render.route"] = error
+    elif route != GATE_RENDER_ROUTE:
+        problems["render.route"] = (
+            f"render route is not the gate route {GATE_RENDER_ROUTE}: "
+            f"{route or 'absent'}"
+        )
+    return problems
 
 
 def _apply_metric(
@@ -743,16 +857,24 @@ def _missing_required(document: dict[str, Any]) -> list[str]:
 def _shape_problems(document: dict[str, Any]) -> list[str]:
     problems: list[str] = []
     duration = _number(document.get("duration_s"))
-    if duration is not None and duration < 90.0:
+    if duration is None:
+        problems.append("duration_s is absent (>=90 s required)")
+    elif duration < 90.0:
         problems.append(f"duration_s={duration:g} is below 90 s")
     warmup = _number(document.get("warmup_s"))
-    if warmup is not None and warmup < 15.0:
+    if warmup is None:
+        problems.append("warmup_s is absent (>=15 s required)")
+    elif warmup < 15.0:
         problems.append(f"warmup_s={warmup:g} is below 15 s")
     runs = _integer(document.get("runs"))
-    if runs is not None and runs < 3:
+    if runs is None:
+        problems.append("runs is absent (>=3 required)")
+    elif runs < 3:
         problems.append(f"runs={runs} is below 3")
     headless = _flag(document.get("headless"))
-    if headless is True:
+    if headless is None:
+        problems.append("headless is absent (false required)")
+    elif headless is True:
         problems.append("headless=true cannot produce FPS evidence")
     return problems
 
@@ -803,17 +925,13 @@ def _warnings(
         messages.append("no save result supplied: save_ms/save_size_mb are null")
     for problem in _shape_problems(document):
         messages.append(f"run shape: {problem}")
+    for problem in _render_problems(render).values():
+        messages.append(f"render evidence: {problem}")
     if render is not None:
         selected = render.get("_assembly_render_route")
         if isinstance(selected, str):
             messages.append(
                 f"multi-route render summary: selected route={selected}"
-            )
-        route = _text(document.get("route"))
-        if route is not None and "late_flyover" not in route.lower():
-            messages.append(
-                "render route is not the docs/68 late gate route "
-                f"(late_flyover_v1): {route}"
             )
     hardware = document.get("hardware")
     if isinstance(hardware, dict):
@@ -897,6 +1015,9 @@ def assemble_document(
         for flat, canonical in RESULTS_KEYS.items()
     }
     missing = _missing_required(document)
+    for field in _render_problems(render):
+        if field not in missing:
+            missing.append(field)
     shape_problems = _shape_problems(document)
     status = "complete" if not missing and not shape_problems else "insufficient"
 
@@ -1005,6 +1126,14 @@ def _write_document(path: Path, document: dict[str, Any]) -> None:
         os.replace(temporary, path)
     except OSError as error:
         raise AssemblyError(f"cannot write {path}: {error}") from error
+
+
+def _in_gate_results_dir(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(GATE_RESULTS_DIR)
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def assemble_from_paths(
@@ -1513,6 +1642,163 @@ def run_self_test() -> int:
 
         case("cli_bad_json", cli_bad_json)
 
+        def missing_shape_fields() -> None:
+            partial = json.loads(json.dumps(_render_fixture()))
+            for field in ("duration_s", "warmup_s", "runs"):
+                del partial[field]
+            path = _file_fixture(directory, "render_no_shape.json", partial)
+            document, missing, _ = assemble_from_paths(
+                cohort_path=str(cohort_path),
+                save_path=str(save_path),
+                streaming_path=str(streaming_path),
+                render_path=str(path),
+                scene=SCENE,
+                seed=None,
+                hardware_note=None,
+            )
+            assert document["status"] == "insufficient", document["status"]
+            for field in ("duration_s", "warmup_s", "runs"):
+                assert field in missing, missing
+                assert document[field] is None, field
+            assert document["headless"] is False
+            warnings = " ".join(document["provenance"]["warnings"])
+            assert "duration_s is absent" in warnings, warnings
+            assert "warmup_s is absent" in warnings, warnings
+            assert "runs is absent" in warnings, warnings
+
+        case("missing_shape_fields", missing_shape_fields)
+
+        def no_gate_route() -> None:
+            payload = {
+                "format_version": 1,
+                "scene": "late_metropolis_v1",
+                "hardware": _render_fixture()["hardware"],
+                "settings": {
+                    "runs": 3,
+                    "duration_s": 120,
+                    "warmup_s": 15,
+                },
+                "routes": {
+                    "city_mid": {
+                        "route": "phase0_city_mid_v1",
+                        "duration_s": 5.0,
+                        "warmup_s": 3.0,
+                        "fps_avg": 1200.0,
+                    },
+                },
+            }
+            path = _file_fixture(directory, "no_gate_route.json", payload)
+            document, missing, _ = assemble_from_paths(
+                cohort_path=str(cohort_path),
+                save_path=str(save_path),
+                streaming_path=str(streaming_path),
+                render_path=str(path),
+                scene=SCENE,
+                seed=None,
+                hardware_note=None,
+            )
+            assert document["status"] == "insufficient", document["status"]
+            assert document["route"] is None, document["route"]
+            assert document["fps_avg"] is None, document["fps_avg"]
+            assert "render.route" in missing, missing
+            assert "duration_s" in missing, missing
+            warnings = " ".join(document["provenance"]["warnings"])
+            assert "no late_flyover_v1 route" in warnings, warnings
+
+        case("no_gate_route", no_gate_route)
+
+        def malformed_routes() -> None:
+            payload = {
+                "format_version": 1,
+                "scene": "late_metropolis_v1",
+                "routes": [],
+            }
+            path = _file_fixture(directory, "malformed_routes.json", payload)
+            out = directory / "malformed" / "never.json"
+            code, stdout, stderr = _run_cli(
+                ["--render", str(path), "--out", str(out)]
+            )
+            assert code == 2, (code, stdout, stderr)
+            assert "routes must be an object" in stderr, stderr
+            assert not out.exists()
+
+        case("malformed_routes", malformed_routes)
+
+        def non_gate_late_route() -> None:
+            route = {
+                "route": "late_phase0_flyover",
+                "duration_s": 120,
+                "warmup_s": 15,
+                "runs": 3,
+                "headless": False,
+            }
+            route.update(_render_fixture()["results"])
+            payload = {
+                "format_version": 1,
+                "scene": "late_metropolis_v1",
+                "seed": 2026,
+                # Wrapper-level values must not win over the selected route.
+                "fps_avg": 999.0,
+                "results": {"fps_avg": 999.0, "vram_mb_peak": 1.0},
+                "hardware": _render_fixture()["hardware"],
+                "settings": {"renderer": "forward_plus"},
+                "routes": {"late_phase0": route},
+            }
+            path = _file_fixture(
+                directory, "non_gate_late_route.json", payload
+            )
+            document, missing, _ = assemble_from_paths(
+                cohort_path=str(cohort_path),
+                save_path=str(save_path),
+                streaming_path=str(streaming_path),
+                render_path=str(path),
+                scene=SCENE,
+                seed=None,
+                hardware_note=None,
+            )
+            assert document["status"] == "insufficient", document["status"]
+            assert document["route"] == "late_phase0_flyover"
+            assert document["fps_avg"] == 31.4, document["fps_avg"]
+            assert document["results"]["fps_avg"] == 31.4
+            assert document["vram_mb_peak"] == 9800, document["vram_mb_peak"]
+            assert missing == ["render.route"], missing
+            warnings = " ".join(document["provenance"]["warnings"])
+            assert "late_flyover_v1" in warnings, warnings
+
+        case("non_gate_late_route", non_gate_late_route)
+
+        def evaluator_passes_complete_fixture() -> None:
+            document, missing, _ = assemble_from_paths(
+                cohort_path=str(cohort_path),
+                save_path=str(save_path),
+                streaming_path=str(streaming_path),
+                render_path=str(render_path),
+                scene=SCENE,
+                seed=None,
+                hardware_note=None,
+            )
+            assert document["status"] == "complete", document["status"]
+            assert missing == [], missing
+            out = directory / "evaluator" / "late.json"
+            _write_document(out, document)
+            evaluator = Path(__file__).resolve().with_name(
+                "check_metropolis_gate.py"
+            )
+            completed = subprocess.run(
+                [sys.executable, str(evaluator), "--result", str(out)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert completed.returncode == 0, (
+                completed.returncode,
+                completed.stdout[-400:],
+                completed.stderr,
+            )
+            assert "METROPOLIS_GATE status=pass" in completed.stdout
+
+        case("evaluator_passes_complete_fixture", evaluator_passes_complete_fixture)
+
     if failures:
         for failure in failures:
             print(f"{MARKER}_SELFTEST_FAIL {failure}")
@@ -1635,6 +1921,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except AssemblyError as error:
         print(f"assemble_gate_result: {error}", file=sys.stderr)
         return 2
+    if document["status"] != "complete" and _in_gate_results_dir(Path(out)):
+        print(
+            "assemble_gate_result: warning: wrote "
+            f"status={document['status']} under benchmarks/results/gate/; "
+            "check_metropolis_gate.sh selects the newest file, so this "
+            "artifact can shadow a complete result",
+            file=sys.stderr,
+        )
     print(_marker(document, missing, field_count, out))
     return 0
 

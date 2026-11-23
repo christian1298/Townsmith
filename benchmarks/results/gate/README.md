@@ -187,7 +187,17 @@ exist. It copies numbers; it never measures or invents one:
 ```
 
 Fields without recorded evidence are `null` and appear in `missing`.
-`status=complete` only means the required fields and the §5.5 run shape exist;
+`status=complete` additionally requires the evaluator scene `late_metropolis_v1`,
+the documented gate route `late_flyover_v1`, and the §5.5 run shape
+(`duration_s` 90 s+, `warmup_s` 15 s+, `runs` 3+, `headless=false`). A render
+record with a missing shape field, a dev `late_*` route, or no gate route stays
+`insufficient`: the assembler fails closed and records `render.scene` /
+`render.route` in `missing` plus a warning. A multi-route summary contributes
+only the selected gate route; wrapper-level metric, `results`, `route`, and
+shape keys are discarded so stale values cannot satisfy the gate fields.
+Writing a non-complete artifact under `benchmarks/results/gate/` prints a
+warning because `check_metropolis_gate.sh` picks the newest file and an
+insufficient artifact can shadow a complete one.
 `check_metropolis_gate.py` still decides pass/fail, and the signed report and
 committed baseline remain authoritative. Self-test:
 `./scripts/assemble_gate_result.py --self-test`.
