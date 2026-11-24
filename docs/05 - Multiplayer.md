@@ -86,7 +86,7 @@ The client never simulates the authoritative city. It predicts local movement an
 ### Settlement ownership
 
 > [!info] D-033 core + first server slice implemented
-> `core_city` implements the stable `PlayerId`/`PlayerRegistry`, roles and the `build`/`manage`/`tax`/`members` permission bits, settlement `owner_id`/`members`/`membership_revision`, claim/transfer/release and member management, the v1→v2 save migration, and stable rejection codes. Stores that never use membership stay v1 and checksum-identical; the first owned/membership mutation upgrades to v2. The authoritative `ServerWorld` now persists the registry and an optional settlement store, the bridge exposes read-only membership fields, and `place_blueprint` enforces `build` inside a settlement. Protocol v1 now has `found_settlement`, `settlement_list`, and invite/set-role/remove-member mutations; claim/rename/transfer commands and dashboard edit controls remain follow-ups.
+> `core_city` implements the stable `PlayerId`/`PlayerRegistry`, roles and the `build`/`manage`/`tax`/`members` permission bits, settlement `owner_id`/`members`/`membership_revision`, claim/transfer/release and member management, the v1→v2 save migration, and stable rejection codes. Stores that never use membership stay v1 and checksum-identical; the first owned/membership mutation upgrades to v2. The authoritative `ServerWorld` now persists the registry and an optional settlement store, the bridge exposes read-only membership fields, and `place_blueprint` enforces `build` inside a settlement. Protocol v1 now has `found_settlement`, `settlement_list`, `settlement_at`, `settlement_claim`, and invite/set-role/remove-member mutations; rename/transfer commands and dashboard edit controls remain follow-ups.
 
 - Every settlement has an **owner**: a player, a group, or the server (shared).
 - The owner can set local policies, taxes, building permissions, and blueprint allowlists.
@@ -207,7 +207,9 @@ Accepted commands produce **events** (construction site created, phase changed, 
 >
 > `found_settlement` requires **Mayor** and a successful hello/resume. The server assigns the id, uses the caller's stable `player_id` as `owner_id`, derives the legacy `owner` display label from the registry, validates the core name/radius/coordinate rules, creates the store on first use, and returns `settlement_found { tick, settlement, settlement_checksum, world_checksum }`. `settlement_list` is open to **Viewer** and returns `settlement_list { tick, count, checksum, settlements }` in ascending id order. Both records are `SettlementView` (no server path) with `owner_id`, `owned`, `members[{player, role, permissions}]`, and `membership_revision`. Rejections use the core codes (`duplicate_name`, `invalid_radius`, `name_too_long`, `coordinate_out_of_range`, `too_many_owned`, …) plus `settlement.identity`, `settlement.seed_mismatch`, and `settlement.unavailable` in the transport-only session.
 >
-> Membership mutations add `settlement_invite`, `settlement_set_role`, and `settlement_remove_member` (all **Mayor** at the global ceiling). Each takes the settlement id, target `player_id`, `expected_revision`, and (for invite/set-role) a role string; the core owner/manager `members` permission is checked on the actor, and a stale revision returns `settlement.revision_conflict`. Accepted mutations return `settlement_updated { tick, settlement, settlement_checksum, world_checksum }` and bump the membership revision. The owner cannot be removed or demoted to another role. There is no claim, rename, or transfer command yet; these commands do not advance the tick.
+> Membership mutations add `settlement_invite`, `settlement_set_role`, and `settlement_remove_member` (all **Mayor** at the global ceiling). Each takes the settlement id, target `player_id`, `expected_revision`, and (for invite/set-role) a role string; the core owner/manager `members` permission is checked on the actor, and a stale revision returns `settlement.revision_conflict`. Accepted mutations return `settlement_updated { tick, settlement, settlement_checksum, world_checksum }` and bump the membership revision. The owner cannot be removed or demoted to another role.
+>
+> `settlement_claim { settlement_id, expected_revision }` claims an unowned record (legacy/admin-released) and assigns the caller as owner; an already-owned record returns `settlement.already_owned`. `settlement_at { x, z }` is a **Viewer** read that returns the nearest containing settlement as `settlement_at { tick, found, settlement }` (or `null`). There is no rename or transfer command yet; none of these commands advance the tick.
 
 ### Protocol v1 (Phase 6 foundation)
 
@@ -236,6 +238,8 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. Protocol v
 | `settlement_invite` | `settlement_id`, `player_id`, `role` (`manager`/`builder`/`member`), `expected_revision` |
 | `settlement_set_role` | `settlement_id`, `player_id`, `role`, `expected_revision` |
 | `settlement_remove_member` | `settlement_id`, `player_id`, `expected_revision` |
+| `settlement_claim` | `settlement_id`, `expected_revision` |
+| `settlement_at` | `x`, `z` |
 | `set_interest` | `center_x`, `center_z`, `radius_m` |
 | `disconnect` | — |
 
@@ -251,6 +255,7 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. Protocol v
 | `settlement_found` | `tick`, `settlement` (`SettlementView`), `settlement_checksum`, `world_checksum` |
 | `settlement_updated` | `tick`, `settlement` (`SettlementView`), `settlement_checksum`, `world_checksum` |
 | `settlement_list` | `tick`, `count`, `checksum`, `settlements` (ascending `SettlementView` records) |
+| `settlement_at` | `tick`, `found`, `settlement` (`SettlementView` or `null`) |
 | `reject` | `code`, `message` |
 | `goodbye` | — |
 
@@ -383,6 +388,8 @@ Population, employment, and building counts are static for v1. `employed` is 60%
 | `found_settlement` | Mayor-only; requires hello/resume and a stable `player_id`; validates name/radius/centre, creates the store on first use, assigns the caller as owner with revision 1; returns `settlement_found`; does not advance the tick | `duplicate_name`, `invalid_radius`, `name_too_long`, `empty_name`, `coordinate_out_of_range`, `too_many_owned`, `settlement.identity`, `settlement.seed_mismatch`, `not_hello`, `role.forbidden` |
 | `settlement_list` | Read-only; returns every record in ascending id order with the store checksum; an absent store returns count 0 and checksum `0000000000000000`; does not advance the tick | `settlement.seed_mismatch`, `not_hello` |
 | `settlement_invite` / `settlement_set_role` / `settlement_remove_member` | Mayor-only; checks the actor's core `members` permission, revision, role, member limit, and owner invariants; returns `settlement_updated`; does not advance the tick | `settlement.unknown`, `settlement.forbidden`, `settlement.not_member`, `settlement.revision_conflict`, `settlement.owner_required`, `settlement.role_invalid`, `settlement.identity`, `settlement.seed_mismatch`, `role.forbidden`, `not_hello` |
+| `settlement_claim` | Mayor-only; claims an unowned record with a revision check and the 16-owned limit; returns `settlement_updated`; does not advance the tick | `settlement.already_owned`, `settlement.revision_conflict`, `settlement.unknown`, `settlement.identity`, `settlement.too_many_owned`, `role.forbidden`, `not_hello` |
+| `settlement_at` | Viewer read; nearest containing record or `found:false`; does not advance the tick | `settlement.seed_mismatch`, `not_hello` |
 | `set_interest` | View-only: stores the connection viewport (`center_x`, `center_z`, `radius_m`) and returns a snapshot plus a bounded `interest_view`; does not advance the tick or move the checksum | `not_hello`, `interest.invalid_center`, `interest.radius_out_of_range` |
 | `time_vote` | Per-connection ballot on the shared vote: call (initiator auto-yes), yes, no; admin cancel; returns `TimeVoteStatus` | `vote.open`, `vote.cooldown`, `vote.min_online`, `vote.unknown_player`, `vote.duplicate`, `vote.closed`, `vote.action_required`, `vote.action_unsupported`, `role.forbidden` |
 | `disconnect` | Closes this connection; returns `goodbye` | `session.closed` |

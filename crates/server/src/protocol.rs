@@ -368,6 +368,20 @@ pub enum ClientCommand {
         /// Revision the client believes is current.
         expected_revision: u32,
     },
+    /// Claim an unowned settlement (D-033, Q-112).
+    SettlementClaim {
+        /// Settlement id from `settlement_list`.
+        settlement_id: u64,
+        /// Revision the client believes is current.
+        expected_revision: u32,
+    },
+    /// Read the settlement containing a world cell, nearest centre first.
+    SettlementAt {
+        /// World cell X in metres.
+        x: i32,
+        /// World cell Z in metres.
+        z: i32,
+    },
     Disconnect,
 }
 
@@ -388,6 +402,8 @@ impl ClientCommand {
             ClientCommand::SettlementInvite { .. } => "settlement_invite",
             ClientCommand::SettlementSetRole { .. } => "settlement_set_role",
             ClientCommand::SettlementRemoveMember { .. } => "settlement_remove_member",
+            ClientCommand::SettlementClaim { .. } => "settlement_claim",
+            ClientCommand::SettlementAt { .. } => "settlement_at",
             ClientCommand::Disconnect => "disconnect",
         }
     }
@@ -655,6 +671,15 @@ pub enum ServerMessage {
         /// Stable checksum of the whole world.
         world_checksum: String,
     },
+    /// Settlement containing a world cell, when one exists.
+    SettlementAt {
+        /// Authoritative tick.
+        tick: u64,
+        /// Whether a settlement contains the cell.
+        found: bool,
+        /// The nearest containing settlement, or `null` when `found` is false.
+        settlement: Option<SettlementView>,
+    },
     /// Read-only settlement list.
     SettlementList {
         /// Authoritative tick.
@@ -810,6 +835,8 @@ pub fn decode_client_command(payload: &[u8]) -> Result<ClientCommand, Rejection>
         "settlement_invite",
         "settlement_set_role",
         "settlement_remove_member",
+        "settlement_claim",
+        "settlement_at",
         "disconnect",
     ];
     if !KNOWN_TAGS.contains(&tag) {
@@ -1223,7 +1250,9 @@ impl Session {
             | ClientCommand::SettlementList
             | ClientCommand::SettlementInvite { .. }
             | ClientCommand::SettlementSetRole { .. }
-            | ClientCommand::SettlementRemoveMember { .. } => reject(
+            | ClientCommand::SettlementRemoveMember { .. }
+            | ClientCommand::SettlementClaim { .. }
+            | ClientCommand::SettlementAt { .. } => reject(
                 codes::SETTLEMENT_UNAVAILABLE,
                 "settlements require the authoritative executor with a player registry, not the transport-only session",
             ),
@@ -1859,6 +1888,69 @@ mod tests {
             assert_eq!(
                 crate::world::ClientRole::required_role_for(&decoded),
                 crate::world::ClientRole::Mayor
+            );
+        }
+    }
+
+    #[test]
+    fn settlement_claim_and_at_decode_and_map_to_roles() {
+        let claim = decode_client_command(
+            br#"{"type":"settlement_claim","settlement_id":1,"expected_revision":0}"#,
+        )
+        .expect("settlement_claim decodes");
+        assert_eq!(
+            claim,
+            ClientCommand::SettlementClaim {
+                settlement_id: 1,
+                expected_revision: 0,
+            }
+        );
+        assert_eq!(claim.tag(), "settlement_claim");
+        assert_eq!(
+            crate::world::ClientRole::required_role_for(&claim),
+            crate::world::ClientRole::Mayor
+        );
+
+        let at = decode_client_command(br#"{"type":"settlement_at","x":10,"z":-20}"#)
+            .expect("settlement_at decodes");
+        assert_eq!(at, ClientCommand::SettlementAt { x: 10, z: -20 });
+        assert_eq!(at.tag(), "settlement_at");
+        assert_eq!(
+            crate::world::ClientRole::required_role_for(&at),
+            crate::world::ClientRole::Viewer
+        );
+    }
+
+    #[test]
+    fn settlement_at_round_trips_with_and_without_a_record() {
+        for settlement in [
+            None,
+            Some(SettlementView {
+                id: 1,
+                name: "Harbour".to_string(),
+                owner: "mayor".to_string(),
+                owner_id: Some(1),
+                owned: true,
+                center: [0, 0],
+                radius_m: 64,
+                members: vec![SettlementMemberView {
+                    player: 1,
+                    role: "owner".to_string(),
+                    permissions: 15,
+                }],
+                membership_revision: 1,
+            }),
+        ] {
+            let message = ServerMessage::SettlementAt {
+                tick: 2,
+                found: settlement.is_some(),
+                settlement,
+            };
+            let json = String::from_utf8(encode_json(&message).expect("encode")).expect("utf8");
+            assert!(json.contains("\"type\":\"settlement_at\""));
+            assert_eq!(
+                serde_json::from_str::<ServerMessage>(&json).expect("decode"),
+                message
             );
         }
     }
