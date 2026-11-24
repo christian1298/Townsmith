@@ -8321,16 +8321,123 @@ fn settlement_error_result(error: &SettlementError) -> VarDictionary {
     placement_simple_error(error.code(), error.to_string())
 }
 
+/// FNV-1a feed shared by the bridge fingerprints.
+fn fnv1a_push(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+}
+
+/// Membership fingerprint for one settlement, as 16 lowercase hex digits.
+///
+/// FNV-1a over the settlement id, owner id, membership revision, and the
+/// sorted member ids and role names. The store keeps its own whole-layer
+/// checksum; this value lets a UI or smoke diff watch one record. It is a
+/// display/diff value, not a security hash.
+fn settlement_membership_checksum(settlement: &Settlement) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    fnv1a_push(&mut hash, &settlement.id.to_le_bytes());
+    fnv1a_push(&mut hash, &settlement.membership_revision.to_le_bytes());
+    match settlement.owner_id {
+        Some(owner) => {
+            fnv1a_push(&mut hash, &[1]);
+            fnv1a_push(&mut hash, &owner.get().to_le_bytes());
+        }
+        None => fnv1a_push(&mut hash, &[0]),
+    }
+    let mut members = settlement.members.clone();
+    members.sort_by_key(|member| member.player);
+    for member in &members {
+        fnv1a_push(&mut hash, &member.player.get().to_le_bytes());
+        fnv1a_push(&mut hash, member.role.as_str().as_bytes());
+        fnv1a_push(&mut hash, &[0]);
+    }
+    format!("{hash:016x}")
+}
+
+#[derive(serde::Serialize)]
+struct SettlementMemberPayload {
+    player: u64,
+    role: &'static str,
+    permissions: u8,
+}
+
+#[derive(serde::Serialize)]
+struct SettlementPayload {
+    id: u64,
+    name: String,
+    owner: String,
+    owned: bool,
+    owner_id: Option<u64>,
+    center: [i32; 2],
+    radius_m: u32,
+    members: Vec<SettlementMemberPayload>,
+    membership_revision: u32,
+    membership_checksum: String,
+}
+
+/// Pure settlement payload, testable without a Godot engine.
+fn settlement_payload(settlement: &Settlement) -> SettlementPayload {
+    let mut members = settlement.members.clone();
+    members.sort_by_key(|member| member.player);
+    SettlementPayload {
+        id: settlement.id,
+        name: settlement.name.clone(),
+        owner: settlement.owner.clone(),
+        owned: settlement.is_owned(),
+        owner_id: settlement.owner_id.map(core_city::player::PlayerId::get),
+        center: settlement.center,
+        radius_m: settlement.radius_m,
+        members: members
+            .iter()
+            .map(|member| SettlementMemberPayload {
+                player: member.player.get(),
+                role: member.role.as_str(),
+                permissions: member.role.permissions().bits(),
+            })
+            .collect(),
+        membership_revision: settlement.membership_revision,
+        membership_checksum: settlement_membership_checksum(settlement),
+    }
+}
+
+/// Read-only settlement payload. Every field is a pure function of the record.
 fn settlement_to_dictionary(settlement: &Settlement) -> VarDictionary {
+    let payload = settlement_payload(settlement);
     let mut result = VarDictionary::new();
-    result.set("id", settlement.id as i64);
-    result.set("name", &GString::from(settlement.name.as_str()));
-    result.set("owner", &GString::from(settlement.owner.as_str()));
+    result.set("id", payload.id as i64);
+    result.set("name", &GString::from(payload.name.as_str()));
+    // `owner` stays the legacy display label; `owner_id` is authoritative.
+    result.set("owner", &GString::from(payload.owner.as_str()));
+    result.set("owned", payload.owned);
+    let owner_id = match payload.owner_id {
+        Some(owner) => Variant::from(owner as i64),
+        None => Variant::nil(),
+    };
+    result.set("owner_id", &owner_id);
     result.set(
         "center",
-        &PackedInt32Array::from(settlement.center.to_vec()).to_variant(),
+        &PackedInt32Array::from(payload.center.to_vec()).to_variant(),
     );
-    result.set("radius_m", i64::from(settlement.radius_m));
+    result.set("radius_m", i64::from(payload.radius_m));
+    let mut payload_members: Array<VarDictionary> = Array::new();
+    for member in &payload.members {
+        let mut item = VarDictionary::new();
+        item.set("player", member.player as i64);
+        item.set("role", &GString::from(member.role));
+        item.set("permissions", i64::from(member.permissions));
+        payload_members.push(&item);
+    }
+    result.set("members", &payload_members.to_variant());
+    result.set(
+        "membership_revision",
+        i64::from(payload.membership_revision),
+    );
+    result.set(
+        "membership_checksum",
+        &GString::from(payload.membership_checksum.as_str()),
+    );
     result
 }
 
@@ -13099,6 +13206,114 @@ mod tests {
         store.format_version = 99;
         let json = attach_lots("{}", &store).expect("attach");
         assert!(lots_from_world_json(&json).is_err());
+    }
+
+    fn bridge_settlement(
+        owner: Option<u64>,
+        members: &[(u64, core_city::settlement::SettlementRole)],
+        revision: u32,
+    ) -> Settlement {
+        Settlement {
+            id: 7,
+            name: "Harbour".to_string(),
+            owner: "mayor".to_string(),
+            center: [10, 20],
+            radius_m: 64,
+            owner_id: owner.map(|id| core_city::player::PlayerId::new(id).expect("player id")),
+            members: members
+                .iter()
+                .map(|(id, role)| core_city::settlement::SettlementMember {
+                    player: core_city::player::PlayerId::new(*id).expect("player id"),
+                    role: *role,
+                })
+                .collect(),
+            membership_revision: revision,
+        }
+    }
+
+    #[test]
+    fn legacy_settlement_payload_stays_unowned_and_empty() {
+        let payload = serde_json::to_value(settlement_payload(&bridge_settlement(None, &[], 0)))
+            .expect("json");
+        assert_eq!(payload["id"], 7);
+        assert_eq!(payload["owner"], "mayor");
+        assert_eq!(payload["owned"], false);
+        assert!(payload["owner_id"].is_null());
+        assert_eq!(payload["members"].as_array().expect("members").len(), 0);
+        assert_eq!(payload["membership_revision"], 0);
+        let checksum = payload["membership_checksum"].as_str().expect("checksum");
+        assert_eq!(checksum.len(), 16);
+        assert!(checksum.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn owned_settlement_payload_lists_sorted_members_and_bits() {
+        use core_city::settlement::SettlementRole;
+        let settlement = bridge_settlement(
+            Some(1),
+            &[
+                (3, SettlementRole::Builder),
+                (1, SettlementRole::Owner),
+                (2, SettlementRole::Manager),
+            ],
+            4,
+        );
+        let payload = serde_json::to_value(settlement_payload(&settlement)).expect("json");
+        assert_eq!(payload["owned"], true);
+        assert_eq!(payload["owner_id"], 1);
+        assert_eq!(payload["membership_revision"], 4);
+        let members = payload["members"].as_array().expect("members");
+        assert_eq!(members.len(), 3);
+        let ids: Vec<_> = members
+            .iter()
+            .map(|member| member["player"].clone())
+            .collect();
+        let roles: Vec<_> = members
+            .iter()
+            .map(|member| member["role"].as_str().expect("role"))
+            .collect();
+        let bits: Vec<_> = members
+            .iter()
+            .map(|member| member["permissions"].as_u64().expect("bits"))
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert_eq!(roles, vec!["owner", "manager", "builder"]);
+        assert_eq!(bits, vec![15, 15, 1]);
+    }
+
+    #[test]
+    fn settlement_membership_checksum_tracks_members_and_revision() {
+        use core_city::settlement::SettlementRole;
+        let first = bridge_settlement(Some(1), &[(1, SettlementRole::Owner)], 1);
+        let same = bridge_settlement(Some(1), &[(1, SettlementRole::Owner)], 1);
+        let added = bridge_settlement(
+            Some(1),
+            &[(1, SettlementRole::Owner), (2, SettlementRole::Builder)],
+            2,
+        );
+        assert_eq!(
+            settlement_membership_checksum(&first),
+            settlement_membership_checksum(&same)
+        );
+        assert_ne!(
+            settlement_membership_checksum(&first),
+            settlement_membership_checksum(&added)
+        );
+        assert_eq!(
+            settlement_membership_checksum(&first).len(),
+            16,
+            "checksum is 16 lowercase hex digits"
+        );
+    }
+
+    #[test]
+    fn settlement_payload_keeps_the_existing_record_keys() {
+        let payload = serde_json::to_value(settlement_payload(&bridge_settlement(None, &[], 0)))
+            .expect("json");
+        for key in ["id", "name", "owner", "center", "radius_m"] {
+            assert!(payload.get(key).is_some(), "missing legacy key {key}");
+        }
+        assert_eq!(payload["center"], serde_json::json!([10, 20]));
     }
 
     #[test]
