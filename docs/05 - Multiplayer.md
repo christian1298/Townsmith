@@ -300,7 +300,13 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. Protocol v
 
 `disconnect` is accepted before `hello` so a client can close cleanly. The global Mayor/Admin placement role, package checks, the district policy gate, the placement geometry rules, and the settlement `build` bit are implemented for `place_blueprint`. The settlement commands cover found/list/at/claim/rename/transfer/release plus membership invite/set-role/remove; the remaining simulation rules stay deferred.
 
-The listen server accepts `--content-hash <64 lowercase hex>` to pin the active content-registry hash. When pinned, every `hello` must carry the exact hash or the server rejects it with `content_hash.mismatch` before registering a player or mutating session state. The pin is process configuration, not save data; the full manifest and the client mismatch screen are still Phase 6 work.
+The listen server accepts `--content-hash <64 lowercase hex>` to pin the active content-registry hash. When pinned, every `hello` must carry the exact hash or the server rejects it with `content_hash.mismatch` before registering a player or mutating session state. The pin is process configuration, not save data. The full manifest is still Phase 6 work; the pinned-hash mismatch now has the presentation-only client screen described below.
+
+**Content-mismatch client screen**
+
+When `godot/mp_client.gd` receives a `content_hash.mismatch` reject, it shows the full-rect `godot/content_mismatch_screen.tscn` overlay instead of the generic protocol status line. The screen displays the server code and message, the client's 64-hex `CONTENT_HASH`, and instructions to install the server's exact content pack and reconnect. Its `Retry` and `Quit` buttons emit `retry_requested` and `quit_requested`; the owner decides what those mean.
+
+The screen is presentation-only. It never reconnects, downloads, substitutes, or saves content, and it has no networking or filesystem code. Strict `hello` remains fail-closed: a mismatch produces no welcome, session, player registration, world state, or fallback hash. A non-mismatch reject keeps the existing generic protocol failure path. `scripts/smoke_content_mismatch.sh` runs the synthetic UI twice headless (no server or socket) and requires the stable marker `CONTENT_MISMATCH_UI status=ok runs=2 code=content_hash.mismatch checksum=<8 hex>`.
 
 **Loopback smoke**
 
