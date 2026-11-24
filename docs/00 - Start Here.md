@@ -61,12 +61,12 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 
 ## Code inventory
 
-`cargo test --workspace`: **1432 tests**, all passing (**1427 unit/integration + 5 doctests**); fmt and clippy clean. Verified on 2026-11-24 on master `4880d82`.
+`cargo test --workspace`: **1433 tests**, all passing (**1428 unit/integration + 5 doctests**); fmt and clippy clean. Verified on 2026-11-24 on master `4880d82`.
 
 | Area | Tests |
 |---|---:|
 | `core_city` | 571 |
-| `godot_ext` (bridge) | 250 |
+| `godot_ext` (bridge) | 251 |
 | `townsmith-server` | 224 |
 | `townsmith-bench` (25 bins; 18 with tests + lib) | 108 |
 | `core_world` | 78 |
@@ -76,7 +76,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | `core_structure` | 22 |
 | `core_rooms` | 13 |
 | doctests (`core_city` 3, `core_rooms` 1, `core_structure` 1) | 5 |
-| **Total** | **1432** |
+| **Total** | **1433** |
 
 Bench bins: `city_loop` 9, `cohort_1m` 9, `cohort_validate` 9, `dormant` 5, `financing` 8, `industrial` 4, `infra_cost` 2, `materialization` 2, `metropolis` 4, `metropolis_balance` 4, `modern` 5, `movement` 6, `placements` 2, `save_1m` 6, `save_stress` 11, `streaming_scale` 13, `traffic` 4, `worldgen` 3, bench lib 2.
 

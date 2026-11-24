@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+use core_city::player::PlayerId;
 use godot::builtin::{
     PackedColorArray, PackedFloat32Array, PackedInt32Array, PackedVector2Array, PackedVector3Array,
     VarArray, Variant,
@@ -42,11 +43,11 @@ use core_city::{
     PlacementStore, PolicyPlacementDenial, PolicyServiceWeight, PolicyTaxWeights, ResearchStore,
     RoadError, RoadGraph, RoadRequest, RoadSegment, RoadStore, RouteCache, ServiceConsumer,
     ServiceKind, ServiceReport, ServiceStore, ServiceTier, Settlement, SettlementError,
-    SettlementRequest, SettlementStore, TechTree, Trade, TradePool, TutorialInput, UtilityConsumer,
-    UtilityKind, UtilityReport, UtilityStore, Workplace, Zone, DEFAULT_LOAN_RATE_PER_DAY,
-    DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY, MAX_HEATMAP_CELLS, MAX_HEATMAP_CELL_M,
-    MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M, MIN_HEATMAP_CELL_M,
-    RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    SettlementRequest, SettlementRole, SettlementStore, TechTree, Trade, TradePool, TutorialInput,
+    UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
+    DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY,
+    MAX_HEATMAP_CELLS, MAX_HEATMAP_CELL_M, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M,
+    MIN_HEATMAP_CELL_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -2710,6 +2711,163 @@ impl TownsmithCore {
             }
             Err((code, message)) => placement_simple_error(code, message),
         }
+    }
+
+    /// Claim an unowned settlement for `player_id`.
+    #[func]
+    fn settlement_claim(&self, id: i64, player_id: i64, expected_revision: i64) -> VarDictionary {
+        let (id, expected_revision) = match settlement_mutation_args(id, expected_revision) {
+            Ok(args) => args,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        let player = match settlement_player_arg(player_id) {
+            Ok(player) => player,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        let mut guard = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(store) = guard.as_mut() else {
+            return settlement_error_result(&SettlementError::Unknown { id });
+        };
+        let outcome = settlement_claim_in_store(store, id, player, expected_revision);
+        settlement_mutation_payload(store, outcome)
+    }
+
+    /// Invite `player_id` as its current owner.
+    #[func]
+    fn settlement_invite(
+        &self,
+        id: i64,
+        player_id: i64,
+        role: GString,
+        expected_revision: i64,
+    ) -> VarDictionary {
+        let (id, expected_revision) = match settlement_mutation_args(id, expected_revision) {
+            Ok(args) => args,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        let player = match settlement_player_arg(player_id) {
+            Ok(player) => player,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        let mut guard = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(store) = guard.as_mut() else {
+            return settlement_error_result(&SettlementError::Unknown { id });
+        };
+        let outcome =
+            settlement_invite_in_store(store, id, player, &role.to_string(), expected_revision);
+        settlement_mutation_payload(store, outcome)
+    }
+
+    /// Change a member's role as its current owner.
+    #[func]
+    fn settlement_set_role(
+        &self,
+        id: i64,
+        player_id: i64,
+        role: GString,
+        expected_revision: i64,
+    ) -> VarDictionary {
+        let (id, expected_revision) = match settlement_mutation_args(id, expected_revision) {
+            Ok(args) => args,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        let player = match settlement_player_arg(player_id) {
+            Ok(player) => player,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        let mut guard = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(store) = guard.as_mut() else {
+            return settlement_error_result(&SettlementError::Unknown { id });
+        };
+        let outcome =
+            settlement_set_role_in_store(store, id, player, &role.to_string(), expected_revision);
+        settlement_mutation_payload(store, outcome)
+    }
+
+    /// Remove a member as its current owner.
+    #[func]
+    fn settlement_remove_member(
+        &self,
+        id: i64,
+        player_id: i64,
+        expected_revision: i64,
+    ) -> VarDictionary {
+        let (id, expected_revision) = match settlement_mutation_args(id, expected_revision) {
+            Ok(args) => args,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        let player = match settlement_player_arg(player_id) {
+            Ok(player) => player,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        let mut guard = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(store) = guard.as_mut() else {
+            return settlement_error_result(&SettlementError::Unknown { id });
+        };
+        let outcome = settlement_remove_member_in_store(store, id, player, expected_revision);
+        settlement_mutation_payload(store, outcome)
+    }
+
+    /// Transfer ownership to `player_id` as its current owner.
+    #[func]
+    fn settlement_transfer(
+        &self,
+        id: i64,
+        player_id: i64,
+        expected_revision: i64,
+    ) -> VarDictionary {
+        let (id, expected_revision) = match settlement_mutation_args(id, expected_revision) {
+            Ok(args) => args,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        let player = match settlement_player_arg(player_id) {
+            Ok(player) => player,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        let mut guard = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(store) = guard.as_mut() else {
+            return settlement_error_result(&SettlementError::Unknown { id });
+        };
+        let outcome = settlement_transfer_in_store(store, id, player, expected_revision);
+        settlement_mutation_payload(store, outcome)
+    }
+
+    /// Set the settlement tax rate as its current owner.
+    #[func]
+    fn settlement_set_tax(&self, id: i64, rate: i64) -> VarDictionary {
+        let Ok(id) = u64::try_from(id) else {
+            return placement_simple_error("invalid_id", "settlement id must be non-negative");
+        };
+        let Ok(rate) = u16::try_from(rate) else {
+            return placement_simple_error(
+                "settlement.tax_out_of_range",
+                "settlement tax rate must fit 16 bits",
+            );
+        };
+        let mut guard = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(store) = guard.as_mut() else {
+            return settlement_error_result(&SettlementError::Unknown { id });
+        };
+        let outcome = settlement_set_tax_in_store(store, id, rate);
+        settlement_mutation_payload(store, outcome)
     }
 
     /// Owner of a world cell, or `{ ok, found: false }`.
@@ -8414,6 +8572,157 @@ fn settlement_rename_in_store(
         .map_err(|error| (error.code(), error.to_string()))
 }
 
+/// Convert the Godot mutation arguments to the core domain types.
+fn settlement_mutation_args(
+    id: i64,
+    expected_revision: i64,
+) -> Result<(u64, u32), (&'static str, &'static str)> {
+    let id = u64::try_from(id).map_err(|_| ("invalid_id", "settlement id must be non-negative"))?;
+    let expected_revision = u32::try_from(expected_revision)
+        .map_err(|_| ("invalid_revision", "settlement revision must fit 32 bits"))?;
+    Ok((id, expected_revision))
+}
+
+fn settlement_player_arg(player_id: i64) -> Result<PlayerId, (&'static str, &'static str)> {
+    u64::try_from(player_id)
+        .ok()
+        .and_then(|id| PlayerId::new(id).ok())
+        .ok_or((
+            "invalid_player_id",
+            "player id must be a positive integer in the supported range",
+        ))
+}
+
+fn settlement_role_arg(role: &str) -> Result<SettlementRole, (&'static str, String)> {
+    let Some(role) = SettlementRole::ALL
+        .into_iter()
+        .find(|candidate| candidate.as_str().eq_ignore_ascii_case(role))
+    else {
+        return Err((
+            "settlement.role_invalid",
+            format!("unknown settlement role `{role}`"),
+        ));
+    };
+    if role == SettlementRole::Owner {
+        return Err((
+            "settlement.role_invalid",
+            "the owner role cannot be invited or assigned".to_string(),
+        ));
+    }
+    Ok(role)
+}
+
+/// The bridge has no player registry: local mutations act as the current owner.
+fn settlement_owner_actor(
+    store: &SettlementStore,
+    id: u64,
+) -> Result<PlayerId, (&'static str, String)> {
+    let Some(settlement) = store.get(id) else {
+        let error = SettlementError::Unknown { id };
+        return Err((error.code(), error.to_string()));
+    };
+    settlement.owner_id.ok_or_else(|| {
+        let error = SettlementError::Unowned { id };
+        (error.code(), error.to_string())
+    })
+}
+
+fn settlement_mutation_payload(
+    store: &SettlementStore,
+    outcome: Result<Settlement, (&'static str, String)>,
+) -> VarDictionary {
+    match outcome {
+        Ok(settlement) => {
+            let mut result = VarDictionary::new();
+            result.set("ok", true);
+            result.set(
+                "settlement",
+                &settlement_to_dictionary(&settlement).to_variant(),
+            );
+            result.set(
+                "checksum",
+                &GString::from(&format!("{:016x}", store.checksum())),
+            );
+            result
+        }
+        Err((code, message)) => placement_simple_error(code, message),
+    }
+}
+
+fn settlement_claim_in_store(
+    store: &mut SettlementStore,
+    id: u64,
+    player: PlayerId,
+    expected_revision: u32,
+) -> Result<Settlement, (&'static str, String)> {
+    store
+        .claim(player, id, expected_revision)
+        .map_err(|error| (error.code(), error.to_string()))
+}
+
+fn settlement_invite_in_store(
+    store: &mut SettlementStore,
+    id: u64,
+    player: PlayerId,
+    role: &str,
+    expected_revision: u32,
+) -> Result<Settlement, (&'static str, String)> {
+    let role = settlement_role_arg(role)?;
+    let actor = settlement_owner_actor(store, id)?;
+    store
+        .invite(actor, id, player, role, expected_revision)
+        .map_err(|error| (error.code(), error.to_string()))
+}
+
+fn settlement_set_role_in_store(
+    store: &mut SettlementStore,
+    id: u64,
+    player: PlayerId,
+    role: &str,
+    expected_revision: u32,
+) -> Result<Settlement, (&'static str, String)> {
+    let role = settlement_role_arg(role)?;
+    let actor = settlement_owner_actor(store, id)?;
+    store
+        .set_member_role(actor, id, player, role, expected_revision)
+        .map_err(|error| (error.code(), error.to_string()))
+}
+
+fn settlement_remove_member_in_store(
+    store: &mut SettlementStore,
+    id: u64,
+    player: PlayerId,
+    expected_revision: u32,
+) -> Result<Settlement, (&'static str, String)> {
+    let actor = settlement_owner_actor(store, id)?;
+    store
+        .remove_member(actor, id, player, expected_revision)
+        .map_err(|error| (error.code(), error.to_string()))
+}
+
+fn settlement_transfer_in_store(
+    store: &mut SettlementStore,
+    id: u64,
+    recipient: PlayerId,
+    expected_revision: u32,
+) -> Result<Settlement, (&'static str, String)> {
+    let actor = settlement_owner_actor(store, id)?;
+    store
+        .transfer(actor, id, recipient, expected_revision)
+        .map_err(|error| (error.code(), error.to_string()))
+}
+
+fn settlement_set_tax_in_store(
+    store: &mut SettlementStore,
+    id: u64,
+    rate: u16,
+) -> Result<Settlement, (&'static str, String)> {
+    let actor = settlement_owner_actor(store, id)?;
+    store
+        .set_tax_rate(actor, id, rate)
+        .map_err(|error| (error.code(), error.to_string()))
+}
+
 /// FNV-1a feed shared by the bridge fingerprints.
 fn fnv1a_push(hash: &mut u64, bytes: &[u8]) {
     for byte in bytes {
@@ -13434,6 +13743,60 @@ mod tests {
             center: [10, 20],
             radius_m: 64,
         }
+    }
+
+    #[test]
+    fn settlement_mutations_use_the_owner_actor_and_core_rules() {
+        let mut store = SettlementStore::new(2026);
+        let unowned = store
+            .found(&bridge_settlement_request("Old Harbour"))
+            .expect("found");
+        let owner = PlayerId::new(9).expect("owner");
+        let member = PlayerId::new(10).expect("member");
+
+        let claimed = settlement_claim_in_store(&mut store, unowned.id, owner, 0).expect("claim");
+        assert_eq!(claimed.owner_id, Some(owner));
+        assert_eq!(claimed.membership_revision, 1);
+
+        let invited = settlement_invite_in_store(&mut store, unowned.id, member, "builder", 1)
+            .expect("invite");
+        assert_eq!(invited.membership_revision, 2);
+        let promoted = settlement_set_role_in_store(&mut store, unowned.id, member, "manager", 2)
+            .expect("promote");
+        assert_eq!(promoted.membership_revision, 3);
+        assert_eq!(promoted.role_of(member), Some(SettlementRole::Manager));
+
+        let transferred =
+            settlement_transfer_in_store(&mut store, unowned.id, member, 3).expect("transfer");
+        assert_eq!(transferred.owner_id, Some(member));
+        assert_eq!(transferred.role_of(owner), Some(SettlementRole::Manager));
+
+        let taxed = settlement_set_tax_in_store(&mut store, unowned.id, 25).expect("tax");
+        assert_eq!(taxed.tax_rate, 25);
+
+        let removed = settlement_remove_member_in_store(&mut store, unowned.id, owner, 4)
+            .expect("remove former owner");
+        assert_eq!(removed.members.len(), 1);
+
+        let error = settlement_invite_in_store(&mut store, unowned.id, member, "owner", 5)
+            .expect_err("owner role is not invitable");
+        assert_eq!(error.0, "settlement.role_invalid");
+        let error = settlement_invite_in_store(
+            &mut store,
+            unowned.id,
+            PlayerId::new(11).expect("player"),
+            "builder",
+            4,
+        )
+        .expect_err("stale revision");
+        assert_eq!(error.0, "settlement.revision_conflict");
+
+        let other = store
+            .found(&bridge_settlement_request("Unowned"))
+            .expect("second");
+        let error = settlement_invite_in_store(&mut store, other.id, member, "builder", 0)
+            .expect_err("unowned cannot invite");
+        assert_eq!(error.0, "settlement.unowned");
     }
 
     #[test]

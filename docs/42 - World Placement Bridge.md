@@ -44,6 +44,12 @@ tags:
 | `world_load_with_library(path, expected_seed, library_root)` | `Dictionary` | Same as `world_load`, with reference-first package resolution: a present `blueprint_ref` is resolved first and does not fall back to the recorded path when it resolves; a legacy record uses `blueprint_path`, then the library by `blueprint_hash`; adds `resolved_references` and `legacy_path_fallbacks`; the save JSON is not rewritten |
 | `world_load_content_checked(path, expected_seed, accept_missing_content)` | `Dictionary` | D-034/D-035 load entry point; `false` is exactly `world_load`, `true` allows a read-only inspection when the pack is missing or different |
 | `settlement_rename(id, name, expected_revision)` | `Dictionary` | Rename a settlement in the live layer; `ok`, `settlement`, `checksum`. The current `owner_id` is the actor, so the bridge never transfers ownership or invites members; an unowned settlement returns `settlement.unowned` and a stale revision returns `settlement.revision_conflict` without mutating |
+| `settlement_claim(id, player_id, expected_revision)` | `Dictionary` | Claim an unowned settlement for an explicit player id; core ownership/limit rules apply |
+| `settlement_invite(id, player_id, role, expected_revision)` | `Dictionary` | Invite a player as the current owner; role is `manager`/`builder`/`member` |
+| `settlement_set_role(id, player_id, role, expected_revision)` | `Dictionary` | Change a member's role as the current owner; `owner` is rejected |
+| `settlement_remove_member(id, player_id, expected_revision)` | `Dictionary` | Remove a member as the current owner; the owner cannot be removed |
+| `settlement_transfer(id, player_id, expected_revision)` | `Dictionary` | Transfer ownership as the current owner; the previous owner becomes Manager |
+| `settlement_set_tax(id, rate)` | `Dictionary` | Set the data-only tax rate `0..=100` as the current owner; no revision bump |
 | `world_height_at(seed, x, z)` | `float` | One terrain sample for the preview; `-1.0` on invalid input |
 | `city_summary()` | `Dictionary` | Derived population, housing, jobs, employment, happiness; see [[49 - Phase 3 Slice Plan]] |
 | `content_registry_summary()` | `Dictionary` | Live content counts, `format_version`, `packs`, `checksum`, and the D-034 `pack_id`/`namespace`/`pack_checksum`/`registry_checksum`/`base_checksum` identity fields |
