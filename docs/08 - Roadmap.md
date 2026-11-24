@@ -2,7 +2,7 @@
 title: Roadmap
 project: Townsmith
 status: draft
-updated: 2026-11-23
+updated: 2026-11-24
 tags:
   - townsmith
   - roadmap
@@ -24,17 +24,19 @@ tags:
 
 ## 2. Phase overview
 
-| Phase | Duration | Theme | Exit milestone |
-|---|---:|---|---|
-| **0. Foundations and spikes** | 3–4 weeks | Prove the tech, answer blocking questions | M0: It renders |
-| **1. Architect Mode core** | 6–8 weeks | Build, save, and reload a blueprint | M1: I built that |
-| **2. Open world and Mayor Mode** | 8–10 weeks | Procedural world, chunk streaming, build anywhere | M2: The world is open |
-| **3. Simulation v1** | 8–12 weeks | Citizens, primary jobs, needs, utilities, economy | M3: The city lives |
-| **4. Progression and content** | 6–8 weeks | Ages, tech, classes, production chains | M4: Ages |
-| **5. Metropolis scale** | 6–8 weeks | 1M+ cohort simulation, 100 km², district UI | M5: Metropolis |
-| **6. Multiplayer** | 6–10 weeks | Authoritative co-op and dedicated servers | M6: Together |
-| **7. Modding and resource packs** | 4–6 weeks | External content without core changes | M7: Modded |
-| **8. Polish and release** | 8–12 weeks | Performance, tutorial, localization, QA | M8: Ship |
+| Phase | Status | Duration | Theme | Exit milestone |
+|---|---|---:|---|---|
+| **0. Foundations and spikes** | ✅ Complete | 3–4 weeks | Prove the tech, answer blocking questions | M0: It renders |
+| **1. Architect Mode core** | ✅ Complete | 6–8 weeks | Build, save, and reload a blueprint | M1: I built that |
+| **2. Open world and Mayor Mode** | ✅ Complete | 8–10 weeks | Procedural world, chunk streaming, build anywhere | M2: The world is open |
+| **3. Simulation v1** | ✅ Complete | 8–12 weeks | Citizens, primary jobs, needs, utilities, economy | M3: The city lives |
+| **4. Progression and content** | ✅ Complete | 6–8 weeks | Ages, tech, classes, production chains | M4: Ages |
+| **5. Metropolis scale** | ✅ Complete (1M render gate open) | 6–8 weeks | 1M+ cohort simulation, 100 km², district UI | M5: Metropolis |
+| **6. Multiplayer** | 🚧 In progress | 6–10 weeks | Authoritative co-op and dedicated servers | M6: Together |
+| **7. Modding and resource packs** | 🟡 Partial (de-risked) | 4–6 weeks | External content without core changes | M7: Modded |
+| **8. Polish and release** | ⬜ Not started | 8–12 weeks | Performance, tutorial, localization, QA | M8: Ship |
+
+Status reflects master `2250ae4` (#314).
 
 **Total:** roughly **55–78 weeks** for a small team. This is a multi-year project for one person. Plan accordingly.
 
@@ -247,12 +249,19 @@ The staged cut is in [[49 - Phase 3 Slice Plan]]: city ledger, households/needs,
 
 ### Phase 6 — Multiplayer (6–10 weeks)
 
+> [!info] Current status — in progress (master `2250ae4`, #314)
+> **Landed:** protocol v1 and the authoritative executor; dev roles, rate limits, and audit; interest views with bounds (≤64 roads, ≤64 building records; #262/#266/#308); D-021 server-side time control including the 7-connection `--vote-smoke` pass/fail/cancel loop (#287); D-032 server-authoritative `place_blueprint` (#306/#308/#309); and bridge content-addressed placement references (#311/#313). F-003 (multi-connection session state) is fixed by #287.
+>
+> **Gaps:** full Godot placement UI (in flight; #309 is a debug single-hash path only); D-033 settlement permissions (Proposed — the next dependency); voxel edit sync and blueprint locks; journal/rollback; chat/pings; the mod-mismatch screen; remote transport and authentication; concurrent listener sessions.
+>
+> In-flight worktrees: settlement identity, placement UI, blueprint dependencies, time-vote UI, and network faults.
+
 **Goals**
 - Co-op that feels native, not bolted on.
 - A dedicated server that runs unattended.
 
 > [!info] Reconnect v0
-> #269 adds the Godot client `--reconnect` path and the server `--listen PORT --sessions N` cap. A reconnecting client sends `resume {session_id, last_tick}` and receives `welcome {resumed:true}` plus a snapshot inside the process-local 300-tick window. This is loopback-only, not authentication, does not survive a server restart, and has no world render integration; concurrent sessions, claims/journal recovery, and remote transport remain Phase 6 work.
+> #269 adds the Godot client `--reconnect` path and the server `--listen PORT --sessions N` cap. A reconnecting client sends `resume {session_id, last_tick}` and receives `welcome {resumed:true}` plus a snapshot inside the process-local 300-tick window. This is **process-local only**: loopback-only, not authentication, no server-restart survival, no world render integration, and no claim or journal recovery. Concurrent sessions, remote transport, and authentication remain Phase 6 work.
 
 **Features**
 - Authoritative server; local server for single-player.
@@ -278,6 +287,11 @@ The staged cut is in [[49 - Phase 3 Slice Plan]]: city ledger, households/needs,
 - Bandwidth and tick time are within target.
 
 ### Phase 7 — Modding and resource packs (4–6 weeks)
+
+> [!info] Current status — partial (de-risked, not started in earnest)
+> The content package foundation is in place: D-027 `.tsbp` v1 (zip + JSON + RLE voxels + BLAKE3) is accepted and implemented; #298 adds the content-addressed local blueprint library; D-034 (content-pack identity in world saves) is **accepted** and its bridge v1 is implemented by #313 (base-only saves stay outer v1 and byte-identical; one live pack writes outer v2 plus a top-level `content` identity, verified before any store or `.tsbp`). D-006 (data-first content with namespaced IDs) remains **Proposed**. The mod loader, dependency resolution, sandbox, mod manager, and resource pack loader are not started.
+>
+> Open content questions: **Q-116** (pack checksum stability and compatible newer packs), **Q-117** (read-only missing-content mode), **Q-118** (content-ID migration and ownership of the mapping). These gate the Phase 7 compatibility and dependency work.
 
 **Goals**
 - External content without touching core code.
@@ -377,16 +391,18 @@ The vertical slice is a small, complete version of the game used to validate the
 
 ## 7. Next 10 tasks
 
-1. Close the remaining Phase 0 questions: Q-002 and Q-052 in [[09 - Open Questions]].
-2. Build the Phase 0 benchmark harness: fixed test scene, fixed camera route, JSON result, 3-run median.
-3. Run the Phase 0 engine/worldgen/1M spike through the harness.
-4. D-003 (engine) is accepted; record the 3060-class performance gate for Phase 5.
-5. Set up the Rust workspace and Godot project.
-6. Implement chunk storage + greedy mesher + a test building.
-7. Implement deterministic worldgen + chunk streaming + terrain edit deltas.
-8. Implement the GDExtension bridge with a coarse API.
-9. Build the first-person edit loop (place/remove/undo) and the 1M cohort benchmark.
-10. Paper-prototype the economy, room-to-stats rules, and primary-industry loops.
+Ordered by dependency, not by size. Status reflects master `2250ae4` (#314).
+
+1. **D-033 core identity/membership** — stable per-save player ID (Q-111), ownership, and membership. 🚧 In flight.
+2. **Full Godot placement UI** — ghost preview, rotation, validation feedback, and library selection; replaces the debug single-hash path (#309). 🚧 In flight.
+3. **Blueprint dependency validation** — resolve and validate package dependencies before placement. 🚧 In flight.
+4. **D-033 server enforcement + persistence** — enforce per-settlement permissions in commands and persist settlement state in `ServerSave`.
+5. **Q-116/Q-117/Q-118 content compatibility decisions** — pack-version compatibility, read-only missing-content mode, and content-ID migration; unblocks the Phase 7 loader.
+6. **Voxel edit sync + blueprint locks** — replicate edits and hold locks across a disconnect.
+7. **Journal/rollback** — crash-safe command journal and rollback/history.
+8. **Chat/pings + mod-mismatch screen** — player communication and a fail-closed content-mismatch explanation.
+9. **Q-101 30-minute playtest** — ⛔ Blocked: needs a human player and observer. See [[66 - Playtest Kit]].
+10. **1M/RTX 3060 render gate** — ⛔ Blocked: needs reference hardware. See [[68 - Metropolis Gate]].
 
 ## 8. Cut lines
 
