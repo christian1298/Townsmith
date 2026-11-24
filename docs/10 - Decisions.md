@@ -53,6 +53,8 @@ tags:
 | D-033 | Settlement ownership, membership, and permissions | Accepted (core model) | 2026-11-24 | [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[48 - Settlement Boundaries]], [[57 - Dashboard and Advisor]] |
 | D-034 | Content-pack identity in world saves | Accepted | 2026-11-23 | [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[42 - World Placement Bridge]] |
 | D-035 | Read-only inspection of content-bound worlds with a missing pack | Proposed (bridge v1 implemented) | 2026-11-24 | [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[78 - Code Audit Findings]] |
+| D-036 | Pack compatibility is explicit, never implicit | Proposed | 2026-11-24 | [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[42 - World Placement Bridge]] |
+| D-037 | Content-ID migrations are explicit and versioned | Proposed | 2026-11-24 | [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[42 - World Placement Bridge]] |
 
 ---
 
@@ -1896,6 +1898,201 @@ D-034 makes a content-bound world fail closed when its recorded pack is missing 
 **Review trigger**
 
 The first server CLI or UI consumer, the first content-dependent simulation path that can run in a read-only world, or the first request to save from an inspected world.
+
+---
+
+## D-036 — Pack compatibility is explicit, never implicit
+
+**Status:** Proposed · **Date:** 2026-11-24 · **Affects:** [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[42 - World Placement Bridge]]
+
+### Context
+
+D-034 records an exact `pack_checksum` and `registry_checksum` in a content-bound save and fails closed when either differs. That is the right default: a pack edit that changes definitions cannot silently reinterpret an existing world. It also means a one-line cost fix or a texture-path correction in a pack makes every old save unloadable, even when the save uses none of the changed definitions. Q-116 asked how stable the pack checksum must be and whether a save can accept a compatible newer pack.
+
+The obvious escape hatch is a semver range: accept any pack whose `game_version` or `version` overlaps the recorded value. That cannot be made sound. A manifest version can be reused, a range can span a semantic change, and `registry_checksum` covers base content plus the pack, so a version string cannot prove that the definitions a save references still resolve. The decision needs a narrow, auditable claim by the pack author and an explicit acceptance by the loader operator, not a rule that infers compatibility.
+
+### Decision
+
+**The default does not change.** A normal load requires the exact `pack_id`, `pack_checksum`, and `registry_checksum` from D-034. Nothing in this ADR runs without an explicit opt-in.
+
+**Pack declaration.** A pack manifest may add two optional fields:
+
+```json
+"compatible_pack_checksums": [
+  {
+    "pack_checksum": "ad4c645869a411ed",
+    "registry_checksum": "330a538d07805b50",
+    "content_version": 2
+  }
+],
+"compatibility_reason": "1.0.1 corrects one copper_roof cost; IDs and saved definitions are unchanged."
+```
+
+- `compatible_pack_checksums` is a bounded list (16 entries proposed) of exact prior identities. Each entry pairs one 16-lowercase-hex `pack_checksum` with the `registry_checksum` recorded beside it in the old save, plus the prior `content_version` used by D-037. No ranges, wildcards, prefixes, `*`, "latest", or version comparison.
+- `compatibility_reason` is a non-empty, bounded (512 characters proposed) human-readable explanation. It is shown in the load result and logs; it is not localized player text.
+- The fields are optional and omitted by default. A manifest without them behaves exactly as today. A malformed list refuses the pack load rather than being ignored.
+- Listing an identity is a claim by the pack author, not proof. The checksums are FNV-1a registry values (D-034), not signatures; the server or admin remains the trust boundary.
+
+**Explicit acceptance.** A save whose recorded identity is not exact loads only when all of the following hold:
+
+1. The active pack has the same `pack_id`. A different `pack_id` still fails with `content_pack_mismatch`; this ADR does not rename or replace a pack.
+2. The recorded `pack_checksum` appears in the pack's list, paired with the recorded `registry_checksum`. A changed `registry_checksum` still fails with `content_registry_checksum_mismatch` unless that exact pair is listed; listing only the pack checksum is not enough.
+3. The caller passes the explicit opt-in: the reserved bridge form `world_load_content_compatible(path, expected_seed, true)` and the reserved server/CLI flag `--accept-compatible-pack`. The names are reserved by this ADR; no code exists yet.
+4. The world is not also missing its pack. A missing pack is Q-117's read-only path (D-035), not a compatibility acceptance.
+
+The opt-in is a per-load argument, never a save field, a server default, or a client-supplied value in multiplayer. The server decides; a client cannot negotiate compatibility.
+
+**Result and retention.** On acceptance, the load proceeds through the ordinary stores and package validation. The result sets `content_identity_status` to `compatible` and adds `content_accepted_prior_pack_checksum`, `content_accepted_prior_registry_checksum`, and `content_accepted_prior_content_version` (the recorded values), alongside the current values. The save file is not rewritten, and no ID is remapped by this ADR. A later explicit save writes the current identity and reports the rebind in its result; it is still a save, not a load-side mutation. This refines D-034's "a later save writes the same checksum" rule for the accepted-compatibility case only; an exact load still writes the recorded checksum.
+
+**No silent behavior.** There is no auto-accept when the list matches, no fallback to the newest pack, no rewrite on load, no downgrade of the save, and no propagation to other saves. Declining to pass the flag returns the existing `content_pack_checksum_mismatch` (or `content_registry_checksum_mismatch`) with the expected and actual values. The player-facing text may say that the installed pack declares compatibility, but it never offers an automatic download.
+
+**Out of scope.** Multi-pack compatibility, cross-pack or different-`pack_id` migration, content-ID renames and removals (D-037), an identity format change, a compatibility UI, auto-download, and any change to `ServerSave` or protocol v1.
+
+### Consequences
+
+**Positive**
+
+- A bugfix pack update can keep old saves with one explicit, auditable action.
+- Exact matching remains the default, so an ordinary load cannot reinterpret a world.
+- The accepted prior checksum is visible in the load result and logs.
+- The mechanism is bounded and testable with fixed checksums; it adds no version-range reasoning.
+
+**Negative**
+
+- Pack authors must list both the prior pack and registry checksums; a pack checksum alone is not enough.
+- A listed pair is an assertion, not a proof; a mistaken or dishonest list can accept a world it should not.
+- A compatible load can still fail on a missing content ID; D-037 is required for renames and removals.
+- The saved world is rebound to the current pack on its next save, so the old identity is not retained in the file.
+- The list must be maintained and bounded; a pack with many releases accumulates entries or drops old support.
+- One pack only; the ADR does not address a multi-pack set.
+
+**Neutral**
+
+- Base-only saves are unaffected.
+- The save identity format and per-store checksums do not change.
+- Compatibility is a load-time policy; no content is embedded or copied.
+
+### Alternatives considered
+
+- **Accept any newer pack version, or a semver range:** convenient, but versions can be reused, ranges can span semantic changes, and neither proves that referenced definitions still resolve. Rejected.
+- **Accept a matching `pack_id` automatically:** makes a typo fix painless, but silently reinterprets every old save and removes the operator's decision. Rejected.
+- **Accept listed checksums without a flag:** the list is pack-authored; a pack update would change load behavior without the player or admin choosing it. Rejected.
+- **Hash only content IDs, not definitions:** stable IDs are necessary but not sufficient; values, rooms, props, and behavior can change under the same ID. Rejected as the gate; `registry_checksum` covers definitions.
+- **Lazy remap on first access:** moves the failure into a running simulation and makes the accepted state depend on what the player touches. Rejected.
+- **Rewrite the save during a compatible load:** mutates on open, loses the prior identity, and has no confirmation. Rejected.
+- **Accept a different `pack_id`:** a rename is a different operation with different ownership and migration questions; keep it out of this ADR.
+- **Embed the old pack in the save:** already rejected by D-034 for size, licensing, and staleness.
+
+### Review trigger
+
+The first pack update that must keep old saves, the first server/admin request to accept a prior pack, or the first pack that needs more than 16 prior identities. If pack updates become frequent enough that a list is unmaintainable, revisit the identity design before accepting; do not add version ranges as a shortcut.
+
+---
+
+## D-037 — Content-ID migrations are explicit and versioned
+
+**Status:** Proposed · **Date:** 2026-11-24 · **Affects:** [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[42 - World Placement Bridge]]
+
+### Context
+
+D-034 proves that the same pack definitions are active; D-036 may accept a listed prior pack. Neither answers what happens when a pack renames `example:copper_roof` to `example:copper_roofing`, moves a prop, or removes a room type. The ID is stored in world records and in `.tsbp` packages. A loader that guesses, substitutes a base ID, or drops the record silently changes the player's city; one that does nothing fails deep in package or simulation validation with no repair path. Q-118 asked how renamed or removed IDs migrate and who owns the mapping.
+
+Content IDs are the stable interface (D-006): namespaced, data-defined, and shared by base and packs. A migration therefore has to be an explicit, reviewed table, not a rule inferred from names or versions, and it has to cover saves and blueprints with the same answer.
+
+### Decision
+
+**Versioned, per-format maps.** Every pack manifest declares a monotonic `content_version` (integer, starting at 1) and a `migrations` list. Each entry maps one prior version to the next and carries an exact ID map per content format:
+
+```json
+"content_version": 3,
+"migrations": [
+  {
+    "from_version": 2,
+    "to_version": 3,
+    "materials": { "example:copper_roof": "example:copper_roofing" },
+    "rooms": {},
+    "props": { "example:old_smokestack": "example:smokestack" }
+  }
+]
+```
+
+- Formats are the registry kinds that saves and blueprints can reference: `materials`, `rooms`, and `props` today, plus any future kind that stores a content ID. An unknown format refuses the manifest rather than being skipped.
+- Keys and values are exact namespaced IDs, not prefixes, globs, regexes, version ranges, or display names. No wildcard, no `*`, no empty target.
+- A migration step is `n -> n+1`. Missing steps, duplicate `from_version` values, cycles, and a `to_version` that is not the next declared version refuse the manifest. A target must exist in the new registry and have the same content kind. A later step may rename it again; the resolver applies steps in order and validates the final ID.
+- A pack migration may only map IDs in its own namespace to IDs in its own namespace. Moving content to `base` or to another pack is not a pack claim; it needs a base or registry migration owned by the game.
+- A removal is not a bare deletion. There is no `null` target or tombstone that drops a record. If an ID is gone and has no successor, the load fails with `content_migration_missing` naming the kind and ID; the player must remove or repair the affected building or package explicitly.
+- The base game owns the base ID space and ships a base migration table with the same shape. Base migrations are compiled into the game, versioned with the save schema, reviewed like any save migration, and cannot be edited or overridden by a pack. A base rename or removal without a base migration fails the same way.
+
+**Source version.** Applying a map requires knowing which content version the save or package was written against:
+
+- A content-bound save records the pack identity but not a content version today. D-036's compatibility entry carries the prior `content_version` beside each prior `pack_checksum`; the loader resolves the recorded checksum to a source version through that declaration.
+- A blueprint package records its content version in `.tsbp` metadata alongside its pack identity. A package without one is accepted only when the pack declares the matching prior identity and version; otherwise it fails.
+- A base-only save uses the game-owned base content version recorded by the save schema. Recording that field is an implementation prerequisite; until it exists, base ID migrations are not applied automatically.
+- If the source version cannot be determined, the load fails with `content_migration_version_unknown`. The loader never assumes "current" or applies the latest step.
+
+**Normal load never migrates.** A normal load resolves IDs against the active registry and declared maps but writes nothing. If a referenced ID is unmapped, it fails with one of:
+
+- `content_migration_required` when a declared step maps the ID but the save has not been rewritten; the result may include the source/target versions and a bounded count, but not an automatic rewrite.
+- `content_migration_missing` when no declared step maps the ID, or the target does not exist.
+- `content_migration_version_unknown` when the source version cannot be established.
+
+No substitute, fallback, nearest match, or deletion is applied. A read-only D-035 inspection may keep the unresolved ID opaque, but it still cannot save.
+
+**Applying is an explicit rewrite.** A separate command (bridge/server/CLI first, UI later) builds a plan, validates every ID and target, and writes a new save or overwrites with a `.bak` only after confirmation. It never runs on load and never partially commits. The result summary includes:
+
+- source and target `content_version`, the accepted prior pack checksum (D-036), and the new pack/registry checksums;
+- per-format counts of mapped, unchanged, and unmapped IDs, with a bounded list of the first unmapped IDs;
+- the new save checksum, the retained `.bak` path, and a stable status (`migrated`, `not_needed`, `missing`, or `version_unknown`).
+
+A failed plan leaves the save and library untouched. Re-running an applied plan is `not_needed`, not a second rewrite.
+
+**Blueprints and saves use one map.** The same per-format map resolves `.tsbp` metadata and world records. A migrated `.tsbp` is rewritten into a new package because its IDs and bytes changed; it receives a new semantic BLAKE3 hash and a new library entry. The old package stays content-addressed and is not overwritten. Placement records are repointed only in the same explicit save rewrite, and a placement keeps its pinned old package until that commit (D-013). On failure, nothing is repointed and the old package still resolves. A blueprint whose content was removed is reported and left untouched; the player must explicitly delete or replace it.
+
+**Ownership and authority.** The base game owns base IDs and base migrations. Each pack owns its namespace and migrations; it cannot map base or another pack's IDs. The server authorizes and performs a migration; clients never receive or apply a map (D-004, D-032). A multiplayer server must complete the rewrite before accepting commands against the new content set.
+
+**Scope.** This ADR defines the contract, not an implementation. It adds no loader code, migration command, UI, save-schema field, or package rewrite in this slice. One pack at a time; multi-pack migration and cross-pack moves are out of scope.
+
+### Consequences
+
+**Positive**
+
+- Renames and removals have one explicit, reviewable source of truth.
+- Saves and blueprints cannot diverge in how they resolve an old ID.
+- Unmapped content fails with the ID and version instead of silently changing the city.
+- Old packages and saves remain for rollback until the explicit commit.
+- Base and pack ownership is clear; a pack cannot rewrite base content.
+
+**Negative**
+
+- Pack authors must maintain version numbers and maps, and every rename adds review work.
+- Source-version recording is a save/package field that does not exist yet.
+- Applying a migration is a separate operation with its own UI/CLI, backups, and failure handling.
+- Repacked blueprints get new hashes and library entries, so the library grows.
+- A removed ID still blocks a world until the player repairs or removes the affected record.
+- Base migrations add save-schema and release work.
+
+**Neutral**
+
+- Normal loads keep the D-034/D-035 behavior; migrations only run through the explicit command.
+- The map is data, not script; no mod code runs during a migration.
+- Existing base-only saves with no renamed content are unaffected.
+
+### Alternatives considered
+
+- **Substitute a safe base ID or placeholder:** keeps the world loadable but silently changes stats and meaning. Rejected.
+- **Drop unknown records or buildings:** prevents a failure by deleting player work. Rejected.
+- **Lazy remap on first access:** spreads failures through a running simulation and makes the result depend on what the player touches. Rejected.
+- **Prefix, glob, or regex mapping:** compact but ambiguous, hard to validate, and easy to over-match. Rejected.
+- **Infer a rename from display names:** localized, non-unique, and not stable. Rejected.
+- **Separate save and blueprint maps:** the same old ID can resolve differently in the two paths. Rejected; one registry-level map.
+- **Auto-apply migrations on load:** mutates the save on open, with no confirmation or summary. Rejected.
+- **Bare deletion or tombstone:** loses the record and hides the loss. Rejected.
+- **Let packs map base or other namespaces:** creates conflicting ownership and lets a pack rewrite content it does not own. Rejected.
+- **Store the old definitions in the save:** rejected by D-034 for size, staleness, and licensing.
+
+### Review trigger
+
+The first renamed or removed content ID in a pack or in base content, the first save or `.tsbp` that needs repacking, or the first request to move content between namespaces. If a migration needs more than one step per release or a player-visible repair UI, revisit before accepting; do not add implicit remapping as a shortcut.
 
 ---
 
