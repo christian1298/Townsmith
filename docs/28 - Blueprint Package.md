@@ -2,7 +2,7 @@
 title: Blueprint Package
 project: Townsmith
 status: active
-updated: 2026-11-23
+updated: 2026-11-24
 tags:
   - townsmith
   - vertical-slice
@@ -62,7 +62,7 @@ Fields:
 - `solid_voxels` must match the decoded stream.
 - `rooms` is filled by editor save-time room detection; `props` is written from the editor prop list and restored on load.
 - `materials` is a provisional key → count map until the content registry lands.
-- `dependencies` is parsed; non-empty mod/resource-pack lists produce a readable `MissingDependency` error in v1 (no resolver yet). The game constraint is not enforced by the current semantic check.
+- `dependencies` is parsed. `load_tsbp` and `insert_file` remain deny-all: non-empty mod/resource-pack lists produce a readable `MissingDependency` error. A caller that knows the live content (the bridge) can use `load_tsbp_with_dependencies` / `insert_file_with_dependencies` with active pack ids; required mods match by exact id or namespace (`mymod` vs `mymod:pack`), while resource packs still fail closed until a runtime registry exists. The game constraint is not enforced by the current semantic check.
 - `structure` is optional. When present it declares the structural system, stories, height, optional span, ground system, and foundation depth; see [[60 - Structural Limits]]. Default metadata omits it, so packages written before Phase 4.2 keep their content hash. Invalid material limits may be saved as drafts; placement and load-time revalidation reject them. Declared fields are still checked: the declared height must match `bounds_m[1]` and the foundation depth is capped at 32 m (D-025).
 
 ## 3. `voxels.bin` v1
@@ -112,7 +112,7 @@ blake3:9f5bcd407d25c5b5204315c873faa1321dfb5dd969c9a22d2322f7502f95a070
 - A failed save removes the temp file and never leaves a partial target.
 - Rename replaces the destination atomically on the same filesystem. The destination directory is not fsynced; a machine crash immediately after rename may lose the new package, but a failed write does not replace the old one.
 - Load validates format version, metadata, declared volume capacity, declared solid count, bounds, decoded solid count, chunk coordinates, palette/RLE, hash, and trailing bytes.
-- Missing mods/resource packs are surfaced as `BlueprintError::MissingDependency`; the game version expression is parsed but not enforced in v1. The full resolver comes with the content registry.
+- Missing mods/resource packs are surfaced as `BlueprintError::MissingDependency`; content-aware callers may satisfy required mods from the live pack ids, but resource packs still fail closed. The game version expression is parsed but not enforced in v1. The full resolver comes with the content registry.
 
 ## 6. Local blueprint library
 
@@ -214,7 +214,7 @@ townsmith-server --listen 47015 --blueprint-library /srv/townsmith/blueprints
 - `place_blueprint_result` returns a `PlacementView` with no `blueprint_path`. The authoritative record stores the stable content-addressed reference `tsbp:blake3:<hex>` in its `blueprint_path` field, not the resolved library path; the server library root is process configuration and never enters the save/checksum, and a remote client never sees a filesystem path.
 - Missing or invalid packages use the stable placement codes `PLACEMENT_PACKAGE_MISSING` / `PLACEMENT_PACKAGE_INVALID`; a bad hash shape uses `PLACEMENT_HASH_INVALID`. The server never writes to or discovers into the library while serving.
 
-This does not change the `.tsbp` format, public library API, existing package hashes, or bridge save bytes. Mod dependencies still fail `load_tsbp` (`MissingDependency`), and there is no mod auto-download.
+This does not change the `.tsbp` format, existing package hashes, or bridge save bytes. The default `load_tsbp` still fails any non-empty dependency list (`MissingDependency`); the additive `load_tsbp_with_dependencies` / `insert_file_with_dependencies` APIs let a caller that knows the live pack satisfy required mods. There is no mod auto-download.
 
 ### 6.7 World content identity (D-034)
 

@@ -25,7 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::BlueprintError;
 use crate::limits::MAX_PACKAGE_BYTES;
-use crate::package::load_tsbp_bytes;
+use crate::package::{load_tsbp_bytes, load_tsbp_bytes_with_dependencies};
 
 const HASH_PREFIX: &str = "blake3:";
 const HASH_HEX_LEN: usize = 64;
@@ -157,7 +157,30 @@ impl BlueprintLibrary {
     pub fn insert_file(&self, path: &Path) -> Result<LibraryInsert, BlueprintLibraryError> {
         validate_source_path(path)?;
         let bytes = read_source_file(path)?;
-        self.insert_validated_bytes(path, &bytes)
+        self.insert_validated_bytes(path, &bytes, None)
+    }
+
+    /// Insert one `.tsbp` file, resolving mod dependencies against
+    /// `active_ids`.
+    ///
+    /// Identical to [`Self::insert_file`] except that the package dependency
+    /// check uses [`crate::dependencies::validate`]: a required mod matches an
+    /// active id by exact id or namespace, while any resource pack still fails
+    /// closed. A dependency failure happens during package validation, before
+    /// the destination shard is created, so the library is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::insert_file`], including
+    /// [`BlueprintLibraryError::InvalidPackage`] when a dependency is missing.
+    pub fn insert_file_with_dependencies(
+        &self,
+        path: &Path,
+        active_ids: &[&str],
+    ) -> Result<LibraryInsert, BlueprintLibraryError> {
+        validate_source_path(path)?;
+        let bytes = read_source_file(path)?;
+        self.insert_validated_bytes(path, &bytes, Some(active_ids))
     }
 
     /// Resolve a hash to its stored package path.
@@ -358,12 +381,15 @@ impl BlueprintLibrary {
         &self,
         source: &Path,
         bytes: &[u8],
+        active_ids: Option<&[&str]>,
     ) -> Result<LibraryInsert, BlueprintLibraryError> {
-        let package = load_tsbp_bytes(bytes).map_err(|source_error| {
-            BlueprintLibraryError::InvalidPackage {
-                path: source.to_path_buf(),
-                source: source_error,
-            }
+        let package = match active_ids {
+            Some(active) => load_tsbp_bytes_with_dependencies(bytes, active),
+            None => load_tsbp_bytes(bytes),
+        }
+        .map_err(|source_error| BlueprintLibraryError::InvalidPackage {
+            path: source.to_path_buf(),
+            source: source_error,
         })?;
         let hash = package.metadata.content_hash;
         let hex = parse_hash(&hash)?;

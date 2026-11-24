@@ -3,9 +3,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use core_blueprint::{
-    compute_hash, encode_voxels, load_tsbp, save_tsbp, save_tsbp_with_hash, Blueprint,
-    BlueprintError, BlueprintMetadata, BlueprintStats, StructuralSystem, StructureSpec,
-    FORMAT_VERSION,
+    compute_hash, encode_voxels, load_tsbp, load_tsbp_with_dependencies, save_tsbp,
+    save_tsbp_with_hash, Blueprint, BlueprintError, BlueprintMetadata, BlueprintStats,
+    StructuralSystem, StructureSpec, FORMAT_VERSION,
 };
 use core_voxel::volume::{VolumeConfig, VolumePos, VoxelVolume};
 
@@ -362,5 +362,63 @@ fn a_structure_height_mismatch_is_rejected_on_save() {
     assert!(matches!(error, BlueprintError::Format(_)));
     assert!(error.to_string().contains("does not match"));
     assert!(!path.exists());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn blueprint_with_dependencies(mods: &[&str], resource_packs: &[&str]) -> Blueprint {
+    let mut blueprint = test_blueprint();
+    blueprint.metadata.dependencies = core_blueprint::Dependencies {
+        mods: mods.iter().map(|id| (*id).to_string()).collect(),
+        resource_packs: resource_packs.iter().map(|id| (*id).to_string()).collect(),
+        ..core_blueprint::Dependencies::default()
+    };
+    blueprint
+}
+
+#[test]
+fn dependency_loaders_resolve_active_mods_but_default_stays_deny_all() {
+    let dir = temp_dir("dependencies");
+    let path = dir.join("deps.tsbp");
+    save_tsbp(&path, &blueprint_with_dependencies(&["mymod"], &[])).expect("save");
+
+    // Default loader: still deny-all.
+    match load_tsbp(&path) {
+        Err(BlueprintError::MissingDependency(message)) => {
+            assert_eq!(message, "mods: mymod");
+        }
+        other => panic!("expected MissingDependency, got {other:?}"),
+    }
+
+    // Exact and namespace matches accept.
+    let exact = load_tsbp_with_dependencies(&path, &["mymod"]).expect("exact match");
+    assert_eq!(exact.metadata.dependencies.mods, vec!["mymod".to_string()]);
+    load_tsbp_with_dependencies(&path, &["mymod:furniture"]).expect("namespace match");
+
+    // Mismatch rejects with a deterministic message.
+    match load_tsbp_with_dependencies(&path, &["othermod"]) {
+        Err(BlueprintError::MissingDependency(message)) => {
+            assert_eq!(message, "mods: mymod");
+        }
+        other => panic!("expected MissingDependency, got {other:?}"),
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn resource_packs_fail_closed_with_active_ids() {
+    let dir = temp_dir("resource-packs");
+    let path = dir.join("pack.tsbp");
+    save_tsbp(
+        &path,
+        &blueprint_with_dependencies(&["mymod"], &["terrain-pack"]),
+    )
+    .expect("save");
+
+    match load_tsbp_with_dependencies(&path, &["mymod", "terrain-pack"]) {
+        Err(BlueprintError::MissingDependency(message)) => {
+            assert_eq!(message, "resource packs: terrain-pack");
+        }
+        other => panic!("expected MissingDependency, got {other:?}"),
+    }
     fs::remove_dir_all(dir).unwrap();
 }
