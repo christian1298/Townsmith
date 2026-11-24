@@ -963,6 +963,46 @@ impl SettlementStore {
         )
     }
 
+    /// Rename a settlement.
+    ///
+    /// The actor needs [`SettlementPermission::MANAGE`]. The name is trimmed,
+    /// checked against the core name rules, and compared case-insensitively
+    /// against every other settlement.
+    ///
+    /// # Errors
+    ///
+    /// Unknown settlement, stale revision, forbidden actor, empty/control/
+    /// oversized name, or a duplicate name.
+    pub fn rename(
+        &mut self,
+        actor: PlayerId,
+        id: u64,
+        name: &str,
+        expected_revision: u32,
+    ) -> Result<Settlement, SettlementError> {
+        let trimmed = name.trim();
+        validate_name(trimmed)?;
+        if self
+            .settlements
+            .iter()
+            .any(|settlement| settlement.id != id && settlement.name.eq_ignore_ascii_case(trimmed))
+        {
+            return Err(SettlementError::DuplicateName);
+        }
+        self.mutate_as(
+            actor,
+            id,
+            expected_revision,
+            SettlementPermission::MANAGE,
+            "rename",
+            |settlement| {
+                settlement.name = trimmed.to_string();
+                settlement.bump_revision();
+                Ok(())
+            },
+        )
+    }
+
     /// Transfer ownership to `recipient`.
     ///
     /// The actor needs [`SettlementPermission::MANAGE`]. The previous owner
@@ -1354,8 +1394,7 @@ pub struct MigrationReport {
     pub unmatched: usize,
 }
 
-fn validate_request(request: &SettlementRequest) -> Result<(), SettlementError> {
-    let name = request.name.trim();
+fn validate_name(name: &str) -> Result<(), SettlementError> {
     if name.is_empty() {
         return Err(SettlementError::EmptyName);
     }
@@ -1370,6 +1409,11 @@ fn validate_request(request: &SettlementRequest) -> Result<(), SettlementError> 
             limit: MAX_SETTLEMENT_NAME_CHARS,
         });
     }
+    Ok(())
+}
+
+fn validate_request(request: &SettlementRequest) -> Result<(), SettlementError> {
+    validate_name(request.name.trim())?;
     let owner = request.owner.trim();
     if owner.is_empty() {
         return Err(SettlementError::EmptyOwner);
@@ -1845,6 +1889,60 @@ mod tests {
         let reclaimed = store.claim(player(4), settlement.id, 3).expect("reclaim");
         assert_eq!(reclaimed.owner_id, Some(player(4)));
         assert_eq!(reclaimed.membership_revision, 4);
+    }
+
+    #[test]
+    fn rename_requires_manage_and_a_fresh_unique_name() {
+        let (mut store, settlement) = owned_store();
+        let revision = settlement.membership_revision;
+        store
+            .found_for_player(&request("Docks", 200, 0, 32), player(2))
+            .expect("second settlement");
+
+        let renamed = store
+            .rename(player(1), settlement.id, "  Harbour  ", revision)
+            .expect("rename");
+        assert_eq!(renamed.name, "Harbour");
+        assert_eq!(renamed.membership_revision, revision + 1);
+
+        assert_eq!(
+            store.rename(player(1), settlement.id, "docks", revision + 1),
+            Err(SettlementError::DuplicateName)
+        );
+        assert_eq!(
+            store.rename(player(1), settlement.id, "Harbour", 0),
+            Err(SettlementError::RevisionConflict {
+                id: settlement.id,
+                expected: 0,
+                actual: revision + 1
+            })
+        );
+        assert_eq!(
+            store.rename(player(1), settlement.id, "  ", revision + 1),
+            Err(SettlementError::EmptyName)
+        );
+
+        let invited = store
+            .invite(
+                player(1),
+                settlement.id,
+                player(3),
+                SettlementRole::Builder,
+                revision + 1,
+            )
+            .expect("invite");
+        assert_eq!(
+            store.rename(
+                player(3),
+                settlement.id,
+                "Harbour",
+                invited.membership_revision
+            ),
+            Err(SettlementError::Forbidden {
+                actor: player(3),
+                action: "rename"
+            })
+        );
     }
 
     #[test]
