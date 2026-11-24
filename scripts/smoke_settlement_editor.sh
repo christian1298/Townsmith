@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# Headless smoke for the standalone settlement ownership editor.
+#
+# Runs `godot/settlement_editor.tscn --smoke` twice and requires the local
+# bridge walkthrough (found two, claim, invite manager/builder, rename, set tax,
+# transfer, change role, remove member, and six rejections). Every
+# `SETTLEMENT_EDITOR*` line is diffed between runs so the state checksum and
+# the action sequence are proven deterministic. No display or server is needed.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GODOT_BIN="${GODOT:-godot}"
+
+if [[ "${1:-}" != "--smoke" ]]; then
+	echo "Usage: $0 --smoke" >&2
+	exit 2
+fi
+
+if ! command -v "$GODOT_BIN" >/dev/null 2>&1; then
+	echo "Godot binary not found: $GODOT_BIN (set GODOT=/path/to/godot)" >&2
+	exit 2
+fi
+
+# The scene is standalone but the project loads the GDExtension. Build it only
+# when missing so a clean worktree can run the smoke.
+if [[ ! -f "$ROOT/godot/bin/libtownsmith_core.so" ]]; then
+	echo "GDExtension library missing; building debug..."
+	"$ROOT/scripts/build_godot_ext.sh" debug >/dev/null
+fi
+
+# Godot 4.7 can abort the first headless import while creating the project
+# cache in a clean worktree. Retry once; a real failure still fails.
+if ! "$GODOT_BIN" --headless --path "$ROOT/godot" --import >/dev/null 2>&1; then
+	"$GODOT_BIN" --headless --path "$ROOT/godot" --import >/dev/null
+fi
+
+SMOKE_DIR="$(mktemp -d)"
+trap 'rm -rf "$SMOKE_DIR"' EXIT
+
+run_editor() {
+	local log="$1"
+	local marker_file="$2"
+	local output
+	local godot_status
+	set +e
+	output="$(timeout 120s "$GODOT_BIN" --headless --path "$ROOT/godot" res://settlement_editor.tscn -- --smoke 2>&1)"
+	godot_status=$?
+	set -e
+	printf '%s\n' "$output" >&2
+
+	if [[ $godot_status -ne 0 ]]; then
+		echo "Settlement editor smoke failed: Godot exited with status $godot_status" >&2
+		exit 1
+	fi
+
+	local marker
+	marker="$(grep '^SETTLEMENT_EDITOR status=' <<<"$output" | tail -1 || true)"
+	if [[ -z "$marker" ]]; then
+		echo "Settlement editor smoke failed: no SETTLEMENT_EDITOR status marker" >&2
+		exit 1
+	fi
+	if [[ ! "$marker" =~ ^SETTLEMENT_EDITOR\ status=ok\ actions=[0-9]+\ checksum=[0-9a-f]{16}$ ]]; then
+		echo "Settlement editor smoke contract mismatch: $marker" >&2
+		exit 1
+	fi
+
+	local actions
+	actions="$(sed -E 's/^SETTLEMENT_EDITOR status=ok actions=([0-9]+) checksum=[0-9a-f]+$/\1/' <<<"$marker")"
+	if [[ "$actions" != "25" ]]; then
+		echo "Settlement editor smoke failed: expected 27 actions, got $actions" >&2
+		exit 1
+	fi
+
+	for expected in \
+		"claim_already_owned code=settlement.already_owned expected=settlement.already_owned match=1" \
+		"rename_unowned code=settlement.unowned expected=settlement.unowned match=1" \
+		"claim_player_zero code=invalid_player_id expected=invalid_player_id match=1" \
+		"stale_revision code=settlement.revision_conflict expected=settlement.revision_conflict match=1" \
+		"owner_role_rejected code=settlement.role_invalid expected=settlement.role_invalid match=1" \
+		"remove_owner_rejected code=settlement.owner_required expected=settlement.owner_required match=1"
+	do
+		if ! grep -Fq "name=${expected%% *} ${expected#* }" <<<"$output"; then
+			echo "Settlement editor smoke failed: rejection marker missing: $expected" >&2
+			exit 1
+		fi
+	done
+
+	if ! grep -Eq '^SETTLEMENT_EDITOR_STATE count=2 id=2 owned=1 owner=3 revision=8 tax=12 members=1:manager, 2:manager, 3:owner$' <<<"$output"; then
+		echo "Settlement editor smoke failed: final state marker mismatch" >&2
+		exit 1
+	fi
+	if ! grep -Eq '^SETTLEMENT_EDITOR_UNOWNED id=1 owned=0 owner=unowned revision=0$' <<<"$output"; then
+		echo "Settlement editor smoke failed: unowned marker mismatch" >&2
+		exit 1
+	fi
+	if grep -q '^SETTLEMENT_EDITOR_FAIL' <<<"$output"; then
+		echo "Settlement editor smoke failed: internal check failure marker present" >&2
+		exit 1
+	fi
+
+	grep '^SETTLEMENT_EDITOR' <<<"$output" | grep -v '^SETTLEMENT_EDITOR status=' >"$log"
+	printf '%s\n' "$marker" >"$marker_file"
+}
+
+run_editor "$SMOKE_DIR/first.txt" "$SMOKE_DIR/first.marker"
+run_editor "$SMOKE_DIR/second.txt" "$SMOKE_DIR/second.marker"
+FIRST_MARKER="$(cat "$SMOKE_DIR/first.marker")"
+SECOND_MARKER="$(cat "$SMOKE_DIR/second.marker")"
+
+if [[ "$FIRST_MARKER" != "$SECOND_MARKER" ]]; then
+	echo "Settlement editor smoke failed: state markers differ between runs" >&2
+	echo "  first:  $FIRST_MARKER" >&2
+	echo "  second: $SECOND_MARKER" >&2
+	exit 1
+fi
+
+if ! diff -u "$SMOKE_DIR/first.txt" "$SMOKE_DIR/second.txt"; then
+	echo "Settlement editor smoke failed: deterministic marker lines differ" >&2
+	exit 1
+fi
+
+echo "SETTLEMENT_EDITOR_SMOKE OK ${FIRST_MARKER#SETTLEMENT_EDITOR }"
