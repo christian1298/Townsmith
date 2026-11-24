@@ -2,7 +2,7 @@
 title: Multiplayer
 project: Townsmith
 status: proposed
-updated: 2026-11-23
+updated: 2026-11-24
 tags:
   - townsmith
   - multiplayer
@@ -531,6 +531,18 @@ Multiplayer + modding is a trust problem. The server is the authority.
 - **Save/load tests:** crash during autosave, journal replay, schema migration.
 - **Time-control tests:** SP Mode B auto-pause; MP pause/resume/speed by admin; vote pass/fail with online/offline changes; pause allows edits; construction resumes correctly.
 - **Security tests:** malformed commands, oversized blueprints, permission bypass attempts, unprivileged time-control attempts.
+
+### Deterministic network fault coverage (Phase 6)
+
+`crates/server/src/listen/network_faults.rs` (test-only, `#[cfg(test)]`) exercises the v1 frame codec and the `serve_io` session boundary with in-memory readers/writers, so every case is deterministic and no test sleeps or opens a socket:
+
+- **Framing:** one-byte-at-a-time delivery, coalesced frames, a header split across reads, every truncated header/payload prefix, an `Interrupted` retry, zero-length and `MAX_FRAME_LEN + 1` oversized headers, and the exact `MAX_FRAME_LEN` cap.
+- **Writers:** a one-byte-per-call writer, a broken pipe at the header, mid-payload, and after a complete response, plus a `serve_io` run that stops before reading the next command after the failure.
+- **Session end:** `session_ended` maps EOF/reset/abort/broken-pipe/would-block/timeout to a clean end; `serve_io` ends on an idle timeout, a clean EOF, a zero-length or oversized header, or a truncated header/payload without reaching the executor. A header-only frame (`Truncated { actual: 0 }`) is treated as a clean close, matching the existing `serve_io` contract; no command is applied.
+- **Executor:** fragmented and coalesced sessions produce identical responses and world checksums; interleaved accepted/rejected commands keep their order; rejected tax/road/unknown-tag frames leave tick, checksum, treasury, and roads unchanged and are audited; malformed command JSON returns `command.invalid_json` and the session continues; autosave fires only at the configured tick boundary in an isolated temp directory.
+- **Reconnect:** a session dropped at EOF opens the existing 300-tick window, resumes successfully at the inclusive deadline tick, and is rejected with `resume.expired` after it.
+
+`cargo test -p townsmith-server` runs the module. Production framing, wire format, server CLI, and checksum goldens are unchanged.
 
 ## 13. Open questions
 
