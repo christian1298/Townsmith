@@ -95,6 +95,18 @@ The `tax_rate` field is data-only groundwork for the existing `tax` permission: 
 
 Enforcement points and the full claim/transfer rules are in [[10 - Decisions]] D-033. Q-111 (stable identity) is answered; claiming policy, offline transfer, limits, and mod/blueprint permissions remain Q-112–Q-115.
 
+### 2.2 Standalone settlement editor
+
+`godot/settlement_editor.tscn` is a developer-only scene for local settlement write actions. Like the policy editor, it owns one `TownsmithCore` instance and never talks to a server. It calls only the local bridge mutations (`settlement_found`, `settlement_claim`, `settlement_rename`, `settlement_transfer`, `settlement_invite`, `settlement_set_role`, `settlement_remove_member`, `settlement_set_tax`) and `settlements()` reads. It is not the in-game dashboard, not the read-only district overview, and adds no protocol, simulation, treasury, or save-envelope fields. The actor for owner-gated calls is the record's current `owner_id`, so the core `manage`/`tax`/`members` checks still apply; a claim takes an explicit positive player id.
+
+The page lists every record in id order, shows the selected record's name, id, owned flag, owner id (and legacy owner label), membership revision, tax rate, and members, plus the last result or bridge `error_code`. It re-reads `membership_revision` before every mutation, re-reads `settlements()` after success, and leaves local state untouched on failure. The `--smoke` path seeds two deterministic settlements (one unowned, one claimed by player 1 with a manager and a builder), runs every mutation plus rejection cases, and prints:
+
+```text
+SETTLEMENT_EDITOR status=ok actions=<n> checksum=<16 hex>
+```
+
+`scripts/smoke_settlement_editor.sh --smoke` runs the scene headless twice and requires identical marker lines and checksums.
+
 ## 3. API
 
 | Method | Returns | Purpose |
