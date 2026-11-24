@@ -104,6 +104,8 @@ pub mod codes {
     pub const PLAYER_NAME_TOO_LONG: &str = "player_name.too_long";
     pub const PLAYER_NAME_INVALID: &str = "player_name.invalid";
     pub const CONTENT_HASH_INVALID: &str = "content_hash.invalid";
+    /// The client content hash does not match the server's pinned registry.
+    pub const CONTENT_HASH_MISMATCH: &str = "content_hash.mismatch";
     pub const SESSION_CLOSED: &str = "session.closed";
     /// `resume` is only implemented by the authoritative executor; the
     /// transport-only reference session rejects it.

@@ -331,6 +331,15 @@ fn run_listen_mode(port: &str) {
 
     let mut world = world;
     world.set_role(role);
+    if let Some(hash) = arg_value("--content-hash") {
+        if let Err(error) = world.set_content_hash(Some(&hash)) {
+            eprintln!(
+                "SERVER_LISTEN status=error code={} error={}",
+                error.code, error.message
+            );
+            std::process::exit(2);
+        }
+    }
     configure_placement(&mut world);
 
     let listener = match TcpListener::bind(address) {

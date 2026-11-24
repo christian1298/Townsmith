@@ -531,6 +531,12 @@ pub struct ServerWorld {
     /// District policy registry used by the placement gate (server config, not
     /// save data). A foreign-seed registry is never installed.
     pub policies: Option<DistrictPolicyStore>,
+    /// Optional pinned content-registry hash (server config, not save data).
+    ///
+    /// When set, every `hello` must carry this exact 64-character lowercase
+    /// hex hash or it is rejected with `content_hash.mismatch`, before any
+    /// session state is mutated.
+    pub content_hash: Option<String>,
     /// Per-session interest viewport centre `[x, z]` in metres.
     ///
     /// View state only: excluded from [`Self::checksum`] and not saved.
@@ -625,6 +631,7 @@ impl ServerWorld {
             settlements: None,
             blueprint_library: None,
             policies: None,
+            content_hash: None,
             interest_center: [0.0, 0.0],
             interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
             paused: false,
@@ -669,6 +676,28 @@ impl ServerWorld {
     pub fn set_role(&mut self, role: ClientRole) {
         self.role = role;
         self.default_role = role;
+    }
+
+    /// Pin the content-registry hash required from every `hello`.
+    ///
+    /// `None` clears the pin. The hash must be 64 lowercase hexadecimal
+    /// characters; validation failure returns the same `content_hash.invalid`
+    /// rejection the protocol uses. This is process configuration, not save
+    /// data.
+    ///
+    /// # Errors
+    ///
+    /// Returns the stable `content_hash.invalid` rejection for a malformed
+    /// hash.
+    pub fn set_content_hash(&mut self, hash: Option<&str>) -> Result<(), Rejection> {
+        self.content_hash = match hash {
+            None => None,
+            Some(value) => {
+                crate::protocol::validate_content_hash(value)?;
+                Some(value.to_string())
+            }
+        };
+        Ok(())
     }
 
     /// Configure the pre-seeded content-addressed blueprint library.
@@ -780,6 +809,7 @@ impl ServerWorld {
             // them and the caller reconfigures placement before use.
             blueprint_library: None,
             policies: None,
+            content_hash: None,
             interest_center: [0.0, 0.0],
             interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
             paused: save.paused,
@@ -1487,6 +1517,14 @@ impl ServerWorld {
                 if let Err(rejection) = validate_hello(*protocol_version, content_hash, player_name)
                 {
                     return from_rejection(rejection);
+                }
+                if let Some(expected) = &self.content_hash {
+                    if content_hash != expected {
+                        return reject_with(
+                            crate::protocol::codes::CONTENT_HASH_MISMATCH,
+                            "client content registry does not match the server pin",
+                        );
+                    }
                 }
                 if self.online.contains(player_name) {
                     return reject_with(
@@ -3894,6 +3932,43 @@ mod tests {
 
     fn vote(action: crate::protocol::VoteAction, time: Option<TimeAction>) -> ClientCommand {
         ClientCommand::TimeVote { action, time }
+    }
+
+    #[test]
+    fn hello_content_hash_must_match_the_server_pin() {
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Admin);
+        assert!(world.set_content_hash(Some("not-a-hash")).is_err());
+
+        world
+            .set_content_hash(Some(&"f".repeat(64)))
+            .expect("valid pin");
+        match world.apply(&hello()) {
+            ServerMessage::Reject { code, .. } => {
+                assert_eq!(code, protocol_codes::CONTENT_HASH_MISMATCH);
+            }
+            other => panic!("expected a content mismatch, got {other:?}"),
+        }
+        assert!(!world.hello_accepted());
+        assert_eq!(
+            world.players.count(),
+            0,
+            "rejection must not register a player"
+        );
+
+        world
+            .set_content_hash(Some(&"0123456789abcdef".repeat(4)))
+            .expect("matching pin");
+        assert!(matches!(
+            world.apply(&hello()),
+            ServerMessage::Welcome { .. }
+        ));
+
+        world.set_content_hash(None).expect("clear pin");
+        let mut unpinned = ServerWorld::with_role(SEED, ClientRole::Admin);
+        assert!(matches!(
+            unpinned.apply(&hello()),
+            ServerMessage::Welcome { .. }
+        ));
     }
 
     fn world_with_hello() -> ServerWorld {
