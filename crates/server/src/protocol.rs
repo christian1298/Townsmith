@@ -160,6 +160,10 @@ pub mod codes {
     // Settlement commands. `unavailable` is specific to the transport-only
     // session, which has no player registry or settlement store.
     pub const SETTLEMENT_UNAVAILABLE: &str = "settlement.unavailable";
+
+    // Audit query. `unavailable` is specific to the transport-only session,
+    // which keeps no audit ring.
+    pub const AUDIT_UNAVAILABLE: &str = "audit.unavailable";
 }
 
 /// A framing or JSON failure. `code()` is stable for logs and tests.
@@ -412,6 +416,17 @@ pub enum ClientCommand {
         /// Revision the client believes is current.
         expected_revision: u32,
     },
+    /// Bounded read of this session's audit ring (Admin only).
+    ///
+    /// The ring is per-session and in-memory: it is neither shared between
+    /// connections nor written to a save. `limit` selects the newest entries,
+    /// defaults to 64, and is clamped to `1..=AUDIT_CAPACITY`. The query never
+    /// advances the tick or mutates the world; like every command it is itself
+    /// audited.
+    AuditLog {
+        /// Newest entries to return; `None` uses the default of 64.
+        limit: Option<u32>,
+    },
     Disconnect,
 }
 
@@ -437,6 +452,7 @@ impl ClientCommand {
             ClientCommand::SettlementRename { .. } => "settlement_rename",
             ClientCommand::SettlementTransfer { .. } => "settlement_transfer",
             ClientCommand::SettlementRelease { .. } => "settlement_release",
+            ClientCommand::AuditLog { .. } => "audit_log",
             ClientCommand::Disconnect => "disconnect",
         }
     }
@@ -581,6 +597,26 @@ pub struct SettlementView {
     pub membership_revision: u32,
 }
 
+/// One entry in [`ServerMessage::AuditLog`].
+///
+/// This is a copy of the server's [`crate::world::AuditEntry`] without any
+/// player identity: the wire carries only the evaluated tick, the session role
+/// at evaluation time, the command tag, the stable code, and whether the
+/// command was accepted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditLogEntry {
+    /// Authoritative tick after the command was evaluated.
+    pub tick: u64,
+    /// Snake_case role the session held when the command arrived.
+    pub role: String,
+    /// Command tag, for example `place_road`.
+    pub tag: String,
+    /// Rejection code, or `ok` when the command was accepted.
+    pub code: String,
+    /// Whether the command was accepted.
+    pub accepted: bool,
+}
+
 /// Messages the authoritative server sends.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -723,6 +759,22 @@ pub enum ServerMessage {
         checksum: String,
         /// Records in ascending id order.
         settlements: Vec<SettlementView>,
+    },
+    /// Bounded per-session audit ring (Admin only).
+    ///
+    /// `entries` are the retained ring, oldest first, truncated to the newest
+    /// `limit` entries. The envelope `checksum` covers the whole retained ring
+    /// *before* this query was recorded, so it stays a pure function of the
+    /// audited commands. The ring is per-session, in-memory, and not saved.
+    AuditLog {
+        /// Authoritative tick the query was evaluated at.
+        tick: u64,
+        /// Maximum entries the session ring retains.
+        capacity: usize,
+        /// FNV-1a checksum over the retained ring before this query.
+        checksum: String,
+        /// Retained entries, oldest first, at most `limit`.
+        entries: Vec<AuditLogEntry>,
     },
     /// Vote snapshot/status, sent after every accepted vote command.
     ///
@@ -873,6 +925,7 @@ pub fn decode_client_command(payload: &[u8]) -> Result<ClientCommand, Rejection>
         "settlement_rename",
         "settlement_transfer",
         "settlement_release",
+        "audit_log",
         "disconnect",
     ];
     if !KNOWN_TAGS.contains(&tag) {
@@ -1294,6 +1347,10 @@ impl Session {
             | ClientCommand::SettlementRelease { .. } => reject(
                 codes::SETTLEMENT_UNAVAILABLE,
                 "settlements require the authoritative executor with a player registry, not the transport-only session",
+            ),
+            ClientCommand::AuditLog { .. } => reject(
+                codes::AUDIT_UNAVAILABLE,
+                "audit queries require the authoritative executor, not the transport-only session",
             ),
         }
     }
@@ -2016,6 +2073,61 @@ mod tests {
         assert_eq!(
             crate::world::ClientRole::required_role_for(&release),
             crate::world::ClientRole::Admin
+        );
+    }
+
+    #[test]
+    fn audit_log_decodes_defaults_and_requires_admin() {
+        let decoded =
+            decode_client_command(br#"{"type":"audit_log","limit":4}"#).expect("audit_log decodes");
+        assert_eq!(decoded, ClientCommand::AuditLog { limit: Some(4) });
+        assert_eq!(decoded.tag(), "audit_log");
+        assert_eq!(
+            crate::world::ClientRole::required_role_for(&decoded),
+            crate::world::ClientRole::Admin
+        );
+
+        let default = decode_client_command(br#"{"type":"audit_log"}"#)
+            .expect("audit_log defaults the limit");
+        assert_eq!(default, ClientCommand::AuditLog { limit: None });
+        assert_eq!(
+            crate::world::ClientRole::required_role("audit_log"),
+            crate::world::ClientRole::Admin
+        );
+    }
+
+    #[test]
+    fn audit_log_round_trips_on_the_wire() {
+        let message = ServerMessage::AuditLog {
+            tick: 7,
+            capacity: 256,
+            checksum: "0123456789abcdef".to_string(),
+            entries: vec![AuditLogEntry {
+                tick: 6,
+                role: "admin".to_string(),
+                tag: "set_tax".to_string(),
+                code: crate::world::AUDIT_ACCEPTED.to_string(),
+                accepted: true,
+            }],
+        };
+        let json = String::from_utf8(encode_json(&message).expect("encode")).expect("utf8");
+        assert!(json.contains("\"type\":\"audit_log\""));
+        assert_eq!(
+            serde_json::from_str::<ServerMessage>(&json).expect("decode"),
+            message
+        );
+    }
+
+    #[test]
+    fn transport_session_rejects_audit_log_as_unavailable() {
+        let mut session = Session::new(LOOPBACK_SEED);
+        assert!(matches!(
+            session.handle(hello()).as_slice(),
+            [ServerMessage::Welcome { .. }]
+        ));
+        expect_reject(
+            &session.handle(ClientCommand::AuditLog { limit: None }),
+            codes::AUDIT_UNAVAILABLE,
         );
     }
 

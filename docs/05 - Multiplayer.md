@@ -247,6 +247,7 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. Protocol v
 | `settlement_rename` | `settlement_id`, `name`, `expected_revision` |
 | `settlement_transfer` | `settlement_id`, `player_id`, `expected_revision` |
 | `settlement_release` | `settlement_id`, `expected_revision` (Admin) |
+| `audit_log` | `limit` (optional, default 64, clamped 1–256; Admin) |
 | `set_interest` | `center_x`, `center_z`, `radius_m` |
 | `disconnect` | — |
 
@@ -263,6 +264,7 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. Protocol v
 | `settlement_updated` | `tick`, `settlement` (`SettlementView`), `settlement_checksum`, `world_checksum` |
 | `settlement_list` | `tick`, `count`, `checksum`, `settlements` (ascending `SettlementView` records) |
 | `settlement_at` | `tick`, `found`, `settlement` (`SettlementView` or `null`) |
+| `audit_log` | `tick`, `capacity`, `checksum`, `entries` (newest `limit` × `{tick, role, tag, code, accepted}`) |
 | `reject` | `code`, `message` |
 | `goodbye` | — |
 
@@ -393,6 +395,7 @@ Population, employment, and building counts are static for v1. `employed` is 60%
 | `time_control` step | Admin only; advances exactly one game day and one tick, even while paused | `not_hello`, `role.forbidden` |
 | `time_control` speed | Rejected; v1 has no real-time loop | `time.invalid_action` |
 | `set_tax` | Validates 0–100 and writes the treasury per-day rates; increments tick | `tax.rate_out_of_range`, `not_hello` |
+| `audit_log` | Admin only; returns the newest retained audit entries oldest-first with the ring capacity and checksum. Per-session, in-memory, not saved; does not advance the tick or change the world checksum | `not_hello`, `role.forbidden`, `audit.unavailable` (transport-only) |
 | `place_road` | Adds a 6 m wide, axis-aligned segment; increments tick | `road.empty`, `road.not_axis_aligned`, `road.out_of_bounds`, `road.too_long` (>512 cells), `road.duplicate`, `road.overlap`, `road.store_full`, `road.id_exhausted` |
 | `place_blueprint` | Mayor-only; resolves the hash in the configured library, validates package/policy/age/placeholder terrain/overlap/funds, appends the placement and priced site, charges the Survey installment, increments tick; an exact repeat returns the existing record without a second charge | `PLACEMENT_HASH_INVALID`, `PLACEMENT_LIBRARY_UNAVAILABLE`, `PLACEMENT_PACKAGE_MISSING`, `PLACEMENT_PACKAGE_INVALID`, `PLACEMENT_POLICY_DENIED`, `PLACEMENT_OUT_OF_RANGE`, `PLACEMENT_ROTATION_INVALID`, `PLACEMENT_OVERLAP`, `PLACEMENT_AGE_LOCKED`, `PLACEMENT_INSUFFICIENT_FUNDS`, `PLACEMENT_STORE_FULL`, `PLACEMENT_REJECTED`, `not_hello` |
 | `found_settlement` | Mayor-only; requires hello/resume and a stable `player_id`; validates name/radius/centre, creates the store on first use, assigns the caller as owner with revision 1; returns `settlement_found`; does not advance the tick | `duplicate_name`, `invalid_radius`, `name_too_long`, `empty_name`, `coordinate_out_of_range`, `too_many_owned`, `settlement.identity`, `settlement.seed_mismatch`, `not_hello`, `role.forbidden` |
