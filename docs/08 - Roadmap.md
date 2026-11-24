@@ -36,7 +36,7 @@ tags:
 | **7. Modding and resource packs** | 🟡 Partial (de-risked) | 4–6 weeks | External content without core changes | M7: Modded |
 | **8. Polish and release** | ⬜ Not started | 8–12 weeks | Performance, tutorial, localization, QA | M8: Ship |
 
-Status reflects master `2250ae4` (#314).
+Status reflects master `80c5cf6` (#334).
 
 **Total:** roughly **55–78 weeks** for a small team. This is a multi-year project for one person. Plan accordingly.
 
@@ -249,12 +249,10 @@ The staged cut is in [[49 - Phase 3 Slice Plan]]: city ledger, households/needs,
 
 ### Phase 6 — Multiplayer (6–10 weeks)
 
-> [!info] Current status — in progress (master `2250ae4`, #314)
-> **Landed:** protocol v1 and the authoritative executor; dev roles, rate limits, and audit; interest views with bounds (≤64 roads, ≤64 building records; #262/#266/#308); D-021 server-side time control including the 7-connection `--vote-smoke` pass/fail/cancel loop (#287); D-032 server-authoritative `place_blueprint` (#306/#308/#309); and bridge content-addressed placement references (#311/#313). F-003 (multi-connection session state) is fixed by #287.
+> [!info] Current status — in progress (master `80c5cf6`, #334)
+> **Landed:** protocol v1 and the authoritative executor; dev roles, rate limits, and audit; interest views with bounds (≤64 roads, ≤64 building records; #262/#266/#308); D-021 server-side time control including the 7-connection `--vote-smoke` pass/fail/cancel loop (#287); D-032 server-authoritative `place_blueprint` (#306/#308/#309); bridge content-addressed placement references (#311/#313); the catalog-driven Godot placement UI (#318); D-033 player identity, server persistence, bridge read model, placement `build` enforcement, and the settlement protocol — found/list/at/claim/rename/transfer/release plus invite/set-role/remove (#319/#321–#330); the time-vote panel (#320); deterministic network-fault tests (#317); the server `--content-hash` hello pin (#331); D-035 read-only missing-pack inspection (#332); and the district-panel membership display (#333). F-003 is fixed by #287.
 >
-> **Gaps:** settlement protocol commands and the remaining `manage`/`tax`/`members` checks; voxel edit sync and blueprint locks; journal/rollback; chat/pings; the mod-mismatch screen; remote transport and authentication; concurrent listener sessions. The full Godot placement UI (#318), D-033 core/server persistence/bridge read model (#319/#321/#322), placement `build` enforcement (#323), and the time-vote panel (#320) are merged.
->
-> In-flight worktrees: settlement identity, placement UI, blueprint dependencies, time-vote UI, and network faults.
+> **Gaps:** dashboard settlement write controls and the remaining `tax` checks; voxel edit sync and blueprint locks; journal/rollback; chat/pings (the sequential listen loop has no broadcast path); the client content-mismatch screen; remote transport and authentication; concurrent listener sessions.
 
 **Goals**
 - Co-op that feels native, not bolted on.
@@ -289,9 +287,9 @@ The staged cut is in [[49 - Phase 3 Slice Plan]]: city ledger, households/needs,
 ### Phase 7 — Modding and resource packs (4–6 weeks)
 
 > [!info] Current status — partial (de-risked, not started in earnest)
-> The content package foundation is in place: D-027 `.tsbp` v1 (zip + JSON + RLE voxels + BLAKE3) is accepted and implemented; #298 adds the content-addressed local blueprint library; D-034 (content-pack identity in world saves) is **accepted** and its bridge v1 is implemented by #313 (base-only saves stay outer v1 and byte-identical; one live pack writes outer v2 plus a top-level `content` identity, verified before any store or `.tsbp`). D-006 (data-first content with namespaced IDs) remains **Proposed**. The mod loader, dependency resolution, sandbox, mod manager, and resource pack loader are not started.
+> The content package foundation is in place: D-027 `.tsbp` v1 (zip + JSON + RLE voxels + BLAKE3) is accepted and implemented; #298 adds the content-addressed local blueprint library; #316 adds `.tsbp` dependency validation; D-034 (content-pack identity in world saves) is **accepted** and its bridge v1 is implemented by #313 (base-only saves stay outer v1 and byte-identical; one live pack writes outer v2 plus a top-level `content` identity, verified before any store or `.tsbp`). #331 adds an optional server content-hash pin; #332 implements the D-035 bridge v1 read-only inspection for a missing or mismatched pack. D-006 (data-first content with namespaced IDs) remains **Proposed**. The mod loader, dependency resolution, sandbox, mod manager, and resource pack loader are not started.
 >
-> Open content questions: **Q-116** (pack checksum stability and compatible newer packs), **Q-117** (read-only missing-content mode), **Q-118** (content-ID migration and ownership of the mapping). These gate the Phase 7 compatibility and dependency work.
+> Content decisions: **D-036 (Proposed)** covers explicit pack compatibility and **D-037 (Proposed)** covers versioned content-ID migrations; neither has loader code yet. **Q-117** has D-035 bridge v1; the server CLI, client mismatch screen, and simulation freeze list remain. The Phase 7 loader should not treat D-036/D-037 as accepted until reviewed.
 
 **Goals**
 - External content without touching core code.
@@ -391,18 +389,18 @@ The vertical slice is a small, complete version of the game used to validate the
 
 ## 7. Next tasks
 
-Ordered by dependency, not by size. Status reflects master `ad2b12a` (#323).
+Ordered by dependency, not by size. Status reflects master `80c5cf6` (#334).
 
 1. **D-033 core identity/membership** — stable per-save player ID (Q-111), ownership, membership, save v2 migration. ✅ Merged in #319.
 2. **D-033 server persistence + placement enforcement** — `PlayerRegistry`/`SettlementStore` in `ServerWorld`/`ServerSave`, stable `player_id` on hello/resume, and `build` checks inside a settlement. ✅ Merged in #321/#323.
 3. **D-033 bridge read model** — read-only `owner_id`, `members[]`, role bits, revision, and membership checksum. ✅ Merged in #322.
 4. **Full Godot placement UI** — library catalog, ghost preview, rotation, validation feedback; replaces the debug single-hash path (#309). ✅ Merged in #318.
 5. **Blueprint dependency validation** — resolve and validate package dependencies before placement. ✅ Merged in #316.
-6. **Settlement protocol commands** — found/list/at/claim/rename/transfer/release and membership invite/set-role/remove are merged; next are the remaining `tax` checks and dashboard controls.
-7. **Q-116/Q-117/Q-118 content compatibility decisions** — pack-version compatibility, read-only missing-content mode, and content-ID migration; unblocks the Phase 7 loader. Q-117 bridge v1 (D-035) and the server content pin (#331) are implemented; Q-116, Q-118, the server `--accept-missing-content` CLI, and the client mismatch screen remain.
+6. **Settlement protocol commands** — found/list/at/claim/rename/transfer/release and membership invite/set-role/remove are merged (#325–#330); #333 adds the read-only district-panel membership display. Next are the remaining `tax` checks and dashboard write controls.
+7. **Q-116/Q-117/Q-118 content compatibility decisions** — Q-117 bridge v1 (D-035, #332) and the server content pin (#331) are implemented; D-036/D-037 are proposed for Q-116/Q-118 and need review plus loader work; the server `--accept-missing-content` CLI, client mismatch screen, and simulation freeze list remain.
 8. **Voxel edit sync + blueprint locks** — replicate edits and hold locks across a disconnect.
 9. **Journal/rollback** — crash-safe command journal and rollback/history.
-10. **Chat/pings + mod-mismatch screen** — player communication and a fail-closed content-mismatch explanation.
+10. **Chat/pings + mod-mismatch screen** — player communication and a fail-closed content-mismatch explanation. Chat broadcast needs a concurrent listen path; the current loop is sequential.
 11. **Q-101 30-minute playtest** — ⛔ Blocked: needs a human player and observer. See [[66 - Playtest Kit]].
 12. **1M/RTX 3060 render gate** — ⛔ Blocked: needs reference hardware. See [[68 - Metropolis Gate]].
 
