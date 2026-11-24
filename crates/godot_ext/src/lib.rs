@@ -13255,6 +13255,7 @@ mod tests {
                 })
                 .collect(),
             membership_revision: revision,
+            tax_rate: 0,
         }
     }
 

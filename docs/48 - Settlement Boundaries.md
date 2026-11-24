@@ -89,7 +89,9 @@ Role presets:
 | Builder | ✅ | ❌ | ❌ | ❌ |
 | Member | ❌ | ❌ | ❌ | ❌ |
 
-Save v2 adds `owner_id`, `members`, and `membership_revision`, and keeps the `owner` display string. Stores that never use membership stay v1 and checksum-identical; the first owned/membership mutation upgrades to v2. A v1 `owner` string maps to an id only when the player registry has exactly one non-ambiguous match; otherwise the record stays unowned for admin assignment. Membership edits use `expected_revision` and reject a stale change with `settlement.revision_conflict`.
+Save v2 adds `owner_id`, `members`, `membership_revision`, and `tax_rate`, and keeps the `owner` display string. Stores that never use membership stay v1 and checksum-identical; the first owned/membership mutation upgrades to v2. A v1 `owner` string maps to an id only when the player registry has exactly one non-ambiguous match; otherwise the record stays unowned for admin assignment. Membership edits use `expected_revision` and reject a stale change with `settlement.revision_conflict`.
+
+The `tax_rate` field is data-only groundwork for the existing `tax` permission: it is stored, validated, and permission-gated, but no treasury or district-policy calculation reads it yet. A future consumer must decide whether it layers on D-030's district multipliers or replaces them; until then it has no simulation effect.
 
 Enforcement points and the full claim/transfer rules are in [[10 - Decisions]] D-033. Q-111 (stable identity) is answered; claiming policy, offline transfer, limits, and mod/blueprint permissions remain Q-112–Q-115.
 
@@ -167,7 +169,8 @@ Read-only settlement record fields:
 - `id`, `name`, `owner` (legacy display label), `center`, `radius_m` (unchanged);
 - `owned` and `owner_id` (integer, or `null` when unowned);
 - `members[]` in ascending player id, each `{player, role, permissions}` with the snake_case role preset and effective permission bits;
-- `membership_revision` and `membership_checksum` (16 lowercase hex, FNV-1a over id, owner, revision, and sorted members). The checksum is a display/diff value, not a security hash.
+- `membership_revision` and `membership_checksum` (16 lowercase hex, FNV-1a over id, owner, revision, and sorted members). The checksum is a display/diff value, not a security hash;
+- `tax_rate` (percent `0..=100`, default `0`). It is set only by `SettlementStore::set_tax_rate`, which requires the `tax` permission; the economy does not consume it yet, and a tax change does not bump the membership revision. A zero rate is omitted from the save, so legacy records and checksums stay unchanged.
 
 There are no bridge mutation methods for membership, claim, transfer, or removal yet.
 
