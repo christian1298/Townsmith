@@ -235,6 +235,8 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. Protocol v
 | `hello` | `protocol_version`, `content_hash`, `player_name` |
 | `resume` | `session_id` (the `session_token` from `welcome`), `last_tick` |
 | `ping` | `nonce` |
+| `chat` | `text` (1–280 characters) |
+| `chat_since` | `after`: last seen chat sequence |
 | `time_control` | `action`: `pause`, `resume`, `step`, `speed_1x`, `speed_2x`, `speed_4x` |
 | `set_tax` | `resident_rate`, `business_rate` (percent, 0–100) |
 | `place_road` | `start: [x, y]`, `end: [x, y]` |
@@ -400,6 +402,8 @@ Population, employment, and building counts are static for v1. `employed` is 60%
 |---|---|---|
 | `hello` | One per connection; returns `welcome`; a name already online is rejected | `protocol.version_mismatch`, `player_name.*`, `content_hash.invalid`, `hello.duplicate`, `player_name.duplicate`, `session.closed` |
 | `ping` | Echoes the nonce | `not_hello` before hello |
+| `chat` | Viewer-level; trims, caps at 280 characters, rejects control characters, appends to the bounded in-memory log, and returns `chat_sent`; does not advance the tick or checksum | `chat.identity`, `chat.empty`, `chat.too_long`, `chat.invalid`, `not_hello` |
+| `chat_since` | Viewer-level read of retained entries with `seq > after`, oldest-first, at most 64; does not advance the tick | `not_hello`, `chat.unavailable` (transport-only) |
 | `time_control` pause/resume | Admin only; freezes/unfreezes `advance_day`; returns a snapshot; does not advance the tick | `not_hello`, `role.forbidden` |
 | `time_control` step | Admin only; advances exactly one game day and one tick, even while paused | `not_hello`, `role.forbidden` |
 | `time_control` speed | Rejected; v1 has no real-time loop | `time.invalid_action` |
@@ -421,6 +425,8 @@ Population, employment, and building counts are static for v1. `employed` is 60%
 | `disconnect` | Closes this connection; returns `goodbye` | `session.closed` |
 
 `hello` and `disconnect` are accepted before `hello`; every other command is rejected with `not_hello`. Rejections never mutate state.
+
+**Chat v0.** The world keeps a 64-line, in-memory chat log with a monotonic `seq` independent of the tick. `chat` stores the trimmed text, the sender's stable `player_id`, and a display-name snapshot; empty/whitespace, over-280-character, and control-character messages are rejected without mutation. The log is not saved, is cleared on restart, and is excluded from the world checksum. The sequential listen loop has no push broadcast: clients poll `chat_since` and receive the retained lines on their next command. `chat` and `chat_since` are Viewer-level; the transport-only session rejects both with `chat.unavailable`.
 
 **Road rules.** Endpoints must be integer cells inside ±1,000,000. Segments must be horizontal or vertical, 1–512 cells long, and are always 6 m wide in v1. The server has no terrain yet, so road validation samples a constant 40 m placeholder ground; water and slope checks are deferred. An exact duplicate (either direction) is `road.duplicate`. A collinear segment sharing two or more cells is `road.overlap`. Roads that share exactly one endpoint cell (T-junction) or cross perpendicularly are allowed. Costs, permissions, and lot/building rules are not implemented.
 

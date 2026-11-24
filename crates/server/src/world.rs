@@ -49,10 +49,10 @@ use crate::protocol::{
     configure_stream, decode_client_command, frame_to_io, normalize_blueprint_hash, read_frame,
     read_json_frame, session_id_for_seed, validate_hello, validate_interest,
     validate_place_blueprint, validate_road, validate_tax_rates, write_json_frame, AuditLogEntry,
-    BuildingView, ClientCommand, FrameError, PlacementView, Rejection, RoadView, ServerMessage,
-    SessionConfig, SettlementMemberView, SettlementView, TimeAction, DEFAULT_INTEREST_RADIUS_M,
-    LOOPBACK_SEED, MAX_INTEREST_BUILDINGS, MAX_INTEREST_ROADS, PROTOCOL_VERSION,
-    SESSION_IO_TIMEOUT,
+    BuildingView, ChatEntry, ClientCommand, FrameError, PlacementView, Rejection, RoadView,
+    ServerMessage, SessionConfig, SettlementMemberView, SettlementView, TimeAction,
+    CHAT_LOG_CAPACITY, DEFAULT_INTEREST_RADIUS_M, LOOPBACK_SEED, MAX_CHAT_CHARS,
+    MAX_INTEREST_BUILDINGS, MAX_INTEREST_ROADS, PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
 };
 
 /// Fixed road width for v0 placement commands.
@@ -202,6 +202,14 @@ pub mod codes {
     pub const SETTLEMENT_UNKNOWN: &str = "settlement.unknown";
     /// A transfer recipient is not in the server player registry.
     pub const SETTLEMENT_UNKNOWN_PLAYER: &str = "settlement.unknown_player";
+    /// Sending chat needs a stable player identity (hello/resume).
+    pub const CHAT_IDENTITY: &str = "chat.identity";
+    /// The chat message is empty or whitespace after trimming.
+    pub const CHAT_EMPTY: &str = "chat.empty";
+    /// The chat message exceeds the character cap.
+    pub const CHAT_TOO_LONG: &str = "chat.too_long";
+    /// The chat message contains a control character.
+    pub const CHAT_INVALID: &str = "chat.invalid";
 }
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -262,8 +270,8 @@ impl ClientRole {
     #[must_use]
     pub fn required_role(tag: &str) -> Self {
         match tag {
-            "hello" | "resume" | "ping" | "disconnect" | "time_vote" | "set_interest"
-            | "settlement_list" | "settlement_at" => Self::Viewer,
+            "hello" | "resume" | "ping" | "chat" | "chat_since" | "disconnect" | "time_vote"
+            | "set_interest" | "settlement_list" | "settlement_at" => Self::Viewer,
             "set_tax"
             | "place_road"
             | "place_blueprint"
@@ -553,6 +561,13 @@ pub struct ServerWorld {
     pub paused: bool,
     /// Deterministic time-control vote state (D-021).
     pub vote: crate::vote::TimeVote,
+    /// Bounded, in-memory chat log shared by every connection.
+    ///
+    /// Not persisted and excluded from the world checksum. The oldest lines are
+    /// dropped once [`CHAT_LOG_CAPACITY`] is reached.
+    pub chat: VecDeque<ChatEntry>,
+    /// Monotonic chat sequence, independent of the world tick.
+    chat_seq: u64,
     /// Players currently online in this process.
     online: BTreeSet<String>,
     /// Hello player name for the session.
@@ -642,6 +657,8 @@ impl ServerWorld {
             interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
             paused: false,
             vote: crate::vote::TimeVote::default(),
+            chat: VecDeque::with_capacity(CHAT_LOG_CAPACITY),
+            chat_seq: 0,
             online: BTreeSet::new(),
             player: None,
             player_id: None,
@@ -820,6 +837,8 @@ impl ServerWorld {
             interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
             paused: save.paused,
             vote: crate::vote::TimeVote::default(),
+            chat: VecDeque::with_capacity(CHAT_LOG_CAPACITY),
+            chat_seq: 0,
             online: BTreeSet::new(),
             player: None,
             player_id: None,
@@ -1571,6 +1590,8 @@ impl ServerWorld {
                 accepted(ServerMessage::Goodbye)
             }
             ClientCommand::Ping { nonce } => accepted(ServerMessage::Pong { nonce: *nonce }),
+            ClientCommand::Chat { text } => self.apply_chat(text),
+            ClientCommand::ChatSince { after } => self.apply_chat_since(*after),
             ClientCommand::TimeControl { action } => self.apply_time_control(*action),
             ClientCommand::SetTax {
                 resident_rate,
@@ -2598,6 +2619,70 @@ impl ServerWorld {
             Ok(settlement) => self.finish_settlement_update(settlement),
             Err(error) => reject_with(error.code(), error.to_string()),
         }
+    }
+
+    fn apply_chat(&mut self, text: &str) -> (Vec<ServerMessage>, &'static str) {
+        let Some(player_id) = self.player_id else {
+            return reject_with(
+                codes::CHAT_IDENTITY,
+                "sending chat requires a player identity",
+            );
+        };
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return reject_with(codes::CHAT_EMPTY, "chat text must not be empty");
+        }
+        if trimmed.chars().count() > MAX_CHAT_CHARS {
+            return reject_with(
+                codes::CHAT_TOO_LONG,
+                format!("chat text exceeds {MAX_CHAT_CHARS} characters"),
+            );
+        }
+        if trimmed.chars().any(char::is_control) {
+            return reject_with(
+                codes::CHAT_INVALID,
+                "chat text must not contain control characters",
+            );
+        }
+        let Some(display_name) = self
+            .players
+            .get(player_id)
+            .map(|player| player.display_name.clone())
+        else {
+            return reject_with(
+                codes::CHAT_IDENTITY,
+                format!("player {player_id} is not in the server registry"),
+            );
+        };
+        self.chat_seq = self.chat_seq.saturating_add(1);
+        let entry = ChatEntry {
+            seq: self.chat_seq,
+            tick: self.tick,
+            player_id: player_id.get(),
+            player: display_name,
+            text: trimmed.to_string(),
+        };
+        if self.chat.len() == CHAT_LOG_CAPACITY {
+            self.chat.pop_front();
+        }
+        self.chat.push_back(entry.clone());
+        accepted(ServerMessage::ChatSent {
+            tick: self.tick,
+            entry,
+        })
+    }
+
+    fn apply_chat_since(&self, after: u64) -> (Vec<ServerMessage>, &'static str) {
+        let entries = self
+            .chat
+            .iter()
+            .filter(|entry| entry.seq > after)
+            .cloned()
+            .collect();
+        accepted(ServerMessage::ChatLog {
+            tick: self.tick,
+            entries,
+        })
     }
 
     fn apply_settlement_set_tax(
@@ -6683,6 +6768,85 @@ mod tests {
             z,
             radius_m,
         }
+    }
+
+    #[test]
+    fn chat_is_trimmed_bounded_and_pollable_without_moving_the_checksum() {
+        let mut world = world_with_hello();
+        let checksum = world.checksum();
+        let tick = world.tick;
+
+        let sent = world.apply(&ClientCommand::Chat {
+            text: "  hello  ".to_string(),
+        });
+        let ServerMessage::ChatSent {
+            tick: sent_tick,
+            entry,
+        } = sent
+        else {
+            panic!("expected chat_sent, got {sent:?}");
+        };
+        assert_eq!(sent_tick, tick);
+        assert_eq!(entry.seq, 1);
+        assert_eq!(entry.tick, tick);
+        assert_eq!(entry.player_id, 1);
+        assert_eq!(entry.player, "mayor");
+        assert_eq!(entry.text, "hello");
+        assert_eq!(world.tick, tick, "chat does not advance the tick");
+        assert_eq!(world.checksum(), checksum, "chat is not world state");
+
+        let log = world.apply(&ClientCommand::ChatSince { after: 0 });
+        let ServerMessage::ChatLog { entries, .. } = log else {
+            panic!("expected chat_log, got {log:?}");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], entry);
+
+        let empty = world.apply(&ClientCommand::ChatSince { after: 1 });
+        assert!(matches!(
+            empty,
+            ServerMessage::ChatLog { ref entries, .. } if entries.is_empty()
+        ));
+
+        let bob = world.players.register("bob").expect("bob");
+        world.player_id = Some(bob.id);
+        let bob_sent = world.apply(&ClientCommand::Chat {
+            text: "hi from bob".to_string(),
+        });
+        let ServerMessage::ChatSent { entry, .. } = bob_sent else {
+            panic!("expected chat_sent, got {bob_sent:?}");
+        };
+        assert_eq!(entry.player_id, bob.id.get());
+        assert_eq!(entry.player, "bob");
+
+        let before_reject = world.chat.len();
+        for (text, code) in [
+            ("   ".to_string(), codes::CHAT_EMPTY),
+            ("x".repeat(MAX_CHAT_CHARS + 1), codes::CHAT_TOO_LONG),
+            ("line\nbreak".to_string(), codes::CHAT_INVALID),
+        ] {
+            let rejected = world.apply(&ClientCommand::Chat { text });
+            assert!(
+                matches!(rejected, ServerMessage::Reject { code: ref found, .. } if found == code),
+                "expected {code}, got {rejected:?}"
+            );
+        }
+        assert_eq!(world.chat.len(), before_reject);
+
+        for index in 0..(CHAT_LOG_CAPACITY + 10) {
+            world.rate = RateBucket::full();
+            let sent = world.apply(&ClientCommand::Chat {
+                text: format!("line {index}"),
+            });
+            assert!(matches!(sent, ServerMessage::ChatSent { .. }));
+        }
+        assert_eq!(world.chat.len(), CHAT_LOG_CAPACITY);
+        let all = world.apply(&ClientCommand::ChatSince { after: 0 });
+        let ServerMessage::ChatLog { entries, .. } = all else {
+            panic!("expected chat_log, got {all:?}");
+        };
+        assert_eq!(entries.len(), CHAT_LOG_CAPACITY);
+        assert_eq!(entries.first().expect("first").seq, entry.seq + 11);
     }
 
     #[test]
