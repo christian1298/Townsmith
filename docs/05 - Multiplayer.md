@@ -86,7 +86,7 @@ The client never simulates the authoritative city. It predicts local movement an
 ### Settlement ownership
 
 > [!info] D-033 core + first server slice implemented
-> `core_city` implements the stable `PlayerId`/`PlayerRegistry`, roles and the `build`/`manage`/`tax`/`members` permission bits, settlement `owner_id`/`members`/`membership_revision`, claim/transfer/release and member management, the v1→v2 save migration, and stable rejection codes. Stores that never use membership stay v1 and checksum-identical; the first owned/membership mutation upgrades to v2. The authoritative `ServerWorld` now persists the registry and an optional settlement store, the bridge exposes read-only membership fields, and `place_blueprint` enforces `build` inside a settlement. Protocol v1 now has `found_settlement`, `settlement_list`, `settlement_at`, `settlement_claim`, `settlement_rename`, `settlement_transfer`, and invite/set-role/remove-member mutations; dashboard edit controls and admin release/override remain follow-ups.
+> `core_city` implements the stable `PlayerId`/`PlayerRegistry`, roles and the `build`/`manage`/`tax`/`members` permission bits, settlement `owner_id`/`members`/`membership_revision`, claim/transfer/release and member management, the v1→v2 save migration, and stable rejection codes. Stores that never use membership stay v1 and checksum-identical; the first owned/membership mutation upgrades to v2. The authoritative `ServerWorld` now persists the registry and an optional settlement store, the bridge exposes read-only membership fields, and `place_blueprint` enforces `build` inside a settlement. Protocol v1 now has `found_settlement`, `settlement_list`, `settlement_at`, `settlement_claim`, `settlement_rename`, `settlement_transfer`, `settlement_release`, and invite/set-role/remove-member mutations; dashboard edit controls remain follow-ups.
 
 - Every settlement has an **owner**: a player, a group, or the server (shared).
 - The owner can set local policies, taxes, building permissions, and blueprint allowlists.
@@ -211,7 +211,9 @@ Accepted commands produce **events** (construction site created, phase changed, 
 >
 > `settlement_claim { settlement_id, expected_revision }` claims an unowned record (legacy/admin-released) and assigns the caller as owner; an already-owned record returns `settlement.already_owned`. `settlement_at { x, z }` is a **Viewer** read that returns the nearest containing settlement as `settlement_at { tick, found, settlement }` (or `null`).
 >
-> `settlement_rename { settlement_id, name, expected_revision }` requires the core `manage` permission, trims the name, checks the 1–48-character/control rules, rejects a duplicate case-insensitively, and bumps the revision. `settlement_transfer { settlement_id, player_id, expected_revision }` also requires `manage`, accepts only a recipient already in the server player registry, makes the recipient owner, and demotes the previous owner to Manager. Both return `settlement_updated`. None of these commands advance the tick.
+> `settlement_rename { settlement_id, name, expected_revision }` requires the core `manage` permission, trims the name, checks the 1–48-character/control rules, rejects a duplicate case-insensitively, and bumps the revision. `settlement_transfer { settlement_id, player_id, expected_revision }` also requires `manage`, accepts only a recipient already in the server player registry, makes the recipient owner, and demotes the previous owner to Manager. Both return `settlement_updated`.
+>
+> `settlement_release { settlement_id, expected_revision }` is the **Admin** override for a dead owner (Q-113): it clears `owner_id` and every member, bumps the revision, and returns `settlement_updated`. It is the only settlement command above the Mayor ceiling. None of these commands advance the tick.
 
 ### Protocol v1 (Phase 6 foundation)
 
@@ -244,6 +246,7 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. Protocol v
 | `settlement_at` | `x`, `z` |
 | `settlement_rename` | `settlement_id`, `name`, `expected_revision` |
 | `settlement_transfer` | `settlement_id`, `player_id`, `expected_revision` |
+| `settlement_release` | `settlement_id`, `expected_revision` (Admin) |
 | `set_interest` | `center_x`, `center_z`, `radius_m` |
 | `disconnect` | — |
 
@@ -396,6 +399,7 @@ Population, employment, and building counts are static for v1. `employed` is 60%
 | `settlement_at` | Viewer read; nearest containing record or `found:false`; does not advance the tick | `settlement.seed_mismatch`, `not_hello` |
 | `settlement_rename` | Mayor-only; core `manage` check, name rules, case-insensitive uniqueness, revision; returns `settlement_updated`; does not advance the tick | `empty_name`, `name_too_long`, `duplicate_name`, `settlement.forbidden`, `settlement.revision_conflict`, `settlement.unknown`, `role.forbidden`, `not_hello` |
 | `settlement_transfer` | Mayor-only; core `manage` check, recipient must be registered, previous owner becomes Manager, revision; returns `settlement_updated`; does not advance the tick | `settlement.forbidden`, `settlement.unowned`, `settlement.revision_conflict`, `settlement.unknown`, `settlement.unknown_player`, `settlement.too_many_owned`, `role.forbidden`, `not_hello` |
+| `settlement_release` | Admin-only dead-owner override; clears owner and members with a revision check; returns `settlement_updated`; does not advance the tick | `settlement.unowned`, `settlement.revision_conflict`, `settlement.unknown`, `role.forbidden`, `not_hello` |
 | `set_interest` | View-only: stores the connection viewport (`center_x`, `center_z`, `radius_m`) and returns a snapshot plus a bounded `interest_view`; does not advance the tick or move the checksum | `not_hello`, `interest.invalid_center`, `interest.radius_out_of_range` |
 | `time_vote` | Per-connection ballot on the shared vote: call (initiator auto-yes), yes, no; admin cancel; returns `TimeVoteStatus` | `vote.open`, `vote.cooldown`, `vote.min_online`, `vote.unknown_player`, `vote.duplicate`, `vote.closed`, `vote.action_required`, `vote.action_unsupported`, `role.forbidden` |
 | `disconnect` | Closes this connection; returns `goodbye` | `session.closed` |

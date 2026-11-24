@@ -1185,6 +1185,33 @@ impl SettlementStore {
         Ok(updated)
     }
 
+    /// Release ownership and clear every member without an owner actor.
+    ///
+    /// This is the explicit admin override for a dead-owner server (Q-113).
+    /// Server call sites must gate it on an admin capability; the core method
+    /// intentionally does not accept a player id.
+    ///
+    /// # Errors
+    ///
+    /// Unknown settlement, stale revision, or an unowned settlement.
+    pub fn force_release(
+        &mut self,
+        id: u64,
+        expected_revision: u32,
+    ) -> Result<Settlement, SettlementError> {
+        let updated = {
+            let settlement = self.settlement_mut(id)?;
+            settlement.check_revision(expected_revision)?;
+            if !settlement.is_owned() {
+                return Err(SettlementError::Unowned { id });
+            }
+            settlement.release()?;
+            settlement.clone()
+        };
+        self.ensure_v2();
+        Ok(updated)
+    }
+
     /// Remove one settlement by id.
     pub fn remove(&mut self, id: u64) -> bool {
         let before = self.settlements.len();
@@ -1941,6 +1968,43 @@ mod tests {
             Err(SettlementError::Forbidden {
                 actor: player(3),
                 action: "rename"
+            })
+        );
+    }
+
+    #[test]
+    fn admin_force_release_clears_ownership_without_an_owner_actor() {
+        let (mut store, settlement) = owned_store();
+        store
+            .invite(
+                player(1),
+                settlement.id,
+                player(2),
+                SettlementRole::Builder,
+                settlement.membership_revision,
+            )
+            .expect("invite");
+        let revision = store
+            .get(settlement.id)
+            .expect("settlement")
+            .membership_revision;
+
+        let released = store
+            .force_release(settlement.id, revision)
+            .expect("force release");
+        assert_eq!(released.owner_id, None);
+        assert!(released.members.is_empty());
+        assert_eq!(released.membership_revision, revision + 1);
+        assert_eq!(
+            store.force_release(settlement.id, revision + 1),
+            Err(SettlementError::Unowned { id: settlement.id })
+        );
+        assert_eq!(
+            store.force_release(settlement.id, 0),
+            Err(SettlementError::RevisionConflict {
+                id: settlement.id,
+                expected: 0,
+                actual: revision + 1
             })
         );
     }

@@ -400,6 +400,16 @@ pub enum ClientCommand {
         /// Revision the client believes is current.
         expected_revision: u32,
     },
+    /// Admin override: release ownership and clear members (D-033, Q-113).
+    ///
+    /// This is the dead-owner recovery path. It requires the Admin role and
+    /// does not accept an owner actor.
+    SettlementRelease {
+        /// Settlement id.
+        settlement_id: u64,
+        /// Revision the client believes is current.
+        expected_revision: u32,
+    },
     Disconnect,
 }
 
@@ -424,6 +434,7 @@ impl ClientCommand {
             ClientCommand::SettlementAt { .. } => "settlement_at",
             ClientCommand::SettlementRename { .. } => "settlement_rename",
             ClientCommand::SettlementTransfer { .. } => "settlement_transfer",
+            ClientCommand::SettlementRelease { .. } => "settlement_release",
             ClientCommand::Disconnect => "disconnect",
         }
     }
@@ -859,6 +870,7 @@ pub fn decode_client_command(payload: &[u8]) -> Result<ClientCommand, Rejection>
         "settlement_at",
         "settlement_rename",
         "settlement_transfer",
+        "settlement_release",
         "disconnect",
     ];
     if !KNOWN_TAGS.contains(&tag) {
@@ -1276,7 +1288,8 @@ impl Session {
             | ClientCommand::SettlementClaim { .. }
             | ClientCommand::SettlementAt { .. }
             | ClientCommand::SettlementRename { .. }
-            | ClientCommand::SettlementTransfer { .. } => reject(
+            | ClientCommand::SettlementTransfer { .. }
+            | ClientCommand::SettlementRelease { .. } => reject(
                 codes::SETTLEMENT_UNAVAILABLE,
                 "settlements require the authoritative executor with a player registry, not the transport-only session",
             ),
@@ -1981,6 +1994,26 @@ mod tests {
         assert_eq!(
             crate::world::ClientRole::required_role_for(&transfer),
             crate::world::ClientRole::Mayor
+        );
+    }
+
+    #[test]
+    fn settlement_release_decodes_and_requires_admin() {
+        let release = decode_client_command(
+            br#"{"type":"settlement_release","settlement_id":1,"expected_revision":2}"#,
+        )
+        .expect("settlement_release decodes");
+        assert_eq!(
+            release,
+            ClientCommand::SettlementRelease {
+                settlement_id: 1,
+                expected_revision: 2,
+            }
+        );
+        assert_eq!(release.tag(), "settlement_release");
+        assert_eq!(
+            crate::world::ClientRole::required_role_for(&release),
+            crate::world::ClientRole::Admin
         );
     }
 
