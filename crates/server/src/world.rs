@@ -40,7 +40,7 @@ use core_city::player::{PlayerId, PlayerRegistry};
 use core_city::policy::{policy_placement_denial, DistrictPolicyError, DistrictPolicyStore};
 use core_city::progression::AgeState;
 use core_city::road::{RoadError, RoadRequest, RoadSegment, RoadStore};
-use core_city::settlement::SettlementStore;
+use core_city::settlement::{SettlementPermission, SettlementStore};
 use core_city::structure_age_error;
 
 use crate::protocol::{
@@ -180,6 +180,14 @@ pub mod codes {
     pub const ROAD_REJECTED: &str = "road.rejected";
     /// Time-vote commands are unavailable in the transport-only session.
     pub const VOTE_UNAVAILABLE: &str = "vote.unavailable";
+    /// A settlement placement needs an authenticated player identity.
+    pub const SETTLEMENT_IDENTITY: &str = "settlement.identity";
+    /// The settlement containing the placement has no owner.
+    pub const SETTLEMENT_UNOWNED: &str = "settlement.unowned";
+    /// The player is a member but lacks [`SettlementPermission::BUILD`].
+    pub const SETTLEMENT_FORBIDDEN: &str = "settlement.forbidden";
+    /// The player is not a member of the settlement containing the placement.
+    pub const SETTLEMENT_NOT_MEMBER: &str = "settlement.not_member";
 }
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -1841,18 +1849,22 @@ impl ServerWorld {
     /// passed:
     ///
     /// 1. payload: hash shape, finite coordinates, rotation multiple of 90;
-    /// 2. server library configured, hash resolves, the stored package loads
+    /// 2. D-033 settlement `build` permission at the placement centre, when a
+    ///    settlement contains it;
+    /// 3. server library configured, hash resolves, the stored package loads
     ///    and its metadata is consistent;
-    /// 3. idempotency: an exact existing placement (same canonical hash,
+    /// 4. idempotency: an exact existing placement (same canonical hash,
     ///    centre rounded to the millimetre, and rotation) returns its result
     ///    without a second charge;
-    /// 4. district policy at the placement centre, when a same-seed registry
+    /// 5. district policy at the placement centre, when a same-seed registry
     ///    is configured;
-    /// 5. settlement age against the blueprint's declared structure;
-    /// 6. terrain/geometry/overlap against the placeholder flat sampler;
-    /// 7. treasury affordability of the first D-028 installment.
+    /// 6. settlement age against the blueprint's declared structure;
+    /// 7. terrain/geometry/overlap against the placeholder flat sampler;
+    /// 8. treasury affordability of the first D-028 installment.
     ///
-    /// Only then are the placement, construction site, charge, tick, and
+    /// The permission check precedes library load and idempotency, so a repeat
+    /// is only acknowledged for an actor who may still build there. Only after
+    /// every check are the placement, construction site, charge, tick, and
     /// checksum committed. Every rejection leaves all state unchanged,
     /// including a placement or construction store created by this call.
     fn apply_place_blueprint(
@@ -1873,6 +1885,9 @@ impl ServerWorld {
                 format!("placement rotation {rotation} is not a multiple of 90 degrees"),
             );
         };
+        if let Some((code, message)) = self.settlement_build_denial(x, z) {
+            return reject_with(code, message);
+        }
         let Some(library) = self.blueprint_library.as_ref() else {
             return reject_with(
                 crate::protocol::codes::PLACEMENT_LIBRARY_UNAVAILABLE,
@@ -2089,6 +2104,64 @@ impl ServerWorld {
             world_checksum: self.checksum(),
             placement: placement_view(&placement),
         })
+    }
+
+    /// D-033 `build` permission inside a settlement.
+    ///
+    /// Wilderness (no settlement store, or no settlement containing the
+    /// placement centre) keeps the global-role behavior and returns `None`.
+    /// Inside a settlement an admin bypasses every settlement check. Otherwise
+    /// the actor must be identified, the settlement must be owned, the actor
+    /// must be a member, and that member must hold
+    /// [`SettlementPermission::BUILD`].
+    ///
+    /// The placement centre is rounded to the nearest whole metre because
+    /// settlement containment is metre-based. This is a pure read: a rejection
+    /// leaves the settlement store untouched, and the caller audits the code.
+    fn settlement_build_denial(&self, x: f64, z: f64) -> Option<(&'static str, String)> {
+        if self.role == ClientRole::Admin {
+            return None;
+        }
+        let cell_x = x.round() as i32;
+        let cell_z = z.round() as i32;
+        let settlement = self.settlements.as_ref()?.at(cell_x, cell_z)?;
+        let Some(player) = self.player_id else {
+            return Some((
+                codes::SETTLEMENT_IDENTITY,
+                format!(
+                    "placing inside settlement {} requires a player identity",
+                    settlement.name
+                ),
+            ));
+        };
+        if !settlement.is_owned() {
+            return Some((
+                codes::SETTLEMENT_UNOWNED,
+                format!(
+                    "settlement {} has no owner; only an admin may place blueprints here",
+                    settlement.name
+                ),
+            ));
+        }
+        if settlement.role_of(player).is_none() {
+            return Some((
+                codes::SETTLEMENT_NOT_MEMBER,
+                format!(
+                    "player {player} is not a member of settlement {}",
+                    settlement.name
+                ),
+            ));
+        }
+        if !settlement.has_permission(player, SettlementPermission::BUILD) {
+            return Some((
+                codes::SETTLEMENT_FORBIDDEN,
+                format!(
+                    "player {player} lacks the build permission in settlement {}",
+                    settlement.name
+                ),
+            ));
+        }
+        None
     }
 
     /// Update this session's interest viewport and answer with the bounded view.
@@ -3323,7 +3396,7 @@ mod tests {
         DEFAULT_BUSINESS_TAX_PER_JOB_PER_DAY, DEFAULT_TAX_PER_RESIDENT_PER_DAY,
     };
     use core_city::population::WAGE_PER_WORKER_PER_DAY;
-    use core_city::settlement::SettlementRequest;
+    use core_city::settlement::{SettlementRequest, SettlementRole};
 
     use crate::protocol::{codes as protocol_codes, decode_client_command, MAX_INTEREST_RADIUS_M};
 
@@ -5901,6 +5974,217 @@ mod tests {
             ServerMessage::PlaceBlueprintResult { .. }
         ));
         assert_eq!(world.placements.as_ref().unwrap().placements.len(), 2);
+    }
+
+    // ---- D-033 settlement build permission ----
+
+    /// Hello one connection and return its stable player identity.
+    fn register_actor(
+        world: &mut ServerWorld,
+        connection: u64,
+        name: &str,
+        role: ClientRole,
+    ) -> PlayerId {
+        world.set_session_role(connection, role);
+        let messages = world.apply_session(connection, &hello_named(name));
+        assert!(
+            matches!(messages.first(), Some(ServerMessage::Welcome { .. })),
+            "expected welcome for {name}, got {messages:?}"
+        );
+        world
+            .players
+            .find_by_display_name(name)
+            .first()
+            .map(|player| player.id)
+            .expect("registered actor")
+    }
+
+    /// Seed one settlement, owned by `owner` or unowned when `None`.
+    fn seed_settlement(
+        world: &mut ServerWorld,
+        owner: Option<PlayerId>,
+        name: &str,
+        center: [i32; 2],
+        radius_m: u32,
+    ) -> u64 {
+        let mut store = world
+            .settlements
+            .take()
+            .unwrap_or_else(|| SettlementStore::new(SEED));
+        let request = SettlementRequest {
+            name: name.to_string(),
+            owner: "settlement-label".to_string(),
+            center,
+            radius_m,
+        };
+        let settlement = match owner {
+            Some(owner) => store.found_for_player(&request, owner),
+            None => store.found(&request),
+        }
+        .expect("seed settlement");
+        world.settlements = Some(store);
+        settlement.id
+    }
+
+    /// Invite one member using the settlement's current revision.
+    fn invite_actor(
+        world: &mut ServerWorld,
+        owner: PlayerId,
+        settlement_id: u64,
+        player: PlayerId,
+        role: SettlementRole,
+    ) {
+        let revision = world
+            .settlements
+            .as_ref()
+            .and_then(|store| store.get(settlement_id))
+            .expect("settlement")
+            .membership_revision;
+        world
+            .settlements
+            .as_mut()
+            .expect("settlement store")
+            .invite(owner, settlement_id, player, role, revision)
+            .expect("invite member");
+    }
+
+    fn settlement_checksum(world: &ServerWorld) -> Option<u64> {
+        world.settlements.as_ref().map(SettlementStore::checksum)
+    }
+
+    fn last_audit_code(world: &ServerWorld) -> &'static str {
+        world.audit_state().last().expect("audit entry").code
+    }
+
+    #[test]
+    fn settlement_owner_places_inside_the_owned_settlement() {
+        let dir = PlacementTempDir::new("settlement-owner");
+        let hash = write_test_package(&dir, "townsmith:settlement_owner", 1_000.0, None);
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Mayor);
+        world.set_blueprint_library(dir.library()).expect("library");
+        let owner = register_actor(&mut world, 1, "owner", ClientRole::Mayor);
+        seed_settlement(&mut world, Some(owner), "Ownerstead", [0, 0], 64);
+
+        let message = first_response(world.apply_session(1, &place(&hash, 12.0, -8.0, 0)));
+        let (view, tick, _, _) = expect_placement_result(&message);
+        assert_eq!(view.id, 1);
+        assert_eq!(tick, 1);
+        assert_eq!(view.center, [12.0, 40.0, -8.0]);
+        assert_eq!(last_audit_code(&world), AUDIT_ACCEPTED);
+    }
+
+    #[test]
+    fn settlement_members_need_the_build_permission() {
+        let dir = PlacementTempDir::new("settlement-roles");
+        let hash = write_test_package(&dir, "townsmith:settlement_roles", 1_000.0, None);
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Mayor);
+        world.set_blueprint_library(dir.library()).expect("library");
+
+        let owner = register_actor(&mut world, 1, "owner", ClientRole::Mayor);
+        let builder = register_actor(&mut world, 2, "builder", ClientRole::Mayor);
+        let member = register_actor(&mut world, 3, "member", ClientRole::Mayor);
+        let _outsider = register_actor(&mut world, 4, "outsider", ClientRole::Mayor);
+
+        let id = seed_settlement(&mut world, Some(owner), "Guildstead", [0, 0], 64);
+        invite_actor(&mut world, owner, id, builder, SettlementRole::Builder);
+        invite_actor(&mut world, owner, id, member, SettlementRole::Member);
+        let settlements = settlement_checksum(&world);
+
+        // A builder member may place.
+        let message = first_response(world.apply_session(2, &place(&hash, 16.0, 0.0, 0)));
+        let (view, _, _, _) = expect_placement_result(&message);
+        assert_eq!(view.id, 1);
+
+        // A plain member is a member without BUILD.
+        let before = placement_state(&world);
+        let denied = first_response(world.apply_session(3, &place(&hash, -16.0, 0.0, 0)));
+        expect_reject(&denied, codes::SETTLEMENT_FORBIDDEN);
+        assert_eq!(last_audit_code(&world), codes::SETTLEMENT_FORBIDDEN);
+        assert_eq!(placement_state(&world), before);
+        assert_eq!(settlement_checksum(&world), settlements);
+
+        // An outsider is not a member at all.
+        let denied = first_response(world.apply_session(4, &place(&hash, 0.0, 16.0, 0)));
+        expect_reject(&denied, codes::SETTLEMENT_NOT_MEMBER);
+        assert_eq!(last_audit_code(&world), codes::SETTLEMENT_NOT_MEMBER);
+        assert_eq!(placement_state(&world), before);
+        assert_eq!(settlement_checksum(&world), settlements);
+
+        // Idempotency does not bypass the permission check: repeating the
+        // builder's accepted request as a plain member is still rejected and
+        // does not acknowledge the existing placement.
+        let denied = first_response(world.apply_session(3, &place(&hash, 16.0, 0.0, 0)));
+        expect_reject(&denied, codes::SETTLEMENT_FORBIDDEN);
+        assert_eq!(
+            world
+                .placements
+                .as_ref()
+                .expect("placements")
+                .placements
+                .len(),
+            1
+        );
+        assert_eq!(placement_state(&world), before);
+    }
+
+    #[test]
+    fn unowned_settlement_rejects_non_admins() {
+        let dir = PlacementTempDir::new("settlement-unowned");
+        let hash = write_test_package(&dir, "townsmith:settlement_unowned", 1_000.0, None);
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Mayor);
+        world.set_blueprint_library(dir.library()).expect("library");
+        register_actor(&mut world, 1, "mayor", ClientRole::Mayor);
+        seed_settlement(&mut world, None, "Freehold", [0, 0], 64);
+        let before = placement_state(&world);
+        let settlements = settlement_checksum(&world);
+
+        let denied = first_response(world.apply_session(1, &place(&hash, 4.0, 4.0, 0)));
+        expect_reject(&denied, codes::SETTLEMENT_UNOWNED);
+        assert_eq!(last_audit_code(&world), codes::SETTLEMENT_UNOWNED);
+        assert_eq!(placement_state(&world), before);
+        assert_eq!(settlement_checksum(&world), settlements);
+    }
+
+    #[test]
+    fn settlement_identity_is_required_for_non_admins() {
+        let dir = PlacementTempDir::new("settlement-identity");
+        let hash = write_test_package(&dir, "townsmith:settlement_identity", 1_000.0, None);
+        let mut world = placement_world(&dir);
+        let owner = world.player_id().expect("hello assigns an id");
+        seed_settlement(&mut world, Some(owner), "Ownerstead", [0, 0], 64);
+        // Simulate a legacy session without a registered identity.
+        world.player_id = None;
+        let before = placement_state(&world);
+
+        let denied = world.apply(&place(&hash, 0.0, 0.0, 0));
+        expect_reject(&denied, codes::SETTLEMENT_IDENTITY);
+        assert_eq!(last_audit_code(&world), codes::SETTLEMENT_IDENTITY);
+        assert_eq!(placement_state(&world), before);
+    }
+
+    #[test]
+    fn admin_bypasses_every_settlement_check() {
+        let dir = PlacementTempDir::new("settlement-admin");
+        let hash = write_test_package(&dir, "townsmith:settlement_admin", 1_000.0, None);
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Admin);
+        world.set_blueprint_library(dir.library()).expect("library");
+        assert!(matches!(
+            world.apply(&hello_named("admin")),
+            ServerMessage::Welcome { .. }
+        ));
+        let owner = world.players.register("owner").expect("register owner").id;
+        seed_settlement(&mut world, Some(owner), "Walled", [0, 0], 64);
+        seed_settlement(&mut world, None, "Freehold", [128, 0], 64);
+        // An admin bypasses even the identity check.
+        world.player_id = None;
+
+        let message = world.apply(&place(&hash, 0.0, 0.0, 0));
+        let (view, _, _, _) = expect_placement_result(&message);
+        assert_eq!(view.id, 1, "admin places in a settlement it does not own");
+
+        let message = world.apply(&place(&hash, 128.0, 0.0, 0));
+        let (view, _, _, _) = expect_placement_result(&message);
+        assert_eq!(view.id, 2, "admin places in an unowned settlement");
     }
 
     #[test]
