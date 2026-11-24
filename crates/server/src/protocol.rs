@@ -382,6 +382,24 @@ pub enum ClientCommand {
         /// World cell Z in metres.
         z: i32,
     },
+    /// Rename a settlement (D-033).
+    SettlementRename {
+        /// Settlement id.
+        settlement_id: u64,
+        /// New player-facing name, trimmed to 1–48 characters.
+        name: String,
+        /// Revision the client believes is current.
+        expected_revision: u32,
+    },
+    /// Transfer settlement ownership to a known player (D-033, Q-113).
+    SettlementTransfer {
+        /// Settlement id.
+        settlement_id: u64,
+        /// Registered recipient player id.
+        player_id: u64,
+        /// Revision the client believes is current.
+        expected_revision: u32,
+    },
     Disconnect,
 }
 
@@ -404,6 +422,8 @@ impl ClientCommand {
             ClientCommand::SettlementRemoveMember { .. } => "settlement_remove_member",
             ClientCommand::SettlementClaim { .. } => "settlement_claim",
             ClientCommand::SettlementAt { .. } => "settlement_at",
+            ClientCommand::SettlementRename { .. } => "settlement_rename",
+            ClientCommand::SettlementTransfer { .. } => "settlement_transfer",
             ClientCommand::Disconnect => "disconnect",
         }
     }
@@ -837,6 +857,8 @@ pub fn decode_client_command(payload: &[u8]) -> Result<ClientCommand, Rejection>
         "settlement_remove_member",
         "settlement_claim",
         "settlement_at",
+        "settlement_rename",
+        "settlement_transfer",
         "disconnect",
     ];
     if !KNOWN_TAGS.contains(&tag) {
@@ -1252,7 +1274,9 @@ impl Session {
             | ClientCommand::SettlementSetRole { .. }
             | ClientCommand::SettlementRemoveMember { .. }
             | ClientCommand::SettlementClaim { .. }
-            | ClientCommand::SettlementAt { .. } => reject(
+            | ClientCommand::SettlementAt { .. }
+            | ClientCommand::SettlementRename { .. }
+            | ClientCommand::SettlementTransfer { .. } => reject(
                 codes::SETTLEMENT_UNAVAILABLE,
                 "settlements require the authoritative executor with a player registry, not the transport-only session",
             ),
@@ -1918,6 +1942,45 @@ mod tests {
         assert_eq!(
             crate::world::ClientRole::required_role_for(&at),
             crate::world::ClientRole::Viewer
+        );
+    }
+
+    #[test]
+    fn settlement_rename_and_transfer_decode_and_map_to_mayor() {
+        let rename = decode_client_command(
+            br#"{"type":"settlement_rename","settlement_id":1,"name":"Harbour","expected_revision":2}"#,
+        )
+        .expect("settlement_rename decodes");
+        assert_eq!(
+            rename,
+            ClientCommand::SettlementRename {
+                settlement_id: 1,
+                name: "Harbour".to_string(),
+                expected_revision: 2,
+            }
+        );
+        assert_eq!(rename.tag(), "settlement_rename");
+        assert_eq!(
+            crate::world::ClientRole::required_role_for(&rename),
+            crate::world::ClientRole::Mayor
+        );
+
+        let transfer = decode_client_command(
+            br#"{"type":"settlement_transfer","settlement_id":1,"player_id":9,"expected_revision":2}"#,
+        )
+        .expect("settlement_transfer decodes");
+        assert_eq!(
+            transfer,
+            ClientCommand::SettlementTransfer {
+                settlement_id: 1,
+                player_id: 9,
+                expected_revision: 2,
+            }
+        );
+        assert_eq!(transfer.tag(), "settlement_transfer");
+        assert_eq!(
+            crate::world::ClientRole::required_role_for(&transfer),
+            crate::world::ClientRole::Mayor
         );
     }
 

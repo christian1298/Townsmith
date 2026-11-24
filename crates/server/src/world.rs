@@ -196,6 +196,8 @@ pub mod codes {
     pub const SETTLEMENT_ROLE_INVALID: &str = "settlement.role_invalid";
     /// No settlement store exists or the requested id is unknown.
     pub const SETTLEMENT_UNKNOWN: &str = "settlement.unknown";
+    /// A transfer recipient is not in the server player registry.
+    pub const SETTLEMENT_UNKNOWN_PLAYER: &str = "settlement.unknown_player";
 }
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -265,7 +267,9 @@ impl ClientRole {
             | "settlement_invite"
             | "settlement_set_role"
             | "settlement_remove_member"
-            | "settlement_claim" => Self::Mayor,
+            | "settlement_claim"
+            | "settlement_rename"
+            | "settlement_transfer" => Self::Mayor,
             // Time control is admin-only in D-021; unknown tags fail closed.
             "time_control" => Self::Admin,
             _ => Self::Admin,
@@ -1576,6 +1580,16 @@ impl ServerWorld {
                 expected_revision,
             } => self.apply_settlement_claim(*settlement_id, *expected_revision),
             ClientCommand::SettlementAt { x, z } => self.apply_settlement_at(*x, *z),
+            ClientCommand::SettlementRename {
+                settlement_id,
+                name,
+                expected_revision,
+            } => self.apply_settlement_rename(*settlement_id, name, *expected_revision),
+            ClientCommand::SettlementTransfer {
+                settlement_id,
+                player_id,
+                expected_revision,
+            } => self.apply_settlement_transfer(*settlement_id, *player_id, *expected_revision),
             ClientCommand::SetInterest {
                 center_x,
                 center_z,
@@ -2436,6 +2450,68 @@ impl ServerWorld {
             found: settlement.is_some(),
             settlement,
         })
+    }
+
+    fn apply_settlement_rename(
+        &mut self,
+        settlement_id: u64,
+        name: &str,
+        expected_revision: u32,
+    ) -> (Vec<ServerMessage>, &'static str) {
+        let Some(actor) = self.player_id else {
+            return reject_with(
+                codes::SETTLEMENT_IDENTITY,
+                "renaming a settlement requires a player identity",
+            );
+        };
+        let outcome = {
+            let store = match self.settlement_store_mut() {
+                Ok(store) => store,
+                Err(rejection) => return rejection,
+            };
+            store.rename(actor, settlement_id, name, expected_revision)
+        };
+        match outcome {
+            Ok(settlement) => self.finish_settlement_update(settlement),
+            Err(error) => reject_with(error.code(), error.to_string()),
+        }
+    }
+
+    fn apply_settlement_transfer(
+        &mut self,
+        settlement_id: u64,
+        player_id: u64,
+        expected_revision: u32,
+    ) -> (Vec<ServerMessage>, &'static str) {
+        let Some(actor) = self.player_id else {
+            return reject_with(
+                codes::SETTLEMENT_IDENTITY,
+                "transferring a settlement requires a player identity",
+            );
+        };
+        let Ok(recipient) = PlayerId::new(player_id) else {
+            return reject_with(
+                codes::SETTLEMENT_IDENTITY,
+                format!("player id {player_id} is outside the supported range"),
+            );
+        };
+        if self.players.get(recipient).is_none() {
+            return reject_with(
+                codes::SETTLEMENT_UNKNOWN_PLAYER,
+                format!("player {player_id} is not in the server registry"),
+            );
+        }
+        let outcome = {
+            let store = match self.settlement_store_mut() {
+                Ok(store) => store,
+                Err(rejection) => return rejection,
+            };
+            store.transfer(actor, settlement_id, recipient, expected_revision)
+        };
+        match outcome {
+            Ok(settlement) => self.finish_settlement_update(settlement),
+            Err(error) => reject_with(error.code(), error.to_string()),
+        }
     }
 
     /// D-033 `build` permission inside a settlement.
@@ -6816,6 +6892,101 @@ mod tests {
                 settlement: None,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn settlement_rename_requires_manage_and_a_unique_name() {
+        let mut world = world_with_hello();
+        world.apply(&found_settlement("Harbour", 0, 0, 64));
+        world.apply(&found_settlement("Docks", 200, 0, 64));
+        let bob = world.players.register("bob").expect("bob").id.get();
+
+        let renamed = world.apply(&ClientCommand::SettlementRename {
+            settlement_id: 1,
+            name: "  Old Harbour  ".to_string(),
+            expected_revision: 1,
+        });
+        let ServerMessage::SettlementUpdated { settlement, .. } = renamed else {
+            panic!("expected settlement_updated, got {renamed:?}");
+        };
+        assert_eq!(settlement.name, "Old Harbour");
+        assert_eq!(settlement.membership_revision, 2);
+
+        let duplicate = world.apply(&ClientCommand::SettlementRename {
+            settlement_id: 1,
+            name: "docks".to_string(),
+            expected_revision: 2,
+        });
+        assert!(matches!(
+            duplicate,
+            ServerMessage::Reject { ref code, .. } if code == "duplicate_name"
+        ));
+        let stale = world.apply(&ClientCommand::SettlementRename {
+            settlement_id: 1,
+            name: "Harbour".to_string(),
+            expected_revision: 1,
+        });
+        assert!(matches!(
+            stale,
+            ServerMessage::Reject { ref code, .. } if code == "settlement.revision_conflict"
+        ));
+
+        world.apply(&settlement_invite(1, bob, "builder", 2));
+        world.player_id = Some(PlayerId::new(bob).expect("bob"));
+        let forbidden = world.apply(&ClientCommand::SettlementRename {
+            settlement_id: 1,
+            name: "Bob's Dock".to_string(),
+            expected_revision: 3,
+        });
+        assert!(matches!(
+            forbidden,
+            ServerMessage::Reject { ref code, .. } if code == "settlement.forbidden"
+        ));
+    }
+
+    #[test]
+    fn settlement_transfer_assigns_a_known_recipient_as_owner() {
+        let mut world = world_with_hello();
+        world.apply(&found_settlement("Harbour", 0, 0, 64));
+        let bob = world.players.register("bob").expect("bob").id.get();
+        let owner = world.player_id().expect("owner id").get();
+
+        let transferred = world.apply(&ClientCommand::SettlementTransfer {
+            settlement_id: 1,
+            player_id: bob,
+            expected_revision: 1,
+        });
+        let ServerMessage::SettlementUpdated { settlement, .. } = transferred else {
+            panic!("expected settlement_updated, got {transferred:?}");
+        };
+        assert_eq!(settlement.owner_id, Some(bob));
+        assert_eq!(settlement.membership_revision, 2);
+        assert_eq!(settlement.members.len(), 2);
+        assert_eq!(settlement.members[0].player, owner);
+        assert_eq!(settlement.members[0].role, "manager");
+        assert_eq!(settlement.members[1].player, bob);
+        assert_eq!(settlement.members[1].role, "owner");
+
+        let unknown = world.apply(&ClientCommand::SettlementTransfer {
+            settlement_id: 1,
+            player_id: 999,
+            expected_revision: 2,
+        });
+        assert!(matches!(
+            unknown,
+            ServerMessage::Reject { ref code, .. } if code == codes::SETTLEMENT_UNKNOWN_PLAYER
+        ));
+
+        world.player_id = Some(PlayerId::new(owner).expect("owner"));
+        let stale = world.apply(&ClientCommand::SettlementTransfer {
+            settlement_id: 1,
+            player_id: owner,
+            expected_revision: 1,
+        });
+        assert!(matches!(
+            stale,
+            ServerMessage::Reject { ref code, .. } if code == "settlement.revision_conflict"
         ));
     }
 
