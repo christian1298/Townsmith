@@ -3548,11 +3548,12 @@ func _settlement_membership_line(settlement: Dictionary) -> String:
 	var suffix := ""
 	for role in roles:
 		suffix += " · %s %s" % [str(role), i18n.format_int(int(counts[role]))]
-	return "Owner #%s · %s members · revision %s%s" % [
+	return "Owner #%s · %s members · revision %s%s · tax %s%%" % [
 		i18n.format_int(owner_id),
 		i18n.format_int(rows.size()),
 		revision,
 		suffix,
+		i18n.format_int(int(settlement.get("tax_rate", 0))),
 	]
 
 ## Read an `[x, z]` pair from a plain or packed array; NAN when malformed.
@@ -5822,13 +5823,14 @@ func _run_scene_smoke() -> void:
 					"owned": true,
 					"owner_id": 42,
 					"membership_revision": 7,
+					"tax_rate": 25,
 					"members": [
 						{"player": 3, "role": "member"},
 						{"player": 4, "role": "builder"},
 						{"player": 5, "role": "manager"},
 						{"player": 6, "role": "builder"},
 					],
-				}) == "Owner #42 · 4 members · revision 7 · builder 2 · manager 1 · member 1"
+				}) == "Owner #42 · 4 members · revision 7 · builder 2 · manager 1 · member 1 · tax 25%"
 				settlement_detail_ok = settlement_detail_ok and _settlement_membership_line({}) == unowned_membership_line
 				settlement_detail_ok = settlement_detail_ok and _select_settlement(first_settlement_id)
 				_update_dashboard()

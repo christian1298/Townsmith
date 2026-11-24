@@ -406,6 +406,16 @@ pub enum ClientCommand {
         /// Revision the client believes is current.
         expected_revision: u32,
     },
+    /// Set the settlement tax rate (D-033).
+    ///
+    /// The actor needs the `tax` permission via the owner or manager role.
+    /// The rate is data-only: it does not change the membership revision.
+    SettlementSetTax {
+        /// Settlement id from `settlement_list`.
+        settlement_id: u64,
+        /// Rate in whole percent, 0–100.
+        rate: u16,
+    },
     /// Admin override: release ownership and clear members (D-033, Q-113).
     ///
     /// This is the dead-owner recovery path. It requires the Admin role and
@@ -451,6 +461,7 @@ impl ClientCommand {
             ClientCommand::SettlementAt { .. } => "settlement_at",
             ClientCommand::SettlementRename { .. } => "settlement_rename",
             ClientCommand::SettlementTransfer { .. } => "settlement_transfer",
+            ClientCommand::SettlementSetTax { .. } => "settlement_set_tax",
             ClientCommand::SettlementRelease { .. } => "settlement_release",
             ClientCommand::AuditLog { .. } => "audit_log",
             ClientCommand::Disconnect => "disconnect",
@@ -595,6 +606,8 @@ pub struct SettlementView {
     pub members: Vec<SettlementMemberView>,
     /// Membership/ownership revision.
     pub membership_revision: u32,
+    /// Settlement tax rate in whole percent, 0–100.
+    pub tax_rate: u16,
 }
 
 /// One entry in [`ServerMessage::AuditLog`].
@@ -924,6 +937,7 @@ pub fn decode_client_command(payload: &[u8]) -> Result<ClientCommand, Rejection>
         "settlement_at",
         "settlement_rename",
         "settlement_transfer",
+        "settlement_set_tax",
         "settlement_release",
         "audit_log",
         "disconnect",
@@ -1344,6 +1358,7 @@ impl Session {
             | ClientCommand::SettlementAt { .. }
             | ClientCommand::SettlementRename { .. }
             | ClientCommand::SettlementTransfer { .. }
+            | ClientCommand::SettlementSetTax { .. }
             | ClientCommand::SettlementRelease { .. } => reject(
                 codes::SETTLEMENT_UNAVAILABLE,
                 "settlements require the authoritative executor with a player registry, not the transport-only session",
@@ -2057,6 +2072,25 @@ mod tests {
     }
 
     #[test]
+    fn settlement_set_tax_decodes_and_maps_to_mayor() {
+        let command =
+            decode_client_command(br#"{"type":"settlement_set_tax","settlement_id":1,"rate":25}"#)
+                .expect("settlement_set_tax decodes");
+        assert_eq!(
+            command,
+            ClientCommand::SettlementSetTax {
+                settlement_id: 1,
+                rate: 25,
+            }
+        );
+        assert_eq!(command.tag(), "settlement_set_tax");
+        assert_eq!(
+            crate::world::ClientRole::required_role_for(&command),
+            crate::world::ClientRole::Mayor
+        );
+    }
+
+    #[test]
     fn settlement_release_decodes_and_requires_admin() {
         let release = decode_client_command(
             br#"{"type":"settlement_release","settlement_id":1,"expected_revision":2}"#,
@@ -2149,6 +2183,7 @@ mod tests {
                     permissions: 15,
                 }],
                 membership_revision: 1,
+                tax_rate: 0,
             }),
         ] {
             let message = ServerMessage::SettlementAt {
@@ -2190,6 +2225,7 @@ mod tests {
                     },
                 ],
                 membership_revision: 2,
+                tax_rate: 10,
             },
             settlement_checksum: "0123456789abcdef".to_string(),
             world_checksum: "fedcba9876543210".to_string(),
@@ -2218,6 +2254,7 @@ mod tests {
                 permissions: 15,
             }],
             membership_revision: 1,
+            tax_rate: 0,
         };
         let found = ServerMessage::SettlementFound {
             tick: 4,

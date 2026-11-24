@@ -36,7 +36,7 @@ tags:
 | **7. Modding and resource packs** | 🟡 Partial (de-risked) | 4–6 weeks | External content without core changes | M7: Modded |
 | **8. Polish and release** | ⬜ Not started | 8–12 weeks | Performance, tutorial, localization, QA | M8: Ship |
 
-Status reflects master `6a2d579` (2026-11-24).
+Status reflects master `4880d82` (2026-11-24).
 
 **Total:** roughly **55–78 weeks** for a small team. This is a multi-year project for one person. Plan accordingly.
 
@@ -249,10 +249,10 @@ The staged cut is in [[49 - Phase 3 Slice Plan]]: city ledger, households/needs,
 
 ### Phase 6 — Multiplayer (6–10 weeks)
 
-> [!info] Current status — in progress (master `6a2d579`, 2026-11-24)
+> [!info] Current status — in progress (master `4880d82`, 2026-11-24)
 > **Landed:** protocol v1 and the authoritative executor; dev roles, rate limits, and audit; interest views with bounds (≤64 roads, ≤64 building records; #262/#266/#308); D-021 server-side time control including the 7-connection `--vote-smoke` pass/fail/cancel loop (#287); D-032 server-authoritative `place_blueprint` (#306/#308/#309); bridge content-addressed placement references (#311/#313); the catalog-driven Godot placement UI (#318); D-033 player identity, server persistence, bridge read model, placement `build` enforcement, and the settlement protocol — found/list/at/claim/rename/transfer/release plus invite/set-role/remove (#319/#321–#330); the time-vote panel (#320); deterministic network-fault tests (#317); the server `--content-hash` hello pin (#331); D-035 read-only missing-pack inspection (#332); the district-panel membership display (#333); the settlement tax-rate model (#338), bridge rename (#341), and admin audit-log command (#337); and the fail-closed client content-mismatch screen (#340). F-003 is fixed by #287.
 >
-> **Gaps:** dashboard settlement write controls and the remaining `tax` checks; voxel edit sync and blueprint locks; journal/rollback; chat/pings (the sequential listen loop has no broadcast path); the client content-mismatch screen; remote transport and authentication; concurrent listener sessions.
+> **Gaps:** dashboard settlement write controls and a treasury consumer for the data-only tax rate; voxel edit sync and blueprint locks; journal/rollback; chat/pings (the sequential listen loop has no broadcast path); remote transport and authentication; concurrent listener sessions.
 
 **Goals**
 - Co-op that feels native, not bolted on.
@@ -389,14 +389,14 @@ The vertical slice is a small, complete version of the game used to validate the
 
 ## 7. Next tasks
 
-Ordered by dependency, not by size. Status reflects master `6a2d579` (2026-11-24).
+Ordered by dependency, not by size. Status reflects master `4880d82` (2026-11-24).
 
 1. **D-033 core identity/membership** — stable per-save player ID (Q-111), ownership, membership, save v2 migration. ✅ Merged in #319.
 2. **D-033 server persistence + placement enforcement** — `PlayerRegistry`/`SettlementStore` in `ServerWorld`/`ServerSave`, stable `player_id` on hello/resume, and `build` checks inside a settlement. ✅ Merged in #321/#323.
 3. **D-033 bridge read model** — read-only `owner_id`, `members[]`, role bits, revision, and membership checksum. ✅ Merged in #322.
 4. **Full Godot placement UI** — library catalog, ghost preview, rotation, validation feedback; replaces the debug single-hash path (#309). ✅ Merged in #318.
 5. **Blueprint dependency validation** — resolve and validate package dependencies before placement. ✅ Merged in #316.
-6. **Settlement protocol commands** — found/list/at/claim/rename/transfer/release and membership invite/set-role/remove are merged (#325–#330); #333 adds the read-only district-panel membership display. Next are the remaining `tax` checks and dashboard write controls.
+6. **Settlement protocol commands** — found/list/at/claim/transfer/rename/set-tax/release and membership invite/set-role/remove are merged (#325–#330 plus the tax command); #333 adds the read-only district-panel membership display. Next are dashboard write controls and a treasury consumer for the tax rate.
 7. **Q-116/Q-117/Q-118 content compatibility decisions** — Q-117 bridge v1 (D-035, #332), the server content pin (#331), and the fail-closed client mismatch screen (#340) are implemented; D-036/D-037 are proposed for Q-116/Q-118 and need review plus loader work; the server `--accept-missing-content` CLI and simulation freeze list remain.
 8. **Voxel edit sync + blueprint locks** — replicate edits and hold locks across a disconnect.
 9. **Journal/rollback** — crash-safe command journal and rollback/history.

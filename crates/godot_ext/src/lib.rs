@@ -8468,6 +8468,7 @@ struct SettlementPayload {
     members: Vec<SettlementMemberPayload>,
     membership_revision: u32,
     membership_checksum: String,
+    tax_rate: u16,
 }
 
 /// Pure settlement payload, testable without a Godot engine.
@@ -8492,6 +8493,7 @@ fn settlement_payload(settlement: &Settlement) -> SettlementPayload {
             .collect(),
         membership_revision: settlement.membership_revision,
         membership_checksum: settlement_membership_checksum(settlement),
+        tax_rate: settlement.tax_rate,
     }
 }
 
@@ -8531,6 +8533,7 @@ fn settlement_to_dictionary(settlement: &Settlement) -> VarDictionary {
         "membership_checksum",
         &GString::from(payload.membership_checksum.as_str()),
     );
+    result.set("tax_rate", i64::from(payload.tax_rate));
     result
 }
 
@@ -13335,6 +13338,7 @@ mod tests {
         assert!(payload["owner_id"].is_null());
         assert_eq!(payload["members"].as_array().expect("members").len(), 0);
         assert_eq!(payload["membership_revision"], 0);
+        assert_eq!(payload["tax_rate"], 0);
         let checksum = payload["membership_checksum"].as_str().expect("checksum");
         assert_eq!(checksum.len(), 16);
         assert!(checksum.chars().all(|c| c.is_ascii_hexdigit()));
@@ -13373,6 +13377,19 @@ mod tests {
         assert_eq!(ids, vec![1, 2, 3]);
         assert_eq!(roles, vec!["owner", "manager", "builder"]);
         assert_eq!(bits, vec![15, 15, 1]);
+    }
+
+    #[test]
+    fn settlement_payload_includes_the_data_only_tax_rate() {
+        let mut settlement = bridge_settlement(
+            Some(1),
+            &[(1, core_city::settlement::SettlementRole::Owner)],
+            1,
+        );
+        settlement.tax_rate = 35;
+        let payload = serde_json::to_value(settlement_payload(&settlement)).expect("json");
+        assert_eq!(payload["tax_rate"], 35);
+        assert_eq!(payload["membership_revision"], 1);
     }
 
     #[test]

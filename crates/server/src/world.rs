@@ -273,7 +273,8 @@ impl ClientRole {
             | "settlement_remove_member"
             | "settlement_claim"
             | "settlement_rename"
-            | "settlement_transfer" => Self::Mayor,
+            | "settlement_transfer"
+            | "settlement_set_tax" => Self::Mayor,
             // Time control is admin-only in D-021; unknown tags fail closed.
             // Settlement release is the Q-113 admin override; the per-session
             // audit ring is admin-only because it records role rejections.
@@ -1634,6 +1635,10 @@ impl ServerWorld {
                 player_id,
                 expected_revision,
             } => self.apply_settlement_transfer(*settlement_id, *player_id, *expected_revision),
+            ClientCommand::SettlementSetTax {
+                settlement_id,
+                rate,
+            } => self.apply_settlement_set_tax(*settlement_id, *rate),
             ClientCommand::SettlementRelease {
                 settlement_id,
                 expected_revision,
@@ -2595,6 +2600,30 @@ impl ServerWorld {
         }
     }
 
+    fn apply_settlement_set_tax(
+        &mut self,
+        settlement_id: u64,
+        rate: u16,
+    ) -> (Vec<ServerMessage>, &'static str) {
+        let Some(actor) = self.player_id else {
+            return reject_with(
+                codes::SETTLEMENT_IDENTITY,
+                "setting a settlement tax requires a player identity",
+            );
+        };
+        let outcome = {
+            let store = match self.settlement_store_mut() {
+                Ok(store) => store,
+                Err(rejection) => return rejection,
+            };
+            store.set_tax_rate(actor, settlement_id, rate)
+        };
+        match outcome {
+            Ok(settlement) => self.finish_settlement_update(settlement),
+            Err(error) => reject_with(error.code(), error.to_string()),
+        }
+    }
+
     fn apply_settlement_release(
         &mut self,
         settlement_id: u64,
@@ -2968,6 +2997,7 @@ fn settlement_view(settlement: &Settlement) -> SettlementView {
             })
             .collect(),
         membership_revision: settlement.membership_revision,
+        tax_rate: settlement.tax_rate,
     }
 }
 
@@ -7078,6 +7108,80 @@ mod tests {
         assert!(matches!(
             forbidden,
             ServerMessage::Reject { ref code, .. } if code == "settlement.forbidden"
+        ));
+    }
+
+    #[test]
+    fn settlement_tax_rate_requires_tax_and_stays_in_range() {
+        let mut world = world_with_hello();
+        world.apply(&found_settlement("Harbour", 0, 0, 64));
+
+        let set = world.apply(&ClientCommand::SettlementSetTax {
+            settlement_id: 1,
+            rate: 25,
+        });
+        let ServerMessage::SettlementUpdated { settlement, .. } = set else {
+            panic!("expected settlement_updated, got {set:?}");
+        };
+        assert_eq!(settlement.tax_rate, 25);
+        assert_eq!(settlement.membership_revision, 1, "tax is data-only");
+
+        let before = world.checksum();
+        let out_of_range = world.apply(&ClientCommand::SettlementSetTax {
+            settlement_id: 1,
+            rate: 101,
+        });
+        assert!(matches!(
+            out_of_range,
+            ServerMessage::Reject { ref code, .. } if code == "settlement.tax_out_of_range"
+        ));
+        assert_eq!(
+            world.checksum(),
+            before,
+            "a rejected tax change mutates nothing"
+        );
+
+        let unowned = seed_settlement(&mut world, None, "Unowned", [200, 0], 64);
+        let unowned_reject = world.apply(&ClientCommand::SettlementSetTax {
+            settlement_id: unowned,
+            rate: 10,
+        });
+        assert!(matches!(
+            unowned_reject,
+            ServerMessage::Reject { ref code, .. } if code == "settlement.unowned"
+        ));
+
+        let bob = world.players.register("bob").expect("bob").id.get();
+        world.apply(&settlement_invite(1, bob, "builder", 1));
+        world.player_id = Some(PlayerId::new(bob).expect("bob"));
+        let forbidden = world.apply(&ClientCommand::SettlementSetTax {
+            settlement_id: 1,
+            rate: 30,
+        });
+        assert!(matches!(
+            forbidden,
+            ServerMessage::Reject { ref code, .. } if code == "settlement.forbidden"
+        ));
+
+        world.player_id = Some(PlayerId::new(1).expect("owner"));
+        world.apply(&settlement_set_role(1, bob, "manager", 2));
+        world.player_id = Some(PlayerId::new(bob).expect("bob"));
+        let manager_set = world.apply(&ClientCommand::SettlementSetTax {
+            settlement_id: 1,
+            rate: 30,
+        });
+        let ServerMessage::SettlementUpdated { settlement, .. } = manager_set else {
+            panic!("expected settlement_updated, got {manager_set:?}");
+        };
+        assert_eq!(settlement.tax_rate, 30);
+
+        let unknown = world.apply(&ClientCommand::SettlementSetTax {
+            settlement_id: 999,
+            rate: 5,
+        });
+        assert!(matches!(
+            unknown,
+            ServerMessage::Reject { ref code, .. } if code == "settlement.unknown"
         ));
     }
 
