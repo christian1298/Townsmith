@@ -96,6 +96,8 @@ The client never simulates the authoritative city. It predicts local movement an
 
 D-033's enforcement points are the D-032 server `place_blueprint`, policy CRUD, tax commands, settlement rename/transfer/remove, membership edits, and dashboard edit paths once they exist. D-032 v1 uses the global placement role only; settlement-scoped `build` is not wired yet. A global role is a ceiling; a settlement permission never grants a global capability, and single-player/dev keeps an implicit owner. The core store wrappers already check the actor, role, revision, and limits, so the server and bridge can reuse one rule set when their slices land.
 
+The authoritative server now keeps the stable `PlayerRegistry` and an optional `SettlementStore` in memory and in `ServerSave` (optional additive fields; a world without either stays byte-identical). A successful `hello`/resume resolves one server-issued `PlayerId` per case-insensitive display name, and the id survives save/load. The registry is a session/identity sidecar, not world gameplay state, so it is excluded from the world checksum; settlement changes still move the checksum. Protocol v1 does not yet expose the id or any settlement command, and placement still enforces only the global role.
+
 ## 4. Time and ticks
 
 | System | Rate | Notes |

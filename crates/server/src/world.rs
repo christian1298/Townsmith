@@ -36,9 +36,11 @@ use core_city::placement::{
     normalize_rotation, validate_placement, Placement, PlacementError, PlacementRequest,
     PlacementStore,
 };
+use core_city::player::{PlayerId, PlayerRegistry};
 use core_city::policy::{policy_placement_denial, DistrictPolicyError, DistrictPolicyStore};
 use core_city::progression::AgeState;
 use core_city::road::{RoadError, RoadRequest, RoadSegment, RoadStore};
+use core_city::settlement::SettlementStore;
 use core_city::structure_age_error;
 
 use crate::protocol::{
@@ -152,6 +154,8 @@ pub mod codes {
     pub const TIME_INVALID_ACTION: &str = "time.invalid_action";
     /// Another online session already uses this player name.
     pub const PLAYER_NAME_DUPLICATE: &str = "player_name.duplicate";
+    /// A player name cannot be resolved to exactly one registry identity.
+    pub const PLAYER_IDENTITY: &str = "player.identity";
     /// The resume token is empty, unknown, or does not match this world.
     pub const RESUME_UNKNOWN: &str = "resume.unknown";
     /// `last_tick` is ahead of the authoritative tick.
@@ -400,6 +404,7 @@ impl ResumeWindow {
 struct SessionState {
     hello: bool,
     player: Option<String>,
+    player_id: Option<PlayerId>,
     role: ClientRole,
     closed: bool,
     resume_window: Option<ResumeWindow>,
@@ -418,6 +423,7 @@ impl SessionState {
         Self {
             hello: false,
             player: None,
+            player_id: None,
             role,
             closed: false,
             resume_window: None,
@@ -480,6 +486,17 @@ pub struct ServerWorld {
     /// `None` until the first accepted placement or a save/load that carries a
     /// construction store.
     pub construction: Option<ConstructionStore>,
+    /// Save-local player address book (D-033).
+    ///
+    /// The registry maps stable [`PlayerId`] values to mutable display names.
+    /// It starts empty and is excluded from the checksum until a name is
+    /// registered, so worlds without players keep their previous goldens.
+    pub players: PlayerRegistry,
+    /// Optional settlement layer (D-019/D-033).
+    ///
+    /// `None` until a save/load carries a settlement store; a `Some` store is
+    /// hashed even when it holds no settlements.
+    pub settlements: Option<SettlementStore>,
     /// Pre-seeded content-addressed package library (server config, not save
     /// data). `None` makes `place_blueprint` reject with
     /// `PLACEMENT_LIBRARY_UNAVAILABLE`.
@@ -501,6 +518,8 @@ pub struct ServerWorld {
     online: BTreeSet<String>,
     /// Hello player name for the session.
     player: Option<String>,
+    /// Stable player identity for the session, if one has been assigned.
+    player_id: Option<PlayerId>,
     /// Checksum of the last accepted state, refreshed after each mutation.
     pub session_checksum: String,
     role: ClientRole,
@@ -575,6 +594,8 @@ impl ServerWorld {
             roads: RoadStore::new(seed),
             placements: None,
             construction: None,
+            players: PlayerRegistry::new(seed),
+            settlements: None,
             blueprint_library: None,
             policies: None,
             interest_center: [0.0, 0.0],
@@ -583,6 +604,7 @@ impl ServerWorld {
             vote: crate::vote::TimeVote::default(),
             online: BTreeSet::new(),
             player: None,
+            player_id: None,
             session_checksum: String::new(),
             role,
             default_role: role,
@@ -710,6 +732,10 @@ impl ServerWorld {
     /// flag, treasury, and roads resume unchanged; the checksum is recomputed
     /// from the restored state.
     pub(crate) fn restore(save: crate::save::ServerSave) -> Self {
+        let players = match save.players {
+            Some(players) => players,
+            None => PlayerRegistry::new(save.seed),
+        };
         let mut world = Self {
             seed: save.seed,
             tick: save.tick,
@@ -720,6 +746,8 @@ impl ServerWorld {
             roads: save.roads,
             placements: save.placements,
             construction: save.construction,
+            players,
+            settlements: save.settlements,
             // The package library and policy registry are process
             // configuration, not save data: a loaded world starts without
             // them and the caller reconfigures placement before use.
@@ -731,6 +759,7 @@ impl ServerWorld {
             vote: crate::vote::TimeVote::default(),
             online: BTreeSet::new(),
             player: None,
+            player_id: None,
             session_checksum: String::new(),
             role: ClientRole::Mayor,
             default_role: ClientRole::Mayor,
@@ -877,6 +906,7 @@ impl ServerWorld {
         SessionState {
             hello: self.hello,
             player: self.player.take(),
+            player_id: self.player_id,
             role: self.role,
             closed: self.closed,
             resume_window: self.resume_window.take(),
@@ -895,6 +925,7 @@ impl ServerWorld {
     fn install_session(&mut self, state: SessionState) {
         self.hello = state.hello;
         self.player = state.player;
+        self.player_id = state.player_id;
         self.role = state.role;
         self.closed = state.closed;
         self.resume_window = state.resume_window;
@@ -930,6 +961,36 @@ impl ServerWorld {
     #[must_use]
     pub fn hello_accepted(&self) -> bool {
         self.hello
+    }
+
+    /// Stable identity assigned to the active session, if any.
+    ///
+    /// The id is issued on the first successful `hello`/`resume` whose display
+    /// name is registered (or newly registered) in [`Self::players`]. It is a
+    /// per-save address-book id, not an authentication credential.
+    #[must_use]
+    pub fn player_id(&self) -> Option<PlayerId> {
+        self.player_id
+    }
+
+    /// Resolve a display name to a registry id, registering it on first use.
+    ///
+    /// Names match case-insensitively. A malformed registry (more than one
+    /// match) or a registration failure rejects with
+    /// [`codes::PLAYER_IDENTITY`] instead of panicking or picking an
+    /// ambiguous identity.
+    fn resolve_player_id(&mut self, display_name: &str) -> Result<PlayerId, &'static str> {
+        let matches = self.players.find_by_display_name(display_name);
+        if matches.len() == 1 {
+            return Ok(matches[0].id);
+        }
+        if !matches.is_empty() {
+            return Err(codes::PLAYER_IDENTITY);
+        }
+        self.players
+            .register(display_name)
+            .map(|player| player.id)
+            .map_err(|_| codes::PLAYER_IDENTITY)
     }
 
     /// Whether the client disconnected.
@@ -1216,12 +1277,13 @@ impl ServerWorld {
     }
 
     /// Stable FNV-1a checksum over tick, population, balance, road checksum,
-    /// economy checksum, and — only when a store exists — the placement and
-    /// construction checksums. No wall clock or seed is mixed in.
+    /// economy checksum, and — only when present — the placement, construction,
+    /// player, and settlement checksums. No wall clock or seed is mixed in.
     ///
-    /// A world without placements and construction hashes exactly as it did
-    /// before D-032; the optional stores are appended only when `Some`, so old
-    /// pins stay put until the first placement.
+    /// A world without placements, construction, players, and settlements
+    /// hashes exactly as it did before D-032; the optional stores are appended
+    /// only when non-empty (or `Some` for settlements), so old pins stay put
+    /// until the first placement or player.
     ///
     /// The interest viewport is deliberately excluded: it is per-session view
     /// state, so a client changing its camera must not move the world golden.
@@ -1237,6 +1299,13 @@ impl ServerWorld {
         }
         if let Some(construction) = &self.construction {
             hash = fnv_update(hash, &construction.checksum().to_le_bytes());
+        }
+        // The player registry is a session/identity sidecar, not world
+        // gameplay state. Keep it out of the world checksum so existing
+        // protocol and loopback goldens do not move when a name is registered;
+        // membership changes reach the checksum through `settlements` only.
+        if let Some(settlements) = &self.settlements {
+            hash = fnv_update(hash, &settlements.checksum().to_le_bytes());
         }
         format!("{hash:016x}")
     }
@@ -1398,8 +1467,18 @@ impl ServerWorld {
                         "another session is already using that player name",
                     );
                 }
+                let player_id = match self.resolve_player_id(player_name) {
+                    Ok(player_id) => player_id,
+                    Err(code) => {
+                        return reject_with(
+                            code,
+                            "the player name cannot be assigned a stable identity",
+                        );
+                    }
+                };
                 self.hello = true;
                 self.player = Some(player_name.clone());
+                self.player_id = Some(player_id);
                 self.online.insert(player_name.clone());
                 self.closed = false;
                 self.resume_window = None;
@@ -1575,7 +1654,20 @@ impl ServerWorld {
             );
         }
 
+        let player_id = match player.as_deref() {
+            Some(name) => match self.resolve_player_id(name) {
+                Ok(player_id) => Some(player_id),
+                Err(code) => {
+                    return reject_with(
+                        code,
+                        "the resumed player name cannot be assigned a stable identity",
+                    );
+                }
+            },
+            None => None,
+        };
         self.resume_window = None;
+        self.player_id = player_id;
         if let Some(player) = player {
             self.player = Some(player.clone());
             self.online.insert(player);
@@ -1642,14 +1734,29 @@ impl ServerWorld {
             );
         }
 
+        let player = self
+            .sessions
+            .get(&connection_id)
+            .and_then(|state| state.resume_window.as_ref())
+            .and_then(|window| window.player.clone());
+        let player_id = match player.as_deref() {
+            Some(name) => match self.resolve_player_id(name) {
+                Ok(player_id) => Some(player_id),
+                Err(code) => {
+                    return reject_with(
+                        code,
+                        "the resumed player name cannot be assigned a stable identity",
+                    );
+                }
+            },
+            None => None,
+        };
+
         let mut state = self
             .sessions
             .remove(&connection_id)
             .expect("token was found");
-        let player = state
-            .resume_window
-            .as_ref()
-            .and_then(|window| window.player.clone());
+        state.player_id = player_id;
         state.resume_window = None;
         state.hello = true;
         state.closed = false;
@@ -3216,6 +3323,7 @@ mod tests {
         DEFAULT_BUSINESS_TAX_PER_JOB_PER_DAY, DEFAULT_TAX_PER_RESIDENT_PER_DAY,
     };
     use core_city::population::WAGE_PER_WORKER_PER_DAY;
+    use core_city::settlement::SettlementRequest;
 
     use crate::protocol::{codes as protocol_codes, decode_client_command, MAX_INTEREST_RADIUS_M};
 
@@ -4617,6 +4725,70 @@ mod tests {
             business_rate: 0,
         });
         assert_eq!(rejected.checksum(), before);
+    }
+
+    #[test]
+    fn hello_registers_a_stable_player_identity() {
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Admin);
+        assert!(world.player_id().is_none());
+        assert!(matches!(
+            world.apply(&hello_named("alice")),
+            ServerMessage::Welcome { .. }
+        ));
+        let alice = world.player_id().expect("hello assigns an id");
+        assert_eq!(world.players.count(), 1);
+
+        world.apply(&ClientCommand::Disconnect);
+        world.online.clear();
+        world.resume_window = None;
+        world.begin_connection();
+        assert!(matches!(
+            world.apply(&hello_named("Alice")),
+            ServerMessage::Welcome { .. }
+        ));
+        assert_eq!(
+            world.player_id(),
+            Some(alice),
+            "case-insensitive name reuses the id"
+        );
+        assert_eq!(world.players.count(), 1);
+
+        world.apply(&ClientCommand::Disconnect);
+        world.online.clear();
+        world.resume_window = None;
+        world.begin_connection();
+        assert!(matches!(
+            world.apply(&hello_named("bob")),
+            ServerMessage::Welcome { .. }
+        ));
+        assert_ne!(world.player_id(), Some(alice));
+        assert_eq!(world.players.count(), 2);
+    }
+
+    #[test]
+    fn settlements_move_the_checksum_but_players_do_not() {
+        let mut world = world_with_hello();
+        let before = world.checksum();
+        let player = world.player_id().expect("hello assigns an id");
+
+        let mut settlements = SettlementStore::new(SEED);
+        let request = SettlementRequest {
+            name: "Checkum".to_string(),
+            owner: "mayor".to_string(),
+            center: [0, 0],
+            radius_m: 64,
+        };
+        settlements
+            .found_for_player(&request, player)
+            .expect("found settlement");
+        world.settlements = Some(settlements);
+
+        assert_ne!(world.checksum(), before);
+        assert_ne!(
+            world.settlements.as_ref().expect("store").checksum(),
+            0,
+            "settlement state has a stable checksum"
+        );
     }
 
     #[test]
