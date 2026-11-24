@@ -273,6 +273,7 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. Protocol v
 | Protocol version must match `1` | `protocol.version_mismatch` |
 | Player name non-empty, ≤ 32 characters, no control characters | `player_name.empty`, `player_name.too_long`, `player_name.invalid` |
 | Content hash is 64 lowercase hex characters | `content_hash.invalid` |
+| Client content hash differs from the server's `--content-hash` pin | `content_hash.mismatch` |
 | Tax rates are 0–100 percent | `tax.rate_out_of_range` |
 | Road endpoints inside ±1,000,000 | `road.out_of_bounds` |
 | Road start ≠ end | `road.empty` |
@@ -297,7 +298,9 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. Protocol v
 | Unknown command tag | `command.unknown_tag` |
 | Session already closed | `session.closed` |
 
-`disconnect` is accepted before `hello` so a client can close cleanly. The global Mayor/Admin placement role, package checks, the district policy gate, the placement geometry rules, and the settlement `build` bit are implemented for `place_blueprint`; `found_settlement` and `settlement_list` expose the first settlement surface. Content-manifest enforcement, membership/transfer commands, and the remaining simulation rules are deferred.
+`disconnect` is accepted before `hello` so a client can close cleanly. The global Mayor/Admin placement role, package checks, the district policy gate, the placement geometry rules, and the settlement `build` bit are implemented for `place_blueprint`. The settlement commands cover found/list/at/claim/rename/transfer/release plus membership invite/set-role/remove; the remaining simulation rules stay deferred.
+
+The listen server accepts `--content-hash <64 lowercase hex>` to pin the active content-registry hash. When pinned, every `hello` must carry the exact hash or the server rejects it with `content_hash.mismatch` before registering a player or mutating session state. The pin is process configuration, not save data; the full manifest and the client mismatch screen are still Phase 6 work.
 
 **Loopback smoke**
 
