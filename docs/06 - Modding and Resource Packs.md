@@ -267,12 +267,22 @@ A world save carries one optional top-level object when a pack is live:
 - A content-bound world keeps its identity across a load/save cycle. Saving without the pack, or with a different pack, is refused rather than silently unpinned. `world_clear_placements` also clears the remembered identity.
 - **Packs remain one at a time.** The save object describes the single `content_load_dir` pack merged after base; it is not a multi-pack list or load order. `content_multiple_packs_unsupported` blocks save/load if the registry ever reports more than one.
 - **Stable rejection codes.** `content_save_requires_pack`, `content_save_pack_mismatch`, `content_pack_mismatch`, `content_pack_checksum_mismatch`, `content_registry_checksum_mismatch`, `content_pack_missing`, `content_multiple_packs_unsupported`, `content_identity_required`, `content_identity_unexpected`, `content_identity_unsupported`, `content_identity_invalid`, and `content_degraded_unsupported`. Malformed save JSON keeps `corrupt_save`. There is no substitution and no auto-download.
-- **Read-only inspection is opt-in (D-035).** `world_load_content_checked(path, expected_seed, accept_missing_content)` delegates to normal `world_load` when `false`; `true` opens a missing or mismatched pack read-only, retains the recorded identity, keeps unknown IDs opaque, and refuses saves with `content_read_only`. The server CLI flag and client mismatch screen remain open, as do pack-version compatibility (Q-116) and content-ID migration (Q-118).
+- **Read-only inspection is opt-in (D-035).** `world_load_content_checked(path, expected_seed, accept_missing_content)` delegates to normal `world_load` when `false`; `true` opens a missing or mismatched pack read-only, retains the recorded identity, keeps unknown IDs opaque, and refuses saves with `content_read_only`. The server CLI flag and client mismatch screen remain open (Q-117). Pack compatibility and content-ID migration are proposed in D-036/D-037; see §5.4.
 - The save result adds `content_bound`, `content_identity_status` (`absent`/`new`/`match`), `content_pack_id`, `content_pack_checksum`, `content_registry_checksum`, and `content_format_version`. The load result adds `content_identity_status` (`absent`/`legacy_unbound`/`match`), the same pack/checksum fields, and `content_format_version` (`0` when none is recorded).
 - A **legacy v1** save loaded with a pack is allowed as `legacy_unbound`; the next save records the active pack. A v1 save with `content` is `content_identity_unexpected`; a v2 save without it is `content_identity_required`.
 - The identity object does not replace per-package `dependencies.mods` or per-ID validation. `.tsbp` metadata remains the package-level hint, and its current loader still rejects non-empty mod dependencies. No path is written or inferred.
 
 See [[10 - Decisions]] D-034 and [[12 - Technical Architecture]] §7; bridge details are in [[42 - World Placement Bridge]] §3.
+
+### 5.4 Compatibility and migrations (proposed)
+
+> [!warning] Proposed, not implemented
+> [[10 - Decisions]] D-036 (pack compatibility) and D-037 (content-ID migrations) are **Proposed** as of 2026-11-24. No loader carries either behavior: the runtime registry has no compatibility list or migration table, there is no migration command, and no save is rewritten by a load.
+
+- **Exact identity stays the default.** A normal load still requires the exact `pack_id`, `pack_checksum`, and `registry_checksum` (D-034). A pack may declare a bounded list of prior `pack_checksum`/`registry_checksum` pairs plus a non-empty `compatibility_reason`; a prior pair loads only with an explicit per-load opt-in, and the load result records the accepted prior checksum. There are no semver ranges, wildcards, or auto-accept.
+- **Migrations are explicit and versioned.** Each pack manifest declares a monotonic `content_version` and per-format `from -> to` ID maps for every prior version; base migrations ship with the game. A normal load never applies them. Unmapped IDs fail the load; nothing is substituted or deleted. Applying a migration is an explicit save rewrite that reports a summary, and saves and `.tsbp` blueprints use the same map.
+- **Ownership.** The base game owns base IDs and base migrations; each pack owns its namespace and may not map base or another pack's IDs. The server authorizes application; clients never migrate a world.
+- Until those ADRs are accepted and implemented, the opt-in read-only inspector (D-035) remains the only non-default load path, and it never writes.
 
 ## 6. Resource packs
 
@@ -404,8 +414,8 @@ end
 - **Game version** is semver. Mods declare a compatible range.
 - **Deprecation policy:** at least one minor release of warning before removal; the mod manager flags deprecated APIs.
 - **Save compatibility:** saves store the content manifest (mod IDs, versions, hashes). On load:
-  - Missing content → placeholder + warning.
-  - Changed content → validate references; if a material was removed, substitute a safe fallback or mark the blueprint as broken.
+  - Missing content fails closed (D-034); the opt-in read-only inspector (D-035) preserves unknown IDs without writing.
+  - Changed content fails on the identity gate. D-036 adds an explicit prior-checksum opt-in; D-037 adds explicit ID migrations. Unmapped or removed IDs fail the load; nothing is substituted or deleted.
   - Never silently delete a player's building.
 - **Mod updates:** the mod manager shows changelogs and compatibility; a server can pin versions.
 - **API stability:** document every public type and event; keep internal APIs private; publish a migration guide per API bump.
