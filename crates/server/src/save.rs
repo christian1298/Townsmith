@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 use core_city::construction::{ConstructionError, ConstructionStore};
 use core_city::economy::{Economy, EconomyError};
 use core_city::placement::{PlacementError, PlacementStore};
+use core_city::player::{PlayerError, PlayerRegistry};
 use core_city::road::{RoadError, RoadStore};
+use core_city::settlement::{SettlementError, SettlementStore};
 use serde::{Deserialize, Serialize};
 
 use crate::world::ServerWorld;
@@ -55,6 +57,10 @@ pub mod codes {
     pub const INVALID_PLACEMENTS: &str = "save.invalid_placements";
     /// The construction store failed validation.
     pub const INVALID_CONSTRUCTION: &str = "save.invalid_construction";
+    /// The player registry failed validation.
+    pub const INVALID_PLAYERS: &str = "save.invalid_players";
+    /// The settlement store failed validation.
+    pub const INVALID_SETTLEMENTS: &str = "save.invalid_settlements";
     /// Neither the primary save nor its backup exists.
     pub const NOT_FOUND: &str = "save.not_found";
     /// The primary and its backup are both unusable.
@@ -97,6 +103,17 @@ pub struct ServerSave {
     /// Omitted when the world has no construction store.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub construction: Option<ConstructionStore>,
+    /// Save-local player registry (D-033).
+    ///
+    /// Omitted while the registry is empty, so a world without players writes
+    /// byte-identical JSON to a pre-D-033 save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub players: Option<PlayerRegistry>,
+    /// Optional settlement layer (D-019/D-033).
+    ///
+    /// Omitted when the world has no settlement store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlements: Option<SettlementStore>,
 }
 
 impl ServerSave {
@@ -151,6 +168,30 @@ impl ServerSave {
                 .validate()
                 .map_err(SaveError::InvalidConstruction)?;
         }
+        if let Some(players) = &self.players {
+            if players.seed != self.seed {
+                return Err(SaveError::SeedMismatch {
+                    field: "players",
+                    expected: self.seed,
+                    found: players.seed,
+                });
+            }
+            players
+                .validate_loaded()
+                .map_err(SaveError::InvalidPlayers)?;
+        }
+        if let Some(settlements) = &self.settlements {
+            if settlements.seed != self.seed {
+                return Err(SaveError::SeedMismatch {
+                    field: "settlements",
+                    expected: self.seed,
+                    found: settlements.seed,
+                });
+            }
+            settlements
+                .validate_loaded()
+                .map_err(SaveError::InvalidSettlements)?;
+        }
         Ok(())
     }
 }
@@ -203,6 +244,10 @@ pub enum SaveError {
     InvalidPlacements(PlacementError),
     /// The construction store failed validation.
     InvalidConstruction(ConstructionError),
+    /// The player registry failed validation.
+    InvalidPlayers(PlayerError),
+    /// The settlement store failed validation.
+    InvalidSettlements(SettlementError),
     /// Neither the primary nor the backup exists.
     NotFound(PathBuf),
     /// The primary and its backup are both unusable.
@@ -228,6 +273,8 @@ impl SaveError {
             Self::InvalidEconomy(_) => codes::INVALID_ECONOMY,
             Self::InvalidPlacements(_) => codes::INVALID_PLACEMENTS,
             Self::InvalidConstruction(_) => codes::INVALID_CONSTRUCTION,
+            Self::InvalidPlayers(_) => codes::INVALID_PLAYERS,
+            Self::InvalidSettlements(_) => codes::INVALID_SETTLEMENTS,
             Self::NotFound(_) => codes::NOT_FOUND,
             Self::Corrupt { .. } => codes::CORRUPT,
         }
@@ -262,6 +309,10 @@ impl std::fmt::Display for SaveError {
             Self::InvalidConstruction(error) => {
                 write!(formatter, "invalid saved construction: {error}")
             }
+            Self::InvalidPlayers(error) => write!(formatter, "invalid saved players: {error}"),
+            Self::InvalidSettlements(error) => {
+                write!(formatter, "invalid saved settlements: {error}")
+            }
             Self::NotFound(path) => {
                 write!(formatter, "no save or backup at {}", path.display())
             }
@@ -280,6 +331,8 @@ impl std::error::Error for SaveError {
             Self::InvalidEconomy(error) => Some(error),
             Self::InvalidPlacements(error) => Some(error),
             Self::InvalidConstruction(error) => Some(error),
+            Self::InvalidPlayers(error) => Some(error),
+            Self::InvalidSettlements(error) => Some(error),
             _ => None,
         }
     }
@@ -313,6 +366,8 @@ impl ServerWorld {
             roads: self.roads.clone(),
             placements: self.placements.clone(),
             construction: self.construction.clone(),
+            players: (!self.players.is_empty()).then(|| self.players.clone()),
+            settlements: self.settlements.clone(),
         }
     }
 
@@ -577,6 +632,64 @@ mod tests {
         assert_eq!(loaded.session_id(), world.session_id());
         assert!(!loaded.hello_accepted());
         assert!(!loaded.is_closed());
+    }
+
+    #[test]
+    fn save_round_trip_preserves_players_and_settlements() {
+        let mut world = played_world();
+        let player = world.player_id().expect("hello assigns a player id");
+        let mut settlements = SettlementStore::new(LOOPBACK_SEED);
+        settlements
+            .found_for_player(
+                &core_city::settlement::SettlementRequest {
+                    name: "Round Trip".to_string(),
+                    owner: "mayor".to_string(),
+                    center: [0, 0],
+                    radius_m: 64,
+                },
+                player,
+            )
+            .expect("found settlement");
+        world.settlements = Some(settlements);
+
+        let json = world.to_save_json_pretty().expect("json");
+        let loaded = ServerWorld::from_save_json(&json).expect("load");
+
+        assert_eq!(loaded.players, world.players);
+        assert_eq!(loaded.settlements, world.settlements);
+        assert_eq!(loaded.checksum(), world.checksum());
+    }
+
+    #[test]
+    fn empty_players_and_settlements_are_omitted_and_byte_identical() {
+        let json = ServerWorld::new(LOOPBACK_SEED)
+            .to_save_json_pretty()
+            .expect("json");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("value");
+        assert!(value.get("players").is_none());
+        assert!(value.get("settlements").is_none());
+
+        let loaded = ServerWorld::from_save_json(&json).expect("load");
+        assert_eq!(loaded.to_save_json_pretty().expect("re-save"), json);
+    }
+
+    #[test]
+    fn foreign_seed_players_and_settlements_are_rejected() {
+        for field in ["players", "settlements"] {
+            let mut value: serde_json::Value = serde_json::from_str(
+                &ServerWorld::new(LOOPBACK_SEED)
+                    .to_save_json_pretty()
+                    .expect("json"),
+            )
+            .expect("value");
+            let foreign = LOOPBACK_SEED + 1;
+            value[field] = match field {
+                "players" => serde_json::to_value(PlayerRegistry::new(foreign)).expect("players"),
+                _ => serde_json::to_value(SettlementStore::new(foreign)).expect("settlements"),
+            };
+            let error = ServerWorld::from_save_json(&save_json(&value)).expect_err("foreign seed");
+            assert_eq!(error.code(), codes::SEED_MISMATCH, "{field}");
+        }
     }
 
     #[test]
