@@ -66,8 +66,8 @@ mod content_identity;
 mod placement_ui;
 
 use content_identity::{
-    stamp_world_content, verify_world_content, ActiveContentIdentity, ContentIdentityError,
-    WorldContentIdentity,
+    stamp_world_content, verify_world_content, verify_world_content_inspecting,
+    ActiveContentIdentity, ContentIdentityError, WorldContentIdentity,
 };
 
 const MAX_TERRAIN_WORKERS: usize = 4;
@@ -896,6 +896,9 @@ struct TownsmithCore {
     /// a durable content-bound save or a fully successful load, cleared by a
     /// base-only save/load and by `world_clear_placements`.
     world_content: Mutex<Option<WorldContentIdentity>>,
+    /// Q-117: a content-bound world opened without its pack. Saves and
+    /// content-dependent mutations are refused until a strict load succeeds.
+    world_content_read_only: Mutex<bool>,
     terrain: Mutex<Option<TerrainBridge>>,
     editor: Mutex<Option<EditorState>>,
     world: Mutex<Option<PlacementStore>>,
@@ -927,6 +930,7 @@ impl Default for TownsmithCore {
         Self {
             content: Mutex::new(RuntimeContent::base()),
             world_content: Mutex::new(None),
+            world_content_read_only: Mutex::new(false),
             terrain: Mutex::new(None),
             editor: Mutex::new(None),
             world: Mutex::new(None),
@@ -2751,6 +2755,10 @@ impl TownsmithCore {
             .world_content
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = None;
+        *self
+            .world_content_read_only
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = false;
         true
     }
 
@@ -6129,6 +6137,13 @@ impl TownsmithCore {
     }
 
     fn world_save_impl(&self, path: GString, library: Option<&BlueprintLibrary>) -> VarDictionary {
+        if *self
+            .world_content_read_only
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+        {
+            return content_identity_error_result(&content_read_only_error());
+        }
         let path = match world_save_path_from_arg(&path.to_string()) {
             Ok(path) => path,
             Err(error) => return placement_simple_error("invalid_save_path", error),
@@ -6762,15 +6777,18 @@ impl TownsmithCore {
     /// and `content_format_version`.
     #[func]
     fn world_load(&self, path: GString, expected_seed: i64) -> VarDictionary {
-        self.world_load_impl(path, expected_seed, None)
+        self.world_load_impl(path, expected_seed, None, false)
     }
 
-    /// Reserved D-034 load entry point with an explicit missing-content opt-out.
+    /// Load a world with an explicit missing-content inspection opt-in (Q-117).
     ///
-    /// v1 has no degraded read mode: `accept_missing_content = true` always
-    /// returns `content_degraded_unsupported` before touching any state. With
-    /// `false` this is exactly [`Self::world_load`], including the fail-closed
-    /// content identity check. There is no auto-download or path substitution.
+    /// With `accept_missing_content = false` this is exactly
+    /// [`Self::world_load`], including the fail-closed content identity check.
+    /// With `true`, a content-bound save also loads when the live registry is
+    /// base-only or holds a different pack; the result reports
+    /// `content_read_only = true`, keeps the recorded identity opaque, and
+    /// refuses every later save with `content_read_only`. Unknown content IDs
+    /// are never substituted. There is no auto-download and no path rewrite.
     #[func]
     fn world_load_content_checked(
         &self,
@@ -6778,10 +6796,7 @@ impl TownsmithCore {
         expected_seed: i64,
         accept_missing_content: bool,
     ) -> VarDictionary {
-        if accept_missing_content {
-            return content_identity_error_result(&content_degraded_error());
-        }
-        self.world_load_impl(path, expected_seed, None)
+        self.world_load_impl(path, expected_seed, None, accept_missing_content)
     }
 
     /// Read a world save, resolving placement packages from a local library.
@@ -6806,7 +6821,7 @@ impl TownsmithCore {
             Ok(library) => library,
             Err((code, message)) => return placement_simple_error(code, message),
         };
-        self.world_load_impl(path, expected_seed, Some(&library))
+        self.world_load_impl(path, expected_seed, Some(&library), false)
     }
 
     fn world_load_impl(
@@ -6814,6 +6829,7 @@ impl TownsmithCore {
         path: GString,
         expected_seed: i64,
         library: Option<&BlueprintLibrary>,
+        accept_missing_content: bool,
     ) -> VarDictionary {
         let expected_seed = match u64::try_from(expected_seed) {
             Ok(seed) => seed,
@@ -6844,11 +6860,17 @@ impl TownsmithCore {
                 Err(error) => return placement_simple_error(error.code, error.message),
             }
         };
-        let content_verification = match verify_world_content(&json, &active_content) {
+        let content_verification = if accept_missing_content {
+            verify_world_content_inspecting(&json, &active_content)
+        } else {
+            verify_world_content(&json, &active_content)
+        };
+        let content_verification = match content_verification {
             Ok(verification) => verification,
             Err(error) => return content_identity_error_result(&error),
         };
         let content_commit = content_verification.identity.clone();
+        let content_read_only = content_verification.read_only();
         let content_status = content_verification.status_str();
         let content_format_version = content_verification.format_version;
         let (content_pack_id, content_pack_checksum, content_registry_checksum) =
@@ -7293,6 +7315,10 @@ impl TownsmithCore {
             .world_content
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = content_commit;
+        *self
+            .world_content_read_only
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = content_read_only;
         let mut result = VarDictionary::new();
         result.set("ok", true);
         result.set("path", &GString::from(path.to_string_lossy().as_ref()));
@@ -7305,6 +7331,7 @@ impl TownsmithCore {
             &content_registry_checksum,
             content_format_version,
         );
+        result.set("content_read_only", content_read_only);
         result.set(
             "backup",
             &GString::from(
@@ -8584,10 +8611,10 @@ fn content_identity_error_result(error: &ContentIdentityError) -> VarDictionary 
 }
 
 /// Reserved D-034 degraded-load refusal.
-fn content_degraded_error() -> ContentIdentityError {
+fn content_read_only_error() -> ContentIdentityError {
     ContentIdentityError {
-        code: "content_degraded_unsupported",
-        message: "degraded content loads are not implemented; install the recorded pack and retry"
+        code: "content_read_only",
+        message: "this world was opened without its required content pack; restore the pack and load it again before saving"
             .to_string(),
     }
 }
@@ -15557,10 +15584,10 @@ mod tests {
     }
 
     #[test]
-    fn content_degraded_loads_are_reserved_and_unimplemented() {
-        let error = content_degraded_error();
-        assert_eq!(error.code, "content_degraded_unsupported");
-        assert!(error.message.contains("not implemented"));
+    fn content_read_only_error_has_a_stable_code() {
+        let error = content_read_only_error();
+        assert_eq!(error.code, "content_read_only");
+        assert!(error.message.contains("restore the pack"));
     }
 
     #[test]

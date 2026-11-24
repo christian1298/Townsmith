@@ -212,12 +212,12 @@ These support D-033, whose core data model and first server/bridge slices are im
 
 ## Content identity questions
 
-These support D-034 (accepted 2026-11-23). The bridge v1 is implemented: a base-only save stays v1 and byte-identical, a save made with one live pack writes outer v2 and the `content` object, and load verifies it before any store or `.tsbp`. The server and `ServerSave` are unchanged, and the reserved degraded mode still returns `content_degraded_unsupported`. The three questions remain open for pack-version compatibility, missing-pack read-only inspection, and content-ID migration.
+These support D-034 (accepted 2026-11-23). The bridge v1 is implemented: a base-only save stays v1 and byte-identical, a save made with one live pack writes outer v2 and the `content` object, and load verifies it before any store or `.tsbp`. Q-117 now has a bridge v1 answer in D-035 (Proposed): strict load stays fail-closed, while `world_load_content_checked(..., true)` inspects a missing or mismatched pack read-only, retains the recorded identity, and refuses later saves with `content_read_only`. The server CLI, client mismatch screen, and simulation freeze list remain open. Q-116 and Q-118 remain open.
 
 | ID | Question | Current assumption / recommendation | Priority |
 |---|---|---|---|
 | **Q-116** | How stable must a pack checksum be across pack versions, and can a save accept a compatible newer pack? | Exact `pack_checksum` match in v1. A pack-declared compatibility range and explicit migration can come later; never auto-accept a changed pack. | High |
-| **Q-117** | How does a content-bound world load when the required pack is missing, and what can a read-only mode safely preserve? | Fail closed by default. A future `--accept-missing-content` may open a read-only inspector that keeps unknown IDs opaque, blocks saves and content-dependent simulation, and never substitutes a fallback. | High |
+| **Q-117** | How does a content-bound world load when the required pack is missing, and what can a read-only mode safely preserve? | **D-035 bridge v1 (Proposed):** strict load stays fail-closed; the opt-in `world_load_content_checked(..., true)` opens a read-only inspector with status `missing`/`mismatch`, keeps unknown IDs opaque, retains the recorded identity, and blocks saves with `content_read_only`. The server CLI flag, client mismatch screen, and a content-dependent simulation freeze list remain open. | High |
 | **Q-118** | How are renamed or removed content IDs migrated in saves and blueprints, and who owns the mapping? | The pack manifest declares explicit `from -> to` migrations per content format version; base migrations ship with the game. Unmapped IDs fail the load; no silent substitution. | High |
 
 ## Construction questions
