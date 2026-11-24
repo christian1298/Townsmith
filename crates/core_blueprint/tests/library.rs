@@ -75,6 +75,14 @@ fn save_package(dir: &Path, name: &str, id: &str) -> (PathBuf, String) {
     (path, hash)
 }
 
+fn save_package_with_mod(dir: &Path, name: &str, id: &str, module: &str) -> (PathBuf, String) {
+    let mut blueprint = test_blueprint(id);
+    blueprint.metadata.dependencies.mods = vec![module.to_string()];
+    let path = dir.join(name);
+    let hash = save_tsbp_with_hash(&path, &blueprint).expect("save package");
+    (path, hash)
+}
+
 fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
     let file = fs::File::create(path).expect("zip file");
     let mut zip = zip::ZipWriter::new(file);
@@ -600,6 +608,45 @@ fn root_symlink_is_canonicalized() {
         library.root(),
         fs::canonicalize(&real).expect("canonical root")
     );
+}
+
+#[test]
+fn insert_with_dependencies_accepts_active_mods_and_rejects_otherwise() {
+    let dir = TempDir::new("deps");
+    let library_root = dir.join("library");
+    fs::create_dir(&library_root).expect("library root");
+    let (package, hash) = save_package_with_mod(dir.path(), "house.tsbp", "local:house", "mymod");
+    let library = BlueprintLibrary::new(&library_root).expect("library");
+
+    // Deny-all stays the default.
+    let error = library.insert_file(&package).expect_err("deny-all");
+    assert!(matches!(
+        error,
+        BlueprintLibraryError::InvalidPackage { .. }
+    ));
+    assert_eq!(library.summary().expect("summary").count, 0);
+    assert!(files_under(&library_root).is_empty());
+
+    // A base-only active set does not satisfy the required mod, and the failed
+    // validation must not create a shard or any other entry.
+    let error = library
+        .insert_file_with_dependencies(&package, &["base"])
+        .expect_err("base only");
+    assert!(matches!(
+        error,
+        BlueprintLibraryError::InvalidPackage { .. }
+    ));
+    assert_eq!(library.summary().expect("summary").count, 0);
+    assert!(files_under(&library_root).is_empty());
+
+    // A matching active id inserts.
+    let insert = library
+        .insert_file_with_dependencies(&package, &["mymod:furniture"])
+        .expect("matching insert");
+    assert!(insert.inserted);
+    assert_eq!(insert.hash, hash);
+    assert_eq!(library.summary().expect("summary").count, 1);
+    assert_eq!(library.resolve(&hash), Some(insert.path));
 }
 
 #[test]

@@ -11,6 +11,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod dependencies;
 pub mod error;
 pub mod format;
 pub mod hash;
@@ -20,6 +21,7 @@ pub mod metadata;
 pub mod package;
 
 pub use core_structure::{StructuralSystem, StructureError, StructureSpec, StructureSummary};
+pub use dependencies::{validate as validate_dependencies, DependencyIssue, DependencyReason};
 pub use error::BlueprintError;
 pub use format::{decode_voxels, encode_voxels, DecodedVoxels};
 pub use hash::compute_hash;
@@ -33,4 +35,6 @@ pub use limits::{
 pub use metadata::{
     BlueprintMetadata, BlueprintStats, Dependencies, PropRecord, RoomRecord, FORMAT_VERSION,
 };
-pub use package::{load_tsbp, save_tsbp, save_tsbp_with_hash, Blueprint};
+pub use package::{
+    load_tsbp, load_tsbp_with_dependencies, save_tsbp, save_tsbp_with_hash, Blueprint,
+};

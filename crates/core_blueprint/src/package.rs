@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use core_voxel::volume::VoxelVolume;
 
+use crate::dependencies::{self, DependencyIssue, DependencyReason};
 use crate::error::BlueprintError;
 use crate::format::{decode_voxels, encode_voxels};
 use crate::hash::compute_hash;
@@ -111,10 +112,29 @@ fn write_package(path: &Path, json: &[u8], voxels: &[u8]) -> Result<(), Blueprin
 }
 
 /// Load a `.tsbp` package and verify its hash and metadata.
+///
+/// Dependencies are deny-all: a package that lists any mod or resource pack is
+/// rejected with [`BlueprintError::MissingDependency`]. Use
+/// [`load_tsbp_with_dependencies`] when the active content ids are known.
 pub fn load_tsbp(path: &Path) -> Result<Blueprint, BlueprintError> {
     let file = File::open(path)?;
     let archive = zip::ZipArchive::new(file)?;
-    load_archive(archive)
+    load_archive(archive, None)
+}
+
+/// Load a `.tsbp` package, resolving mod dependencies against `active_ids`.
+///
+/// Active ids are trimmed and matched by exact id or by namespace (`mymod`
+/// matches `mymod:pack`). Resource packs still fail closed because there is no
+/// resource-pack registry. The hash, metadata, and voxel validation are the
+/// same as [`load_tsbp`].
+pub fn load_tsbp_with_dependencies(
+    path: &Path,
+    active_ids: &[&str],
+) -> Result<Blueprint, BlueprintError> {
+    let file = File::open(path)?;
+    let archive = zip::ZipArchive::new(file)?;
+    load_archive(archive, Some(active_ids))
 }
 
 /// Load and verify a `.tsbp` package from bytes already held in memory.
@@ -125,11 +145,24 @@ pub fn load_tsbp(path: &Path) -> Result<Blueprint, BlueprintError> {
 /// input.
 pub(crate) fn load_tsbp_bytes(bytes: &[u8]) -> Result<Blueprint, BlueprintError> {
     let archive = zip::ZipArchive::new(Cursor::new(bytes))?;
-    load_archive(archive)
+    load_archive(archive, None)
+}
+
+/// Load and verify a `.tsbp` package from bytes, resolving dependencies
+/// against `active_ids`.
+///
+/// This is the in-memory counterpart of [`load_tsbp_with_dependencies`].
+pub(crate) fn load_tsbp_bytes_with_dependencies(
+    bytes: &[u8],
+    active_ids: &[&str],
+) -> Result<Blueprint, BlueprintError> {
+    let archive = zip::ZipArchive::new(Cursor::new(bytes))?;
+    load_archive(archive, Some(active_ids))
 }
 
 fn load_archive<R: Read + Seek>(
     mut archive: zip::ZipArchive<R>,
+    active_ids: Option<&[&str]>,
 ) -> Result<Blueprint, BlueprintError> {
     if archive.has_duplicate_names() {
         return Err(BlueprintError::DuplicateEntry(
@@ -200,23 +233,52 @@ fn load_archive<R: Read + Seek>(
         });
     }
 
-    if !metadata.dependencies.mods.is_empty() {
-        return Err(BlueprintError::MissingDependency(format!(
-            "mods: {}",
-            metadata.dependencies.mods.join(", ")
-        )));
-    }
-    if !metadata.dependencies.resource_packs.is_empty() {
-        return Err(BlueprintError::MissingDependency(format!(
-            "resource packs: {}",
-            metadata.dependencies.resource_packs.join(", ")
-        )));
+    match active_ids {
+        None => {
+            if !metadata.dependencies.mods.is_empty() {
+                return Err(BlueprintError::MissingDependency(format!(
+                    "mods: {}",
+                    metadata.dependencies.mods.join(", ")
+                )));
+            }
+            if !metadata.dependencies.resource_packs.is_empty() {
+                return Err(BlueprintError::MissingDependency(format!(
+                    "resource packs: {}",
+                    metadata.dependencies.resource_packs.join(", ")
+                )));
+            }
+        }
+        Some(active) => {
+            if let Err(issues) = dependencies::validate(&metadata.dependencies, active) {
+                return Err(BlueprintError::MissingDependency(describe_issues(&issues)));
+            }
+        }
     }
 
     Ok(Blueprint {
         metadata,
         volume: decoded.volume,
     })
+}
+
+/// Deterministic dependency error detail: `mods: a, b; resource packs: c`.
+fn describe_issues(issues: &[DependencyIssue]) -> String {
+    let mut mods = Vec::new();
+    let mut packs = Vec::new();
+    for issue in issues {
+        match issue.reason {
+            DependencyReason::MissingMod => mods.push(issue.id.as_str()),
+            DependencyReason::MissingResourcePack => packs.push(issue.id.as_str()),
+        }
+    }
+    let mut parts = Vec::new();
+    if !mods.is_empty() {
+        parts.push(format!("mods: {}", mods.join(", ")));
+    }
+    if !packs.is_empty() {
+        parts.push(format!("resource packs: {}", packs.join(", ")));
+    }
+    parts.join("; ")
 }
 
 fn validate_metadata(metadata: &BlueprintMetadata) -> Result<(), BlueprintError> {
