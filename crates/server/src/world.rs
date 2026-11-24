@@ -271,7 +271,8 @@ impl ClientRole {
             | "settlement_rename"
             | "settlement_transfer" => Self::Mayor,
             // Time control is admin-only in D-021; unknown tags fail closed.
-            "time_control" => Self::Admin,
+            // Settlement release is the Q-113 admin override.
+            "time_control" | "settlement_release" => Self::Admin,
             _ => Self::Admin,
         }
     }
@@ -1590,6 +1591,10 @@ impl ServerWorld {
                 player_id,
                 expected_revision,
             } => self.apply_settlement_transfer(*settlement_id, *player_id, *expected_revision),
+            ClientCommand::SettlementRelease {
+                settlement_id,
+                expected_revision,
+            } => self.apply_settlement_release(*settlement_id, *expected_revision),
             ClientCommand::SetInterest {
                 center_x,
                 center_z,
@@ -2507,6 +2512,24 @@ impl ServerWorld {
                 Err(rejection) => return rejection,
             };
             store.transfer(actor, settlement_id, recipient, expected_revision)
+        };
+        match outcome {
+            Ok(settlement) => self.finish_settlement_update(settlement),
+            Err(error) => reject_with(error.code(), error.to_string()),
+        }
+    }
+
+    fn apply_settlement_release(
+        &mut self,
+        settlement_id: u64,
+        expected_revision: u32,
+    ) -> (Vec<ServerMessage>, &'static str) {
+        let outcome = {
+            let store = match self.settlement_store_mut() {
+                Ok(store) => store,
+                Err(rejection) => return rejection,
+            };
+            store.force_release(settlement_id, expected_revision)
         };
         match outcome {
             Ok(settlement) => self.finish_settlement_update(settlement),
@@ -6988,6 +7011,70 @@ mod tests {
             stale,
             ServerMessage::Reject { ref code, .. } if code == "settlement.revision_conflict"
         ));
+    }
+
+    #[test]
+    fn admin_release_clears_a_dead_owner_settlement() {
+        let mut world = world_with_hello();
+        world.apply(&found_settlement("Harbour", 0, 0, 64));
+        let before = world.checksum();
+
+        let released = world.apply(&ClientCommand::SettlementRelease {
+            settlement_id: 1,
+            expected_revision: 1,
+        });
+        let ServerMessage::SettlementUpdated { settlement, .. } = released else {
+            panic!("expected settlement_updated, got {released:?}");
+        };
+        assert_eq!(settlement.owner_id, None);
+        assert!(!settlement.owned);
+        assert!(settlement.members.is_empty());
+        assert_eq!(settlement.membership_revision, 2);
+        assert_ne!(world.checksum(), before);
+
+        let again = world.apply(&ClientCommand::SettlementRelease {
+            settlement_id: 1,
+            expected_revision: 2,
+        });
+        assert!(matches!(
+            again,
+            ServerMessage::Reject { ref code, .. } if code == "settlement.unowned"
+        ));
+        let stale = world.apply(&ClientCommand::SettlementRelease {
+            settlement_id: 1,
+            expected_revision: 0,
+        });
+        assert!(matches!(
+            stale,
+            ServerMessage::Reject { ref code, .. } if code == "settlement.revision_conflict"
+        ));
+    }
+
+    #[test]
+    fn settlement_release_is_admin_only() {
+        let mut mayor = ServerWorld::with_role(SEED, ClientRole::Mayor);
+        first_response(mayor.apply_all(&hello()));
+        mayor.apply(&found_settlement("Harbour", 0, 0, 64));
+        let denied = mayor.apply(&ClientCommand::SettlementRelease {
+            settlement_id: 1,
+            expected_revision: 1,
+        });
+        assert!(matches!(
+            denied,
+            ServerMessage::Reject { ref code, .. } if code == codes::FORBIDDEN
+        ));
+        assert_eq!(
+            mayor
+                .settlements
+                .as_ref()
+                .expect("store")
+                .get(1)
+                .expect("settlement")
+                .owner_id
+                .map(PlayerId::get),
+            mayor.player_id().map(PlayerId::get),
+            "denied release leaves ownership unchanged"
+        );
     }
 
     #[test]
