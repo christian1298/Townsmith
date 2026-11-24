@@ -107,6 +107,15 @@ Enforcement points and the full claim/transfer rules are in [[10 - Decisions]] D
 
 A failed first settlement leaves no empty world store behind. A successful first settlement opens a `PlacementStore` for the seed, mirroring roads and lots.
 
+### Authoritative server (D-033 staged v1)
+
+| Command | Fields | Result | Role |
+|---|---|---|---|
+| `found_settlement` | `name`, `x`, `z`, `radius_m` | `settlement_found { tick, settlement, settlement_checksum, world_checksum }`; owner is the caller's stable `player_id` | Mayor |
+| `settlement_list` | — | `settlement_list { tick, count, checksum, settlements }` in ascending id order | Viewer |
+
+Both commands require a successful hello/resume, do not advance the tick, and return `SettlementView` records with `owner_id`, `owned`, `members[{player, role, permissions}]`, and `membership_revision`. `found_settlement` creates the server store on first use, rejects duplicate names and invalid core payloads, and enforces the 16-owned-settlements-per-player limit. There is no claim, rename, transfer, invite, remove, or role-change command yet; the transport-only session rejects both commands with `settlement.unavailable`.
+
 ## 4. Save
 
 The world JSON gains an optional `settlements` object:

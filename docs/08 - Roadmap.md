@@ -398,7 +398,7 @@ Ordered by dependency, not by size. Status reflects master `ad2b12a` (#323).
 3. **D-033 bridge read model** — read-only `owner_id`, `members[]`, role bits, revision, and membership checksum. ✅ Merged in #322.
 4. **Full Godot placement UI** — library catalog, ghost preview, rotation, validation feedback; replaces the debug single-hash path (#309). ✅ Merged in #318.
 5. **Blueprint dependency validation** — resolve and validate package dependencies before placement. ✅ Merged in #316.
-6. **Settlement protocol commands** — expose found/claim/list/at and membership edits on protocol v1, with the remaining `manage`/`tax`/`members` checks.
+6. **Settlement protocol commands** — `found_settlement`/`settlement_list` are merged; next are claim/at/rename/transfer and membership edits, with the remaining `manage`/`tax`/`members` checks.
 7. **Q-116/Q-117/Q-118 content compatibility decisions** — pack-version compatibility, read-only missing-content mode, and content-ID migration; unblocks the Phase 7 loader.
 8. **Voxel edit sync + blueprint locks** — replicate edits and hold locks across a disconnect.
 9. **Journal/rollback** — crash-safe command journal and rollback/history.
