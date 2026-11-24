@@ -188,7 +188,7 @@ These must be answered before or during Phase 0. They change the architecture, t
 
 ## Settlement ownership questions
 
-These support D-033, whose core data model is now implemented (accepted 2026-11-24). Q-111 is answered; Q-112–Q-115 remain open. The bridge still exposes `Settlement.owner` as a display string, `ServerWorld` has no settlement store, and the only roles are global dev roles, so enforcement is a follow-up slice.
+These support D-033, whose core data model and first server/bridge slices are implemented (accepted 2026-11-24). Q-111 is answered; Q-112–Q-115 remain open. `ServerWorld` now persists the player registry and an optional settlement store, `place_blueprint` enforces `build` inside a settlement, and the bridge exposes read-only owner/member fields. Protocol v1 still has no settlement command, the dashboard has no edit controls, and the only roles are global dev roles.
 
 | ID | Question | Current assumption / recommendation | Priority |
 |---|---|---|---|

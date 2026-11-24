@@ -252,7 +252,7 @@ The staged cut is in [[49 - Phase 3 Slice Plan]]: city ledger, households/needs,
 > [!info] Current status — in progress (master `2250ae4`, #314)
 > **Landed:** protocol v1 and the authoritative executor; dev roles, rate limits, and audit; interest views with bounds (≤64 roads, ≤64 building records; #262/#266/#308); D-021 server-side time control including the 7-connection `--vote-smoke` pass/fail/cancel loop (#287); D-032 server-authoritative `place_blueprint` (#306/#308/#309); and bridge content-addressed placement references (#311/#313). F-003 (multi-connection session state) is fixed by #287.
 >
-> **Gaps:** full Godot placement UI (in flight; #309 is a debug single-hash path only); D-033 settlement permissions (Proposed — the next dependency); voxel edit sync and blueprint locks; journal/rollback; chat/pings; the mod-mismatch screen; remote transport and authentication; concurrent listener sessions.
+> **Gaps:** settlement protocol commands and the remaining `manage`/`tax`/`members` checks; voxel edit sync and blueprint locks; journal/rollback; chat/pings; the mod-mismatch screen; remote transport and authentication; concurrent listener sessions. The full Godot placement UI (#318), D-033 core/server persistence/bridge read model (#319/#321/#322), placement `build` enforcement (#323), and the time-vote panel (#320) are merged.
 >
 > In-flight worktrees: settlement identity, placement UI, blueprint dependencies, time-vote UI, and network faults.
 
@@ -389,20 +389,22 @@ The vertical slice is a small, complete version of the game used to validate the
 | Solo-dev burnout | High | High | Vertical slice, realistic schedule, community build | Missed milestones 3 months in a row |
 | Art style mismatch at 10 cm | Medium | Medium | Early art tests, resource packs, flat-color fallback | Playtest confusion |
 
-## 7. Next 10 tasks
+## 7. Next tasks
 
-Ordered by dependency, not by size. Status reflects master `2250ae4` (#314).
+Ordered by dependency, not by size. Status reflects master `ad2b12a` (#323).
 
-1. **D-033 core identity/membership** — stable per-save player ID (Q-111), ownership, and membership. 🚧 In flight.
-2. **Full Godot placement UI** — ghost preview, rotation, validation feedback, and library selection; replaces the debug single-hash path (#309). 🚧 In flight.
-3. **Blueprint dependency validation** — resolve and validate package dependencies before placement. 🚧 In flight.
-4. **D-033 server enforcement + persistence** — enforce per-settlement permissions in commands and persist settlement state in `ServerSave`.
-5. **Q-116/Q-117/Q-118 content compatibility decisions** — pack-version compatibility, read-only missing-content mode, and content-ID migration; unblocks the Phase 7 loader.
-6. **Voxel edit sync + blueprint locks** — replicate edits and hold locks across a disconnect.
-7. **Journal/rollback** — crash-safe command journal and rollback/history.
-8. **Chat/pings + mod-mismatch screen** — player communication and a fail-closed content-mismatch explanation.
-9. **Q-101 30-minute playtest** — ⛔ Blocked: needs a human player and observer. See [[66 - Playtest Kit]].
-10. **1M/RTX 3060 render gate** — ⛔ Blocked: needs reference hardware. See [[68 - Metropolis Gate]].
+1. **D-033 core identity/membership** — stable per-save player ID (Q-111), ownership, membership, save v2 migration. ✅ Merged in #319.
+2. **D-033 server persistence + placement enforcement** — `PlayerRegistry`/`SettlementStore` in `ServerWorld`/`ServerSave`, stable `player_id` on hello/resume, and `build` checks inside a settlement. ✅ Merged in #321/#323.
+3. **D-033 bridge read model** — read-only `owner_id`, `members[]`, role bits, revision, and membership checksum. ✅ Merged in #322.
+4. **Full Godot placement UI** — library catalog, ghost preview, rotation, validation feedback; replaces the debug single-hash path (#309). ✅ Merged in #318.
+5. **Blueprint dependency validation** — resolve and validate package dependencies before placement. ✅ Merged in #316.
+6. **Settlement protocol commands** — expose found/claim/list/at and membership edits on protocol v1, with the remaining `manage`/`tax`/`members` checks.
+7. **Q-116/Q-117/Q-118 content compatibility decisions** — pack-version compatibility, read-only missing-content mode, and content-ID migration; unblocks the Phase 7 loader.
+8. **Voxel edit sync + blueprint locks** — replicate edits and hold locks across a disconnect.
+9. **Journal/rollback** — crash-safe command journal and rollback/history.
+10. **Chat/pings + mod-mismatch screen** — player communication and a fail-closed content-mismatch explanation.
+11. **Q-101 30-minute playtest** — ⛔ Blocked: needs a human player and observer. See [[66 - Playtest Kit]].
+12. **1M/RTX 3060 render gate** — ⛔ Blocked: needs reference hardware. See [[68 - Metropolis Gate]].
 
 ## 8. Cut lines
 

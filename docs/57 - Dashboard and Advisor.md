@@ -36,7 +36,7 @@ In:
 Out:
 
 - player-facing standalone district or per-settlement panels outside the dashboard (the dashboard has one read-only Settlements section that selects one record for the existing 256 m District, containing-policy, and heatmap queries and renders a detail block from those same reads; per-settlement budgets, rename/merge, and drill-down beyond that block remain later; the developer-only policy editor in §4.2 and read-only district overview in §4.3 are separate scenes, not dashboard panels);
-- settlement editing, membership, roles, or permission checks in the dashboard (D-033's core model is implemented, but the dashboard/server wiring is not); the Settlements section remains a selector plus a read-only detail block, and the ownership string it shows is not enforced anywhere;
+- settlement editing, membership, roles, or permission views in the dashboard (D-033's core model and the first server/bridge slices are implemented, but dashboard wiring is not); the Settlements section remains a selector plus a read-only detail block, and the ownership string it shows is a display label;
 - clickable advice that selects or centres a building;
 - acknowledged, dismissed, or persisted notifications;
 - charts, history, trend lines, or time-series;
@@ -227,7 +227,7 @@ The final checksum is the empty-registry checksum after the walkthrough (seed pl
 
 ### 4.3 Standalone district overview (developer scene)
 
-`godot/district_panel.tscn` (with `godot/district_panel.gd`) is a developer-only, **read-only** `Control` scene over the settlement and district data. It owns one `TownsmithCore` instance and only reads `settlements`, `district_summary` (fixed 256 m radius around each settlement centre), and `district_policies_state`. It runs outside the world scene and the dashboard and is not reachable from either. It cannot found, edit, or remove a settlement, create/update/remove a policy, save, or load; `--fixture` and `--smoke` populate the in-memory bridge through `settlement_found`/`district_policy_create` before the page settles into display, and the page's own controls never mutate the bridge. Ownership is a display label only; D-033's core model defines membership and permissions, but this scene stays read-only and adds none of them.
+`godot/district_panel.tscn` (with `godot/district_panel.gd`) is a developer-only, **read-only** `Control` scene over the settlement and district data. It owns one `TownsmithCore` instance and only reads `settlements`, `district_summary` (fixed 256 m radius around each settlement centre), and `district_policies_state`. It runs outside the world scene and the dashboard and is not reachable from either. It cannot found, edit, or remove a settlement, create/update/remove a policy, save, or load; `--fixture` and `--smoke` populate the in-memory bridge through `settlement_found`/`district_policy_create` before the page settles into display, and the page's own controls never mutate the bridge. Ownership is a display label here; D-033's core model defines membership and permissions and the server enforces `build` on placement, but this scene stays read-only and adds none of them.
 
 - **Settlement list.** One row per settlement in ascending id from `settlements()`, showing id, name, owner, centre, and radius. Selecting a row (or `Previous`/`Next` in id order, wrapping) loads its overview. The panel defaults to the lowest id and never creates a store just by reading: an untouched session reports `open:false`, zero rows, and the empty text.
 - **Overview.** The 256 m `district_summary` around the settlement centre (`DISTRICT_RADIUS_M`) shows population, housing capacity/vacancies/households, jobs/employed/unemployed, happiness, food/water/rest, average commute, and completed buildings/construction sites. It is derived state, never applied.
@@ -341,7 +341,7 @@ The **Policies** section follows the same centre as the District query (`_distri
 ### 5.2 Selectable settlements
 
 > [!warning] Read-only today
-> The Settlements section cannot create, rename, remove, claim, transfer, or invite. The `owner` it displays is an unenforced display string, and the panel has no membership list, role, or permission view. D-033's core model defines membership, `build`/`manage`/`tax`/`members`, claims, and transfer; server enforcement and dashboard controls are follow-ups, and no edit control or permission check exists in this slice.
+> The Settlements section cannot create, rename, remove, claim, transfer, or invite. The `owner` it displays is a display label, and the panel has no membership list, role, or permission view. D-033 defines membership, `build`/`manage`/`tax`/`members`, claims, and transfer; the server now enforces `build` on placement and the bridge exposes read-only membership, but dashboard controls and the remaining server checks are follow-ups.
 
 The dashboard **Settlements** section is a read-only selector over the bridge's `settlements()` list. Rows are ordered by ascending settlement id (the stable selector) and show id, name, owner, centre, and radius; the selected row is bold, prefixed with `▸`, and ends with the localized `selected`. The section also shows the founded count and the selected name, or localized none/unavailable lines. It never creates, renames, removes, or saves a settlement, and it adds no save field or bridge call beyond the existing `settlements()` read.
 
@@ -489,5 +489,5 @@ The script requires `settlements=2 selected=1 population=0 policy=1` for `--smok
 3. Add persisted acknowledgement and a notification history.
 4. Finish number formatting, remaining content names, and error-code display.
 5. Add per-settlement budgets and policy scoping on top of the dashboard settlement selector; the selector and its read-only detail block remain presentation-only, while the compact §5.3 editor covers the district centre.
-6. Add settlement membership and permission-gated edit actions on top of the read-only selector (D-033 core model accepted; server enforcement is the next slice; Q-112–Q-115 remain open). The server enforces them; the dashboard only reads and hides actions.
+6. Add settlement membership and permission-gated edit actions on top of the read-only selector (D-033 core model accepted; `place_blueprint` enforces `build`; settlement commands and the remaining `manage`/`tax`/`members` checks are next; Q-112–Q-115 remain open). The server enforces them; the dashboard only reads and hides actions.
 7. Optionally integrate the §4.3 read-only settlement overview into the dashboard once policies have simulation effects; the standalone scene remains the developer harness and is not the dashboard.

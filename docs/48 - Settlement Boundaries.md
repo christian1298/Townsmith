@@ -26,7 +26,7 @@ This slice proves the settlement identity half of D-019:
 - list every settlement in the dashboard, select one for the existing 256 m district, policy, and heatmap queries, and show a read-only detail block (identity, 256 m district metrics, containing policy) under the selector;
 - save and reload the settlement layer with the world.
 
-It does **not** add districts, taxes, service coverage, merging, or automatic growth. Those remain later simulation and multiplayer work. D-033 now supplies the core ownership/membership model (accepted 2026-11-24); server enforcement and UI wiring remain follow-ups.
+It does **not** add districts, taxes, service coverage, merging, or automatic growth. Those remain later simulation and multiplayer work. D-033 supplies the core ownership/membership model and its first server slice (accepted 2026-11-24): the server persists the registry/store, `place_blueprint` enforces `build`, and the bridge exposes read-only membership fields. Protocol commands and UI wiring remain follow-ups.
 
 ## 2. Data model
 
@@ -69,7 +69,7 @@ This is the current **v1** wire/display model. D-033's core store model adds an 
 ### 2.1 Ownership and permissions (D-033 core, implemented)
 
 > [!info] Core model implemented 2026-11-24
-> `core_city` implements `PlayerId`/`PlayerRegistry`, the role presets and permission bits, settlement `owner_id`/`members`/`membership_revision`, claim/transfer/release and member management, the v1→v2 save migration, and stable rejection codes. The authoritative server now persists the player registry and an optional settlement store. The bridge still accepts the legacy `owner` display string, `settlement_remove` still removes by id without a caller check, and there are no bridge mutation commands yet. Server placement enforcement, settlement commands, and dashboard controls are follow-up slices.
+> `core_city` implements `PlayerId`/`PlayerRegistry`, the role presets and permission bits, settlement `owner_id`/`members`/`membership_revision`, claim/transfer/release and member management, the v1→v2 save migration, and stable rejection codes. The authoritative server persists the player registry and an optional settlement store, and `place_blueprint` enforces `build` inside a settlement (admin bypass; wilderness unchanged). The bridge still accepts the legacy `owner` display string, `settlement_remove` still removes by id without a caller check, and there are no bridge mutation commands yet. Settlement protocol commands and dashboard controls are follow-up slices.
 
 D-033 defines:
 
@@ -188,17 +188,17 @@ It checks:
 ## 8. Limits
 
 - No districts, policies, taxes, services, land value, or budgets. The dashboard has a read-only settlement selector plus a read-only detail block over the existing 256 m district, containing-policy, and heatmap queries, and the developer-only read-only overview in [[57 - Dashboard and Advisor]] §4.3 lists settlements and samples one fixed 256 m district around each centre; neither adds district simulation, editing, or save fields.
-- No hard permission checks in the bridge or server; `owner` is still an unenforced display string there. D-033's core store model implements membership, permissions, claims, and transfer, but the enforcement call sites are follow-ups.
+- No hard permission checks in the bridge; `owner` is still a display label there. The server enforces `build` on `place_blueprint` inside a settlement, while claims, transfer, and the `manage`/`tax`/`members` call sites remain follow-ups.
 - Overlapping settlements are allowed; nearest-centre ownership is provisional.
 - No settlement merge, rename, or owner transfer in the bridge. D-033's core store puts rename and owner transfer behind `manage` and the owner/admin rule; the protocol path is not wired.
 - No automatic lot/placement assignment; ownership is derived by containment.
-- No multiplayer authority or per-player permissions. Server roles are global dev roles and the server has no settlement store; D-033's core store is the contract, with enforcement still to wire.
+- No settlement command surface or per-player UI. Server roles are global dev roles, and only `place_blueprint` enforces the `build` bit; D-033's core store is the contract for the remaining `manage`/`tax`/`members` checks.
 - Ring/label overlay is English-only and developer-oriented.
 - Settlement names are not localized.
 
 ## 9. Next
 
 1. Phase 3 simulation: districts, service coverage, land value, and taxes.
-2. Per-player ownership and permission checks with the authoritative server (D-033 core model accepted; server enforcement is the next slice; Q-112–Q-115 remain open).
+2. Per-player ownership and permission checks with the authoritative server (D-033 core model accepted; `place_blueprint` `build` enforcement landed; settlement commands and `manage`/`tax`/`members` checks remain; Q-112–Q-115 remain open).
 3. Settlement merge/split rules and a region view.
 4. Automatic lot generation tied to settlement growth.

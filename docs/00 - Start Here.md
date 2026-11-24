@@ -48,7 +48,7 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 | Destruction | **Accepted:** none in v1; cosmetic damage and repair later. See D-008. |
 | Server placement | **Accepted and implemented (D-032, #306):** server-authoritative `place_blueprint` with a pre-seeded content-addressed `.tsbp` library, hash-only command, JSON policy registry, deterministic placeholder terrain, and optional `ServerSave` placement/construction fields. The server record uses the content-addressed reference `tsbp:blake3:<hex>` and never exposes a filesystem path. The **bridge/world save** keeps the recorded absolute `blueprint_path`; the opt-in `world_save_with_library` (#311) adds an optional `tsbp:blake3:<hex>` `blueprint_ref`, and a default plain `world_save` still writes no reference. Portable load (#302) remains opt-in. Upload/fetch, mod auto-download, rollback, demolition/refunds, per-settlement permissions, ghost preview, and a full Godot placement UI are **not v1**; #309 adds a debug client path that sends one configured hash and renders the authoritative result. |
 | Biggest open risk | Whether 1M+ at ~30 FPS on RTX 3060-class hardware with real 10 cm building detail is tractable. The box-city MultiMesh path is measured well above target on an RTX 4080; the target 3060-class run and voxel building LOD remain. See [[03 - Voxel and Scale]], [[23 - City Rendering Benchmark]], and [[09 - Open Questions]]. |
-| Next action | **Phase 6 in progress.** Finish the in-flight slices first: D-033 core identity/membership, the full Godot placement UI, and blueprint dependency validation. Then D-033 server enforcement + persistence, the Q-116–Q-118 content compatibility decisions, voxel edit sync + blueprint locks, journal/rollback, and chat/pings + mod-mismatch screen. Two gates stay blocked and need people or hardware, not code: the Q-101 30-minute playtest ([[66 - Playtest Kit]] §9) and the 1M/RTX 3060 render gate ([[68 - Metropolis Gate]]). D-033 is **Proposed**; D-034 is **Accepted** with bridge v1 in #313. See [[08 - Roadmap]] §7. |
+| Next action | **Phase 6 in progress.** Merged: D-033 core identity/membership (#319), server persistence (#321), bridge read-only membership (#322), placement `build` enforcement (#323), the full Godot placement UI (#318), blueprint dependency validation (#316), the time-vote panel (#320), and network-fault tests (#317). Remaining: settlement protocol commands, Q-116–Q-118 content compatibility, voxel edit sync + blueprint locks, journal/rollback, and chat/pings + mod-mismatch screen. Two gates stay blocked and need people or hardware, not code: the Q-101 30-minute playtest ([[66 - Playtest Kit]] §9) and the 1M/RTX 3060 render gate ([[68 - Metropolis Gate]]). D-033 is **Accepted (core model + first server slice)**; D-034 is **Accepted** with bridge v1 in #313. See [[08 - Roadmap]] §7. |
 
 ## Current capabilities
 
@@ -61,22 +61,22 @@ One sentence: *Minecraft's build-anywhere authorship, Cities: Skylines' manageme
 
 ## Code inventory
 
-`cargo test --workspace`: **1311 tests**, all passing (**1306 unit/integration + 5 doctests**); fmt and clippy clean. Verified on 2026-11-23 at master `514571f` (#313). #314 (`2250ae4`) is docs-only and changes no code or test counts.
+`cargo test --workspace`: **1385 tests**, all passing (**1380 unit/integration + 5 doctests**); fmt and clippy clean. Verified on 2026-11-24 at master `ad2b12a` (#323).
 
 | Area | Tests |
 |---|---:|
-| `core_city` | 541 |
-| `godot_ext` (bridge) | 235 |
-| `townsmith-server` | 161 |
+| `core_city` | 564 |
+| `godot_ext` (bridge) | 241 |
+| `townsmith-server` | 193 |
 | `townsmith-bench` (25 bins; 18 with tests + lib) | 108 |
 | `core_world` | 78 |
 | `core_voxel` | 55 |
 | `core_sim` | 53 |
+| `core_blueprint` | 53 |
 | `core_structure` | 22 |
-| `core_blueprint` | 40 |
 | `core_rooms` | 13 |
 | doctests (`core_city` 3, `core_rooms` 1, `core_structure` 1) | 5 |
-| **Total** | **1311** |
+| **Total** | **1385** |
 
 Bench bins: `city_loop` 9, `cohort_1m` 9, `cohort_validate` 9, `dormant` 5, `financing` 8, `industrial` 4, `infra_cost` 2, `materialization` 2, `metropolis` 4, `metropolis_balance` 4, `modern` 5, `movement` 6, `placements` 2, `save_1m` 6, `save_stress` 11, `streaming_scale` 13, `traffic` 4, `worldgen` 3, bench lib 2.
 
@@ -190,14 +190,13 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 
 ## Next actions
 
-1. Finish the in-flight Phase 6 slices: D-033 core identity/membership (Q-111), the full Godot placement UI (replacing the #309 debug single-hash path), and blueprint dependency validation.
-2. Land D-033 server enforcement and persistence: per-settlement permissions in commands, settlement state in `ServerSave`.
-3. Decide Q-116/Q-117/Q-118 — pack-version compatibility, read-only missing-content mode, and content-ID migration — before the Phase 7 loader.
-4. Harden Phase 6: voxel edit sync + blueprint locks, journal/rollback, chat/pings, and the mod-mismatch screen.
+1. Extend D-033 beyond placement: settlement protocol commands and the remaining `manage`/`tax`/`members` checks, plus bridge/dashboard membership mutations.
+2. Decide Q-116/Q-117/Q-118 — pack-version compatibility, read-only missing-content mode, and content-ID migration — before the Phase 7 loader.
+3. Harden Phase 6: voxel edit sync + blueprint locks, journal/rollback, chat/pings, and the mod-mismatch screen.
 5. Blocked gates: run the Q-101 30-minute playtest in [[66 - Playtest Kit]] (capture form in §9; summarize with `./scripts/check_playtest_report.sh`), and record reference-hardware evidence for the 1M/RTX 3060 render gate with [[68 - Metropolis Gate]] (`./scripts/check_metropolis_gate.py`). Neither tool substitutes for the human session or the reference machine.
 
 > [!note] Accepted and implemented (staged v1)
-> D-032 (server-authoritative blueprint placement) is **Accepted** (2026-11-23) and implemented by #306 (then at master `61449ce`): a pre-seeded content-addressed server `.tsbp` library, a hash-only `place_blueprint` command, server-configured JSON district policies, deterministic placeholder terrain, and optional `ServerSave` placement/construction fields. The authoritative record stores `tsbp:blake3:<hex>` and never exposes a filesystem path; the bridge/world save keeps the recorded absolute `blueprint_path`, the opt-in library save (#311) adds an optional content-addressed `blueprint_ref`, and a default plain `world_save` still writes no reference. Portable load (#302) remains opt-in. Package upload/fetch, mod auto-download, rollback/history, demolition/refunds, per-settlement permissions, and a full Godot placement UI are **not** v1. #309 adds a debug 3D-client path that sends `place_blueprint` with one operator-configured hash and renders the authoritative result; it has no ghost preview, prediction, rollback, package upload/fetch, or full placement UI. D-033 (settlement ownership and permissions; stable identity is Q-111) remains **Proposed**. D-034 (content-pack identity in world saves) is **Accepted** (2026-11-23) with its bridge v1 implemented by #313: the optional outer-v2 `content` object, byte-identical base-only saves, fail-closed load, and the reserved `content_degraded_unsupported` opt-out; Q-116–Q-118 remain open.
+> D-032 (server-authoritative blueprint placement) is **Accepted** (2026-11-23) and implemented by #306 (then at master `61449ce`): a pre-seeded content-addressed server `.tsbp` library, a hash-only `place_blueprint` command, server-configured JSON district policies, deterministic placeholder terrain, and optional `ServerSave` placement/construction fields. The authoritative record stores `tsbp:blake3:<hex>` and never exposes a filesystem path; the bridge/world save keeps the recorded absolute `blueprint_path`, the opt-in library save (#311) adds an optional content-addressed `blueprint_ref`, and a default plain `world_save` still writes no reference. Portable load (#302) remains opt-in. Package upload/fetch, mod auto-download, rollback/history, demolition/refunds, and per-settlement `manage`/`tax`/`members` checks are **not** v1. #309 added the debug 3D-client path; #318 replaces it with a catalog-driven placement UI (ghost, rotation, scripted input, authoritative results). D-033 (settlement ownership and permissions; stable identity is Q-111) is **Accepted (core model + first server slice)**: #319 core model, #321 server persistence, #322 bridge read-only membership, #323 placement `build` enforcement. D-034 (content-pack identity in world saves) is **Accepted** (2026-11-23) with its bridge v1 implemented by #313: the optional outer-v2 `content` object, byte-identical base-only saves, fail-closed load, and the reserved `content_degraded_unsupported` opt-out; Q-116–Q-118 remain open.
 
 ## Document map
 
