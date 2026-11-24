@@ -39,6 +39,7 @@ extends Control
 
 const InterestRender = preload("res://mp_interest_render.gd")
 const InterestCanvas = preload("res://mp_interest_canvas.gd")
+const ContentMismatchScene = preload("res://content_mismatch_screen.tscn")
 
 enum Phase {
 	CONNECTING,
@@ -114,6 +115,7 @@ var _frames_label: Label
 var _interest_label: Label
 var _interest_checksum_label: Label
 var _interest_canvas
+var _content_mismatch_screen
 
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
@@ -510,10 +512,13 @@ func _on_interest_view(message: Dictionary) -> void:
 	_arm_deadline(_timeout_ms)
 
 func _on_reject(message: Dictionary) -> void:
-	if _phase != Phase.TAX_REJECT_WAIT:
-		_fail("reject_%s_code=%s" % [_phase_name(), str(message.get("code", "missing"))])
-		return
 	var code := str(message.get("code", ""))
+	if code == "content_hash.mismatch":
+		_show_content_mismatch(message)
+		return
+	if _phase != Phase.TAX_REJECT_WAIT:
+		_fail("reject_%s_code=%s" % [_phase_name(), code if code != "" else "missing"])
+		return
 	if code != "tax.rate_out_of_range":
 		_fail("reject_code_%s" % (code if code != "" else "missing"))
 		return
@@ -524,6 +529,33 @@ func _on_reject(message: Dictionary) -> void:
 		return
 	_phase = Phase.ROAD_SENT
 	_arm_deadline(_timeout_ms)
+
+## The server refused `hello` because the content registries differ. Show the
+## dedicated screen and stop: no welcome, session, world state, or fallback hash.
+## Unlike `_fail`, this does not write the generic protocol status line.
+func _show_content_mismatch(message: Dictionary) -> void:
+	if _finished:
+		return
+	_finished = true
+	set_process(false)
+	if _content_mismatch_screen == null:
+		_content_mismatch_screen = ContentMismatchScene.instantiate()
+		_content_mismatch_screen.name = "ContentMismatch"
+		add_child(_content_mismatch_screen)
+	_content_mismatch_screen.set_failure(
+		"content_hash.mismatch", str(message.get("message", "")), CONTENT_HASH
+	)
+	if _peer != null:
+		_peer.disconnect_from_host()
+	print(
+		(
+			"MP_CLIENT status=fail %s error=content_hash.mismatch content_hash=%s"
+			+ " frames_sent=%d frames_received=%d"
+		)
+		% [_flags_text(), CONTENT_HASH, _frames_sent, _frames_received]
+	)
+	if _smoke:
+		get_tree().quit(1)
 
 func _on_goodbye() -> void:
 	if _phase == Phase.RESUME_DISCONNECT_WAIT:
@@ -892,6 +924,12 @@ func _build_ui() -> void:
 	_interest_canvas = InterestCanvas.new()
 	_interest_canvas.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	root.add_child(_interest_canvas)
+
+	# Fail-closed overlay: hidden until `_on_reject` sees `content_hash.mismatch`.
+	_content_mismatch_screen = ContentMismatchScene.instantiate()
+	_content_mismatch_screen.name = "ContentMismatch"
+	_content_mismatch_screen.visible = false
+	add_child(_content_mismatch_screen)
 
 func _add_row(parent: VBoxContainer, key: String, value: String) -> Label:
 	var row := HBoxContainer.new()
