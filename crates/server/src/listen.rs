@@ -341,6 +341,9 @@ fn run_smoke_client(address: SocketAddr) -> io::Result<()> {
 }
 
 #[cfg(test)]
+mod network_faults;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
