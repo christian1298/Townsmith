@@ -399,7 +399,7 @@ Ordered by dependency, not by size. Status reflects master `ad2b12a` (#323).
 4. **Full Godot placement UI** — library catalog, ghost preview, rotation, validation feedback; replaces the debug single-hash path (#309). ✅ Merged in #318.
 5. **Blueprint dependency validation** — resolve and validate package dependencies before placement. ✅ Merged in #316.
 6. **Settlement protocol commands** — found/list/at/claim/rename/transfer/release and membership invite/set-role/remove are merged; next are the remaining `tax` checks and dashboard controls.
-7. **Q-116/Q-117/Q-118 content compatibility decisions** — pack-version compatibility, read-only missing-content mode, and content-ID migration; unblocks the Phase 7 loader.
+7. **Q-116/Q-117/Q-118 content compatibility decisions** — pack-version compatibility, read-only missing-content mode, and content-ID migration; unblocks the Phase 7 loader. Q-117 bridge v1 (D-035) and the server content pin (#331) are implemented; Q-116, Q-118, the server `--accept-missing-content` CLI, and the client mismatch screen remain.
 8. **Voxel edit sync + blueprint locks** — replicate edits and hold locks across a disconnect.
 9. **Journal/rollback** — crash-safe command journal and rollback/history.
 10. **Chat/pings + mod-mismatch screen** — player communication and a fail-closed content-mismatch explanation.

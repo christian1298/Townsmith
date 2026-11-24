@@ -52,6 +52,7 @@ tags:
 | D-032 | Server-authoritative blueprint placement | Accepted | 2026-11-23 | [[05 - Multiplayer]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[42 - World Placement Bridge]], [[53 - Treasury and Taxes]] |
 | D-033 | Settlement ownership, membership, and permissions | Accepted (core model) | 2026-11-24 | [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[48 - Settlement Boundaries]], [[57 - Dashboard and Advisor]] |
 | D-034 | Content-pack identity in world saves | Accepted | 2026-11-23 | [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[42 - World Placement Bridge]] |
+| D-035 | Read-only inspection of content-bound worlds with a missing pack | Proposed (bridge v1 implemented) | 2026-11-24 | [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[78 - Code Audit Findings]] |
 
 ---
 
@@ -1854,6 +1855,47 @@ Until that mode exists, passing the flag must return `content_degraded_unsupport
 ### Review trigger
 
 The first implementation that writes or reads `content`, the first outer save-version bump, the first multi-pack loader, or the first pack update that wants to keep old saves. Revisit when Q-116–Q-118 are answered. If base content changes frequently enough that `registry_checksum` blocks ordinary game updates, split base compatibility out of this object before accepting the ADR. If D-006 is accepted, update the status and links; this ADR does not accept it.
+
+---
+
+## D-035 — Read-only inspection of content-bound worlds with a missing pack
+
+**Status:** Proposed (bridge v1 implemented) · **Date:** 2026-11-24 · **Affects:** [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[78 - Code Audit Findings]]
+
+**Context**
+
+D-034 makes a content-bound world fail closed when its recorded pack is missing or different. That is correct for normal play, but it leaves support, QA, and content authors unable to inspect a save after a pack was uninstalled, renamed, or updated. Q-117 asked whether a safe read-only mode can preserve unknown IDs without turning a missing pack into a silent remap.
+
+**Decision**
+
+- Strict `world_load` keeps today's fail-closed behavior. Missing pack, different pack, or a checksum mismatch still returns the existing `content_*` error.
+- `world_load_content_checked(path, expected_seed, true)` is the explicit inspection opt-in. It accepts a v2 save with a base-only registry or a different pack/checksum, loads the ordinary stores and terrain, and reports `content_identity_status` as `missing` or `mismatch` plus `content_read_only = true`.
+- The recorded identity is retained in memory for display and diagnosis. Unknown content IDs remain opaque data: the loader does not resolve, rewrite, substitute, or drop them.
+- Every save from a read-only world fails with `content_read_only`. A strict load with the exact pack restores normal read-write behavior. `world_clear_placements` also clears the read-only flag.
+- There is no auto-download, install, path rewrite, or fallback content. The server CLI flag, a UI mismatch screen, and any content-dependent simulation freeze remain follow-ups; the bridge guard is the v1 boundary.
+
+**Consequences**
+
+- Positive: support can inspect a world after a pack is removed; pack authors can diagnose mismatches without editing JSON; the default remains fail-closed.
+- Negative: a read-only world is not playable and cannot be saved, so the mode does not recover a missing pack by itself.
+- Neutral: the content identity envelope and per-store records are unchanged; only the load result and live read-only flag are new.
+
+**Alternatives considered**
+
+- **Keep everything fail-closed:** simplest and safest, but leaves no recovery path for support or QA. Rejected for the opt-in inspection case.
+- **Auto-remap unknown IDs or substitute base content:** hides data loss and produces a world that no longer matches its pack. Rejected.
+- **Allow saving after a degraded load:** would silently drop or reinterpret the recorded identity. Rejected; saves are blocked.
+- **Implement a full playable degraded mode:** requires freezing or rewriting every content-dependent simulation path. Deferred until a consumer exists.
+
+**Open questions**
+
+| ID | Question |
+|---|---|
+| Q-117 | Server `--accept-missing-content` CLI, a client mismatch screen, and the exact simulation freeze list remain open. |
+
+**Review trigger**
+
+The first server CLI or UI consumer, the first content-dependent simulation path that can run in a read-only world, or the first request to save from an inspected world.
 
 ---
 

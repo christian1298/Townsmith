@@ -2,7 +2,7 @@
 title: Modding and Resource Packs
 project: Townsmith
 status: proposed
-updated: 2026-11-23
+updated: 2026-11-24
 tags:
   - townsmith
   - modding
@@ -267,7 +267,7 @@ A world save carries one optional top-level object when a pack is live:
 - A content-bound world keeps its identity across a load/save cycle. Saving without the pack, or with a different pack, is refused rather than silently unpinned. `world_clear_placements` also clears the remembered identity.
 - **Packs remain one at a time.** The save object describes the single `content_load_dir` pack merged after base; it is not a multi-pack list or load order. `content_multiple_packs_unsupported` blocks save/load if the registry ever reports more than one.
 - **Stable rejection codes.** `content_save_requires_pack`, `content_save_pack_mismatch`, `content_pack_mismatch`, `content_pack_checksum_mismatch`, `content_registry_checksum_mismatch`, `content_pack_missing`, `content_multiple_packs_unsupported`, `content_identity_required`, `content_identity_unexpected`, `content_identity_unsupported`, `content_identity_invalid`, and `content_degraded_unsupported`. Malformed save JSON keeps `corrupt_save`. There is no substitution and no auto-download.
-- **Read-only opt-out is reserved, not implemented.** `world_load_content_checked(path, expected_seed, accept_missing_content)` delegates to normal `world_load` when `false`; `true` returns `content_degraded_unsupported` until Q-117 defines a safe mode. Pack-version compatibility and content-ID migration remain open in Q-116 and Q-118.
+- **Read-only inspection is opt-in (D-035).** `world_load_content_checked(path, expected_seed, accept_missing_content)` delegates to normal `world_load` when `false`; `true` opens a missing or mismatched pack read-only, retains the recorded identity, keeps unknown IDs opaque, and refuses saves with `content_read_only`. The server CLI flag and client mismatch screen remain open, as do pack-version compatibility (Q-116) and content-ID migration (Q-118).
 - The save result adds `content_bound`, `content_identity_status` (`absent`/`new`/`match`), `content_pack_id`, `content_pack_checksum`, `content_registry_checksum`, and `content_format_version`. The load result adds `content_identity_status` (`absent`/`legacy_unbound`/`match`), the same pack/checksum fields, and `content_format_version` (`0` when none is recorded).
 - A **legacy v1** save loaded with a pack is allowed as `legacy_unbound`; the next save records the active pack. A v1 save with `content` is `content_identity_unexpected`; a v2 save without it is `content_identity_required`.
 - The identity object does not replace per-package `dependencies.mods` or per-ID validation. `.tsbp` metadata remains the package-level hint, and its current loader still rejects non-empty mod dependencies. No path is written or inferred.

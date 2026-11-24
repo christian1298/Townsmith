@@ -107,6 +107,10 @@ pub(crate) enum ContentIdentityStatus {
     LegacyUnbound,
     /// A v2 save whose pack ID and both checksums match.
     Match,
+    /// A v2 save inspected without its required pack (base-only registry).
+    Missing,
+    /// A v2 save inspected with a different pack or checksum.
+    Mismatch,
 }
 
 impl ContentIdentityStatus {
@@ -117,7 +121,15 @@ impl ContentIdentityStatus {
             Self::Absent => "absent",
             Self::LegacyUnbound => "legacy_unbound",
             Self::Match => "match",
+            Self::Missing => "missing",
+            Self::Mismatch => "mismatch",
         }
+    }
+
+    /// Whether this is a degraded inspection result.
+    #[must_use]
+    pub(crate) fn read_only(self) -> bool {
+        matches!(self, Self::Missing | Self::Mismatch)
     }
 }
 
@@ -165,6 +177,8 @@ impl StampedWorldContent {
             (ContentIdentityStatus::Match, true) => "new",
             (ContentIdentityStatus::Match, false) => "match",
             (ContentIdentityStatus::LegacyUnbound, _) => "legacy_unbound",
+            (ContentIdentityStatus::Missing, _) => "missing",
+            (ContentIdentityStatus::Mismatch, _) => "mismatch",
         }
     }
 
@@ -199,6 +213,13 @@ impl VerifiedWorldContent {
     #[must_use]
     pub(crate) fn status_str(&self) -> &'static str {
         self.status.as_str()
+    }
+
+    /// Whether the inspected world must stay read-only because the pack is
+    /// missing or does not match.
+    #[must_use]
+    pub(crate) fn read_only(&self) -> bool {
+        self.status.read_only()
     }
 }
 
@@ -478,6 +499,118 @@ pub(crate) fn verify_world_content(
             })?;
             Ok(VerifiedWorldContent {
                 status: ContentIdentityStatus::Match,
+                format_version: identity.format_version,
+                identity: Some(identity),
+                normalized_json: Some(normalized_json),
+            })
+        }
+        other => Err(identity_error(
+            "content_identity_unsupported",
+            format!("outer world save format_version {other} is not supported"),
+        )),
+    }
+}
+
+/// Inspect a content-bound save without requiring its pack to be active.
+///
+/// This is the Q-117 read-only path: a v2 world loads even when the live
+/// registry is base-only or holds a different pack/checksum, but the result is
+/// marked [`ContentIdentityStatus::Missing`] or
+/// [`ContentIdentityStatus::Mismatch`] and the caller must keep it read-only.
+/// A matching pack still reports `Match`; v1 semantics are unchanged. Unknown
+/// content IDs stay opaque because only the top-level identity is interpreted;
+/// no store value is rewritten or substituted.
+///
+/// # Errors
+///
+/// Uses the same structural errors as [`verify_world_content`] (corrupt JSON,
+/// unsupported versions, malformed identity, multiple active packs). A
+/// recorded pack that is missing or different is **not** an error here.
+pub(crate) fn verify_world_content_inspecting(
+    json: &str,
+    active: &ActiveContentIdentity,
+) -> Result<VerifiedWorldContent, ContentIdentityError> {
+    let value: Value = serde_json::from_str(json)
+        .map_err(|error| identity_error("corrupt_save", format!("invalid save JSON: {error}")))?;
+    let Some(object) = value.as_object() else {
+        return Err(identity_error(
+            "corrupt_save",
+            "the world save is not a JSON object",
+        ));
+    };
+    if active.packs > 1 {
+        return Err(identity_error(
+            "content_multiple_packs_unsupported",
+            format!(
+                "the runtime registry has {} active packs; one pack is supported",
+                active.packs
+            ),
+        ));
+    }
+    let version = object
+        .get("format_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            identity_error(
+                "content_identity_invalid",
+                "the world save format_version is missing or not an integer",
+            )
+        })?;
+    let content = object.get("content");
+    match version {
+        version if version == u64::from(WORLD_SAVE_FORMAT_VERSION_V1) => {
+            if content.is_some() {
+                return Err(identity_error(
+                    "content_identity_unexpected",
+                    "a format_version 1 world save must not carry a content identity",
+                ));
+            }
+            let status = if active.packs == 0 {
+                ContentIdentityStatus::Absent
+            } else {
+                ContentIdentityStatus::LegacyUnbound
+            };
+            Ok(VerifiedWorldContent {
+                status,
+                identity: None,
+                normalized_json: None,
+                format_version: 0,
+            })
+        }
+        version if version == u64::from(WORLD_SAVE_FORMAT_VERSION_V2) => {
+            let Some(content) = content else {
+                return Err(identity_error(
+                    "content_identity_required",
+                    "a format_version 2 world save requires a content identity",
+                ));
+            };
+            let identity = parse_content_identity(content)?;
+            let status = if active.packs == 0 {
+                ContentIdentityStatus::Missing
+            } else if identity.pack_id != active.pack_id
+                || identity.pack_checksum != active.pack_checksum
+                || identity.registry_checksum != active.registry_checksum
+            {
+                ContentIdentityStatus::Mismatch
+            } else {
+                ContentIdentityStatus::Match
+            };
+            let mut normalized = value;
+            if let Some(object) = normalized.as_object_mut() {
+                object.remove("content");
+                object.insert(
+                    "format_version".to_string(),
+                    Value::from(WORLD_SAVE_FORMAT_VERSION_V1),
+                );
+            }
+            let normalized_json = serde_json::to_string_pretty(&normalized).map_err(|error| {
+                identity_error(
+                    "content_identity_invalid",
+                    format!("content-bound save normalization failed: {error}"),
+                )
+            })?;
+            Ok(VerifiedWorldContent {
+                status,
                 format_version: identity.format_version,
                 identity: Some(identity),
                 normalized_json: Some(normalized_json),
@@ -875,6 +1008,59 @@ mod tests {
             .expect("re-save");
         assert_eq!(resaved.status_str(), "match");
         assert_eq!(resaved.json, stamped.json);
+    }
+
+    #[test]
+    fn inspecting_v1_stays_legacy_unbound_and_writable() {
+        let inspected = verify_world_content_inspecting(&base_world_json(), &pack_active())
+            .expect("legacy inspection");
+        assert_eq!(inspected.status, ContentIdentityStatus::LegacyUnbound);
+        assert!(!inspected.read_only());
+        assert!(inspected.identity.is_none());
+        assert!(inspected.normalized_json.is_none());
+    }
+
+    #[test]
+    fn inspecting_v2_without_its_pack_loads_read_only() {
+        let json = base_world_json();
+        let before = PlacementStore::from_json(&json).expect("v1 store");
+        let stamped = stamp_world_content(&json, &pack_active(), None).expect("v2 save");
+        assert_eq!(
+            verify_world_content(&stamped.json, &base_active())
+                .expect_err("strict load refuses the missing pack")
+                .code,
+            "content_pack_missing"
+        );
+
+        let inspected =
+            verify_world_content_inspecting(&stamped.json, &base_active()).expect("inspect");
+        assert_eq!(inspected.status, ContentIdentityStatus::Missing);
+        assert_eq!(inspected.status_str(), "missing");
+        assert!(inspected.read_only());
+        assert_eq!(inspected.identity.as_ref(), stamped.identity.as_ref());
+        let normalized = inspected.normalized_json.as_deref().expect("normalized");
+        let after = PlacementStore::from_json(normalized).expect("normalized store");
+        assert_eq!(after, before);
+        assert_eq!(after.checksum(), before.checksum());
+    }
+
+    #[test]
+    fn inspecting_v2_with_a_different_pack_is_read_only_mismatch() {
+        let stamped =
+            stamp_world_content(&base_world_json(), &pack_active(), None).expect("v2 save");
+        let other = ActiveContentIdentity::pack(
+            "example:iron_age",
+            PACK_CHECKSUM.wrapping_add(1),
+            REGISTRY_CHECKSUM.wrapping_add(1),
+            BASE_CHECKSUM,
+        );
+        let inspected =
+            verify_world_content_inspecting(&stamped.json, &other).expect("inspect other pack");
+        assert_eq!(inspected.status, ContentIdentityStatus::Mismatch);
+        assert_eq!(inspected.status_str(), "mismatch");
+        assert!(inspected.read_only());
+        assert_eq!(inspected.identity.as_ref(), stamped.identity.as_ref());
+        assert!(inspected.normalized_json.is_some());
     }
 
     #[test]
