@@ -113,8 +113,11 @@ A failed first settlement leaves no empty world store behind. A successful first
 |---|---|---|---|
 | `found_settlement` | `name`, `x`, `z`, `radius_m` | `settlement_found { tick, settlement, settlement_checksum, world_checksum }`; owner is the caller's stable `player_id` | Mayor |
 | `settlement_list` | — | `settlement_list { tick, count, checksum, settlements }` in ascending id order | Viewer |
+| `settlement_invite` | `settlement_id`, `player_id`, `role`, `expected_revision` | `settlement_updated`; actor needs the core `members` permission | Mayor |
+| `settlement_set_role` | `settlement_id`, `player_id`, `role`, `expected_revision` | `settlement_updated`; owner cannot be demoted | Mayor |
+| `settlement_remove_member` | `settlement_id`, `player_id`, `expected_revision` | `settlement_updated`; owner cannot be removed | Mayor |
 
-Both commands require a successful hello/resume, do not advance the tick, and return `SettlementView` records with `owner_id`, `owned`, `members[{player, role, permissions}]`, and `membership_revision`. `found_settlement` creates the server store on first use, rejects duplicate names and invalid core payloads, and enforces the 16-owned-settlements-per-player limit. There is no claim, rename, transfer, invite, remove, or role-change command yet; the transport-only session rejects both commands with `settlement.unavailable`.
+All commands require a successful hello/resume, do not advance the tick, and return `SettlementView` records with `owner_id`, `owned`, `members[{player, role, permissions}]`, and `membership_revision`. `found_settlement` creates the server store on first use, rejects duplicate names and invalid core payloads, and enforces the 16-owned-settlements-per-player limit. Membership mutations check the actor's core `members` permission and the expected revision, reject `owner` as an invited/changed role, and bump the revision. There is no claim, rename, or transfer command yet; the transport-only session rejects these commands with `settlement.unavailable`.
 
 ## 4. Save
 

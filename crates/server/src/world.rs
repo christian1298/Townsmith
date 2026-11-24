@@ -40,7 +40,9 @@ use core_city::player::{PlayerId, PlayerRegistry};
 use core_city::policy::{policy_placement_denial, DistrictPolicyError, DistrictPolicyStore};
 use core_city::progression::AgeState;
 use core_city::road::{RoadError, RoadRequest, RoadSegment, RoadStore};
-use core_city::settlement::{Settlement, SettlementPermission, SettlementRequest, SettlementStore};
+use core_city::settlement::{
+    Settlement, SettlementPermission, SettlementRequest, SettlementRole, SettlementStore,
+};
 use core_city::structure_age_error;
 
 use crate::protocol::{
@@ -190,6 +192,10 @@ pub mod codes {
     pub const SETTLEMENT_NOT_MEMBER: &str = "settlement.not_member";
     /// The settlement store belongs to a different world seed.
     pub const SETTLEMENT_SEED_MISMATCH: &str = "settlement.seed_mismatch";
+    /// A settlement command carried an unknown or disallowed role.
+    pub const SETTLEMENT_ROLE_INVALID: &str = "settlement.role_invalid";
+    /// No settlement store exists or the requested id is unknown.
+    pub const SETTLEMENT_UNKNOWN: &str = "settlement.unknown";
 }
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -252,7 +258,13 @@ impl ClientRole {
         match tag {
             "hello" | "resume" | "ping" | "disconnect" | "time_vote" | "set_interest"
             | "settlement_list" => Self::Viewer,
-            "set_tax" | "place_road" | "place_blueprint" | "found_settlement" => Self::Mayor,
+            "set_tax"
+            | "place_road"
+            | "place_blueprint"
+            | "found_settlement"
+            | "settlement_invite"
+            | "settlement_set_role"
+            | "settlement_remove_member" => Self::Mayor,
             // Time control is admin-only in D-021; unknown tags fail closed.
             "time_control" => Self::Admin,
             _ => Self::Admin,
@@ -1537,6 +1549,27 @@ impl ServerWorld {
                 radius_m,
             } => self.apply_found_settlement(name, *x, *z, *radius_m),
             ClientCommand::SettlementList => self.apply_settlement_list(),
+            ClientCommand::SettlementInvite {
+                settlement_id,
+                player_id,
+                role,
+                expected_revision,
+            } => self.apply_settlement_invite(*settlement_id, *player_id, role, *expected_revision),
+            ClientCommand::SettlementSetRole {
+                settlement_id,
+                player_id,
+                role,
+                expected_revision,
+            } => {
+                self.apply_settlement_set_role(*settlement_id, *player_id, role, *expected_revision)
+            }
+            ClientCommand::SettlementRemoveMember {
+                settlement_id,
+                player_id,
+                expected_revision,
+            } => {
+                self.apply_settlement_remove_member(*settlement_id, *player_id, *expected_revision)
+            }
             ClientCommand::SetInterest {
                 center_x,
                 center_z,
@@ -2204,6 +2237,152 @@ impl ServerWorld {
         })
     }
 
+    fn settlement_store_mut(
+        &mut self,
+    ) -> Result<&mut SettlementStore, (Vec<ServerMessage>, &'static str)> {
+        let seed = self.seed;
+        let Some(store) = self.settlements.as_mut() else {
+            return Err(reject_with(
+                codes::SETTLEMENT_UNKNOWN,
+                "no settlement store exists in this world",
+            ));
+        };
+        if store.seed != seed {
+            return Err(reject_with(
+                codes::SETTLEMENT_SEED_MISMATCH,
+                format!(
+                    "settlement store seed {} does not match world seed {seed}",
+                    store.seed
+                ),
+            ));
+        }
+        Ok(store)
+    }
+
+    fn finish_settlement_update(
+        &mut self,
+        settlement: Settlement,
+    ) -> (Vec<ServerMessage>, &'static str) {
+        self.refresh_checksum();
+        let settlement_checksum = self
+            .settlements
+            .as_ref()
+            .map_or(0, SettlementStore::checksum);
+        accepted(ServerMessage::SettlementUpdated {
+            tick: self.tick,
+            settlement: settlement_view(&settlement),
+            settlement_checksum: format!("{settlement_checksum:016x}"),
+            world_checksum: self.checksum(),
+        })
+    }
+
+    fn apply_settlement_invite(
+        &mut self,
+        settlement_id: u64,
+        player_id: u64,
+        role: &str,
+        expected_revision: u32,
+    ) -> (Vec<ServerMessage>, &'static str) {
+        let Some(actor) = self.player_id else {
+            return reject_with(
+                codes::SETTLEMENT_IDENTITY,
+                "settlement membership requires a player identity",
+            );
+        };
+        let Some(role) = parse_settlement_role(role) else {
+            return reject_with(
+                codes::SETTLEMENT_ROLE_INVALID,
+                format!("unknown settlement role `{role}`"),
+            );
+        };
+        let Ok(target) = PlayerId::new(player_id) else {
+            return reject_with(
+                codes::SETTLEMENT_IDENTITY,
+                format!("player id {player_id} is outside the supported range"),
+            );
+        };
+        let outcome = {
+            let store = match self.settlement_store_mut() {
+                Ok(store) => store,
+                Err(rejection) => return rejection,
+            };
+            store.invite(actor, settlement_id, target, role, expected_revision)
+        };
+        match outcome {
+            Ok(settlement) => self.finish_settlement_update(settlement),
+            Err(error) => reject_with(error.code(), error.to_string()),
+        }
+    }
+
+    fn apply_settlement_set_role(
+        &mut self,
+        settlement_id: u64,
+        player_id: u64,
+        role: &str,
+        expected_revision: u32,
+    ) -> (Vec<ServerMessage>, &'static str) {
+        let Some(actor) = self.player_id else {
+            return reject_with(
+                codes::SETTLEMENT_IDENTITY,
+                "settlement membership requires a player identity",
+            );
+        };
+        let Some(role) = parse_settlement_role(role) else {
+            return reject_with(
+                codes::SETTLEMENT_ROLE_INVALID,
+                format!("unknown settlement role `{role}`"),
+            );
+        };
+        let Ok(target) = PlayerId::new(player_id) else {
+            return reject_with(
+                codes::SETTLEMENT_IDENTITY,
+                format!("player id {player_id} is outside the supported range"),
+            );
+        };
+        let outcome = {
+            let store = match self.settlement_store_mut() {
+                Ok(store) => store,
+                Err(rejection) => return rejection,
+            };
+            store.set_member_role(actor, settlement_id, target, role, expected_revision)
+        };
+        match outcome {
+            Ok(settlement) => self.finish_settlement_update(settlement),
+            Err(error) => reject_with(error.code(), error.to_string()),
+        }
+    }
+
+    fn apply_settlement_remove_member(
+        &mut self,
+        settlement_id: u64,
+        player_id: u64,
+        expected_revision: u32,
+    ) -> (Vec<ServerMessage>, &'static str) {
+        let Some(actor) = self.player_id else {
+            return reject_with(
+                codes::SETTLEMENT_IDENTITY,
+                "settlement membership requires a player identity",
+            );
+        };
+        let Ok(target) = PlayerId::new(player_id) else {
+            return reject_with(
+                codes::SETTLEMENT_IDENTITY,
+                format!("player id {player_id} is outside the supported range"),
+            );
+        };
+        let outcome = {
+            let store = match self.settlement_store_mut() {
+                Ok(store) => store,
+                Err(rejection) => return rejection,
+            };
+            store.remove_member(actor, settlement_id, target, expected_revision)
+        };
+        match outcome {
+            Ok(settlement) => self.finish_settlement_update(settlement),
+            Err(error) => reject_with(error.code(), error.to_string()),
+        }
+    }
+
     /// D-033 `build` permission inside a settlement.
     ///
     /// Wilderness (no settlement store, or no settlement containing the
@@ -2533,6 +2712,12 @@ pub fn placement_package_reference(canonical_hash: &str) -> String {
 /// The server-local `blueprint_path` is deliberately omitted; a remote client
 /// only needs the content hash.
 #[must_use]
+fn parse_settlement_role(value: &str) -> Option<SettlementRole> {
+    SettlementRole::ALL
+        .into_iter()
+        .find(|role| role.as_str().eq_ignore_ascii_case(value))
+}
+
 /// Read-only wire copy of one settlement record.
 fn settlement_view(settlement: &Settlement) -> SettlementView {
     SettlementView {
@@ -6327,6 +6512,156 @@ mod tests {
             settlements[0].owner_id,
             world.player_id().map(PlayerId::get)
         );
+    }
+
+    fn settlement_invite(
+        settlement_id: u64,
+        player_id: u64,
+        role: &str,
+        expected_revision: u32,
+    ) -> ClientCommand {
+        ClientCommand::SettlementInvite {
+            settlement_id,
+            player_id,
+            role: role.to_string(),
+            expected_revision,
+        }
+    }
+
+    fn settlement_set_role(
+        settlement_id: u64,
+        player_id: u64,
+        role: &str,
+        expected_revision: u32,
+    ) -> ClientCommand {
+        ClientCommand::SettlementSetRole {
+            settlement_id,
+            player_id,
+            role: role.to_string(),
+            expected_revision,
+        }
+    }
+
+    fn settlement_remove_member(
+        settlement_id: u64,
+        player_id: u64,
+        expected_revision: u32,
+    ) -> ClientCommand {
+        ClientCommand::SettlementRemoveMember {
+            settlement_id,
+            player_id,
+            expected_revision,
+        }
+    }
+
+    #[test]
+    fn settlement_owner_invites_changes_roles_and_removes_members() {
+        let mut world = world_with_hello();
+        world.apply(&found_settlement("Harbour", 10, 20, 64));
+        let before = world.checksum();
+        let bob = world.players.register("bob").expect("bob").id.get();
+
+        let invited = world.apply(&settlement_invite(1, bob, "builder", 1));
+        let ServerMessage::SettlementUpdated {
+            settlement,
+            settlement_checksum,
+            world_checksum,
+            ..
+        } = invited
+        else {
+            panic!("expected settlement_updated, got {invited:?}");
+        };
+        assert_eq!(settlement.membership_revision, 2);
+        assert_eq!(settlement.members.len(), 2);
+        assert_eq!(settlement.members[1].player, bob);
+        assert_eq!(settlement.members[1].role, "builder");
+        assert_eq!(settlement.members[1].permissions, 1);
+        assert_ne!(world_checksum, before);
+        assert_eq!(world_checksum, world.checksum());
+        assert_eq!(settlement_checksum.len(), 16);
+
+        let promoted = world.apply(&settlement_set_role(1, bob, "manager", 2));
+        let ServerMessage::SettlementUpdated { settlement, .. } = promoted else {
+            panic!("expected settlement_updated, got {promoted:?}");
+        };
+        assert_eq!(settlement.membership_revision, 3);
+        assert_eq!(settlement.members[1].role, "manager");
+        assert_eq!(settlement.members[1].permissions, 15);
+
+        let removed = world.apply(&settlement_remove_member(1, bob, 3));
+        let ServerMessage::SettlementUpdated { settlement, .. } = removed else {
+            panic!("expected settlement_updated, got {removed:?}");
+        };
+        assert_eq!(settlement.membership_revision, 4);
+        assert_eq!(settlement.members.len(), 1);
+        assert_eq!(settlement.members[0].role, "owner");
+    }
+
+    #[test]
+    fn settlement_membership_requires_members_permission_and_revision() {
+        let mut world = world_with_hello();
+        world.apply(&found_settlement("Harbour", 0, 0, 64));
+        let bob = world.players.register("bob").expect("bob").id;
+        let carol = world.players.register("carol").expect("carol").id.get();
+        world.apply(&settlement_invite(1, bob.get(), "builder", 1));
+        let checksum = world.checksum();
+
+        world.player_id = Some(bob);
+        let denied = world.apply(&settlement_invite(1, carol, "member", 2));
+        assert!(matches!(
+            denied,
+            ServerMessage::Reject { ref code, .. } if code == "settlement.forbidden"
+        ));
+        assert_eq!(world.checksum(), checksum);
+
+        world.player_id = Some(PlayerId::new(1).expect("owner"));
+        let stale = world.apply(&settlement_invite(1, carol, "member", 1));
+        assert!(matches!(
+            stale,
+            ServerMessage::Reject { ref code, .. } if code == "settlement.revision_conflict"
+        ));
+        let invalid_role = world.apply(&settlement_invite(1, carol, "emperor", 2));
+        assert!(matches!(
+            invalid_role,
+            ServerMessage::Reject { ref code, .. } if code == codes::SETTLEMENT_ROLE_INVALID
+        ));
+        let unknown = world.apply(&settlement_invite(99, carol, "member", 2));
+        assert!(matches!(
+            unknown,
+            ServerMessage::Reject { ref code, .. } if code == "settlement.unknown"
+        ));
+        let owner_remove = world.apply(&settlement_remove_member(1, 1, 2));
+        assert!(matches!(
+            owner_remove,
+            ServerMessage::Reject { ref code, .. } if code == "settlement.owner_required"
+        ));
+        assert_eq!(world.checksum(), checksum);
+    }
+
+    #[test]
+    fn settlement_membership_requires_the_mayor_role_and_survives_save_load() {
+        let mut viewer = ServerWorld::with_role(SEED, ClientRole::Viewer);
+        first_response(viewer.apply_all(&hello()));
+        let denied = viewer.apply(&settlement_invite(1, 2, "member", 1));
+        assert!(matches!(
+            denied,
+            ServerMessage::Reject { ref code, .. } if code == codes::FORBIDDEN
+        ));
+
+        let mut world = world_with_hello();
+        world.apply(&found_settlement("Harbour", 0, 0, 64));
+        let bob = world.players.register("bob").expect("bob").id.get();
+        world.apply(&settlement_invite(1, bob, "builder", 1));
+        let json = world.to_save_json_pretty().expect("save");
+        let mut loaded = ServerWorld::from_save_json(&json).expect("load");
+        first_response(loaded.apply_all(&hello()));
+        let list = loaded.apply(&ClientCommand::SettlementList);
+        let ServerMessage::SettlementList { settlements, .. } = list else {
+            panic!("expected settlement_list, got {list:?}");
+        };
+        assert_eq!(settlements[0].members.len(), 2);
+        assert_eq!(settlements[0].membership_revision, 2);
+        assert_eq!(settlements[0].members[1].player, bob);
     }
 
     #[test]
