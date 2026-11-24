@@ -34,6 +34,19 @@ extends Node3D
 ## Y value is a render hint, never a server height. Without the flag the flow,
 ## markers, and frame counts are unchanged.
 ##
+## Placement UI is a second opt-in path: `--place-ui --library <abs dir>
+## [--place-ui-script "..."]`. It loads the local catalog through
+## `TownsmithCore.blueprint_library_entries` (instantiated via `ClassDB`, never
+## referenced statically), draws a translucent `BoxMesh` ghost from the entry's
+## `bounds_m` on the 1 m grid, and keeps placement mode active through
+## authoritative results and rejects. The zero-view probe is skipped; the first
+## view and the existing `MP_WORLD_CLIENT` marker still run. A scripted
+## `place` sends `place_blueprint`, renders the authoritative box, and refreshes
+## with `set_interest`; `reject` records the server code and continues.
+## Keyboard (interactive): Tab / Shift+Tab cycle entries, wheel cycles, arrows
+## nudge 1 m, R rotates 90°, Enter places, Esc cancels. Esc/q cancels. Without
+## `--place-ui` none of this code runs.
+##
 ## `godot/mp_interest_render.gd` is reused for road parsing, the 64-road wire
 ## cap, and the deterministic 16-hex road checksum. Buildings are parsed
 ## defensively here (cap 64, ascending id, malformed entries skipped) with a
@@ -56,10 +69,14 @@ extends Node3D
 ## across two runs. `scripts/smoke_mp_placement.sh` seeds a client fixture
 ## library, runs the same scene with `--place-hash`, and asserts the
 ## `MP_PLACEMENT` result plus 11/13 frame counts across two runs.
+## `scripts/smoke_mp_placement_ui.sh` seeds separate client and server fixture
+## libraries, runs `--place-ui` with a scripted place/overlap/cancel sequence,
+## and asserts identical `MP_PLACE_UI*` markers across two fresh runs.
 ##
 ## See docs/05 - Multiplayer.md §Interest view 3D world client.
 
 const InterestRender = preload("res://mp_interest_render.gd")
+const PlacementUI = preload("res://mp_placement_ui.gd")
 
 enum Phase {
 	CONNECTING,
@@ -69,6 +86,10 @@ enum Phase {
 	INTEREST_VIEW_WAIT,
 	ZERO_INTEREST_SENT,
 	ZERO_VIEW_WAIT,
+	UI_SNAPSHOT_SENT,
+	UI_VIEW_WAIT,
+	UI_PLACE_WAIT,
+	UI_ACTIVE,
 	PLACE_SENT,
 	DISCONNECT_SENT,
 }
@@ -140,6 +161,10 @@ const COLOR_OUTSIDE := Color(0.92, 0.28, 0.22)
 const COLOR_BUILDING_INSIDE := Color(0.30, 0.82, 0.92)
 const COLOR_BUILDING_OUTSIDE := Color(0.86, 0.36, 0.94)
 const COLOR_PLACEMENT := Color(0.98, 0.64, 0.24)
+const COLOR_UI_GHOST := Color(0.40, 0.96, 0.72, 0.42)
+const COLOR_UI_PLACEMENT := Color(0.98, 0.64, 0.24)
+const UI_MOVE_STEP_M := 1.0
+const UI_MAX_ACTIONS := 256
 
 var _peer: StreamPeerTCP
 var _phase: int = Phase.CONNECTING
@@ -209,6 +234,37 @@ var _placement_transform := Transform3D.IDENTITY
 var _placement_size := Vector3.ZERO
 var _placement_marker := ""
 
+# Opt-in placement UI (`--place-ui`). Everything below is inert without the
+# flag, so the legacy markers, frame counts, and checksums stay unchanged.
+var _place_ui := false
+var _library_root := ""
+var _place_ui_script := ""
+var _ui_actions: Array = []
+var _ui_action_index := 0
+var _ui_actions_run := 0
+var _ui_core: Object = null
+var _ui_entries: Array = []
+var _ui_catalog_checksum := ""
+var _ui_selected := 0
+var _ui_center := Vector2.ZERO
+var _ui_rotation := 0
+var _ui_root: Node3D
+var _ui_ghost: MeshInstance3D
+var _ui_ghost_transform := Transform3D.IDENTITY
+var _ui_ghost_size := Vector3.ZERO
+var _ui_placements: Array = []
+var _ui_placement_transforms: Array = []
+var _ui_accepted := 0
+var _ui_rejected := 0
+var _ui_last_error := ""
+var _ui_pending_hash := ""
+var _ui_pending_center := Vector2.ZERO
+var _ui_pending_rotation := 0
+var _ui_main_marker := ""
+var _ui_done_marker := ""
+var _ui_place_markers: Array = []
+var _ui_reject_markers: Array = []
+
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
 	_smoke = args.has("--smoke")
@@ -226,9 +282,17 @@ func _ready() -> void:
 	_place_z = _float_arg(args, "--place-z", DEFAULT_PLACE_Z)
 	_place_rotation = _int_arg(args, "--place-rotation", DEFAULT_PLACE_ROTATION)
 
+	_place_ui = args.has("--place-ui")
+	_library_root = _arg(args, "--library", "")
+	_place_ui_script = _arg(args, "--place-ui-script", "")
+
 	_container = Node3D.new()
 	_container.name = "WorldClientRoot"
 	add_child(_container)
+	if _place_ui:
+		_ui_root = Node3D.new()
+		_ui_root.name = "WorldClientPlacementUI"
+		add_child(_ui_root)
 	_build_hud()
 
 	var port_text := _arg(args, "--port", str(DEFAULT_PORT))
@@ -253,6 +317,8 @@ func _ready() -> void:
 	if not _is_valid_view(_center, _radius_m):
 		_fail("invalid_interest")
 		return
+	if _place_ui and not _prepare_place_ui():
+		return
 
 	_peer = StreamPeerTCP.new()
 	var error := _peer.connect_to_host(_host, _port)
@@ -262,12 +328,54 @@ func _ready() -> void:
 	_arm_deadline(CONNECT_TIMEOUT_MS)
 	_set_status("Connecting to %s:%d..." % [_host, _port])
 
+## Validate the opt-in placement UI arguments before opening the socket. The
+## script is parsed up front so a typo fails fast with a stable marker.
+func _prepare_place_ui() -> bool:
+	if not _place_hash.is_empty():
+		_fail("place_ui_conflict")
+		return false
+	if _library_root.strip_edges().is_empty():
+		_fail("place_ui_library_missing")
+		return false
+	if (
+		not is_finite(_place_x)
+		or not is_finite(_place_z)
+		or absf(_place_x) > 1000000.0
+		or absf(_place_z) > 1000000.0
+	):
+		_fail("place_ui_center_invalid")
+		return false
+	var rotation := PlacementUI.canonical_rotation(_place_rotation)
+	if rotation < 0:
+		_fail("place_ui_rotation_invalid")
+		return false
+	var parsed := PlacementUI.parse_script(_place_ui_script)
+	if not bool(parsed.get("ok", false)):
+		_fail("place_ui_script_%s" % str(parsed.get("error", "invalid")))
+		return false
+	_ui_actions = parsed.get("actions", [])
+	if _ui_actions.size() > UI_MAX_ACTIONS:
+		_fail("place_ui_script_too_long")
+		return false
+	if _smoke and _ui_actions.is_empty():
+		_fail("place_ui_script_empty")
+		return false
+	_ui_center = Vector2(roundf(_place_x), roundf(_place_z))
+	_ui_rotation = rotation
+	return true
+
 func _process(_delta: float) -> void:
 	if _finished:
 		return
 	if Time.get_ticks_msec() > _deadline_ms:
-		_fail("timeout_%s" % _phase_name())
-		return
+		# Interactive placement mode has no scripted clock; keep the session
+		# alive while the player moves the ghost. Scripted/network waits still
+		# time out normally.
+		if _place_ui and _phase == Phase.UI_ACTIVE and _place_ui_script.is_empty():
+			_arm_deadline(_timeout_ms)
+		else:
+			_fail("timeout_%s" % _phase_name())
+			return
 	if _peer == null:
 		_fail("peer_missing")
 		return
@@ -448,6 +556,20 @@ func _on_snapshot(message: Dictionary) -> void:
 		_arm_deadline(_timeout_ms)
 		return
 
+	if _phase == Phase.UI_SNAPSHOT_SENT:
+		if not _check_view_snapshot(message, tick, checksum, _ui_center, _radius_m):
+			return
+		_visible_roads = int(message.get("visible_roads", -1))
+		if _visible_roads <= 0:
+			_fail("ui_visible_roads_%d" % _visible_roads)
+			return
+		_store_snapshot(tick, population, balance, checksum)
+		_set_status("Placement refresh snapshot received; awaiting the detail view.")
+		_refresh_hud()
+		_phase = Phase.UI_VIEW_WAIT
+		_arm_deadline(_timeout_ms)
+		return
+
 	_fail("snapshot_in_%s" % _phase_name())
 
 ## Shared checks for a set_interest snapshot: the viewport is view-only, so the
@@ -471,7 +593,11 @@ func _check_view_snapshot(
 	return true
 
 func _on_interest_view(message: Dictionary) -> void:
-	if _phase != Phase.INTEREST_VIEW_WAIT and _phase != Phase.ZERO_VIEW_WAIT:
+	if (
+		_phase != Phase.INTEREST_VIEW_WAIT
+		and _phase != Phase.ZERO_VIEW_WAIT
+		and _phase != Phase.UI_VIEW_WAIT
+	):
 		_fail("interest_view_in_%s" % _phase_name())
 		return
 	var tick := int(message.get("tick", -1))
@@ -484,8 +610,13 @@ func _on_interest_view(message: Dictionary) -> void:
 		_fail("interest_view_center")
 		return
 	var center := Vector2(float(center_raw[0]), float(center_raw[1]))
-	var expected_center := _center if _phase == Phase.INTEREST_VIEW_WAIT else ZERO_CENTER
-	var expected_radius := _radius_m if _phase == Phase.INTEREST_VIEW_WAIT else ZERO_RADIUS_M
+	var is_zero := _phase == Phase.ZERO_VIEW_WAIT
+	var expected_center := (
+		ZERO_CENTER
+		if is_zero
+		else (_ui_center if _phase == Phase.UI_VIEW_WAIT else _center)
+	)
+	var expected_radius := ZERO_RADIUS_M if is_zero else _radius_m
 	if not center.is_equal_approx(expected_center):
 		_fail("interest_view_center_value")
 		return
@@ -516,11 +647,22 @@ func _on_interest_view(message: Dictionary) -> void:
 	if not _build_scene(tick, center, radius_m, roads, truncated, buildings, buildings_truncated):
 		return
 
+	if _phase == Phase.UI_VIEW_WAIT:
+		if not _assert_ui_view():
+			return
+		_set_status("Placement refresh rendered; placement mode active.")
+		_phase = Phase.UI_ACTIVE
+		_ui_next_action()
+		return
+
 	if _phase == Phase.INTEREST_VIEW_WAIT:
 		if not _assert_main_view():
 			return
 		_main_marker = _marker_text("MP_WORLD_CLIENT", false)
 		print(_main_marker)
+		if _place_ui:
+			_ui_begin()
+			return
 		if _smoke:
 			_set_status("Main view rendered; probing the zero-viewport case.")
 			if not _send({
@@ -567,6 +709,9 @@ func _on_interest_view(message: Dictionary) -> void:
 ## Rejects are handled by `_on_reject` with the server code in the failure
 ## marker. This is the only place the client consumes `place_blueprint`.
 func _on_place_blueprint_result(message: Dictionary) -> void:
+	if _place_ui:
+		_on_ui_place_result(message)
+		return
 	if _phase != Phase.PLACE_SENT:
 		_fail("place_result_in_%s" % _phase_name())
 		return
@@ -632,6 +777,9 @@ func _on_place_blueprint_result(message: Dictionary) -> void:
 	_arm_deadline(_timeout_ms)
 
 func _on_reject(message: Dictionary) -> void:
+	if _place_ui and _phase == Phase.UI_PLACE_WAIT:
+		_on_ui_reject(message)
+		return
 	_fail("reject_%s_code=%s" % [_phase_name(), str(message.get("code", "missing"))])
 
 func _on_goodbye() -> void:
@@ -639,6 +787,332 @@ func _on_goodbye() -> void:
 		_fail("goodbye_in_%s" % _phase_name())
 		return
 	_finish_ok()
+
+## Load the local catalog through the bridge and enter placement mode.
+func _ui_begin() -> void:
+	if not ClassDB.class_exists("TownsmithCore"):
+		_fail("place_ui_bridge_missing")
+		return
+	_ui_core = ClassDB.instantiate("TownsmithCore")
+	var catalog := PlacementUI.load_catalog(_ui_core, _library_root)
+	if not bool(catalog.get("ok", false)):
+		_fail("place_ui_catalog_%s" % str(catalog.get("error", "failed")))
+		return
+	_ui_entries = catalog.get("entries", [])
+	if _ui_entries.is_empty():
+		_fail("place_ui_empty")
+		return
+	_ui_catalog_checksum = str(catalog.get("checksum", ""))
+	_ui_selected = 0
+	_ui_rotation = PlacementUI.canonical_rotation(_place_rotation)
+	if _ui_rotation < 0:
+		_ui_rotation = 0
+	_ui_render_ghost()
+	var entry: Dictionary = _ui_entries[_ui_selected]
+	var bounds: Array = entry.get("bounds_m", [0.0, 0.0, 0.0])
+	var footprint: Array = entry.get("footprint_m", [0.0, 0.0])
+	print((
+		"MP_PLACE_UI status=ok mode=ui entries=%d selected=%d id=%s hash=%s"
+		+ " bounds=%.1f,%.1f,%.1f footprint=%.1f,%.1f library_checksum=%s"
+	) % [
+			_ui_entries.size(),
+			_ui_selected,
+			str(entry.get("id", "")),
+			str(entry.get("hash", "")),
+			float(bounds[0]),
+			float(bounds[1]),
+			float(bounds[2]),
+			float(footprint[0]),
+			float(footprint[1]),
+			_ui_catalog_checksum,
+		])
+	_phase = Phase.UI_ACTIVE
+	_arm_deadline(_timeout_ms)
+	_ui_next_action()
+
+## Run the next scripted action, or finish. Interactive mode stays active.
+func _ui_next_action() -> void:
+	if _phase != Phase.UI_ACTIVE:
+		return
+	if _ui_action_index >= _ui_actions.size():
+		if _ui_actions.is_empty() and _place_ui_script.is_empty() and not _smoke:
+			_arm_deadline(_timeout_ms)
+			return
+		_ui_finish()
+		return
+	var action: Dictionary = _ui_actions[_ui_action_index]
+	_ui_action_index += 1
+	_ui_actions_run += 1
+	match str(action.get("kind", "")):
+		"select":
+			_ui_select(int(action.get("index", 0)))
+		"move":
+			_ui_move(int(action.get("dx", 0)), int(action.get("dz", 0)))
+		"rotate":
+			_ui_rotate(int(action.get("rotation", 0)))
+		"place":
+			_ui_place()
+		"cancel":
+			_ui_finish()
+		_:
+			_fail("place_ui_action")
+
+func _ui_select(index: int) -> void:
+	if _ui_entries.is_empty():
+		_fail("place_ui_empty")
+		return
+	var count := _ui_entries.size()
+	_ui_selected = ((index % count) + count) % count
+	_ui_render_ghost()
+	_ui_next_action()
+
+func _ui_move(dx: int, dz: int) -> void:
+	_ui_center = Vector2(
+		roundf(_ui_center.x + float(dx)),
+		roundf(_ui_center.y + float(dz)),
+	)
+	_ui_center.x = clampf(_ui_center.x, -1000000.0, 1000000.0)
+	_ui_center.y = clampf(_ui_center.y, -1000000.0, 1000000.0)
+	_ui_render_ghost()
+	_ui_next_action()
+
+func _ui_rotate(rotation_deg: int) -> void:
+	var rotation := PlacementUI.canonical_rotation(rotation_deg)
+	if rotation < 0:
+		_fail("place_ui_rotation")
+		return
+	_ui_rotation = rotation
+	_ui_render_ghost()
+	_ui_next_action()
+
+func _ui_place() -> void:
+	if _ui_entries.is_empty():
+		_fail("place_ui_empty")
+		return
+	var entry: Dictionary = _ui_entries[_ui_selected]
+	_ui_pending_hash = str(entry.get("hash", ""))
+	_ui_pending_center = _ui_center
+	_ui_pending_rotation = _ui_rotation
+	_set_status("Placing %s at %.1f, %.1f." % [str(entry.get("id", "")), _ui_center.x, _ui_center.y])
+	if not _send({
+		"type": "place_blueprint",
+		"blueprint_hash": _ui_pending_hash,
+		"x": _ui_center.x,
+		"z": _ui_center.y,
+		"rotation": _ui_rotation,
+	}):
+		return
+	_phase = Phase.UI_PLACE_WAIT
+	_arm_deadline(_timeout_ms)
+
+## Accept an authoritative placement, render its box, and refresh the view.
+func _on_ui_place_result(message: Dictionary) -> void:
+	if _phase != Phase.UI_PLACE_WAIT:
+		_fail("place_result_in_%s" % _phase_name())
+		return
+	var tick := int(message.get("tick", -1))
+	if tick != _last_tick + 1:
+		_fail("place_ui_tick_%d_after_%d" % [tick, _last_tick])
+		return
+	var placement_id := int(message.get("placement_id", 0))
+	if placement_id < 1:
+		_fail("place_ui_id_%d" % placement_id)
+		return
+	if str(message.get("blueprint_hash", "")) != _ui_pending_hash:
+		_fail("place_ui_hash_mismatch")
+		return
+	var placement_checksum := str(message.get("placement_checksum", ""))
+	var world_checksum := str(message.get("world_checksum", ""))
+	if not _is_hex16(placement_checksum) or not _is_hex16(world_checksum):
+		_fail("place_ui_checksums")
+		return
+	var view_raw: Variant = message.get("placement", null)
+	if typeof(view_raw) != TYPE_DICTIONARY:
+		_fail("place_ui_view")
+		return
+	var view: Dictionary = view_raw
+	var center := _finite_array(view.get("center", null), 3)
+	var footprint := _finite_array(view.get("footprint_m", null), 2)
+	var bounds := _finite_array(view.get("bounds_m", null), 3)
+	if center.is_empty() or footprint.is_empty() or bounds.is_empty():
+		_fail("place_ui_geometry")
+		return
+	var placed_center := Vector2(float(center[0]), float(center[2]))
+	if not placed_center.is_equal_approx(_ui_pending_center):
+		_fail("place_ui_center")
+		return
+	if int(view.get("rotation_deg", _ui_pending_rotation)) != _ui_pending_rotation:
+		_fail("place_ui_rotation_echo")
+		return
+	if float(footprint[0]) <= 0.0 or float(footprint[1]) <= 0.0 or float(bounds[1]) <= 0.0:
+		_fail("place_ui_geometry_size")
+		return
+	_ui_placements.append({
+		"id": placement_id,
+		"hash": _ui_pending_hash,
+		"center": placed_center,
+		"footprint": Vector2(float(footprint[0]), float(footprint[1])),
+		"bounds": Vector3(float(bounds[0]), float(bounds[1]), float(bounds[2])),
+		"checksum": placement_checksum,
+		"world_checksum": world_checksum,
+		"tick": tick,
+	})
+	_ui_accepted += 1
+	_ui_last_error = ""
+	print((
+		"MP_PLACE_UI_PLACE status=ok index=%d id=%d hash=%s center=%.1f,%.1f"
+		+ " rotation=%d footprint=%.1f,%.1f placement_checksum=%s"
+		+ " world_checksum=%s tick=%d"
+	) % [
+			_ui_selected,
+			placement_id,
+			_ui_pending_hash,
+			placed_center.x,
+			placed_center.y,
+			_ui_pending_rotation,
+			float(footprint[0]),
+			float(footprint[1]),
+			placement_checksum,
+			world_checksum,
+			tick,
+		])
+	_store_snapshot(tick, _last_population, _last_balance, world_checksum)
+	_ui_render_authoritative()
+	_set_status("Placement accepted; refreshing the authoritative view.")
+	if not _send({
+		"type": "set_interest",
+		"center_x": _ui_center.x,
+		"center_z": _ui_center.y,
+		"radius_m": _radius_m,
+	}):
+		return
+	_phase = Phase.UI_SNAPSHOT_SENT
+	_arm_deadline(_timeout_ms)
+
+func _on_ui_reject(message: Dictionary) -> void:
+	var code := str(message.get("code", "missing"))
+	_ui_rejected += 1
+	_ui_last_error = code
+	print("MP_PLACE_UI_REJECT status=ok index=%d code=%s" % [_ui_selected, code])
+	_set_status("Placement rejected: %s" % code)
+	_phase = Phase.UI_ACTIVE
+	_arm_deadline(_timeout_ms)
+	_ui_next_action()
+
+## Print the terminal marker, then leave the session cleanly.
+func _ui_finish() -> void:
+	if _finished:
+		return
+	print((
+		"MP_PLACE_UI_DONE status=ok mode=ui actions=%d accepted=%d rejected=%d"
+		+ " placements=%d selected=%d error=%s"
+	) % [
+			_ui_actions_run,
+			_ui_accepted,
+			_ui_rejected,
+			_ui_placements.size(),
+			_ui_selected,
+			_ui_last_error if not _ui_last_error.is_empty() else "-",
+		])
+	_set_status("Placement UI complete; disconnecting.")
+	if not _send({"type": "disconnect"}):
+		return
+	_phase = Phase.DISCONNECT_SENT
+	_arm_deadline(_timeout_ms)
+
+func _assert_ui_view() -> bool:
+	if not _view_center.is_equal_approx(_ui_center):
+		_fail("assert_ui_center")
+		return false
+	if absf(_view_radius_m - _radius_m) > 0.001:
+		_fail("assert_ui_radius")
+		return false
+	if _visible_roads <= 0 or _roads.is_empty():
+		_fail("assert_ui_roads")
+		return false
+	return true
+
+func _ui_render_ghost() -> void:
+	if _ui_root == null or _ui_entries.is_empty():
+		return
+	var entry: Dictionary = _ui_entries[_ui_selected]
+	if _ui_ghost == null:
+		var box := BoxMesh.new()
+		box.size = Vector3.ONE
+		var material := StandardMaterial3D.new()
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		material.albedo_color = COLOR_UI_GHOST
+		box.material = material
+		_ui_ghost = MeshInstance3D.new()
+		_ui_ghost.name = "WorldClientPlacementGhost"
+		_ui_ghost.mesh = box
+		_ui_ghost.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_ui_root.add_child(_ui_ghost)
+	_ui_ghost_transform = PlacementUI.ghost_transform(
+		entry, _ui_center.x, _ui_center.y, _ui_rotation
+	)
+	_ui_ghost.transform = _ui_ghost_transform
+	_ui_ghost.visible = true
+
+## Render one box per accepted placement. These live under `_ui_root`, which is
+## never cleared by `_build_scene`, so a view refresh keeps them.
+func _ui_render_authoritative() -> void:
+	if _ui_root == null:
+		return
+	for node in _ui_placement_transforms:
+		if is_instance_valid(node):
+			node.free()
+	_ui_placement_transforms.clear()
+	for placement in _ui_placements:
+		var footprint: Vector2 = placement.get("footprint", Vector2.ONE)
+		var bounds: Vector3 = placement.get("bounds", Vector3.ONE)
+		var center: Vector2 = placement.get("center", Vector2.ZERO)
+		var size := Vector3(footprint.x, bounds.y, footprint.y)
+		var box := BoxMesh.new()
+		box.size = Vector3.ONE
+		var material := StandardMaterial3D.new()
+		material.albedo_color = COLOR_UI_PLACEMENT
+		material.roughness = 0.65
+		box.material = material
+		var node := MeshInstance3D.new()
+		node.name = "WorldClientPlacementUI_%d" % int(placement.get("id", 0))
+		node.mesh = box
+		node.transform = Transform3D(
+			Basis.from_scale(size),
+			Vector3(center.x, size.y * 0.5, center.y),
+		)
+		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_ui_root.add_child(node)
+		_ui_placement_transforms.append(node)
+
+## Interactive controls. Scripted runs stay deterministic and ignore input.
+func _unhandled_input(event: InputEvent) -> void:
+	if not _place_ui or _phase != Phase.UI_ACTIVE or not _place_ui_script.is_empty():
+		return
+	if event is InputEventKey and event.pressed and not event.echo:
+		match event.keycode:
+			KEY_TAB:
+				_ui_select(_ui_selected + (-1 if event.shift_pressed else 1))
+			KEY_LEFT:
+				_ui_move(-1, 0)
+			KEY_RIGHT:
+				_ui_move(1, 0)
+			KEY_UP:
+				_ui_move(0, -1)
+			KEY_DOWN:
+				_ui_move(0, 1)
+			KEY_R:
+				_ui_rotate(_ui_rotation + 90)
+			KEY_ENTER, KEY_KP_ENTER:
+				_ui_place()
+			KEY_ESCAPE:
+				_ui_finish()
+	elif event is InputEventMouseButton and event.pressed:
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			_ui_select(_ui_selected - 1)
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			_ui_select(_ui_selected + 1)
 
 func _finish_ok() -> void:
 	if _finished:
@@ -1459,6 +1933,23 @@ func _refresh_hud() -> void:
 				_placement_world_checksum,
 			]
 		)
+	if _place_ui:
+		text += (
+			(
+				"\nplacement_ui: entries=%d selected=%d center=(%.1f, %.1f)"
+				+ " rotation=%d accepted=%d rejected=%d error=%s"
+			)
+			% [
+				_ui_entries.size(),
+				_ui_selected,
+				_ui_center.x,
+				_ui_center.y,
+				_ui_rotation,
+				_ui_accepted,
+				_ui_rejected,
+				_ui_last_error if not _ui_last_error.is_empty() else "-",
+			]
+		)
 	_hud_label.text = text
 
 func _set_status(text: String) -> void:
@@ -1542,6 +2033,14 @@ func _phase_name() -> String:
 			return "zero_interest_sent"
 		Phase.ZERO_VIEW_WAIT:
 			return "zero_view_wait"
+		Phase.UI_SNAPSHOT_SENT:
+			return "ui_snapshot_sent"
+		Phase.UI_VIEW_WAIT:
+			return "ui_view_wait"
+		Phase.UI_PLACE_WAIT:
+			return "ui_place_wait"
+		Phase.UI_ACTIVE:
+			return "ui_active"
 		Phase.PLACE_SENT:
 			return "place_sent"
 		Phase.DISCONNECT_SENT:
