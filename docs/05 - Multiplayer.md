@@ -663,6 +663,20 @@ The synthetic smoke covers idle, open → yes → passed, open → no → failed
 
 Real server wiring is a follow-up: the current `--listen` loop serves one socket at a time, and a one-player vote is rejected with `vote.min_online`.
 
+### Chat panel (developer)
+
+`godot/chat_panel.tscn` (script `godot/chat_panel.gd`) is a standalone synthetic chat panel for the protocol's `chat` / `chat_since` commands. It never opens a socket or starts a timer: the owning client feeds `set_identity`, `set_log`, `apply_chat_sent`, `apply_chat_log`, `set_status`, and `set_error`, sends whatever the panel emits on `command_issued`, and calls `poll_command()` when it wants `{"type":"chat_since","after":last_seq}`. `submit`/`draft` compose `{"type":"chat","text":...}` and apply the server's local rules: trim, reject empty (`chat.empty`), reject over 280 characters (`chat.too_long`), and reject control characters (`chat.invalid`).
+
+`set_log` and `append_entry` dedupe by `seq`, keep lines ascending, and cap the displayed transcript at the server's 64-line log capacity; `last_seq` always advances to the highest sequence seen even when older lines are dropped. `apply_chat_sent` and `apply_chat_log` update the transcript from the protocol payloads, so a future client can wire the panel without reshaping dictionaries.
+
+```bash
+GODOT=/path/to/godot ./scripts/smoke_chat_panel.sh
+```
+
+The deterministic `--smoke` mode uses a fixed identity, fixed entries, both rejected and accepted drafts, two accepted sends, `chat_since` polling after each advance, a `chat_log` merge with duplicates and out-of-order sequences, and the 64-line cap. The script runs the scene twice, diffs the `CHAT_PANEL` markers and checksum, and probes that a headless run without `--smoke` prints usage and exits 2.
+
+Limits: the panel is not wired into `mp_client.gd`, has no push/notification path, no autocomplete or moderation, and does not persist drafts or the transcript across reconnects.
+
 ### Interest filtering v1
 
 `set_interest {center_x, center_z, radius_m}` is a per-session viewport. The executor stores `interest_center: [f32; 2]` (default `[0, 0]`) and `interest_radius_m` (default **2,048 m**, the cap). A successful command answers with **two** messages: the current `snapshot`, then an `interest_view`. The snapshot reports `interest_center`, `interest_radius_m`, and `visible_roads`; the view carries `tick`, `center`, `radius_m`, up to **64** `RoadView { id, start, end, width_m }` entries with `truncated`, and up to **64** `BuildingView { id, center, radius_m }` entries with `buildings_truncated`.
