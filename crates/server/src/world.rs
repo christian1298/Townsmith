@@ -257,14 +257,15 @@ impl ClientRole {
     pub fn required_role(tag: &str) -> Self {
         match tag {
             "hello" | "resume" | "ping" | "disconnect" | "time_vote" | "set_interest"
-            | "settlement_list" => Self::Viewer,
+            | "settlement_list" | "settlement_at" => Self::Viewer,
             "set_tax"
             | "place_road"
             | "place_blueprint"
             | "found_settlement"
             | "settlement_invite"
             | "settlement_set_role"
-            | "settlement_remove_member" => Self::Mayor,
+            | "settlement_remove_member"
+            | "settlement_claim" => Self::Mayor,
             // Time control is admin-only in D-021; unknown tags fail closed.
             "time_control" => Self::Admin,
             _ => Self::Admin,
@@ -1570,6 +1571,11 @@ impl ServerWorld {
             } => {
                 self.apply_settlement_remove_member(*settlement_id, *player_id, *expected_revision)
             }
+            ClientCommand::SettlementClaim {
+                settlement_id,
+                expected_revision,
+            } => self.apply_settlement_claim(*settlement_id, *expected_revision),
+            ClientCommand::SettlementAt { x, z } => self.apply_settlement_at(*x, *z),
             ClientCommand::SetInterest {
                 center_x,
                 center_z,
@@ -2381,6 +2387,55 @@ impl ServerWorld {
             Ok(settlement) => self.finish_settlement_update(settlement),
             Err(error) => reject_with(error.code(), error.to_string()),
         }
+    }
+
+    fn apply_settlement_claim(
+        &mut self,
+        settlement_id: u64,
+        expected_revision: u32,
+    ) -> (Vec<ServerMessage>, &'static str) {
+        let Some(actor) = self.player_id else {
+            return reject_with(
+                codes::SETTLEMENT_IDENTITY,
+                "claiming a settlement requires a player identity",
+            );
+        };
+        let outcome = {
+            let store = match self.settlement_store_mut() {
+                Ok(store) => store,
+                Err(rejection) => return rejection,
+            };
+            store.claim(actor, settlement_id, expected_revision)
+        };
+        match outcome {
+            Ok(settlement) => self.finish_settlement_update(settlement),
+            Err(error) => reject_with(error.code(), error.to_string()),
+        }
+    }
+
+    fn apply_settlement_at(&mut self, x: i32, z: i32) -> (Vec<ServerMessage>, &'static str) {
+        let Some(store) = self.settlements.as_ref() else {
+            return accepted(ServerMessage::SettlementAt {
+                tick: self.tick,
+                found: false,
+                settlement: None,
+            });
+        };
+        if store.seed != self.seed {
+            return reject_with(
+                codes::SETTLEMENT_SEED_MISMATCH,
+                format!(
+                    "settlement store seed {} does not match world seed {}",
+                    store.seed, self.seed
+                ),
+            );
+        }
+        let settlement = store.at(x, z).map(settlement_view);
+        accepted(ServerMessage::SettlementAt {
+            tick: self.tick,
+            found: settlement.is_some(),
+            settlement,
+        })
     }
 
     /// D-033 `build` permission inside a settlement.
@@ -6662,6 +6717,106 @@ mod tests {
         assert_eq!(settlements[0].members.len(), 2);
         assert_eq!(settlements[0].membership_revision, 2);
         assert_eq!(settlements[0].members[1].player, bob);
+    }
+
+    #[test]
+    fn settlement_claim_takes_an_unowned_settlement_once() {
+        let mut world = world_with_hello();
+        let player = world.player_id().expect("player id");
+        let id = seed_settlement(&mut world, None, "Old Town", [10, 10], 64);
+        let before = world.checksum();
+
+        let claimed = world.apply(&ClientCommand::SettlementClaim {
+            settlement_id: id,
+            expected_revision: 0,
+        });
+        let ServerMessage::SettlementUpdated { settlement, .. } = claimed else {
+            panic!("expected settlement_updated, got {claimed:?}");
+        };
+        assert_eq!(settlement.owner_id, Some(player.get()));
+        assert_eq!(settlement.membership_revision, 1);
+        assert_eq!(settlement.members.len(), 1);
+        assert_eq!(settlement.members[0].player, player.get());
+        assert_eq!(settlement.members[0].role, "owner");
+        assert_ne!(world.checksum(), before);
+
+        let again = world.apply(&ClientCommand::SettlementClaim {
+            settlement_id: id,
+            expected_revision: 1,
+        });
+        assert!(matches!(
+            again,
+            ServerMessage::Reject { ref code, .. } if code == "settlement.already_owned"
+        ));
+        let stale = world.apply(&ClientCommand::SettlementClaim {
+            settlement_id: id,
+            expected_revision: 0,
+        });
+        assert!(matches!(
+            stale,
+            ServerMessage::Reject { ref code, .. } if code == "settlement.revision_conflict"
+        ));
+    }
+
+    #[test]
+    fn settlement_at_finds_the_nearest_containing_record() {
+        let mut world = world_with_hello();
+        let outside = world.apply(&ClientCommand::SettlementAt { x: 500, z: 500 });
+        assert!(matches!(
+            outside,
+            ServerMessage::SettlementAt {
+                found: false,
+                settlement: None,
+                ..
+            }
+        ));
+
+        seed_settlement(&mut world, None, "Old Town", [10, 10], 64);
+        let inside = world.apply(&ClientCommand::SettlementAt { x: 12, z: 12 });
+        let ServerMessage::SettlementAt {
+            found,
+            settlement: Some(settlement),
+            ..
+        } = inside
+        else {
+            panic!("expected a containing settlement, got {inside:?}");
+        };
+        assert!(found);
+        assert_eq!(settlement.id, 1);
+        assert_eq!(settlement.name, "Old Town");
+
+        let outside = world.apply(&ClientCommand::SettlementAt { x: 300, z: 300 });
+        assert!(matches!(
+            outside,
+            ServerMessage::SettlementAt {
+                found: false,
+                settlement: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn settlement_claim_requires_mayor_but_at_is_viewer_readable() {
+        let mut viewer = ServerWorld::with_role(SEED, ClientRole::Viewer);
+        first_response(viewer.apply_all(&hello()));
+        let denied = viewer.apply(&ClientCommand::SettlementClaim {
+            settlement_id: 1,
+            expected_revision: 0,
+        });
+        assert!(matches!(
+            denied,
+            ServerMessage::Reject { ref code, .. } if code == codes::FORBIDDEN
+        ));
+        let at = viewer.apply(&ClientCommand::SettlementAt { x: 0, z: 0 });
+        assert!(matches!(
+            at,
+            ServerMessage::SettlementAt {
+                found: false,
+                settlement: None,
+                ..
+            }
+        ));
     }
 
     #[test]
