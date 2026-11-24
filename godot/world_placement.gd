@@ -3463,6 +3463,7 @@ func _settlement_detail_section(settlement: Dictionary, district: Dictionary, po
 		"z": int(center.y),
 		"radius": i18n.format_float(float(settlement.get("radius_m", 0.0)), 0),
 	}) + "\n"
+	block += _settlement_membership_line(settlement) + "\n"
 	var district_center := _xz_from_pair(district.get("center", null))
 	if not bool(district.get("ok", false)) or not is_finite(district_center.x) \
 		or not is_finite(district_center.y) or district_center.distance_to(center) >= 0.001:
@@ -3523,6 +3524,36 @@ func _settlement_detail_section(settlement: Dictionary, district: Dictionary, po
 		"count": i18n.format_int(allowlist_count) if allowlist_count > 0 else i18n.NOT_AVAILABLE,
 	}) + "\n"
 	return block
+
+## One compact D-033 membership line for the settlement detail block. It reads
+## only the `settlements()` record the list already rendered: `owned`,
+## `owner_id`, `members`, and `membership_revision`. Role counts are sorted by
+## role name so the rebuilt dashboard text stays identical, and numbers use
+## `WorldI18n.format_int`. An unowned record has no member/owner count to show.
+func _settlement_membership_line(settlement: Dictionary) -> String:
+	var revision: String = i18n.format_int(int(settlement.get("membership_revision", 0)))
+	if not bool(settlement.get("owned", false)):
+		return "Members %s · revision %s" % [i18n.NOT_AVAILABLE, revision]
+	var owner_value = settlement.get("owner_id", 0)
+	var owner_id := int(owner_value) if owner_value != null else 0
+	var rows_value = settlement.get("members", [])
+	var rows: Array = rows_value if rows_value is Array else []
+	var counts := {}
+	for member in rows:
+		if member is Dictionary:
+			var role := str(member.get("role", "member"))
+			counts[role] = int(counts.get(role, 0)) + 1
+	var roles: Array = counts.keys()
+	roles.sort()
+	var suffix := ""
+	for role in roles:
+		suffix += " · %s %s" % [str(role), i18n.format_int(int(counts[role]))]
+	return "Owner #%s · %s members · revision %s%s" % [
+		i18n.format_int(owner_id),
+		i18n.format_int(rows.size()),
+		revision,
+		suffix,
+	]
 
 ## Read an `[x, z]` pair from a plain or packed array; NAN when malformed.
 ## A detail-only helper: it never converts missing values into a fake zero.
@@ -5780,6 +5811,25 @@ func _run_scene_smoke() -> void:
 					"z": int(second_settlement_center.y),
 					"radius": i18n.format_float(float(second_record.get("radius_m", 0.0)), 0),
 				}
+				# `settlement_found` creates an unowned v1 record: revision 0,
+				# no members. The fixture therefore exercises the unowned
+				# membership line; the helper check covers the owned format.
+				var unowned_membership_line := "Members %s · revision %s" % [
+					i18n.NOT_AVAILABLE,
+					i18n.format_int(0),
+				]
+				settlement_detail_ok = settlement_detail_ok and _settlement_membership_line({
+					"owned": true,
+					"owner_id": 42,
+					"membership_revision": 7,
+					"members": [
+						{"player": 3, "role": "member"},
+						{"player": 4, "role": "builder"},
+						{"player": 5, "role": "manager"},
+						{"player": 6, "role": "builder"},
+					],
+				}) == "Owner #42 · 4 members · revision 7 · builder 2 · manager 1 · member 1"
+				settlement_detail_ok = settlement_detail_ok and _settlement_membership_line({}) == unowned_membership_line
 				settlement_detail_ok = settlement_detail_ok and _select_settlement(first_settlement_id)
 				_update_dashboard()
 				var first_detail_section: String = _settlements_section(
@@ -5788,6 +5838,7 @@ func _run_scene_smoke() -> void:
 				settlement_detail_ok = settlement_detail_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_detail_title"))
 				settlement_detail_ok = settlement_detail_ok and dashboard_text.text.contains(i18n.t("base.ui.dashboard.body.settlement_detail", first_detail_params))
 				settlement_detail_ok = settlement_detail_ok and first_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail", first_detail_params))
+				settlement_detail_ok = settlement_detail_ok and first_detail_section.contains(unowned_membership_line)
 				settlement_detail_ok = settlement_detail_ok and first_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail_district", {
 					"radius": i18n.format_float(DISTRICT_RADIUS_M, 0),
 					"residents": i18n.format_int(int(first_district.get("population", 0))),
@@ -5839,6 +5890,7 @@ func _run_scene_smoke() -> void:
 					core.settlements(), second_district, core.district_policies_state(SEED)
 				)
 				settlement_detail_ok = settlement_detail_ok and second_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail", second_detail_params))
+				settlement_detail_ok = settlement_detail_ok and second_detail_section.contains(unowned_membership_line)
 				settlement_detail_ok = settlement_detail_ok and second_detail_section.contains(i18n.t("base.ui.dashboard.body.settlement_detail_district", {
 					"radius": i18n.format_float(DISTRICT_RADIUS_M, 0),
 					"residents": i18n.format_int(int(second_district.get("population", 0))),

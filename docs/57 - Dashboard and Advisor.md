@@ -25,18 +25,18 @@ In:
 - rules for food, water, power, jobs, vacancies, happiness, commute, roads, construction, debt, and bankruptcy;
 - a `City Dashboard` overlay with population, district, policies, work, wellbeing, services, treasury, industry, roads, and construction sections;
 - a District section that queries `district_summary` around the Mayor camera target or the selected building with a 256 m radius once per dashboard rebuild;
-- a Settlements section that lists every founded settlement in stable ascending-id order with name, owner, centre, radius, and a selected marker; `PageUp` / `PageDown` cycle a leading "none" entry plus every settlement, and an explicit selection overrides the District, Policies, and `F7` heatmap centres until cleared; a selected record adds a read-only detail block under the list with its identity, the same 256 m district metrics, the smallest-id containing policy, and the district's completed/construction-site counts;
+- a Settlements section that lists every founded settlement in stable ascending-id order with name, owner, centre, radius, and a selected marker; `PageUp` / `PageDown` cycle a leading "none" entry plus every settlement, and an explicit selection overrides the District, Policies, and `F7` heatmap centres until cleared; a selected record adds a read-only detail block under the list with its identity, its D-033 ownership/member/role/revision read model, the same 256 m district metrics, the smallest-id containing policy, and the district's completed/construction-site counts;
 - a Policies section that calls `district_policies_state` once per dashboard rebuild and reports the registered policy count plus the smallest-id policy whose inclusive XZ circle contains the same settlement/building/camera centre, with a compact keyboard editor for that policy (create default, remove, construction toggle, tax ±0.25, service funding ±0.25) through the existing bridge CRUD;
 - an `F6` District focus toggle: camera focus by default, selection focus when a building is selected, with the selected placement's centre as the query centre and an F6 return action; an explicit settlement selection takes precedence over building focus;
 - an `F7` district heatmap overlay that queries `district_heatmap` at 512 m / 32 m around the same focus, renders up to 1,024 pooled cells, and shows a localized status/legend line; `Shift+F7` cycles Population, Jobs, and Happiness with a colorblind-safe, luminance-ordered ramp and metric-aware peak values;
 - `F1` toggles the dashboard; `Esc` closes it; entering Architect Mode closes it;
-- a world-scene smoke that checks the advisor warning, dashboard text, district values and labels, the camera/selection focus toggle, settlement list/selection/precedence/fallback and the per-settlement detail block, policy count/name/tax/funding/allowlist rendering, compact policy create/toggle/clamp/preserve/remove/reject behavior, localized advisor titles, and the heatmap grid/instance/teardown contract;
+- a world-scene smoke that checks the advisor warning, dashboard text, district values and labels, the camera/selection focus toggle, settlement list/selection/precedence/fallback and the per-settlement detail block including the unowned membership line and the owned role-count format, policy count/name/tax/funding/allowlist rendering, compact policy create/toggle/clamp/preserve/remove/reject behavior, localized advisor titles, and the heatmap grid/instance/teardown contract;
 - markers `dashboard=ok`, `district_ui=ok`, `settlement_select=ok`, `settlement_detail=ok`, `policy_ui=ok`, `policy_edit=ok`, `district_select=ok`, `heatmap_ui=ok`, and `heatmap_modes=ok`, enforced by `scripts/smoke_world_scene.sh`.
 
 Out:
 
 - player-facing standalone district or per-settlement panels outside the dashboard (the dashboard has one read-only Settlements section that selects one record for the existing 256 m District, containing-policy, and heatmap queries and renders a detail block from those same reads; per-settlement budgets, rename/merge, and drill-down beyond that block remain later; the developer-only policy editor in §4.2 and read-only district overview in §4.3 are separate scenes, not dashboard panels);
-- settlement editing, membership, roles, or permission views in the dashboard (D-033's core model and the first server/bridge slices are implemented, but dashboard wiring is not); the Settlements section remains a selector plus a read-only detail block, and the ownership string it shows is a display label;
+- settlement editing, membership controls, role assignment, or permission views in the dashboard (D-033's core model, the server checks, and the bridge read model are implemented, but dashboard mutation wiring is not); the Settlements section remains a selector plus a read-only detail block that shows the D-033 owner id, member count, role counts, and revision; the separate `owner` string it also shows remains a display label;
 - clickable advice that selects or centres a building;
 - acknowledged, dismissed, or persisted notifications;
 - charts, history, trend lines, or time-series;
@@ -342,7 +342,7 @@ The **Policies** section follows the same centre as the District query (`_distri
 ### 5.2 Selectable settlements
 
 > [!warning] Read-only today
-> The Settlements section cannot create, rename, remove, claim, transfer, or invite. The `owner` it displays is a display label, and the panel has no membership list, role, or permission view. D-033 defines membership, `build`/`manage`/`tax`/`members`, claims, and transfer; the server now enforces `build` on placement and the bridge exposes read-only membership, but dashboard controls and the remaining server checks are follow-ups.
+> The Settlements section cannot create, rename, remove, claim, transfer, invite, remove a member, or change a role. The `owner` string it lists is a display label; the detail block separately shows the D-033 owner id, member count, role counts, and membership revision read-only, but there is no membership list, role assignment, or permission view. D-033 defines membership, `build`/`manage`/`tax`/`members`, claims, and transfer; the server now enforces `build` on placement and the bridge exposes read-only membership, but dashboard controls and the remaining server checks are follow-ups.
 
 The dashboard **Settlements** section is a read-only selector over the bridge's `settlements()` list. Rows are ordered by ascending settlement id (the stable selector) and show id, name, owner, centre, and radius; the selected row is bold, prefixed with `▸`, and ends with the localized `selected`. The section also shows the founded count and the selected name, or localized none/unavailable lines. It never creates, renames, removes, or saves a settlement, and it adds no save field or bridge call beyond the existing `settlements()` read.
 
@@ -363,13 +363,14 @@ Selection is runtime UI state, not a save field. It survives dashboard rebuilds 
 | Line | Source |
 |---|---|
 | `Settlement detail` + name/owner/id/centre/radius | the selected `settlements()` record |
+| `Members — · revision N` (unowned) or `Owner #id · N members · revision N · role count ...` (owned) | the same record's D-033 membership read model: `owned`, `owner_id`, `members`, `membership_revision`; role counts are sorted by role name |
 | `Within 256 m · residents · housing · vacant` | the dashboard's `district_summary(SEED, settlement centre, 256)` |
 | jobs · employed · unemployed | same district payload |
 | happiness · food/water/rest · commute | same district payload; `—` for happiness/needs when population is 0 |
 | completed buildings · construction sites | same district payload (`completed_buildings`, `construction_sites`) |
 | policy name · tax · funding, construction allowed/blocked, allowlist count | the smallest-id policy whose inclusive circle contains the settlement centre, scanned from `district_policies_state` |
 
-The block is presentation only: it never creates, updates, or removes a settlement or policy, and it does not compute a per-settlement budget, tax, ownership, or simulation state. The district counts are the same values the District section shows while the settlement is selected, repeated inside the settlement section for a single-record read. An empty population renders `—` for happiness and needs rather than a fake `0%`; the completed-buildings line is omitted if a payload ever lacks `completed_buildings`/`construction_sites`, rather than inventing a zero.
+The block is presentation only: it never creates, updates, or removes a settlement or policy, never edits membership or roles, and does not compute a per-settlement budget, tax, or simulation state. The district counts are the same values the District section shows while the settlement is selected, repeated inside the settlement section for a single-record read. An empty population renders `—` for happiness and needs rather than a fake `0%`; the completed-buildings line is omitted if a payload ever lacks `completed_buildings`/`construction_sites`, rather than inventing a zero.
 
 Clearing rules:
 
@@ -379,7 +380,7 @@ Clearing rules:
 - A payload whose `center` does not match the selected settlement centre (malformed or stale state) is treated as unavailable, so values never render under the wrong header.
 - Repeating the same selection rebuilds the identical block; the smoke compares the full dashboard text after a `none` → same-id cycle.
 
-All seven new strings are keyed in EN/DE under `base.ui.dashboard.body.*`: detail title, identity, district, jobs, buildings, containing policy, and no-containing-policy. The world table floor is now **265** keys.
+All seven new strings are keyed in EN/DE under `base.ui.dashboard.body.*`: detail title, identity, district, jobs, buildings, containing policy, and no-containing-policy. The world table floor is now **265** keys. The membership summary is one compact read-only status line built from the selected record: unowned records show `Members — · revision N`; owned records show the owner id, member count, role counts in stable sorted role-name order, and the revision. It adds no member list, role, or permission control.
 
 All ten selector strings are keyed in EN/DE: section title, founded count, none/unavailable, row, selected row, focus line, focus hint, and the `PageUp`/`PageDown` hint. Settlement names, owners, ids, and centres stay verbatim.
 
