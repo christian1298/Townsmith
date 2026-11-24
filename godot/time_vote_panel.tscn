@@ -1,0 +1,8 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://time_vote_panel.gd" id="1"]
+
+[node name="TimeVotePanel" type="PanelContainer"]
+offset_right = 380.0
+offset_bottom = 330.0
+script = ExtResource("1")
