@@ -87,6 +87,7 @@ var _list: ItemList
 var _empty_label: Label
 var _summary_title: Label
 var _settlement_line: Label
+var _membership_line: Label
 var _district_line: Label
 var _jobs_line: Label
 var _needs_line: Label
@@ -240,6 +241,31 @@ func _settlement_center(settlement: Dictionary) -> Vector2:
 	return _xy_of(settlement.get("center", []))
 
 
+func _membership_summary(settlement: Dictionary) -> String:
+	var revision := int(settlement.get("membership_revision", 0))
+	if not bool(settlement.get("owned", false)):
+		return "Unowned · revision %s" % _i18n.format_int(revision)
+	var owner_id := int(settlement.get("owner_id", 0))
+	var rows = settlement.get("members", [])
+	var counts := {}
+	if rows is Array:
+		for member in rows:
+			if member is Dictionary:
+				var role := str(member.get("role", "member"))
+				counts[role] = int(counts.get(role, 0)) + 1
+	var parts: Array[String] = []
+	for role in counts.keys():
+		parts.append("%s %s" % [role, _i18n.format_int(int(counts[role]))])
+	parts.sort()
+	var suffix := "" if parts.is_empty() else " · " + " · ".join(parts)
+	return "Owner #%s · %s members · revision %s%s" % [
+		_i18n.format_int(owner_id),
+		_i18n.format_int((rows as Array).size() if rows is Array else 0),
+		_i18n.format_int(revision),
+		suffix,
+	]
+
+
 func _policy_center(policy: Dictionary) -> Vector2:
 	return _xy_of(policy.get("center", []))
 
@@ -301,6 +327,7 @@ func _show_empty() -> void:
 		_summary_title.text = "No settlement selected"
 	if _settlement_line != null:
 		_settlement_line.text = "—"
+		_membership_line.text = "—"
 		_district_line.text = "—"
 		_jobs_line.text = "—"
 		_needs_line.text = "—"
@@ -333,6 +360,7 @@ func _show_unavailable(code: String, message: String) -> void:
 			if not message.is_empty()
 			else "Cannot read settlements: %s" % code
 		)
+		_membership_line.text = "—"
 		_district_line.text = "District unavailable — the panel does not retry."
 		_jobs_line.text = "—"
 		_needs_line.text = "—"
@@ -365,6 +393,8 @@ func _render_selection() -> void:
 			_i18n.format_float(center.y, 0),
 			_i18n.format_int(int(settlement.get("radius_m", 0))),
 		]
+		if _membership_line != null:
+			_membership_line.text = _membership_summary(settlement)
 		_render_district()
 		_render_policy(center)
 		_checksum_line.text = "settlements %s · district %s · policies %s" % [
@@ -690,6 +720,8 @@ func _build_summary_panel() -> Control:
 	box.add_child(_summary_title)
 
 	_settlement_line = _add_summary_label(box, "—", TEXT_COLOR)
+	_add_summary_heading(box, "Membership (read-only)")
+	_membership_line = _add_summary_label(box, "—", TEXT_COLOR)
 	_add_summary_heading(box, "District (256 m around the settlement centre)")
 	_district_line = _add_summary_label(box, "—", TEXT_COLOR)
 	_jobs_line = _add_summary_label(box, "—", TEXT_COLOR)
@@ -927,6 +959,8 @@ func _run_smoke() -> void:
 			status = "select_first_district_checksum"
 		elif not _settlement_line.text.contains("Smoke Alpha"):
 			status = "select_first_title"
+		elif not _membership_line.text.contains("Unowned"):
+			status = "select_first_membership"
 		elif not _district_line.text.contains("Population 0"):
 			status = "select_first_row"
 		elif not _policy_line.text.contains("#1") or not _policy_line.text.contains("Smoke Core"):
