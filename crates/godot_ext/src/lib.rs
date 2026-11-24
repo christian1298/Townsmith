@@ -2680,6 +2680,38 @@ impl TownsmithCore {
             .is_some_and(|store| store.remove(id))
     }
 
+    /// Rename a settlement as its current owner.
+    #[func]
+    fn settlement_rename(&self, id: i64, name: GString, expected_revision: i64) -> VarDictionary {
+        let (id, expected_revision) = match settlement_rename_args(id, expected_revision) {
+            Ok(args) => args,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        let mut store = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(store) = store.as_mut() else {
+            return settlement_error_result(&SettlementError::Unknown { id });
+        };
+        match settlement_rename_in_store(store, id, &name.to_string(), expected_revision) {
+            Ok(settlement) => {
+                let mut result = VarDictionary::new();
+                result.set("ok", true);
+                result.set(
+                    "settlement",
+                    &settlement_to_dictionary(&settlement).to_variant(),
+                );
+                result.set(
+                    "checksum",
+                    &GString::from(&format!("{:016x}", store.checksum())),
+                );
+                result
+            }
+            Err((code, message)) => placement_simple_error(code, message),
+        }
+    }
+
     /// Owner of a world cell, or `{ ok, found: false }`.
     #[func]
     fn settlement_at(&self, x: i64, z: i64) -> VarDictionary {
@@ -8348,6 +8380,40 @@ fn settlement_error_result(error: &SettlementError) -> VarDictionary {
     placement_simple_error(error.code(), error.to_string())
 }
 
+/// Convert the Godot rename arguments to the core domain types.
+fn settlement_rename_args(
+    id: i64,
+    expected_revision: i64,
+) -> Result<(u64, u32), (&'static str, &'static str)> {
+    let id = u64::try_from(id).map_err(|_| ("invalid_id", "settlement id must be non-negative"))?;
+    let expected_revision = u32::try_from(expected_revision)
+        .map_err(|_| ("invalid_revision", "settlement revision must fit 32 bits"))?;
+    Ok((id, expected_revision))
+}
+
+/// Rename `id` as its current owner, without touching an unowned settlement.
+///
+/// The bridge has no player registry, so the local actor is the settlement's
+/// own `owner_id`. This never transfers ownership or changes membership.
+fn settlement_rename_in_store(
+    store: &mut SettlementStore,
+    id: u64,
+    name: &str,
+    expected_revision: u32,
+) -> Result<Settlement, (&'static str, String)> {
+    let Some(settlement) = store.get(id) else {
+        let error = SettlementError::Unknown { id };
+        return Err((error.code(), error.to_string()));
+    };
+    let Some(owner) = settlement.owner_id else {
+        let error = SettlementError::Unowned { id };
+        return Err((error.code(), error.to_string()));
+    };
+    store
+        .rename(owner, id, name, expected_revision)
+        .map_err(|error| (error.code(), error.to_string()))
+}
+
 /// FNV-1a feed shared by the bridge fingerprints.
 fn fnv1a_push(hash: &mut u64, bytes: &[u8]) {
     for byte in bytes {
@@ -13341,6 +13407,109 @@ mod tests {
             assert!(payload.get(key).is_some(), "missing legacy key {key}");
         }
         assert_eq!(payload["center"], serde_json::json!([10, 20]));
+    }
+
+    fn bridge_settlement_request(name: &str) -> SettlementRequest {
+        SettlementRequest {
+            name: name.to_string(),
+            owner: "player".to_string(),
+            center: [10, 20],
+            radius_m: 64,
+        }
+    }
+
+    #[test]
+    fn settlement_rename_in_store_uses_owner_and_bumps_revision() {
+        let mut store = SettlementStore::new(2026);
+        let owner = core_city::player::PlayerId::new(1).expect("player id");
+        let found = store
+            .found_for_player(&bridge_settlement_request("Old Harbour"), owner)
+            .expect("found");
+        let before = store.checksum();
+        let renamed = settlement_rename_in_store(
+            &mut store,
+            found.id,
+            "New Harbour",
+            found.membership_revision,
+        )
+        .expect("rename");
+        assert_eq!(renamed.name, "New Harbour");
+        assert_eq!(renamed.membership_revision, found.membership_revision + 1);
+        assert_eq!(store.get(found.id).expect("settlement").name, "New Harbour");
+        assert_ne!(store.checksum(), before);
+    }
+
+    #[test]
+    fn settlement_rename_in_store_rejects_stale_revision_without_mutation() {
+        let mut store = SettlementStore::new(2026);
+        let owner = core_city::player::PlayerId::new(1).expect("player id");
+        let found = store
+            .found_for_player(&bridge_settlement_request("Old Harbour"), owner)
+            .expect("found");
+        let before = store.checksum();
+        let (code, _) = settlement_rename_in_store(
+            &mut store,
+            found.id,
+            "New Harbour",
+            found.membership_revision - 1,
+        )
+        .expect_err("stale revision");
+        assert_eq!(code, "settlement.revision_conflict");
+        assert_eq!(store.get(found.id).expect("settlement").name, "Old Harbour");
+        assert_eq!(store.checksum(), before);
+    }
+
+    #[test]
+    fn settlement_rename_in_store_rejects_unowned_without_mutation() {
+        let mut store = SettlementStore::new(2026);
+        let found = store
+            .found(&bridge_settlement_request("Old Harbour"))
+            .expect("found");
+        let before = store.checksum();
+        let (code, _) = settlement_rename_in_store(
+            &mut store,
+            found.id,
+            "New Harbour",
+            found.membership_revision,
+        )
+        .expect_err("unowned");
+        assert_eq!(code, "settlement.unowned");
+        assert_eq!(store.get(found.id).expect("settlement").name, "Old Harbour");
+        assert_eq!(store.checksum(), before);
+    }
+
+    #[test]
+    fn settlement_rename_in_store_rejects_unknown_id() {
+        let mut store = SettlementStore::new(2026);
+        let before = store.checksum();
+        let (code, _) =
+            settlement_rename_in_store(&mut store, 99, "New Harbour", 1).expect_err("unknown");
+        assert_eq!(code, "settlement.unknown");
+        assert_eq!(store.checksum(), before);
+    }
+
+    #[test]
+    fn settlement_rename_args_rejects_negative_and_overflowing_values() {
+        assert_eq!(
+            settlement_rename_args(-1, 0).expect_err("negative id").0,
+            "invalid_id"
+        );
+        assert_eq!(
+            settlement_rename_args(1, -1)
+                .expect_err("negative revision")
+                .0,
+            "invalid_revision"
+        );
+        assert_eq!(
+            settlement_rename_args(1, i64::from(u32::MAX) + 1)
+                .expect_err("overflowing revision")
+                .0,
+            "invalid_revision"
+        );
+        assert_eq!(
+            settlement_rename_args(1, i64::from(u32::MAX)).expect("valid"),
+            (1, u32::MAX)
+        );
     }
 
     #[test]
