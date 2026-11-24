@@ -2,7 +2,7 @@
 title: Decisions
 project: Townsmith
 status: active
-updated: 2026-11-23
+updated: 2026-11-24
 tags:
   - townsmith
   - adr
@@ -50,7 +50,7 @@ tags:
 | D-030 | District policy tax multipliers weight city tax income by home and workplace | Proposed | 2026-11-23 | [[07 - Simulation and AI]], [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]] |
 | D-031 | District policy service funding weights civic service upkeep by completed site | Proposed | 2026-11-23 | [[07 - Simulation and AI]], [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]] |
 | D-032 | Server-authoritative blueprint placement | Accepted | 2026-11-23 | [[05 - Multiplayer]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[42 - World Placement Bridge]], [[53 - Treasury and Taxes]] |
-| D-033 | Settlement ownership, membership, and permissions | Proposed | 2026-11-23 | [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[48 - Settlement Boundaries]], [[57 - Dashboard and Advisor]] |
+| D-033 | Settlement ownership, membership, and permissions | Accepted (core model) | 2026-11-24 | [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[48 - Settlement Boundaries]], [[57 - Dashboard and Advisor]] |
 | D-034 | Content-pack identity in world saves | Accepted | 2026-11-23 | [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[42 - World Placement Bridge]] |
 
 ---
@@ -1434,7 +1434,7 @@ The result is a split placement model in multiplayer: a client can run the bridg
 Accepted 2026-11-23 for a staged v1 implementation. The following defaults bound that slice; anything not listed stays future work.
 
 - **Package source:** v1 is a **pre-seeded server library**. The server starts with an absolute content-addressed `.tsbp` library root; the client sends only `blueprint_hash`, `x`, `z`, and `rotation`. There is **no upload, fetch, or auto-download** in v1 (Q-107, Q-108).
-- **Policy:** v1 enforcement uses a server-configured district policy registry loaded from JSON at startup. It is **not persisted in `ServerSave`**, and a missing or foreign-seed registry is neutral. Per-settlement permissions remain D-033 (Proposed) and are not v1.
+- **Policy:** v1 enforcement uses a server-configured district policy registry loaded from JSON at startup. It is **not persisted in `ServerSave`**, and a missing or foreign-seed registry is neutral. Per-settlement permissions are defined by D-033's accepted core model but are not wired into server v1.
 - **Terrain:** v1 validates against the server's deterministic placeholder ground, the same constant ground used by roads. Full terrain sampling stays in the local preview until the server streams terrain.
 - **Persistence:** v1 stores placements and construction in optional `ServerSave` fields; older saves without them load unchanged. There is no rollback, history, or garbage collection in v1 (Q-110).
 - **Idempotency and limits:** v1 idempotency is exact placement identity (hash + centre + rotation); a repeat returns the existing placement without a second charge. Rate limiting and audit reuse the existing per-session token bucket and audit ring (Q-109).
@@ -1492,7 +1492,10 @@ Accepted 2026-11-23 for the staged v1 above and implemented in #306 at master `6
 
 ## D-033 — Settlement ownership, membership, and permissions
 
-**Status:** Proposed · **Date:** 2026-11-23 · **Affects:** [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[48 - Settlement Boundaries]], [[57 - Dashboard and Advisor]]
+**Status:** Accepted (core data model) 2026-11-24 · **Date:** 2026-11-23 · **Affects:** [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[48 - Settlement Boundaries]], [[57 - Dashboard and Advisor]]
+
+> [!success] Accepted 2026-11-24 for the core data model
+> `core_city` now implements `PlayerId`/`PlayerRegistry`, roles and permission bits, settlement `owner_id`/`members`/`membership_revision`, claim/transfer/release and member-management methods, the save v1→v2 migration, and the stable rejection codes. Stores that never use membership stay v1 and keep their existing checksums; the first owned/membership mutation upgrades the store to v2. Server enforcement, settlement protocol commands, bridge payload additions, and dashboard edit controls are follow-up slices and are **not** part of this acceptance. Single-player still uses the implicit-owner rule at the call-site level.
 
 ### Context
 
@@ -1500,7 +1503,7 @@ D-019 accepts settlements as soft simulation units, says each player may manage 
 
 There is no membership, role, permission, transfer, claim, or audit model, and no save field for any of them. The dashboard Settlements section is a read-only selector with a read-only detail block; the standalone district overview is also read-only. Multiplayer has global dev roles only (`viewer`, `mayor`, `admin`) assigned by the server process, and the authoritative `ServerWorld` has no settlement store at all. Protocol v1 has no settlement command. D-032 (Accepted 2026-11-23, implemented by #306) adds server-authoritative blueprint placement and says the server record carries "owner/settlement when those exist", but it defines neither.
 
-The result: a multiplayer client can write any owner label it likes, a Mayor can place and (once policies are editable) edit inside any settlement, and no player can invite a collaborator, transfer a settlement, or claim an unowned one. This ADR defines the missing contract. It does not implement it.
+The result: a multiplayer client can write any owner label it likes, a Mayor can place and (once policies are editable) edit inside any settlement, and no player can invite a collaborator, transfer a settlement, or claim an unowned one. This ADR defines the missing contract; its core data model is now implemented, while the server, bridge, and dashboard enforcement paths remain follow-ups.
 
 ### Decision
 
@@ -1613,7 +1616,7 @@ pub struct Settlement {
 
 - **In scope:** the membership model, the permission set, server check points for placement/policy/tax/settlement management once those commands exist, claim/transfer/remove rules, the save v2 migration, and stable rejection codes.
 - **Out of scope:** authentication (Q-111), the protocol command set itself, a membership UI, per-district permissions, per-lot claims, settlement splitting/merging, and live in-world editing permissions beyond the bit definition.
-- **Not implemented today.** `owner` remains an unenforced display string and no permission check exists in the bridge, dashboard, or server. This ADR does not change code, protocol, or saves.
+- **Status.** The core data model, save migration, and membership rules are implemented in `core_city`. The bridge still exposes the legacy `owner` display string and does not yet accept a `PlayerId`; the server has no settlement store and protocol v1 has no settlement command. Those enforcement and UI paths remain follow-up work.
 
 ### Consequences
 

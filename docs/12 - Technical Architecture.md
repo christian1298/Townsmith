@@ -2,7 +2,7 @@
 title: Technical Architecture
 project: Townsmith
 status: proposed
-updated: 2026-11-23
+updated: 2026-11-24
 tags:
   - townsmith
   - architecture
@@ -318,7 +318,7 @@ save_001/
 | `mods` | id, version, hash, enabled |
 | `events` | id, tick, type, payload_json (journal) |
 
-- D-033 (Proposed) would add `owner_id`, `members`, and `membership_revision` to the settlement record. Today's world JSON stores only `owner`, a display string.
+- D-033's core model adds `owner_id`, `members`, and `membership_revision` to the settlement record in `core_city` (lazy v2 save upgrade). The bridge world JSON still writes only `owner`, a display string, until the bridge slice wires the new fields.
 - Blobs (voxels) live in `.tsbp` files, not SQLite.
 - JSON columns are for flexible/modded state; hot fields get real columns.
 - Writes are batched; do not commit per tick.

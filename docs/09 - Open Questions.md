@@ -2,7 +2,7 @@
 title: Open Questions
 project: Townsmith
 status: active
-updated: 2026-11-23
+updated: 2026-11-24
 tags:
   - townsmith
   - questions
@@ -188,11 +188,11 @@ These must be answered before or during Phase 0. They change the architecture, t
 
 ## Settlement ownership questions
 
-These support D-033 (Proposed). None is answered yet; the ADR keeps ownership and permissions **unimplemented** until each has a v1 default. Today `Settlement.owner` is an unenforced display string, `ServerWorld` has no settlement store, and the only roles are global dev roles.
+These support D-033, whose core data model is now implemented (accepted 2026-11-24). Q-111 is answered; Q-112–Q-115 remain open. The bridge still exposes `Settlement.owner` as a display string, `ServerWorld` has no settlement store, and the only roles are global dev roles, so enforcement is a follow-up slice.
 
 | ID | Question | Current assumption / recommendation | Priority |
 |---|---|---|---|
-| **Q-111** | What is the stable player identity source — a server-issued per-save id, Steam ID, account/password, or the current display name? | Server-issued per-save player id, with the display name as a mutable label; Steam/account auth later. A free-form owner string is never identity. | High |
+
 | **Q-112** | When is a settlement unowned, who may claim it, is proximity or presence required, and when does an inactive owner lose it? | Only migrated or admin-released settlements are unowned; an explicit claim by id with the Mayor/Admin role. No automatic claim by entering the radius; abandonment rules deferred. | High |
 | **Q-113** | How does ownership transfer work when the owner is offline or gone (recipient acceptance, admin override, succession, dead-owner servers)? | Owner-initiated transfer to a known player; admin force/release for dead-owner servers; recipient acceptance deferred until identity exists. | Normal |
 | **Q-114** | What are the per-settlement member, per-player settlement, manager, and membership-edit rate limits? | Provisional: 64 members per settlement, 16 settlements owned per player, same command bucket as placement; tune with playtests. | Normal |
@@ -346,6 +346,7 @@ These support D-034 (accepted 2026-11-23). The bridge v1 is implemented: a base-
 | **Q-108** | How are modded blueprints and dependencies resolved when the server lacks the mod? | The server must already hold the pack and its dependencies; unknown packages are rejected with a stable code and never auto-downloaded. Removal policy remains future work. | 2026-11-23 | D-032 |
 | **Q-109** | Placement rate limits, quotas, idempotency, and audit? | Exact placement identity (hash + centre + rotation) is the idempotency key; a repeat returns the existing placement without a second charge. Reuses the existing per-session token bucket and audit ring; per-player quotas remain future work. | 2026-11-23 | D-032 |
 | **Q-110** | Server placement save migration and rollback/history? | Optional `ServerSave` placement/construction fields with serde defaults; older saves without them load unchanged. No migration beyond load-old/ignore-missing; rollback, history, and GC remain future work. | 2026-11-23 | D-032 |
+| **Q-111** | What is the stable player identity source — a server-issued per-save id, Steam ID, account/password, or the current display name? | Server-issued per-save `PlayerId(u64)`, with the display name as a mutable label; Steam/account authentication later. A free-form owner string is never identity. | 2026-11-24 | D-033 |
 
 ## How to answer a question
 
@@ -374,5 +375,5 @@ These support D-034 (accepted 2026-11-23). The bridge v1 is implemented: a base-
 | Q-083–Q-089 | Construction |
 | Q-090–Q-100 | Materials, structure, and basements |
 | Q-107–Q-110 | Server-authoritative blueprint placement |
-| Q-111–Q-115 | Settlement ownership, membership, and permissions |
+| Q-111–Q-115 | Settlement ownership, membership, and permissions (Q-111 answered) |
 | Q-116–Q-118 | Content-pack identity in world saves (D-034 accepted; bridge v1 implemented) |
