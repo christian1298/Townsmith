@@ -45,6 +45,7 @@ pub mod named;
 pub mod pack;
 pub mod placement;
 pub mod placement_rule;
+pub mod player;
 pub mod policy;
 pub mod policy_effect;
 pub mod population;
@@ -129,6 +130,10 @@ pub use placement::{
     WATER_LEVEL_M, WORLD_SAVE_FORMAT_VERSION,
 };
 pub use placement_rule::{structure_age_error, structure_required_age};
+pub use player::{
+    Player, PlayerError, PlayerId, PlayerRegistry, MAX_PLAYERS, MAX_PLAYER_ID,
+    MAX_PLAYER_NAME_CHARS, PLAYER_FORMAT_VERSION,
+};
 pub use policy::{
     policy_allows_placement, policy_placement_denial, DistrictPolicy, DistrictPolicyError,
     DistrictPolicyRequest, DistrictPolicyStore, PolicyPlacementDenial,
@@ -170,9 +175,11 @@ pub use services::{
     MAX_SERVICE_SITES, SCHOOL_DEMAND_PER_RESIDENT, SERVICES_FORMAT_VERSION, WORKER_SERVICE_DEMAND,
 };
 pub use settlement::{
-    Settlement, SettlementError, SettlementRequest, SettlementStore, MAX_SETTLEMENTS,
-    MAX_SETTLEMENT_ID, MAX_SETTLEMENT_NAME_CHARS, MAX_SETTLEMENT_OWNER_CHARS,
-    MAX_SETTLEMENT_RADIUS_M, MIN_SETTLEMENT_RADIUS_M, SETTLEMENT_FORMAT_VERSION,
+    MigrationReport, Settlement, SettlementError, SettlementMember, SettlementPermission,
+    SettlementRequest, SettlementRole, SettlementStore, MAX_SETTLEMENTS,
+    MAX_SETTLEMENTS_OWNED_PER_PLAYER, MAX_SETTLEMENT_ID, MAX_SETTLEMENT_MEMBERS,
+    MAX_SETTLEMENT_NAME_CHARS, MAX_SETTLEMENT_OWNER_CHARS, MAX_SETTLEMENT_RADIUS_M,
+    MIN_SETTLEMENT_RADIUS_M, SETTLEMENT_FORMAT_VERSION, SETTLEMENT_FORMAT_VERSION_V1,
 };
 pub use trades::{Trade, TradeError, TradePool};
 pub use traffic::{

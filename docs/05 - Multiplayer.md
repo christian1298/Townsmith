@@ -74,7 +74,7 @@ The client never simulates the authoritative city. It predicts local movement an
 ⚙️ = configurable; admin-only by default. All players can start a time vote by default (`time.vote`). The **Builder** role is a player permission role, not the NPC construction trade; construction crews are simulation jobs.
 
 > [!success] Blueprint placement: D-032 accepted and implemented (protocol v1)
-> D-032 (**Accepted 2026-11-23**, implemented by #306 at master `61449ce`) makes `place_blueprint` the v1 server authority. The command carries only `{ blueprint_hash, x, z, rotation }`; the package path never crosses the wire, and the server resolves the hash in its own pre-seeded content-addressed `.tsbp` library. Placement is authorized by the global **Mayor** role (Admin inherits it); per-settlement `build` permissions are D-033 (Proposed) and **not v1**. Package upload/fetch, transfer, mod auto-download, and a full client placement UI are also **not v1** (the #309 debug world client has an opt-in single-hash path; see §Interest view 3D world client). `world_place_blueprint` in `crates/godot_ext` remains the single-player/developer path: it applies the district gate and first installment to local stores only, and a multiplayer client must use the server command to commit a placement. The **Place buildings** column still describes intended policy beyond placement; v1 enforces the global placement role and the placement rules, not per-settlement permissions, and blueprint editing has the same gap.
+> D-032 (**Accepted 2026-11-23**, implemented by #306 at master `61449ce`) makes `place_blueprint` the v1 server authority. The command carries only `{ blueprint_hash, x, z, rotation }`; the package path never crosses the wire, and the server resolves the hash in its own pre-seeded content-addressed `.tsbp` library. Placement is authorized by the global **Mayor** role (Admin inherits it); per-settlement `build` permissions are defined by D-033's core model but are **not wired into server v1**. Package upload/fetch, transfer, mod auto-download, and a full client placement UI are also **not v1** (the #309 debug world client has an opt-in single-hash path; see §Interest view 3D world client). `world_place_blueprint` in `crates/godot_ext` remains the single-player/developer path: it applies the district gate and first installment to local stores only, and a multiplayer client must use the server command to commit a placement. The **Place buildings** column still describes intended policy beyond placement; v1 enforces the global placement role and the placement rules, not per-settlement permissions, and blueprint editing has the same gap.
 
 - Permissions are configurable per player and per role.
 - The server owner can disable roles entirely for a "everyone is mayor" casual server.
@@ -85,8 +85,8 @@ The client never simulates the authoritative city. It predicts local movement an
 
 ### Settlement ownership
 
-> [!warning] Proposed — not implemented (D-033)
-> Settlement ownership is currently an **unenforced display string**. `Settlement.owner` accepts any 1–48 character value from the caller, the bridge and dashboard never check it, the authoritative `ServerWorld` has no settlement store, and protocol v1 has no settlement command. The only roles are global dev roles assigned by the server process (`viewer`/`mayor`/`admin`). The bullets below are the intended model; D-033 (Proposed) defines membership, the `build`/`manage`/`tax`/`members` permissions, claims, transfer, and save migration. None of it is enforced today.
+> [!info] D-033 core implemented; enforcement follow-up
+> `core_city` now implements the stable `PlayerId`/`PlayerRegistry`, roles and the `build`/`manage`/`tax`/`members` permission bits, settlement `owner_id`/`members`/`membership_revision`, claim/transfer/release and member management, the v1→v2 save migration, and stable rejection codes. Stores that never use membership stay v1 and checksum-identical; the first owned/membership mutation upgrades to v2. The bridge still accepts the legacy display `owner`, the authoritative `ServerWorld` has no settlement store, and protocol v1 has no settlement command. The bullets below are the accepted model; server enforcement, bridge payloads, and dashboard edit controls are follow-up slices.
 
 - Every settlement has an **owner**: a player, a group, or the server (shared).
 - The owner can set local policies, taxes, building permissions, and blueprint allowlists.
@@ -94,7 +94,7 @@ The client never simulates the authoritative city. It predicts local movement an
 - Admins can override ownership, transfer it, or resolve disputes.
 - Shared services (highways, regional rail, power) are managed at the world/server level; local services at the settlement level.
 
-D-033's proposed enforcement points are the D-032 server `place_blueprint`, policy CRUD, tax commands, settlement rename/transfer/remove, membership edits, and dashboard edit paths once they exist. D-032 v1 uses the global placement role only; settlement-scoped `build` is not v1. A global role is a ceiling; a settlement permission never grants a global capability, and single-player/dev keeps an implicit owner.
+D-033's enforcement points are the D-032 server `place_blueprint`, policy CRUD, tax commands, settlement rename/transfer/remove, membership edits, and dashboard edit paths once they exist. D-032 v1 uses the global placement role only; settlement-scoped `build` is not wired yet. A global role is a ceiling; a settlement permission never grants a global capability, and single-player/dev keeps an implicit owner. The core store wrappers already check the actor, role, revision, and limits, so the server and bridge can reuse one rule set when their slices land.
 
 ## 4. Time and ticks
 
@@ -547,7 +547,7 @@ Multiplayer + modding is a trust problem. The server is the authority.
 ## 13. Open questions
 
 - **Q-002:** Target player count and server type? Affects bandwidth, AOI, and simulation budgets.
-- **Q-066 (answered by D-019):** Multiple settlements; each player may manage one or several. The concrete permissions, membership, and transfer contract is D-033 (Proposed), with Q-111–Q-115.
+- **Q-066 (answered by D-019):** Multiple settlements; each player may manage one or several. The concrete permissions, membership, and transfer contract is D-033 (core model accepted); Q-111 is answered and Q-112–Q-115 remain open.
 - **Q-070:** 1M multiplayer: players per server, active-region cap, server hardware.
 - **Q-078:** Time-vote duration, cooldown, and quorum tuning.
 - **Q-083:** Construction management depth: auto-assign crews vs player priority.
@@ -566,7 +566,7 @@ Multiplayer + modding is a trust problem. The server is the authority.
 - **Q-114:** Per-settlement member and per-player settlement limits?
 - **Q-115:** Settlement-level blueprint/mod permissions?
 
-See [[09 - Open Questions]] and [[10 - Decisions]]. D-032 (Accepted 2026-11-23, implemented by #306) is the server-authoritative blueprint placement ADR; D-033 (Proposed) is the settlement ownership, membership, and permissions ADR.
+See [[09 - Open Questions]] and [[10 - Decisions]]. D-032 (Accepted 2026-11-23, implemented by #306) is the server-authoritative blueprint placement ADR; D-033 (core model accepted 2026-11-24) is the settlement ownership, membership, and permissions ADR.
 
 ### Session resume v0
 
