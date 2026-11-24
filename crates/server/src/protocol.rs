@@ -154,6 +154,10 @@ pub mod codes {
     pub const INTEREST_UNAVAILABLE: &str = "interest.unavailable";
     pub const INTEREST_INVALID_CENTER: &str = "interest.invalid_center";
     pub const INTEREST_RADIUS_OUT_OF_RANGE: &str = "interest.radius_out_of_range";
+
+    // Settlement commands. `unavailable` is specific to the transport-only
+    // session, which has no player registry or settlement store.
+    pub const SETTLEMENT_UNAVAILABLE: &str = "settlement.unavailable";
 }
 
 /// A framing or JSON failure. `code()` is stable for logs and tests.
@@ -313,6 +317,23 @@ pub enum ClientCommand {
         /// Rotation around Y in degrees; must be a multiple of 90.
         rotation: i32,
     },
+    /// Found a settlement owned by the calling player (D-033).
+    ///
+    /// The server assigns the id, uses the caller's stable `player_id` as the
+    /// owner, and derives the legacy `owner` display label from the player
+    /// registry. Requires the Mayor role and a successful hello/resume.
+    FoundSettlement {
+        /// Player-facing name, trimmed to 1–48 characters.
+        name: String,
+        /// Centre X in whole world metres.
+        x: i32,
+        /// Centre Z in whole world metres.
+        z: i32,
+        /// Soft boundary radius in metres, 16–2000.
+        radius_m: u32,
+    },
+    /// Read-only settlement list for the current world.
+    SettlementList,
     Disconnect,
 }
 
@@ -328,6 +349,8 @@ impl ClientCommand {
             ClientCommand::PlaceRoad { .. } => "place_road",
             ClientCommand::SetInterest { .. } => "set_interest",
             ClientCommand::PlaceBlueprint { .. } => "place_blueprint",
+            ClientCommand::FoundSettlement { .. } => "found_settlement",
+            ClientCommand::SettlementList => "settlement_list",
             ClientCommand::Disconnect => "disconnect",
         }
     }
@@ -434,6 +457,44 @@ pub struct PlacementView {
     pub solid_voxels: u64,
 }
 
+/// One settlement member in [`SettlementView`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettlementMemberView {
+    /// Stable server-issued player id.
+    pub player: u64,
+    /// Snake_case role preset.
+    pub role: String,
+    /// Effective permission bits (`build`=1, `manage`=2, `tax`=4, `members`=8).
+    pub permissions: u8,
+}
+
+/// Read-only settlement record returned by the settlement commands.
+///
+/// This is a copy of the authoritative [`core_city::settlement::Settlement`]
+/// without any server-local state. `owner` stays the legacy display label;
+/// `owner_id` is the authoritative identity when the record is owned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettlementView {
+    /// Stable settlement id within the world.
+    pub id: u64,
+    /// Player-facing name.
+    pub name: String,
+    /// Legacy owner display label.
+    pub owner: String,
+    /// Authoritative owner identity, when owned.
+    pub owner_id: Option<u64>,
+    /// Whether the settlement has an owner.
+    pub owned: bool,
+    /// Centre `[x, z]` in metres.
+    pub center: [i32; 2],
+    /// Soft boundary radius in metres.
+    pub radius_m: u32,
+    /// Members in ascending player id, including the owner.
+    pub members: Vec<SettlementMemberView>,
+    /// Membership/ownership revision.
+    pub membership_revision: u32,
+}
+
 /// Messages the authoritative server sends.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -534,6 +595,28 @@ pub enum ServerMessage {
         world_checksum: String,
         /// Copy of the stored placement without any server filesystem path.
         placement: PlacementView,
+    },
+    /// Accepted authoritative settlement creation (D-033).
+    SettlementFound {
+        /// Authoritative tick after the accepted command.
+        tick: u64,
+        /// Stored settlement record.
+        settlement: SettlementView,
+        /// Stable checksum of the server settlement store.
+        settlement_checksum: String,
+        /// Stable checksum of the whole world.
+        world_checksum: String,
+    },
+    /// Read-only settlement list.
+    SettlementList {
+        /// Authoritative tick.
+        tick: u64,
+        /// Number of settlement records.
+        count: usize,
+        /// Stable checksum of the server settlement store, or `"0000000000000000"` when absent.
+        checksum: String,
+        /// Records in ascending id order.
+        settlements: Vec<SettlementView>,
     },
     /// Vote snapshot/status, sent after every accepted vote command.
     ///
@@ -674,6 +757,8 @@ pub fn decode_client_command(payload: &[u8]) -> Result<ClientCommand, Rejection>
         "place_road",
         "set_interest",
         "place_blueprint",
+        "found_settlement",
+        "settlement_list",
         "disconnect",
     ];
     if !KNOWN_TAGS.contains(&tag) {
@@ -1082,6 +1167,10 @@ impl Session {
             ClientCommand::PlaceBlueprint { .. } => reject(
                 codes::PLACEMENT_UNAVAILABLE,
                 "blueprint placement requires the authoritative executor with a package library, not the transport-only session",
+            ),
+            ClientCommand::FoundSettlement { .. } | ClientCommand::SettlementList => reject(
+                codes::SETTLEMENT_UNAVAILABLE,
+                "settlements require the authoritative executor with a player registry, not the transport-only session",
             ),
         }
     }
@@ -1649,6 +1738,86 @@ mod tests {
         let json = serde_json::to_string(&message).expect("json");
         assert!(!json.contains("blueprint_path"));
         assert!(json.contains("\"type\":\"place_blueprint_result\""));
+    }
+
+    #[test]
+    fn settlement_commands_decode_and_map_to_roles() {
+        let payload =
+            br#"{"type":"found_settlement","name":"Harbour","x":10,"z":-20,"radius_m":64}"#;
+        let decoded = decode_client_command(payload).expect("found_settlement decodes");
+        assert_eq!(
+            decoded,
+            ClientCommand::FoundSettlement {
+                name: "Harbour".to_string(),
+                x: 10,
+                z: -20,
+                radius_m: 64,
+            }
+        );
+        assert_eq!(decoded.tag(), "found_settlement");
+        assert_eq!(
+            crate::world::ClientRole::required_role_for(&decoded),
+            crate::world::ClientRole::Mayor
+        );
+
+        let list = decode_client_command(br#"{"type":"settlement_list"}"#)
+            .expect("settlement_list decodes");
+        assert_eq!(list, ClientCommand::SettlementList);
+        assert_eq!(list.tag(), "settlement_list");
+        assert_eq!(
+            crate::world::ClientRole::required_role_for(&list),
+            crate::world::ClientRole::Viewer
+        );
+    }
+
+    #[test]
+    fn settlement_views_round_trip_on_the_wire() {
+        let view = SettlementView {
+            id: 3,
+            name: "Harbour".to_string(),
+            owner: "mayor".to_string(),
+            owner_id: Some(7),
+            owned: true,
+            center: [10, -20],
+            radius_m: 64,
+            members: vec![SettlementMemberView {
+                player: 7,
+                role: "owner".to_string(),
+                permissions: 15,
+            }],
+            membership_revision: 1,
+        };
+        let found = ServerMessage::SettlementFound {
+            tick: 4,
+            settlement: view.clone(),
+            settlement_checksum: "0123456789abcdef".to_string(),
+            world_checksum: "fedcba9876543210".to_string(),
+        };
+        let json = String::from_utf8(encode_json(&found).expect("encode")).expect("utf8");
+        assert!(json.contains("\"type\":\"settlement_found\""));
+        assert!(
+            !json.contains(":\\/"),
+            "paths never appear in a settlement view"
+        );
+        assert_eq!(
+            serde_json::from_str::<ServerMessage>(&json).expect("decode"),
+            found,
+            "settlement_found round-trips"
+        );
+
+        let list = ServerMessage::SettlementList {
+            tick: 4,
+            count: 1,
+            checksum: "0123456789abcdef".to_string(),
+            settlements: vec![view],
+        };
+        let json = String::from_utf8(encode_json(&list).expect("encode")).expect("utf8");
+        assert!(json.contains("\"type\":\"settlement_list\""));
+        assert_eq!(
+            serde_json::from_str::<ServerMessage>(&json).expect("decode"),
+            list,
+            "settlement_list round-trips"
+        );
     }
 
     #[test]

@@ -40,7 +40,7 @@ use core_city::player::{PlayerId, PlayerRegistry};
 use core_city::policy::{policy_placement_denial, DistrictPolicyError, DistrictPolicyStore};
 use core_city::progression::AgeState;
 use core_city::road::{RoadError, RoadRequest, RoadSegment, RoadStore};
-use core_city::settlement::{SettlementPermission, SettlementStore};
+use core_city::settlement::{Settlement, SettlementPermission, SettlementRequest, SettlementStore};
 use core_city::structure_age_error;
 
 use crate::protocol::{
@@ -48,8 +48,8 @@ use crate::protocol::{
     read_json_frame, session_id_for_seed, validate_hello, validate_interest,
     validate_place_blueprint, validate_road, validate_tax_rates, write_json_frame, BuildingView,
     ClientCommand, FrameError, PlacementView, Rejection, RoadView, ServerMessage, SessionConfig,
-    TimeAction, DEFAULT_INTEREST_RADIUS_M, LOOPBACK_SEED, MAX_INTEREST_BUILDINGS,
-    MAX_INTEREST_ROADS, PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
+    SettlementMemberView, SettlementView, TimeAction, DEFAULT_INTEREST_RADIUS_M, LOOPBACK_SEED,
+    MAX_INTEREST_BUILDINGS, MAX_INTEREST_ROADS, PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
 };
 
 /// Fixed road width for v0 placement commands.
@@ -188,6 +188,8 @@ pub mod codes {
     pub const SETTLEMENT_FORBIDDEN: &str = "settlement.forbidden";
     /// The player is not a member of the settlement containing the placement.
     pub const SETTLEMENT_NOT_MEMBER: &str = "settlement.not_member";
+    /// The settlement store belongs to a different world seed.
+    pub const SETTLEMENT_SEED_MISMATCH: &str = "settlement.seed_mismatch";
 }
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -248,10 +250,9 @@ impl ClientRole {
     #[must_use]
     pub fn required_role(tag: &str) -> Self {
         match tag {
-            "hello" | "resume" | "ping" | "disconnect" | "time_vote" | "set_interest" => {
-                Self::Viewer
-            }
-            "set_tax" | "place_road" | "place_blueprint" => Self::Mayor,
+            "hello" | "resume" | "ping" | "disconnect" | "time_vote" | "set_interest"
+            | "settlement_list" => Self::Viewer,
+            "set_tax" | "place_road" | "place_blueprint" | "found_settlement" => Self::Mayor,
             // Time control is admin-only in D-021; unknown tags fail closed.
             "time_control" => Self::Admin,
             _ => Self::Admin,
@@ -1529,6 +1530,13 @@ impl ServerWorld {
                 z,
                 rotation,
             } => self.apply_place_blueprint(blueprint_hash, *x, *z, *rotation),
+            ClientCommand::FoundSettlement {
+                name,
+                x,
+                z,
+                radius_m,
+            } => self.apply_found_settlement(name, *x, *z, *radius_m),
+            ClientCommand::SettlementList => self.apply_settlement_list(),
             ClientCommand::SetInterest {
                 center_x,
                 center_z,
@@ -2106,6 +2114,96 @@ impl ServerWorld {
         })
     }
 
+    fn apply_found_settlement(
+        &mut self,
+        name: &str,
+        x: i32,
+        z: i32,
+        radius_m: u32,
+    ) -> (Vec<ServerMessage>, &'static str) {
+        let Some(player_id) = self.player_id else {
+            return reject_with(
+                codes::SETTLEMENT_IDENTITY,
+                "founding a settlement requires a player identity",
+            );
+        };
+        let Some(display_name) = self
+            .players
+            .get(player_id)
+            .map(|player| player.display_name.clone())
+        else {
+            return reject_with(
+                codes::SETTLEMENT_IDENTITY,
+                format!("player {player_id} is not in the server registry"),
+            );
+        };
+        if let Some(store) = self.settlements.as_ref() {
+            if store.seed != self.seed {
+                return reject_with(
+                    codes::SETTLEMENT_SEED_MISMATCH,
+                    format!(
+                        "settlement store seed {} does not match world seed {}",
+                        store.seed, self.seed
+                    ),
+                );
+            }
+        }
+        let request = SettlementRequest {
+            name: name.to_string(),
+            owner: display_name,
+            center: [x, z],
+            radius_m,
+        };
+        let outcome = {
+            let store = self
+                .settlements
+                .get_or_insert_with(|| SettlementStore::new(self.seed));
+            store.found_for_player(&request, player_id)
+        };
+        match outcome {
+            Ok(settlement) => {
+                self.refresh_checksum();
+                let settlement_checksum = self
+                    .settlements
+                    .as_ref()
+                    .map_or(0, SettlementStore::checksum);
+                accepted(ServerMessage::SettlementFound {
+                    tick: self.tick,
+                    settlement: settlement_view(&settlement),
+                    settlement_checksum: format!("{settlement_checksum:016x}"),
+                    world_checksum: self.checksum(),
+                })
+            }
+            Err(error) => reject_with(error.code(), error.to_string()),
+        }
+    }
+
+    fn apply_settlement_list(&mut self) -> (Vec<ServerMessage>, &'static str) {
+        let Some(store) = self.settlements.as_ref() else {
+            return accepted(ServerMessage::SettlementList {
+                tick: self.tick,
+                count: 0,
+                checksum: "0000000000000000".to_string(),
+                settlements: Vec::new(),
+            });
+        };
+        if store.seed != self.seed {
+            return reject_with(
+                codes::SETTLEMENT_SEED_MISMATCH,
+                format!(
+                    "settlement store seed {} does not match world seed {}",
+                    store.seed, self.seed
+                ),
+            );
+        }
+        accepted(ServerMessage::SettlementList {
+            tick: self.tick,
+            count: store.count(),
+            checksum: format!("{:016x}", store.checksum()),
+            settlements: store.settlements.iter().map(settlement_view).collect(),
+        })
+    }
+
     /// D-033 `build` permission inside a settlement.
     ///
     /// Wilderness (no settlement store, or no settlement containing the
@@ -2435,6 +2533,29 @@ pub fn placement_package_reference(canonical_hash: &str) -> String {
 /// The server-local `blueprint_path` is deliberately omitted; a remote client
 /// only needs the content hash.
 #[must_use]
+/// Read-only wire copy of one settlement record.
+fn settlement_view(settlement: &Settlement) -> SettlementView {
+    SettlementView {
+        id: settlement.id,
+        name: settlement.name.clone(),
+        owner: settlement.owner.clone(),
+        owner_id: settlement.owner_id.map(core_city::player::PlayerId::get),
+        owned: settlement.is_owned(),
+        center: settlement.center,
+        radius_m: settlement.radius_m,
+        members: settlement
+            .members
+            .iter()
+            .map(|member| SettlementMemberView {
+                player: member.player.get(),
+                role: member.role.as_str().to_string(),
+                permissions: member.role.permissions().bits(),
+            })
+            .collect(),
+        membership_revision: settlement.membership_revision,
+    }
+}
+
 pub fn placement_view(placement: &Placement) -> PlacementView {
     PlacementView {
         id: placement.id,
@@ -6071,6 +6192,141 @@ mod tests {
         assert_eq!(tick, 1);
         assert_eq!(view.center, [12.0, 40.0, -8.0]);
         assert_eq!(last_audit_code(&world), AUDIT_ACCEPTED);
+    }
+
+    fn found_settlement(name: &str, x: i32, z: i32, radius_m: u32) -> ClientCommand {
+        ClientCommand::FoundSettlement {
+            name: name.to_string(),
+            x,
+            z,
+            radius_m,
+        }
+    }
+
+    #[test]
+    fn settlement_found_assigns_the_calling_player_as_owner() {
+        let mut world = world_with_hello();
+        let player = world.player_id().expect("hello assigns a player id");
+        let checksum_before = world.checksum();
+
+        let found = world.apply(&found_settlement("Harbour", 10, -20, 64));
+        let ServerMessage::SettlementFound {
+            tick,
+            settlement,
+            settlement_checksum,
+            world_checksum,
+        } = found
+        else {
+            panic!("expected settlement_found, got {found:?}");
+        };
+        assert_eq!(tick, 0);
+        assert_eq!(settlement.id, 1);
+        assert_eq!(settlement.name, "Harbour");
+        assert_eq!(settlement.center, [10, -20]);
+        assert_eq!(settlement.radius_m, 64);
+        assert_eq!(settlement.owner_id, Some(player.get()));
+        assert!(settlement.owned);
+        assert_eq!(settlement.members.len(), 1);
+        assert_eq!(settlement.members[0].player, player.get());
+        assert_eq!(settlement.members[0].role, "owner");
+        assert_eq!(settlement.members[0].permissions, 15);
+        assert_eq!(settlement.membership_revision, 1);
+        assert_eq!(settlement_checksum.len(), 16);
+        assert_ne!(world_checksum, checksum_before);
+        assert_eq!(world_checksum, world.checksum());
+
+        let list = world.apply(&ClientCommand::SettlementList);
+        let ServerMessage::SettlementList {
+            count,
+            checksum,
+            settlements,
+            ..
+        } = list
+        else {
+            panic!("expected settlement_list, got {list:?}");
+        };
+        assert_eq!(count, 1);
+        assert_eq!(settlements.len(), 1);
+        assert_eq!(settlements[0], settlement);
+        assert_eq!(checksum, settlement_checksum);
+    }
+
+    #[test]
+    fn settlement_found_rejects_duplicates_and_invalid_payloads_without_mutation() {
+        let mut world = world_with_hello();
+        world.apply(&found_settlement("Harbour", 10, 20, 64));
+        let checksum = world.checksum();
+
+        let duplicate = world.apply(&found_settlement("harbour", 30, 40, 32));
+        assert!(matches!(
+            duplicate,
+            ServerMessage::Reject { ref code, .. } if code == "duplicate_name"
+        ));
+        assert_eq!(world.checksum(), checksum);
+
+        let invalid_radius = world.apply(&found_settlement("Docks", 0, 0, 4));
+        assert!(matches!(
+            invalid_radius,
+            ServerMessage::Reject { ref code, .. } if code == "invalid_radius"
+        ));
+        assert_eq!(world.checksum(), checksum);
+        assert_eq!(world.settlements.as_ref().expect("store").count(), 1);
+    }
+
+    #[test]
+    fn settlement_commands_require_hello_and_the_mayor_role() {
+        let mut viewer = ServerWorld::with_role(SEED, ClientRole::Viewer);
+        first_response(viewer.apply_all(&hello()));
+        let denied = viewer.apply(&found_settlement("Harbour", 0, 0, 64));
+        assert!(matches!(
+            denied,
+            ServerMessage::Reject { ref code, .. } if code == codes::FORBIDDEN
+        ));
+
+        let list = viewer.apply(&ClientCommand::SettlementList);
+        assert!(matches!(
+            list,
+            ServerMessage::SettlementList { count: 0, .. }
+        ));
+
+        let mut unopened = ServerWorld::with_role(SEED, ClientRole::Mayor);
+        let rejected = unopened.apply(&found_settlement("Harbour", 0, 0, 64));
+        assert!(matches!(
+            rejected,
+            ServerMessage::Reject { ref code, .. } if code == codes::NOT_HELLO
+        ));
+    }
+
+    #[test]
+    fn settlement_list_starts_empty_and_found_state_survives_save_load() {
+        let mut world = world_with_hello();
+        let empty = world.apply(&ClientCommand::SettlementList);
+        assert!(matches!(
+            empty,
+            ServerMessage::SettlementList {
+                count: 0,
+                ref checksum,
+                ..
+            } if checksum == "0000000000000000"
+        ));
+
+        world.apply(&found_settlement("Harbour", 10, 20, 64));
+        let json = world.to_save_json_pretty().expect("save");
+        let mut loaded = ServerWorld::from_save_json(&json).expect("load");
+        first_response(loaded.apply_all(&hello()));
+        let list = loaded.apply(&ClientCommand::SettlementList);
+        let ServerMessage::SettlementList {
+            count, settlements, ..
+        } = list
+        else {
+            panic!("expected settlement_list, got {list:?}");
+        };
+        assert_eq!(count, 1);
+        assert_eq!(settlements[0].name, "Harbour");
+        assert_eq!(
+            settlements[0].owner_id,
+            world.player_id().map(PlayerId::get)
+        );
     }
 
     #[test]
