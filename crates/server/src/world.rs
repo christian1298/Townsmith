@@ -48,10 +48,11 @@ use core_city::structure_age_error;
 use crate::protocol::{
     configure_stream, decode_client_command, frame_to_io, normalize_blueprint_hash, read_frame,
     read_json_frame, session_id_for_seed, validate_hello, validate_interest,
-    validate_place_blueprint, validate_road, validate_tax_rates, write_json_frame, BuildingView,
-    ClientCommand, FrameError, PlacementView, Rejection, RoadView, ServerMessage, SessionConfig,
-    SettlementMemberView, SettlementView, TimeAction, DEFAULT_INTEREST_RADIUS_M, LOOPBACK_SEED,
-    MAX_INTEREST_BUILDINGS, MAX_INTEREST_ROADS, PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
+    validate_place_blueprint, validate_road, validate_tax_rates, write_json_frame, AuditLogEntry,
+    BuildingView, ClientCommand, FrameError, PlacementView, Rejection, RoadView, ServerMessage,
+    SessionConfig, SettlementMemberView, SettlementView, TimeAction, DEFAULT_INTEREST_RADIUS_M,
+    LOOPBACK_SEED, MAX_INTEREST_BUILDINGS, MAX_INTEREST_ROADS, PROTOCOL_VERSION,
+    SESSION_IO_TIMEOUT,
 };
 
 /// Fixed road width for v0 placement commands.
@@ -109,6 +110,9 @@ pub const ROLES_SESSIONS: u64 = 3;
 
 /// Maximum audit entries retained per session.
 pub const AUDIT_CAPACITY: usize = 256;
+
+/// Entries returned by `audit_log` when the client omits `limit`.
+pub const AUDIT_DEFAULT_LIMIT: usize = 64;
 
 /// Audit code recorded for an accepted command.
 pub const AUDIT_ACCEPTED: &str = "ok";
@@ -271,8 +275,9 @@ impl ClientRole {
             | "settlement_rename"
             | "settlement_transfer" => Self::Mayor,
             // Time control is admin-only in D-021; unknown tags fail closed.
-            // Settlement release is the Q-113 admin override.
-            "time_control" | "settlement_release" => Self::Admin,
+            // Settlement release is the Q-113 admin override; the per-session
+            // audit ring is admin-only because it records role rejections.
+            "time_control" | "settlement_release" | "audit_log" => Self::Admin,
             _ => Self::Admin,
         }
     }
@@ -1633,6 +1638,7 @@ impl ServerWorld {
                 settlement_id,
                 expected_revision,
             } => self.apply_settlement_release(*settlement_id, *expected_revision),
+            ClientCommand::AuditLog { limit } => self.apply_audit_log(*limit),
             ClientCommand::SetInterest {
                 center_x,
                 center_z,
@@ -2297,6 +2303,38 @@ impl ServerWorld {
             count: store.count(),
             checksum: format!("{:016x}", store.checksum()),
             settlements: store.settlements.iter().map(settlement_view).collect(),
+        })
+    }
+
+    /// Bounded read of the per-session audit ring.
+    ///
+    /// `limit` defaults to [`AUDIT_DEFAULT_LIMIT`] and is clamped to
+    /// `1..=AUDIT_CAPACITY`. Entries are the newest `limit` retained records,
+    /// oldest first. The reported checksum covers the ring before this query is
+    /// recorded, so it is a pure function of the audited commands. The query
+    /// never advances the tick or mutates the world.
+    fn apply_audit_log(&mut self, limit: Option<u32>) -> (Vec<ServerMessage>, &'static str) {
+        let requested = limit.map_or(AUDIT_DEFAULT_LIMIT, |value| value as usize);
+        let limit = requested.clamp(1, AUDIT_CAPACITY);
+        let entries = self
+            .audit
+            .iter()
+            .rev()
+            .take(limit)
+            .rev()
+            .map(|entry| AuditLogEntry {
+                tick: entry.tick,
+                role: entry.role.as_str().to_string(),
+                tag: entry.tag.to_string(),
+                code: entry.code.to_string(),
+                accepted: entry.accepted(),
+            })
+            .collect();
+        accepted(ServerMessage::AuditLog {
+            tick: self.tick,
+            capacity: AUDIT_CAPACITY,
+            checksum: self.audit_checksum(),
+            entries,
         })
     }
 
@@ -7391,6 +7429,150 @@ mod tests {
             assert!(!wire.contains("blueprint_path"));
             assert!(!wire.contains("/tmp"));
             assert!(!wire.contains("/media"));
+        }
+    }
+
+    #[test]
+    fn admin_audit_log_returns_the_session_ring_without_mutation() {
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Admin);
+        assert!(matches!(
+            world.apply(&hello_named("audit-admin")),
+            ServerMessage::Welcome { .. }
+        ));
+        world.apply(&ClientCommand::SetTax {
+            resident_rate: 10,
+            business_rate: 20,
+        });
+        world.apply(&ClientCommand::PlaceRoad {
+            start: [0, 0],
+            end: [4, 0],
+        });
+        world.apply(&ClientCommand::SetTax {
+            resident_rate: 101,
+            business_rate: 0,
+        });
+
+        let tick = world.tick;
+        let world_checksum = world.checksum();
+        let retained = world.audit_len();
+        let audit_checksum = world.audit_checksum();
+
+        let message = world.apply(&ClientCommand::AuditLog { limit: None });
+        let ServerMessage::AuditLog {
+            tick: message_tick,
+            capacity,
+            checksum,
+            entries,
+        } = &message
+        else {
+            panic!("expected audit_log, got {message:?}");
+        };
+
+        assert_eq!(*message_tick, tick);
+        assert_eq!(*capacity, AUDIT_CAPACITY);
+        assert_eq!(*checksum, audit_checksum);
+        assert_eq!(retained, 4, "hello plus three commands");
+        assert_eq!(entries.len(), retained);
+        assert_eq!(entries[0].tag, "hello");
+        assert_eq!(entries[1].tag, "set_tax");
+        assert_eq!(entries[1].code, AUDIT_ACCEPTED);
+        assert!(entries[1].accepted);
+        assert_eq!(entries[2].tag, "place_road");
+        assert_eq!(entries[3].tag, "set_tax");
+        assert_eq!(entries[3].code, protocol_codes::TAX_RATE_OUT_OF_RANGE);
+        assert!(!entries[3].accepted);
+        assert!(entries.iter().all(|entry| entry.role == "admin"));
+
+        // The query is audited, never advances the tick, never moves the
+        // world checksum, and carries no player identity.
+        assert_eq!(world.tick, tick);
+        assert_eq!(world.checksum(), world_checksum);
+        let audit = world.audit_state();
+        assert_eq!(audit.len(), retained + 1);
+        let last = audit.last().expect("audit entry");
+        assert_eq!(last.tag, "audit_log");
+        assert!(last.accepted());
+        let json = serde_json::to_string(&message).expect("wire json");
+        assert!(!json.contains("audit-admin"));
+        assert!(!json.contains("player_name"));
+    }
+
+    #[test]
+    fn audit_log_limit_defaults_and_clamps() {
+        let mut world = world_with_hello();
+        while world.audit.len() < AUDIT_CAPACITY {
+            world.audit.push_back(AuditEntry {
+                tick: world.tick,
+                role: ClientRole::Admin,
+                tag: "synthetic",
+                code: AUDIT_ACCEPTED,
+            });
+        }
+        assert_eq!(world.audit_len(), AUDIT_CAPACITY);
+
+        let message = world.apply(&ClientCommand::AuditLog { limit: None });
+        let ServerMessage::AuditLog { entries, .. } = &message else {
+            panic!("expected audit_log, got {message:?}");
+        };
+        assert_eq!(entries.len(), AUDIT_DEFAULT_LIMIT);
+        assert_eq!(
+            entries.first().map(|entry| entry.tag.as_str()),
+            Some("synthetic")
+        );
+        assert_eq!(
+            entries.last().map(|entry| entry.tag.as_str()),
+            Some("synthetic")
+        );
+
+        let message = world.apply(&ClientCommand::AuditLog { limit: Some(0) });
+        let ServerMessage::AuditLog { entries, .. } = &message else {
+            panic!("expected audit_log, got {message:?}");
+        };
+        assert_eq!(entries.len(), 1, "limit 0 clamps up to one entry");
+        assert_eq!(entries[0].tag, "audit_log", "the newest retained entry");
+
+        let message = world.apply(&ClientCommand::AuditLog {
+            limit: Some(u32::MAX),
+        });
+        let ServerMessage::AuditLog { entries, .. } = &message else {
+            panic!("expected audit_log, got {message:?}");
+        };
+        assert_eq!(
+            entries.len(),
+            AUDIT_CAPACITY,
+            "oversized limit clamps to capacity"
+        );
+        assert_eq!(
+            entries.last().map(|entry| entry.tag.as_str()),
+            Some("audit_log")
+        );
+    }
+
+    #[test]
+    fn audit_log_requires_admin_and_rejects_lower_roles() {
+        assert_eq!(
+            ClientRole::required_role_for(&ClientCommand::AuditLog { limit: None }),
+            ClientRole::Admin
+        );
+        assert_eq!(ClientRole::required_role("audit_log"), ClientRole::Admin);
+
+        for role in [ClientRole::Viewer, ClientRole::Mayor] {
+            let mut world = ServerWorld::with_role(SEED, role);
+            assert!(matches!(
+                world.apply(&hello()),
+                ServerMessage::Welcome { .. }
+            ));
+            let tick = world.tick;
+            let checksum = world.checksum();
+            let message = world.apply(&ClientCommand::AuditLog { limit: None });
+            expect_reject(&message, codes::FORBIDDEN);
+            assert_eq!(world.tick, tick);
+            assert_eq!(world.checksum(), checksum);
+            assert_eq!(last_audit_code(&world), codes::FORBIDDEN);
+            assert_eq!(
+                world.audit_state().last().map(|entry| entry.role),
+                Some(role)
+            );
         }
     }
 }
