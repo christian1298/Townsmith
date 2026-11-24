@@ -63,6 +63,7 @@ use core_world::{
 };
 
 mod content_identity;
+mod placement_ui;
 
 use content_identity::{
     stamp_world_content, verify_world_content, ActiveContentIdentity, ContentIdentityError,
@@ -1507,6 +1508,22 @@ impl TownsmithCore {
     fn blueprint_library_summary(&self, root_path: GString) -> VarDictionary {
         match blueprint_library_summary_from_arg(&root_path.to_string()) {
             Ok(summary) => blueprint_library_summary_dictionary(&summary),
+            Err((code, message)) => placement_simple_error(code, message),
+        }
+    }
+
+    /// Enumerate a local content-addressed blueprint library for the UI.
+    ///
+    /// `root_path` follows [`Self::blueprint_library_summary`]. The result is
+    /// read-only and stateless: `ok`, library summary fields, `entry_count`,
+    /// `skipped`, and `entries[{hash, id, name, bytes, bounds_m,
+    /// footprint_m}]`, sorted by hash. A package that cannot be revalidated is
+    /// skipped, not returned as a partially trusted entry. No world,
+    /// placement, or blueprint checksum changes.
+    #[func]
+    fn blueprint_library_entries(&self, root_path: GString) -> VarDictionary {
+        match placement_ui::blueprint_library_entries_from_arg(&root_path.to_string()) {
+            Ok(entries) => entries,
             Err((code, message)) => placement_simple_error(code, message),
         }
     }
@@ -8542,11 +8559,15 @@ fn blueprint_library_error_code(error: &BlueprintLibraryError) -> &'static str {
     }
 }
 
-fn blueprint_library_error_pair(error: &BlueprintLibraryError) -> (&'static str, String) {
+pub(crate) fn blueprint_library_error_pair(
+    error: &BlueprintLibraryError,
+) -> (&'static str, String) {
     (blueprint_library_error_code(error), error.to_string())
 }
 
-fn blueprint_library_open(raw_root: &str) -> Result<BlueprintLibrary, (&'static str, String)> {
+pub(crate) fn blueprint_library_open(
+    raw_root: &str,
+) -> Result<BlueprintLibrary, (&'static str, String)> {
     let root = blueprint_library_root_from_arg(raw_root)
         .map_err(|message| ("invalid_blueprint_library_root", message))?;
     BlueprintLibrary::new(root).map_err(|error| blueprint_library_error_pair(&error))
@@ -8585,7 +8606,7 @@ fn blueprint_library_resolve_from_args(
         .map_err(|error| blueprint_library_error_pair(&error))
 }
 
-fn blueprint_library_summary_dictionary(summary: &LibrarySummary) -> VarDictionary {
+pub(crate) fn blueprint_library_summary_dictionary(summary: &LibrarySummary) -> VarDictionary {
     let mut result = VarDictionary::new();
     result.set("ok", true);
     result.set("count", summary.count as i64);
