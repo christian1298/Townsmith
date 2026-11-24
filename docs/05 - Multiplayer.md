@@ -2,7 +2,7 @@
 title: Multiplayer
 project: Townsmith
 status: proposed
-updated: 2026-11-23
+updated: 2026-11-24
 tags:
   - townsmith
   - multiplayer
@@ -569,7 +569,23 @@ The Godot client covers the same path with `--reconnect`: it captures the token 
 
 **Multi-connection vote smoke.** `cargo run --release -p townsmith-server -- --vote-smoke` runs three phases over seven real TCP connections sharing one world per phase (two yes votes pass pause; three players fail a pause with two no votes; two players cancel resume when one disconnects) and prints `SERVER_TIME_VOTE sessions=7 votes=3 passed=1 failed=1 cancelled=1 paused=false checksum=ec840a35bac5065a status=ok`. The same line is part of `--loopback-smoke`. Two runs produce the same checksum; the server test `multi_connection_loopback_passes_fails_and_cancels_deterministically` pins it and runs the harness twice.
 
-Limits: no persistence of vote state, proxies, weighted votes, or UI. Q-078 tuning remains open.
+Limits: no persistence of vote state, proxies, weighted votes, or production UI. Q-078 tuning remains open.
+
+### Time-vote client panel (developer)
+
+`godot/time_vote_panel.tscn` (script `godot/time_vote_panel.gd`) is a self-contained `PanelContainer` that renders one `TimeVoteStatus` dictionary and composes the D-021 wire commands. It never opens a connection: the owning client feeds `set_status`, `set_permissions`, and `set_error`, then sends whatever the panel emits on `command_issued`. Payloads are the protocol dictionaries unchanged: `{"type":"time_vote","action":"call","time":"pause"|"resume"}`, and `yes` / `no` / `cancel` with `"time": null`.
+
+Calls and ballots require `can_vote`; cancel requires `is_admin`. Calls are disabled while a vote is open or its cooldown is live. Ballots are disabled outside an open vote and after the local player has voted in that `vote_id`, which suppresses a duplicate click before the status round-trip. Every status refreshes the labels and button states. `set_error` renders a stable line keyed by every `vote.*` code, `vote.unavailable`, and `role.forbidden`, ignoring the server message for known codes.
+
+The panel is a developer debug tool. Labels live in a small EN/DE table inside the script (`set_locale("en"|"de")`); the surrounding `mp_client.gd` remains raw English. `snapshot()` returns the rendered fields, button states, and a deterministic render checksum for headless tests.
+
+```bash
+GODOT=/path/to/godot bash scripts/smoke_time_vote_ui.sh
+```
+
+The synthetic smoke covers idle, open → yes → passed, open → no → failed, admin cancel, cooldown, role-disabled controls, duplicate-ballot suppression, exact emitted payloads, and every stable error line. It runs the scene twice and diffs the `TIME_VOTE_UI` markers.
+
+Real server wiring is a follow-up: the current `--listen` loop serves one socket at a time, and a one-player vote is rejected with `vote.min_online`.
 
 ### Interest filtering v1
 
