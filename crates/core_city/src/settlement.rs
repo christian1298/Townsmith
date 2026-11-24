@@ -2,8 +2,9 @@
 //!
 //! A settlement is a player-named circle on the terrain. Boundaries are soft
 //! and may overlap; the nearest containing settlement owns a point. This slice
-//! stores identity, ownership, roles, and permissions. District boundaries,
-//! taxes, policies, service coverage, and global server roles are later work.
+//! stores identity, ownership, roles, permissions, and a data-only tax rate.
+//! District boundaries, tax policy, service coverage, and global server roles
+//! are later work.
 //!
 //! # Save versions
 //!
@@ -49,6 +50,9 @@ pub const MAX_SETTLEMENT_NAME_CHARS: usize = 48;
 
 /// Longest owner name in characters.
 pub const MAX_SETTLEMENT_OWNER_CHARS: usize = 48;
+
+/// Largest settlement tax rate, in percent.
+pub const MAX_SETTLEMENT_TAX_RATE: u16 = 100;
 
 /// Largest id representable by the GDScript bridge.
 pub const MAX_SETTLEMENT_ID: u64 = i64::MAX as u64;
@@ -206,6 +210,17 @@ pub struct Settlement {
     /// Optimistic-concurrency revision for membership and ownership edits.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub membership_revision: u32,
+    /// Settlement tax rate in percent, `0..=100`.
+    ///
+    /// Data-only until an economy consumer lands: nothing reads this value yet.
+    /// Changes go through [`SettlementStore::set_tax_rate`], which requires
+    /// [`SettlementPermission::TAX`]. A tax change is not a membership edit, so
+    /// it does not bump `membership_revision`.
+    ///
+    /// Legacy records deserialize to `0`, and a zero rate is skipped on
+    /// serialization so pre-tax saves stay byte-identical.
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub tax_rate: u16,
 }
 
 impl Settlement {
@@ -452,6 +467,21 @@ impl Settlement {
         }
     }
 
+    /// Check the tax rate is inside `0..=100`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SettlementError::TaxOutOfRange`] for a rate above
+    /// [`MAX_SETTLEMENT_TAX_RATE`].
+    pub fn validate_tax_rate(&self) -> Result<(), SettlementError> {
+        if self.tax_rate > MAX_SETTLEMENT_TAX_RATE {
+            return Err(SettlementError::TaxOutOfRange {
+                rate: self.tax_rate,
+            });
+        }
+        Ok(())
+    }
+
     /// Whether this record carries any v2 membership data.
     #[must_use]
     pub fn has_membership_data(&self) -> bool {
@@ -545,6 +575,10 @@ const fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
+const fn is_zero_u16(value: &u16) -> bool {
+    *value == 0
+}
+
 /// A request to found one settlement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettlementRequest {
@@ -579,6 +613,11 @@ pub enum SettlementError {
     InvalidRadius {
         /// Requested radius.
         radius: u32,
+    },
+    /// The settlement tax rate is above 100 percent.
+    TaxOutOfRange {
+        /// Requested rate.
+        rate: u16,
     },
     /// A coordinate is outside the world range.
     CoordinateOutOfRange,
@@ -679,6 +718,7 @@ impl SettlementError {
             Self::EmptyOwner => "empty_owner",
             Self::OwnerTooLong { .. } => "owner_too_long",
             Self::InvalidRadius { .. } => "invalid_radius",
+            Self::TaxOutOfRange { .. } => "settlement.tax_out_of_range",
             Self::CoordinateOutOfRange => "coordinate_out_of_range",
             Self::DuplicateName => "duplicate_name",
             Self::TooMany => "too_many",
@@ -716,8 +756,11 @@ impl fmt::Display for SettlementError {
                 f,
                 "settlement radius {radius} m is outside {MIN_SETTLEMENT_RADIUS_M}..={MAX_SETTLEMENT_RADIUS_M} m"
             ),
-            Self::CoordinateOutOfRange => f.write_str("settlement centre is outside the world"),
-            Self::DuplicateName => f.write_str("settlement name is already in use"),
+            Self::TaxOutOfRange { rate } => write!(
+                f,
+                "settlement tax rate {rate} percent is above {MAX_SETTLEMENT_TAX_RATE}"
+            ),
+            Self::CoordinateOutOfRange => f.write_str("settlement centre is outside the world"),            Self::DuplicateName => f.write_str("settlement name is already in use"),
             Self::TooMany => write!(f, "settlement limit of {MAX_SETTLEMENTS} reached"),
             Self::Unknown { id } => write!(f, "unknown settlement {id}"),
             Self::Unowned { id } => write!(f, "settlement {id} has no owner"),
@@ -963,6 +1006,49 @@ impl SettlementStore {
         )
     }
 
+    /// Set a settlement's tax rate in percent.
+    ///
+    /// The actor needs [`SettlementPermission::TAX`]; Owner and Manager hold it.
+    /// The rate is stored as data only: no economy system consumes it yet.
+    ///
+    /// A tax change is not a membership edit, so it takes no expected revision
+    /// and does not bump `membership_revision`. Ownership and members are never
+    /// touched. Setting the current rate again succeeds unchanged.
+    ///
+    /// # Errors
+    ///
+    /// [`SettlementError::Unknown`] for a missing id,
+    /// [`SettlementError::Unowned`] for an unowned settlement,
+    /// [`SettlementError::Forbidden`] when the actor lacks `tax`, and
+    /// [`SettlementError::TaxOutOfRange`] for a rate above
+    /// [`MAX_SETTLEMENT_TAX_RATE`].
+    pub fn set_tax_rate(
+        &mut self,
+        actor: PlayerId,
+        id: u64,
+        rate: u16,
+    ) -> Result<Settlement, SettlementError> {
+        let updated = {
+            let settlement = self.settlement_mut(id)?;
+            if !settlement.is_owned() {
+                return Err(SettlementError::Unowned { id });
+            }
+            if !settlement.has_permission(actor, SettlementPermission::TAX) {
+                return Err(SettlementError::Forbidden {
+                    actor,
+                    action: "set tax rate",
+                });
+            }
+            if rate > MAX_SETTLEMENT_TAX_RATE {
+                return Err(SettlementError::TaxOutOfRange { rate });
+            }
+            settlement.tax_rate = rate;
+            settlement.clone()
+        };
+        self.ensure_v2();
+        Ok(updated)
+    }
+
     /// Rename a settlement.
     ///
     /// The actor needs [`SettlementPermission::MANAGE`]. The name is trimmed,
@@ -1128,6 +1214,7 @@ impl SettlementStore {
             owner_id: None,
             members: Vec::new(),
             membership_revision: 0,
+            tax_rate: 0,
         };
         self.next_id += 1;
         Ok(settlement)
@@ -1383,6 +1470,7 @@ impl SettlementStore {
                 },
             })?;
             settlement.validate_membership(self.format_version)?;
+            settlement.validate_tax_rate()?;
             if !names.insert(settlement.name.to_lowercase()) {
                 return Err(SettlementError::DuplicateName);
             }
@@ -1687,6 +1775,7 @@ mod tests {
                 },
             ],
             membership_revision: 1,
+            tax_rate: 0,
         };
         // The owner keeps every bit even when a malformed record omits the
         // owner from `members`.
@@ -2340,5 +2429,162 @@ mod tests {
             assert_eq!(error.code(), code);
             assert!(!error.to_string().is_empty());
         }
+    }
+
+    #[test]
+    fn owner_can_set_tax_rate_across_the_allowed_range() {
+        let (mut store, settlement) = owned_store();
+        let id = settlement.id;
+        assert_eq!(store.get(id).expect("settlement").tax_rate, 0);
+
+        // Setting the current value is a successful no-op.
+        let unchanged = store.set_tax_rate(player(1), id, 0).expect("zero");
+        assert_eq!(unchanged.tax_rate, 0);
+        assert_eq!(unchanged.membership_revision, 1);
+
+        let mutated = store.set_tax_rate(player(1), id, 100).expect("maximum");
+        assert_eq!(mutated.tax_rate, 100);
+        assert_eq!(mutated.owner_id, Some(player(1)));
+        assert_eq!(mutated.membership_revision, 1);
+        assert_eq!(store.get(id).expect("settlement").tax_rate, 100);
+
+        let repeated = store.set_tax_rate(player(1), id, 100).expect("repeat");
+        assert_eq!(repeated.tax_rate, 100);
+        assert_eq!(repeated.membership_revision, 1);
+    }
+
+    #[test]
+    fn manager_can_set_tax_rate_but_builder_and_member_are_denied() {
+        let (mut store, settlement) = owned_store();
+        let id = settlement.id;
+        let mut revision = settlement.membership_revision;
+        for (value, role) in [
+            (2, SettlementRole::Manager),
+            (3, SettlementRole::Builder),
+            (4, SettlementRole::Member),
+        ] {
+            revision = store
+                .invite(player(1), id, player(value), role, revision)
+                .expect("invite")
+                .membership_revision;
+        }
+
+        for actor in [player(3), player(4), player(9)] {
+            assert_eq!(
+                store.set_tax_rate(actor, id, 30),
+                Err(SettlementError::Forbidden {
+                    actor,
+                    action: "set tax rate"
+                })
+            );
+        }
+        assert_eq!(store.get(id).expect("settlement").tax_rate, 0);
+        assert_eq!(
+            store.get(id).expect("settlement").membership_revision,
+            revision
+        );
+
+        let updated = store
+            .set_tax_rate(player(2), id, 30)
+            .expect("manager set tax");
+        assert_eq!(updated.tax_rate, 30);
+        assert_eq!(updated.membership_revision, revision);
+        assert_eq!(
+            store.get(id).expect("settlement").role_of(player(2)),
+            Some(SettlementRole::Manager)
+        );
+    }
+
+    #[test]
+    fn tax_rate_rejects_unknown_unowned_and_out_of_range() {
+        let mut store = SettlementStore::new(2026);
+        assert_eq!(
+            store.set_tax_rate(player(1), 999, 5),
+            Err(SettlementError::Unknown { id: 999 })
+        );
+
+        let unowned = store.found(&request("Riverbend", 0, 0, 32)).expect("found");
+        assert_eq!(
+            store.set_tax_rate(player(1), unowned.id, 5),
+            Err(SettlementError::Unowned { id: unowned.id })
+        );
+
+        let claimed = store.claim(player(1), unowned.id, 0).expect("claim");
+        let error = store
+            .set_tax_rate(player(1), claimed.id, 101)
+            .expect_err("out of range");
+        assert_eq!(error, SettlementError::TaxOutOfRange { rate: 101 });
+        assert_eq!(error.code(), "settlement.tax_out_of_range");
+        assert!(!error.to_string().is_empty());
+        assert_eq!(store.get(claimed.id).expect("settlement").tax_rate, 0);
+
+        // A hand-edited save is rejected on load.
+        let mut tampered = store.clone();
+        tampered.settlements[0].tax_rate = 101;
+        assert_eq!(
+            tampered.validate_loaded(),
+            Err(SettlementError::TaxOutOfRange { rate: 101 })
+        );
+        let json = tampered.to_json_pretty().expect("json");
+        assert_eq!(
+            SettlementStore::from_json(&json),
+            Err(SettlementError::TaxOutOfRange { rate: 101 })
+        );
+    }
+
+    #[test]
+    fn legacy_json_without_tax_rate_loads_as_zero_and_zero_is_omitted() {
+        let legacy = r#"{
+  "format_version": 1,
+  "seed": 2026,
+  "next_id": 2,
+  "settlements": [
+    {
+      "id": 1,
+      "name": "Legacy",
+      "owner": "player",
+      "center": [0, 0],
+      "radius_m": 32
+    }
+  ]
+}"#;
+        let store = SettlementStore::from_json(legacy).expect("legacy decode");
+        assert_eq!(store.settlements.len(), 1);
+        assert_eq!(store.settlements[0].tax_rate, 0);
+        assert_eq!(store.format_version, SETTLEMENT_FORMAT_VERSION_V1);
+
+        let encoded = store.to_json_pretty().expect("json");
+        assert!(!encoded.contains("tax_rate"));
+        let original: serde_json::Value = serde_json::from_str(legacy).expect("legacy value");
+        let round_trip: serde_json::Value = serde_json::from_str(&encoded).expect("value");
+        assert_eq!(round_trip, original);
+        assert_eq!(store.checksum(), store.normalized().checksum());
+
+        // An owned store with the default zero rate also omits the field.
+        let (owned, _) = owned_store();
+        assert!(!owned.to_json_pretty().expect("json").contains("tax_rate"));
+    }
+
+    #[test]
+    fn nonzero_tax_rate_survives_save_load_without_membership_edits() {
+        let (mut store, settlement) = owned_store();
+        let id = settlement.id;
+        let before = store.get(id).expect("settlement").clone();
+        store
+            .set_tax_rate(player(1), id, 25)
+            .expect("owner set tax");
+
+        let json = store.to_json_pretty().expect("json");
+        assert!(json.contains("\"tax_rate\": 25"));
+        let decoded = SettlementStore::from_json(&json).expect("decode");
+        assert_eq!(decoded, store);
+        assert_eq!(decoded.get(id).expect("settlement").tax_rate, 25);
+
+        // Data only: the rate is the sole difference from the pre-set record.
+        let mut stored = decoded.get(id).expect("settlement").clone();
+        assert_eq!(stored.tax_rate, 25);
+        stored.tax_rate = 0;
+        assert_eq!(stored, before);
+        assert_eq!(before.membership_revision, 1);
     }
 }
