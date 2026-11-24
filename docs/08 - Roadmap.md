@@ -252,7 +252,7 @@ The staged cut is in [[49 - Phase 3 Slice Plan]]: city ledger, households/needs,
 > [!info] Current status — in progress (master `4880d82`, 2026-11-24)
 > **Landed:** protocol v1 and the authoritative executor; dev roles, rate limits, and audit; interest views with bounds (≤64 roads, ≤64 building records; #262/#266/#308); D-021 server-side time control including the 7-connection `--vote-smoke` pass/fail/cancel loop (#287); D-032 server-authoritative `place_blueprint` (#306/#308/#309); bridge content-addressed placement references (#311/#313); the catalog-driven Godot placement UI (#318); D-033 player identity, server persistence, bridge read model, placement `build` enforcement, and the settlement protocol — found/list/at/claim/rename/transfer/release plus invite/set-role/remove (#319/#321–#330); the time-vote panel (#320); deterministic network-fault tests (#317); the server `--content-hash` hello pin (#331); D-035 read-only missing-pack inspection (#332); the district-panel membership display (#333); the settlement tax-rate model (#338), bridge rename (#341), and admin audit-log command (#337); and the fail-closed client content-mismatch screen (#340). F-003 is fixed by #287.
 >
-> **Gaps:** dashboard settlement write controls and a treasury consumer for the data-only tax rate; voxel edit sync and blueprint locks; journal/rollback; chat/pings (the sequential listen loop has no broadcast path); remote transport and authentication; concurrent listener sessions.
+> **Gaps:** dashboard settlement write controls and a treasury consumer for the data-only tax rate; voxel edit sync and blueprint locks; journal/rollback; a chat client UI and push delivery (the sequential listen loop has a pollable server log but no broadcast path); remote transport and authentication; concurrent listener sessions.
 
 **Goals**
 - Co-op that feels native, not bolted on.
@@ -400,7 +400,7 @@ Ordered by dependency, not by size. Status reflects master `4880d82` (2026-11-24
 7. **Q-116/Q-117/Q-118 content compatibility decisions** — Q-117 bridge v1 (D-035, #332), the server content pin (#331), and the fail-closed client mismatch screen (#340) are implemented; D-036/D-037 are proposed for Q-116/Q-118 and need review plus loader work; the server `--accept-missing-content` CLI and simulation freeze list remain.
 8. **Voxel edit sync + blueprint locks** — replicate edits and hold locks across a disconnect.
 9. **Journal/rollback** — crash-safe command journal and rollback/history.
-10. **Chat/pings** — player communication. Chat broadcast needs a concurrent listen path; the current loop is sequential. The fail-closed content-mismatch screen landed in #340.
+10. **Chat/pings** — the server now has a bounded pollable chat log (`chat`/`chat_since`, Viewer-level); the client UI and push broadcast still need a concurrent listen path. The fail-closed content-mismatch screen landed in #340.
 11. **Q-101 30-minute playtest** — ⛔ Blocked: needs a human player and observer. See [[66 - Playtest Kit]].
 12. **1M/RTX 3060 render gate** — ⛔ Blocked: needs reference hardware. See [[68 - Metropolis Gate]].
 

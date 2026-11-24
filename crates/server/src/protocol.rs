@@ -30,6 +30,12 @@ pub const MAX_FRAME_LEN: usize = 1024 * 1024;
 /// Maximum player name length in Unicode scalar values.
 pub const MAX_PLAYER_NAME_CHARS: usize = 32;
 
+/// Maximum chat message length in Unicode scalar values.
+pub const MAX_CHAT_CHARS: usize = 280;
+
+/// Retained chat entries per world; older lines are dropped from the poll log.
+pub const CHAT_LOG_CAPACITY: usize = 64;
+
 /// Maximum number of client-provided characters echoed in a rejection message.
 ///
 /// Rejections must always fit in one [`MAX_FRAME_LEN`] frame: a client can send
@@ -103,6 +109,16 @@ pub mod codes {
     pub const PLAYER_NAME_EMPTY: &str = "player_name.empty";
     pub const PLAYER_NAME_TOO_LONG: &str = "player_name.too_long";
     pub const PLAYER_NAME_INVALID: &str = "player_name.invalid";
+    /// Chat is unavailable in the transport-only session.
+    pub const CHAT_UNAVAILABLE: &str = "chat.unavailable";
+    /// The sender has no stable player identity (hello/resume required).
+    pub const CHAT_IDENTITY: &str = "chat.identity";
+    /// A chat message is empty or whitespace after trimming.
+    pub const CHAT_EMPTY: &str = "chat.empty";
+    /// A chat message exceeds [`MAX_CHAT_CHARS`].
+    pub const CHAT_TOO_LONG: &str = "chat.too_long";
+    /// A chat message contains a control character.
+    pub const CHAT_INVALID: &str = "chat.invalid";
     pub const CONTENT_HASH_INVALID: &str = "content_hash.invalid";
     /// The client content hash does not match the server's pinned registry.
     pub const CONTENT_HASH_MISMATCH: &str = "content_hash.mismatch";
@@ -271,6 +287,16 @@ pub enum ClientCommand {
     },
     Ping {
         nonce: u64,
+    },
+    /// Send one text chat line to the world log.
+    Chat {
+        /// Trimmed message, 1–[`MAX_CHAT_CHARS`] characters.
+        text: String,
+    },
+    /// Read chat entries newer than `after` (a sequence number).
+    ChatSince {
+        /// Last sequence the client has seen; 0 reads from the oldest retained.
+        after: u64,
     },
     TimeControl {
         action: TimeAction,
@@ -446,6 +472,8 @@ impl ClientCommand {
             ClientCommand::Hello { .. } => "hello",
             ClientCommand::Resume { .. } => "resume",
             ClientCommand::Ping { .. } => "ping",
+            ClientCommand::Chat { .. } => "chat",
+            ClientCommand::ChatSince { .. } => "chat_since",
             ClientCommand::TimeControl { .. } => "time_control",
             ClientCommand::TimeVote { .. } => "time_vote",
             ClientCommand::SetTax { .. } => "set_tax",
@@ -630,6 +658,24 @@ pub struct AuditLogEntry {
     pub accepted: bool,
 }
 
+/// One retained chat line.
+///
+/// `seq` is a per-world monotonic sequence; clients pass the last seen value to
+/// `chat_since`. The display name is a snapshot, not an identity claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatEntry {
+    /// Monotonic sequence, starting at 1.
+    pub seq: u64,
+    /// Authoritative tick when the line was accepted.
+    pub tick: u64,
+    /// Stable server-issued player id.
+    pub player_id: u64,
+    /// Display-name label at send time.
+    pub player: String,
+    /// Trimmed message text.
+    pub text: String,
+}
+
 /// Messages the authoritative server sends.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -651,6 +697,16 @@ pub enum ServerMessage {
     },
     Pong {
         nonce: u64,
+    },
+    /// Accepted chat line, echoed to the sender.
+    ChatSent {
+        tick: u64,
+        entry: ChatEntry,
+    },
+    /// Retained chat lines newer than the requested sequence.
+    ChatLog {
+        tick: u64,
+        entries: Vec<ChatEntry>,
     },
     Snapshot {
         tick: u64,
@@ -922,6 +978,8 @@ pub fn decode_client_command(payload: &[u8]) -> Result<ClientCommand, Rejection>
         "hello",
         "resume",
         "ping",
+        "chat",
+        "chat_since",
         "time_control",
         "time_vote",
         "set_tax",
@@ -1362,6 +1420,10 @@ impl Session {
             | ClientCommand::SettlementRelease { .. } => reject(
                 codes::SETTLEMENT_UNAVAILABLE,
                 "settlements require the authoritative executor with a player registry, not the transport-only session",
+            ),
+            ClientCommand::Chat { .. } | ClientCommand::ChatSince { .. } => reject(
+                codes::CHAT_UNAVAILABLE,
+                "chat requires the authoritative executor with a player registry, not the transport-only session",
             ),
             ClientCommand::AuditLog { .. } => reject(
                 codes::AUDIT_UNAVAILABLE,
@@ -2004,6 +2066,55 @@ mod tests {
     }
 
     #[test]
+    fn chat_commands_decode_and_map_to_viewer() {
+        let send =
+            decode_client_command(br#"{"type":"chat","text":"hello"}"#).expect("chat decodes");
+        assert_eq!(
+            send,
+            ClientCommand::Chat {
+                text: "hello".to_string()
+            }
+        );
+        assert_eq!(send.tag(), "chat");
+        assert_eq!(
+            crate::world::ClientRole::required_role_for(&send),
+            crate::world::ClientRole::Viewer
+        );
+
+        let since = decode_client_command(br#"{"type":"chat_since","after":4}"#)
+            .expect("chat_since decodes");
+        assert_eq!(since, ClientCommand::ChatSince { after: 4 });
+        assert_eq!(since.tag(), "chat_since");
+        assert_eq!(
+            crate::world::ClientRole::required_role_for(&since),
+            crate::world::ClientRole::Viewer
+        );
+
+        let entry = ChatEntry {
+            seq: 1,
+            tick: 2,
+            player_id: 3,
+            player: "mayor".to_string(),
+            text: "hello".to_string(),
+        };
+        let message = ServerMessage::ChatSent {
+            tick: 2,
+            entry: entry.clone(),
+        };
+        let json = String::from_utf8(encode_json(&message).expect("encode")).expect("utf8");
+        assert_eq!(
+            serde_json::from_str::<ServerMessage>(&json).expect("decode"),
+            message
+        );
+        let log = ServerMessage::ChatLog {
+            tick: 2,
+            entries: vec![entry],
+        };
+        let json = String::from_utf8(encode_json(&log).expect("encode")).expect("utf8");
+        assert!(json.contains("\"type\":\"chat_log\""));
+    }
+
+    #[test]
     fn settlement_claim_and_at_decode_and_map_to_roles() {
         let claim = decode_client_command(
             br#"{"type":"settlement_claim","settlement_id":1,"expected_revision":0}"#,
@@ -2162,6 +2273,25 @@ mod tests {
         expect_reject(
             &session.handle(ClientCommand::AuditLog { limit: None }),
             codes::AUDIT_UNAVAILABLE,
+        );
+    }
+
+    #[test]
+    fn transport_session_rejects_chat_as_unavailable() {
+        let mut session = Session::new(LOOPBACK_SEED);
+        assert!(matches!(
+            session.handle(hello()).as_slice(),
+            [ServerMessage::Welcome { .. }]
+        ));
+        expect_reject(
+            &session.handle(ClientCommand::Chat {
+                text: "hello".to_string(),
+            }),
+            codes::CHAT_UNAVAILABLE,
+        );
+        expect_reject(
+            &session.handle(ClientCommand::ChatSince { after: 0 }),
+            codes::CHAT_UNAVAILABLE,
         );
     }
 
