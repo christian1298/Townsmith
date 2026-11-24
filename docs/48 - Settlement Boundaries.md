@@ -69,7 +69,7 @@ This is the current **v1** wire/display model. D-033's core store model adds an 
 ### 2.1 Ownership and permissions (D-033 core, implemented)
 
 > [!info] Core model implemented 2026-11-24
-> `core_city` implements `PlayerId`/`PlayerRegistry`, the role presets and permission bits, settlement `owner_id`/`members`/`membership_revision`, claim/transfer/release and member management, the v1→v2 save migration, and stable rejection codes. The bridge still accepts the legacy `owner` display string, `settlement_remove` still removes by id without a caller check, and the authoritative server has no settlement store. Server enforcement, bridge payloads, and dashboard controls are follow-up slices.
+> `core_city` implements `PlayerId`/`PlayerRegistry`, the role presets and permission bits, settlement `owner_id`/`members`/`membership_revision`, claim/transfer/release and member management, the v1→v2 save migration, and stable rejection codes. The authoritative server now persists the player registry and an optional settlement store. The bridge still accepts the legacy `owner` display string, `settlement_remove` still removes by id without a caller check, and there are no bridge mutation commands yet. Server placement enforcement, settlement commands, and dashboard controls are follow-up slices.
 
 D-033 defines:
 
@@ -98,7 +98,7 @@ Enforcement points and the full claim/transfer rules are in [[10 - Decisions]] D
 | Method | Returns | Purpose |
 |---|---|---|
 | `settlement_found(seed, name, owner, x, z, radius)` | `Dictionary` | Found one; opens the world layer if needed |
-| `settlements()` | `Dictionary` | `open`, `seed`, `next_id`, `count`, `checksum`, `settlements[]` |
+| `settlements()` | `Dictionary` | `open`, `seed`, `next_id`, `count`, `checksum`, `settlements[]`; each record carries the read-only D-033 fields below |
 | `settlement_count()` | `int` | Count |
 | `settlement_checksum()` | `String` | Stable FNV checksum |
 | `settlement_clear()` | `bool` | Clear records; keep seed/next id |
@@ -145,9 +145,18 @@ Load:
 - A billboard `Label3D` with the settlement name and owner.
 - The selected-building line in the HUD shows `owner <name>` or `wilderness`.
 - The status line shows the settlement count.
+Read-only settlement record fields:
+
+- `id`, `name`, `owner` (legacy display label), `center`, `radius_m` (unchanged);
+- `owned` and `owner_id` (integer, or `null` when unowned);
+- `members[]` in ascending player id, each `{player, role, permissions}` with the snake_case role preset and effective permission bits;
+- `membership_revision` and `membership_checksum` (16 lowercase hex, FNV-1a over id, owner, revision, and sorted members). The checksum is a display/diff value, not a security hash.
+
+There are no bridge mutation methods for membership, claim, transfer, or removal yet.
+
 - The dashboard's read-only Settlements section lists every record in ascending id order and selects one with `PageUp` / `PageDown` (or clears it through the leading `none` entry). The selection drives the dashboard's 256 m district query, containing-policy scan, and `F7` heatmap centre until cleared; `F6` building focus yields to it. While a record is selected, a read-only detail block under the list repeats its name, owner, id, centre, radius, the same 256 m district metrics (population, housing, vacancies, jobs, employed/unemployed, happiness, food/water/rest, commute, completed buildings, construction sites), and the smallest-id containing policy (name, tax, funding, construction flag, allowlist count). It uses only the existing `settlements()`, `district_summary`, and `district_policies_state` reads; it cannot mutate a settlement or policy. See [[57 - Dashboard and Advisor]] §5.2.
 - Save/load rebuilds rings and labels from the store; the dashboard revalidates a selected id after load and falls back to no settlement when it no longer exists.
-- The dashboard selector and detail block are read-only. D-033's core model now defines membership and permission-gated actions, but no bridge payload, role display, invite, rename, transfer, claim, or remove control exists in this slice.
+- The dashboard selector and detail block are read-only. D-033's core model now defines membership and permission-gated actions, and `settlements()` exposes the read-only owner/member fields, but no role display, invite, rename, transfer, claim, or remove control exists yet.
 
 The ring is a developer overlay, not final art. It samples every segment endpoint with `world_height_at`; a segment can clip a very steep slope between endpoints.
 
