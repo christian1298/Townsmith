@@ -334,6 +334,40 @@ pub enum ClientCommand {
     },
     /// Read-only settlement list for the current world.
     SettlementList,
+    /// Invite a player to a settlement (D-033).
+    ///
+    /// The actor needs the `members` permission via the owner or manager role.
+    /// `expected_revision` must match the current `membership_revision`.
+    SettlementInvite {
+        /// Settlement id from `settlement_list`.
+        settlement_id: u64,
+        /// Stable server-issued player id to invite.
+        player_id: u64,
+        /// `manager`, `builder`, or `member`; `owner` is rejected.
+        role: String,
+        /// Revision the client believes is current.
+        expected_revision: u32,
+    },
+    /// Change one settlement member's role (D-033).
+    SettlementSetRole {
+        /// Settlement id.
+        settlement_id: u64,
+        /// Member to change; the owner cannot be demoted.
+        player_id: u64,
+        /// New role: `manager`, `builder`, or `member`.
+        role: String,
+        /// Revision the client believes is current.
+        expected_revision: u32,
+    },
+    /// Remove one settlement member (D-033); the owner cannot be removed.
+    SettlementRemoveMember {
+        /// Settlement id.
+        settlement_id: u64,
+        /// Member to remove.
+        player_id: u64,
+        /// Revision the client believes is current.
+        expected_revision: u32,
+    },
     Disconnect,
 }
 
@@ -351,6 +385,9 @@ impl ClientCommand {
             ClientCommand::PlaceBlueprint { .. } => "place_blueprint",
             ClientCommand::FoundSettlement { .. } => "found_settlement",
             ClientCommand::SettlementList => "settlement_list",
+            ClientCommand::SettlementInvite { .. } => "settlement_invite",
+            ClientCommand::SettlementSetRole { .. } => "settlement_set_role",
+            ClientCommand::SettlementRemoveMember { .. } => "settlement_remove_member",
             ClientCommand::Disconnect => "disconnect",
         }
     }
@@ -607,6 +644,17 @@ pub enum ServerMessage {
         /// Stable checksum of the whole world.
         world_checksum: String,
     },
+    /// Accepted settlement membership mutation (D-033).
+    SettlementUpdated {
+        /// Authoritative tick after the accepted command.
+        tick: u64,
+        /// Updated settlement record.
+        settlement: SettlementView,
+        /// Stable checksum of the server settlement store.
+        settlement_checksum: String,
+        /// Stable checksum of the whole world.
+        world_checksum: String,
+    },
     /// Read-only settlement list.
     SettlementList {
         /// Authoritative tick.
@@ -759,6 +807,9 @@ pub fn decode_client_command(payload: &[u8]) -> Result<ClientCommand, Rejection>
         "place_blueprint",
         "found_settlement",
         "settlement_list",
+        "settlement_invite",
+        "settlement_set_role",
+        "settlement_remove_member",
         "disconnect",
     ];
     if !KNOWN_TAGS.contains(&tag) {
@@ -1168,7 +1219,11 @@ impl Session {
                 codes::PLACEMENT_UNAVAILABLE,
                 "blueprint placement requires the authoritative executor with a package library, not the transport-only session",
             ),
-            ClientCommand::FoundSettlement { .. } | ClientCommand::SettlementList => reject(
+            ClientCommand::FoundSettlement { .. }
+            | ClientCommand::SettlementList
+            | ClientCommand::SettlementInvite { .. }
+            | ClientCommand::SettlementSetRole { .. }
+            | ClientCommand::SettlementRemoveMember { .. } => reject(
                 codes::SETTLEMENT_UNAVAILABLE,
                 "settlements require the authoritative executor with a player registry, not the transport-only session",
             ),
@@ -1767,6 +1822,81 @@ mod tests {
         assert_eq!(
             crate::world::ClientRole::required_role_for(&list),
             crate::world::ClientRole::Viewer
+        );
+    }
+
+    #[test]
+    fn settlement_membership_commands_decode_and_map_to_mayor() {
+        let payload = br#"{"type":"settlement_invite","settlement_id":1,"player_id":9,"role":"builder","expected_revision":2}"#;
+        let decoded = decode_client_command(payload).expect("settlement_invite decodes");
+        assert_eq!(
+            decoded,
+            ClientCommand::SettlementInvite {
+                settlement_id: 1,
+                player_id: 9,
+                role: "builder".to_string(),
+                expected_revision: 2,
+            }
+        );
+        assert_eq!(decoded.tag(), "settlement_invite");
+        assert_eq!(
+            crate::world::ClientRole::required_role_for(&decoded),
+            crate::world::ClientRole::Mayor
+        );
+
+        for (tag, expected) in [
+            (
+                r#"{"type":"settlement_set_role","settlement_id":1,"player_id":9,"role":"manager","expected_revision":2}"#,
+                "settlement_set_role",
+            ),
+            (
+                r#"{"type":"settlement_remove_member","settlement_id":1,"player_id":9,"expected_revision":2}"#,
+                "settlement_remove_member",
+            ),
+        ] {
+            let decoded = decode_client_command(tag.as_bytes()).expect("membership command");
+            assert_eq!(decoded.tag(), expected);
+            assert_eq!(
+                crate::world::ClientRole::required_role_for(&decoded),
+                crate::world::ClientRole::Mayor
+            );
+        }
+    }
+
+    #[test]
+    fn settlement_updated_round_trips_on_the_wire() {
+        let message = ServerMessage::SettlementUpdated {
+            tick: 5,
+            settlement: SettlementView {
+                id: 1,
+                name: "Harbour".to_string(),
+                owner: "mayor".to_string(),
+                owner_id: Some(1),
+                owned: true,
+                center: [0, 0],
+                radius_m: 64,
+                members: vec![
+                    SettlementMemberView {
+                        player: 1,
+                        role: "owner".to_string(),
+                        permissions: 15,
+                    },
+                    SettlementMemberView {
+                        player: 9,
+                        role: "builder".to_string(),
+                        permissions: 1,
+                    },
+                ],
+                membership_revision: 2,
+            },
+            settlement_checksum: "0123456789abcdef".to_string(),
+            world_checksum: "fedcba9876543210".to_string(),
+        };
+        let json = String::from_utf8(encode_json(&message).expect("encode")).expect("utf8");
+        assert!(json.contains("\"type\":\"settlement_updated\""));
+        assert_eq!(
+            serde_json::from_str::<ServerMessage>(&json).expect("decode"),
+            message
         );
     }
 
