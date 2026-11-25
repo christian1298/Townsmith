@@ -243,8 +243,9 @@ func _settlement_center(settlement: Dictionary) -> Vector2:
 
 func _membership_summary(settlement: Dictionary) -> String:
 	var revision := int(settlement.get("membership_revision", 0))
+	var tax := " · tax %s%%" % _i18n.format_int(int(settlement.get("tax_rate", 0)))
 	if not bool(settlement.get("owned", false)):
-		return "Unowned · revision %s" % _i18n.format_int(revision)
+		return "Unowned · revision %s%s" % [_i18n.format_int(revision), tax]
 	var owner_id := int(settlement.get("owner_id", 0))
 	var rows = settlement.get("members", [])
 	var counts := {}
@@ -258,10 +259,11 @@ func _membership_summary(settlement: Dictionary) -> String:
 		parts.append("%s %s" % [role, _i18n.format_int(int(counts[role]))])
 	parts.sort()
 	var suffix := "" if parts.is_empty() else " · " + " · ".join(parts)
-	return "Owner #%s · %s members · revision %s%s" % [
+	return "Owner #%s · %s members · revision %s%s%s" % [
 		_i18n.format_int(owner_id),
 		_i18n.format_int((rows as Array).size() if rows is Array else 0),
 		_i18n.format_int(revision),
+		tax,
 		suffix,
 	]
 
@@ -385,13 +387,14 @@ func _render_selection() -> void:
 	if _summary_title != null:
 		_summary_title.text = "#%s %s" % [_i18n.format_int(_selected_id), settlement_name]
 	if _settlement_line != null:
-		_settlement_line.text = "#%s %s · owner %s · centre (%s, %s) · radius %s m" % [
+		_settlement_line.text = "#%s %s · owner %s · centre (%s, %s) · radius %s m · tax %s%%" % [
 			_i18n.format_int(_selected_id),
 			settlement_name,
 			owner,
 			_i18n.format_float(center.x, 0),
 			_i18n.format_float(center.y, 0),
 			_i18n.format_int(int(settlement.get("radius_m", 0))),
+			_i18n.format_int(int(settlement.get("tax_rate", 0))),
 		]
 		if _membership_line != null:
 			_membership_line.text = _membership_summary(settlement)
@@ -480,13 +483,14 @@ func _rebuild_list() -> void:
 	for settlement in _settlements:
 		var id := int(settlement.get("id", 0))
 		var center := _settlement_center(settlement)
-		_list.add_item("#%s  %s  ·  %s  ·  centre (%s, %s)  ·  r %s m" % [
+		_list.add_item("#%s  %s  ·  %s  ·  centre (%s, %s)  ·  r %s m  ·  tax %s%%" % [
 			_i18n.format_int(id),
 			str(settlement.get("name", "")),
 			str(settlement.get("owner", "")),
 			_i18n.format_float(center.x, 0),
 			_i18n.format_float(center.y, 0),
 			_i18n.format_int(int(settlement.get("radius_m", 0))),
+			_i18n.format_int(int(settlement.get("tax_rate", 0))),
 		])
 		_list.set_item_metadata(_list.item_count - 1, id)
 		if id == _selected_id:
@@ -936,6 +940,8 @@ func _run_smoke() -> void:
 			status = "fixture_row_second"
 		elif not first_row.contains("#1") or not second_row.contains("#2"):
 			status = "fixture_row_ids"
+		elif not first_row.contains("tax 0%") or not second_row.contains("tax 0%"):
+			status = "fixture_row_tax"
 		elif int(_list.get_item_metadata(0)) != 1 or int(_list.get_item_metadata(1)) != 2:
 			status = "fixture_metadata"
 		elif _selected_id != 1:
@@ -961,6 +967,10 @@ func _run_smoke() -> void:
 			status = "select_first_title"
 		elif not _membership_line.text.contains("Unowned"):
 			status = "select_first_membership"
+		elif not _settlement_line.text.contains("tax 0%"):
+			status = "select_first_tax"
+		elif not _membership_line.text.contains("tax 0%"):
+			status = "select_first_membership_tax"
 		elif not _district_line.text.contains("Population 0"):
 			status = "select_first_row"
 		elif not _policy_line.text.contains("#1") or not _policy_line.text.contains("Smoke Core"):
@@ -980,6 +990,8 @@ func _run_smoke() -> void:
 			status = "select_second_policy_row"
 		elif not _summary_title.text.contains("Smoke Beta"):
 			status = "select_second_title"
+		elif not _settlement_line.text.contains("tax 0%"):
+			status = "select_second_tax"
 
 	# 6. Keyboard/button stepping wraps in id order.
 	if status == "ok":
@@ -1052,6 +1064,14 @@ func _run_smoke() -> void:
 		contained_id,
 		rejection_code,
 		unavailable_code,
+	])
+	var alpha_tax := int(_find_settlement(1).get("tax_rate", 0))
+	var beta_tax := int(_find_settlement(2).get("tax_rate", 0))
+	var selected_tax := int(_find_settlement(selected_id).get("tax_rate", 0)) if selected_id != 0 else 0
+	print("DISTRICT_TAX alpha=%d%% beta=%d%% selected=%d%%" % [
+		alpha_tax,
+		beta_tax,
+		selected_tax,
 	])
 	_print_marker(status, _settlements.size(), selected_id, population, contained_id)
 	get_tree().quit(0 if status == "ok" else 1)
