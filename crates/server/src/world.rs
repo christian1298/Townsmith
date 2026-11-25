@@ -129,6 +129,15 @@ pub const MAX_BLUEPRINT_LOCK_LEASE_TICKS: u64 = 3_600;
 /// Audit code recorded for an accepted command.
 pub const AUDIT_ACCEPTED: &str = "ok";
 
+/// Audit code for an Admin force-unlock of another player's advisory lock.
+pub const AUDIT_UNLOCK_FORCED: &str = "blueprint.unlock_forced";
+
+/// Whether an audit code records an accepted command.
+#[must_use]
+pub fn audit_code_accepted(code: &'static str) -> bool {
+    code == AUDIT_ACCEPTED || code == AUDIT_UNLOCK_FORCED
+}
+
 /// Sustained command rate, in credits per authoritative second.
 ///
 /// The rate is nominal: v0 has no wall-clock loop, so virtual time comes from
@@ -424,7 +433,7 @@ impl AuditEntry {
     /// Whether the command was accepted.
     #[must_use]
     pub fn accepted(self) -> bool {
-        self.code == AUDIT_ACCEPTED
+        audit_code_accepted(self.code)
     }
 }
 
@@ -1654,7 +1663,7 @@ impl ServerWorld {
         self.commands = self.commands.saturating_add(1);
         let (messages, code) = self.evaluate(command);
         self.record_audit(command.tag(), code);
-        if self.hello && code == AUDIT_ACCEPTED {
+        if self.hello && audit_code_accepted(code) {
             self.last_seen_tick = self.tick;
         }
         messages
@@ -2685,26 +2694,32 @@ impl ServerWorld {
                 format!("no advisory lock exists for blueprint {hash}"),
             );
         };
-        if self.role != ClientRole::Admin
-            && Some(existing.player_id) != self.player_id.map(PlayerId::get)
-        {
+        let holder_id = existing.player_id;
+        let foreign = Some(holder_id) != self.player_id.map(PlayerId::get);
+        if self.role != ClientRole::Admin && foreign {
             return reject_with(
                 crate::protocol::codes::BLUEPRINT_LOCKED,
-                format!(
-                    "blueprint {hash} is locked by player #{}",
-                    existing.player_id
-                ),
+                format!("blueprint {hash} is locked by player #{holder_id}"),
             );
         }
+        let forced = self.role == ClientRole::Admin && foreign;
         self.tick = self.tick.saturating_add(1);
         self.blueprint_locks.remove(&hash);
         self.refresh_checksum();
-        accepted(ServerMessage::BlueprintUnlockResult {
+        let message = ServerMessage::BlueprintUnlockResult {
             tick: self.tick,
             hash,
             locks_count: self.blueprint_locks.len(),
             checksum: self.blueprint_locks_checksum(),
-        })
+            forced,
+            holder_id: forced.then_some(holder_id),
+        };
+        let code = if forced {
+            AUDIT_UNLOCK_FORCED
+        } else {
+            AUDIT_ACCEPTED
+        };
+        (vec![message], code)
     }
 
     fn apply_blueprint_locks(&mut self) -> (Vec<ServerMessage>, &'static str) {
@@ -6798,6 +6813,66 @@ mod tests {
             world.blueprint_locks.is_empty(),
             "disconnect releases every lock held by the player"
         );
+    }
+
+    #[test]
+    fn admin_force_unlock_is_explicit_and_audited() {
+        let hash = format!("blake3:{}", "a".repeat(64));
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Mayor);
+        let alice = world.open_connection();
+        let alice_id = register_actor(&mut world, alice, "alice", ClientRole::Mayor);
+        let bob = world.open_connection();
+        register_actor(&mut world, bob, "bob", ClientRole::Admin);
+        let carol = world.open_connection();
+        register_actor(&mut world, carol, "carol", ClientRole::Mayor);
+
+        world.apply_session(alice, &lock_command(&hash));
+        let holder_unlock = first_response(world.apply_session(alice, &unlock_command(&hash)));
+        match holder_unlock {
+            ServerMessage::BlueprintUnlockResult {
+                forced, holder_id, ..
+            } => {
+                assert!(!forced, "the holder's own unlock is not forced");
+                assert_eq!(holder_id, None);
+            }
+            other => panic!("expected unlock, got {other:?}"),
+        }
+        assert_eq!(last_audit_code(&world), AUDIT_ACCEPTED);
+
+        world.apply_session(bob, &lock_command(&hash));
+        let admin_own = first_response(world.apply_session(bob, &unlock_command(&hash)));
+        assert!(matches!(
+            admin_own,
+            ServerMessage::BlueprintUnlockResult {
+                forced: false,
+                holder_id: None,
+                ..
+            }
+        ));
+
+        world.apply_session(alice, &lock_command(&hash));
+        let foreign = first_response(world.apply_session(carol, &unlock_command(&hash)));
+        assert_eq!(rejection_code(&foreign), "blueprint.locked");
+        assert!(world.blueprint_locks.contains_key(&hash));
+        assert!(!last_audit_code(&world).eq(AUDIT_UNLOCK_FORCED));
+
+        let forced = first_response(world.apply_session(bob, &unlock_command(&hash)));
+        match forced {
+            ServerMessage::BlueprintUnlockResult {
+                forced,
+                holder_id,
+                locks_count,
+                ..
+            } => {
+                assert!(forced);
+                assert_eq!(holder_id, Some(alice_id.get()));
+                assert_eq!(locks_count, 0);
+            }
+            other => panic!("expected forced unlock, got {other:?}"),
+        }
+        assert!(!world.blueprint_locks.contains_key(&hash));
+        assert_eq!(last_audit_code(&world), AUDIT_UNLOCK_FORCED);
+        assert!(world.audit_state().last().expect("audit").accepted());
     }
 
     #[test]
