@@ -183,7 +183,7 @@ run_block() {
 		echo "placement-UI smoke ($name) locks marker mismatch: $locks_line" >&2
 		exit 1
 	fi
-	if [[ ! "$lock_line" =~ ^MP_PLACE_UI_LOCK\ status=ok\ selected=0\ hash=blake3:[0-9a-f]{64}\ player_id=1\ count=1\ checksum=[0-9a-f]{16}\ tick=7\ lock=LOCKED_you$ ]]; then
+	if [[ ! "$lock_line" =~ ^MP_PLACE_UI_LOCK\ status=ok\ selected=0\ hash=blake3:[0-9a-f]{64}\ player_id=1\ count=1\ checksum=[0-9a-f]{16}\ tick=7\ lock=LOCKED_you\ lease=299t$ ]]; then
 		echo "placement-UI smoke ($name) lock marker mismatch: $lock_line" >&2
 		exit 1
 	fi
