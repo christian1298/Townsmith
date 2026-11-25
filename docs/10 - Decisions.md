@@ -57,6 +57,7 @@ tags:
 | D-037 | Content-ID migrations are explicit and versioned | Proposed | 2026-11-24 | [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[42 - World Placement Bridge]] |
 | D-038 | Authoritative placed-blueprint voxel edits are bounded, revisioned, and lock-scoped | Proposed | 2026-11-25 | [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[35 - Editor Undo Redo]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]] |
 | D-039 | Settlement tax composes as a per-location surcharge on the district-weighted base | Proposed | 2026-11-25 | [[09 - Open Questions]], [[48 - Settlement Boundaries]], [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]], [[81 - Settlement Tax Composition]] |
+| D-040 | Authoritative command journal with bounded replay and Admin rollback | Proposed | 2026-11-25 | [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[75 - Save Load Stress]], [[78 - Code Audit Findings]], [[82 - Journal and Rollback]] |
 
 ---
 
@@ -2198,6 +2199,74 @@ Adopt option A in [[81 - Settlement Tax Composition]]:
 ### Review trigger
 
 Accept before the first treasury consumer reads `tax_rate`. Revisit if Q-121 selects the additive rule, if Q-122 changes the collection watermark, or if the cap forces a `PolicyTaxWeights` schema change.
+
+---
+
+## D-040 — Authoritative command journal with bounded replay and Admin rollback
+
+**Status:** Proposed · **Date:** 2026-11-25 · **Affects:** [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[75 - Save Load Stress]], [[78 - Code Audit Findings]], [[82 - Journal and Rollback]]
+
+### Context
+
+D-004 makes the server authoritative and D-020 makes its accepted path deterministic, but the server keeps no durable command history. The only history is a 256-entry, per-session, in-memory audit ring behind the Admin `audit_log` command and a process-local 300-tick resume window. Neither survives a restart, neither is replayable, and neither can answer which accepted command produced a save. D-032 and D-038 add accepted placement and voxel-edit mutations without a common record; D-034 pins a content identity that a restored snapshot must match; D-021 allows editing while paused, so several commands can share a tick. Q-123 and Q-124 ask what to retain and who may roll back.
+
+### Decision
+
+Adopt the v1 design in [[82 - Journal and Rollback]]:
+
+1. **Journal scope.** One append-only, world-scoped, bounded journal. A command entry is `{seq, tick, player_id, role, tag, command_checksum, accepted, result_code}` plus a `chain` field. `seq` is the global acceptance order and is never reused, including across rollback. Rejected commands are recorded but replayed only when `accepted` is true.
+2. **No payload by default.** The default stores a BLAKE3-256 command checksum, not the command body. A bounded Admin-only payload mode (`--journal-payloads` reserved) enables replay to arbitrary targets. Chat, personal text, tokens, and credentials are never captured. Payload `hash` mode limits rollback to exact snapshot ticks.
+3. **Bounded retention.** Retention is capped by both entry count and tick age. Rotation deletes only segments whose range is covered by a retained snapshot and no rollback floor. The in-memory index is bounded to sequence, offset, and chain head.
+4. **Fail-closed writes.** Validation runs on a scratch copy. An accepted command is appended and flushed before the state commit and response; an append failure rejects the command and mutates nothing. Degraded or read-only mode is an explicit Admin choice, never silent.
+5. **Snapshots and replay.** Snapshots are ordinary `ServerSave`-shaped files written atomically, with a sidecar manifest carrying tick, last `seq`, save checksum, schema version, and content identity. Rollback loads a validated snapshot at or before the target and replays the accepted suffix.
+6. **Reconnect replay.** A valid resume may receive accepted entries after the client's last acknowledged `seq`/tick, bounded by entry and byte caps. A gap, backward tick, or expired window forces a full snapshot resync. The journal does not extend the 300-tick window, replace the resume token, or survive a server restart.
+7. **Admin rollback.** A rollback is Admin-only, targets a resolved `(tick, seq)`, and is two-step: a no-mutation dry run with a deterministic preview checksum, then an explicit apply. It requires a validated snapshot and an exact schema/content identity, or a verified D-036 compatibility path with no pending D-037 migration. It writes through the existing atomic `.tmp`/`.bak` save path, appends `rollback_intent`/`rollback_applied`, increments the journal epoch, audits the admin and target, and resynchronizes or disconnects every online client.
+8. **One state.** The journal records decisions; it is not a second simulation, an event-sourced replacement for `ServerSave`, per-voxel undo (D-038), client prediction rollback, or an authentication boundary.
+
+### Consequences
+
+**Positive**
+
+- Accepted commands are durable evidence across a crash, not only the last autosave.
+- Reconnect has a bounded catch-up path and an explicit gap rule instead of an all-or-nothing snapshot.
+- Admin rollback becomes a previewed, audited, snapshot-backed operation with online resync.
+- One record format covers placement, settlement, time, and voxel-edit commands without changing their authority.
+- Default hash-only mode keeps disk, privacy, and memory bounded.
+
+**Negative**
+
+- Every accepted command pays a journal append before commit; the tick budget must absorb it.
+- Rollback needs payload capture or an exact snapshot tick, so the default mode cannot roll back to an arbitrary command.
+- A per-session audit ring and a world journal are two histories that can disagree if retention or payload policy is misunderstood.
+- Snapshots add disk I/O and a second file family beside the save.
+- Content or schema migrations can strand old snapshots until explicitly handled.
+
+**Neutral**
+
+- The save remains the only world-state authority; the journal does not change `ServerSave` fields.
+- Base-only saves and existing checksums are unaffected until a journal is enabled.
+- Reconnect and audit keep their current roles; the journal adds a recovery path, not a new permission model.
+
+### Alternatives considered
+
+- **Full event sourcing:** the journal as the only state with no `ServerSave`. Rejected: rewrites the persistence model, makes startup proportional to history, and contradicts the existing atomic save design.
+- **Backup-file rollback only:** restore the last `.bak`. Rejected: no target tick, no preview, no resync, and it discards every accepted command since the backup.
+- **WAL-only with no queryable entries:** smaller, but gives no audit trail, no reconnect replay, and no Admin inspection.
+- **Unbounded payload capture:** makes every rollback trivial but stores chat, personal text, and large commands forever. Rejected for privacy and size.
+- **Client-supplied journal or reconnect sequence:** lets a client choose what the server replays. Rejected; the server owns sequence and acceptance.
+- **Per-voxel undo as rollback:** conflates D-038's bounded edit revisions with world recovery and cannot restore economy or settlement state. Rejected.
+- **In-memory-only journal:** cheap, but loses the history on exactly the crash it is meant to survive.
+
+### Open questions
+
+| ID | Question |
+|---|---|
+| Q-123 | What are the default retention (entries and ticks), payload capture policy, and snapshot cadence? |
+| Q-124 | Who may authorize a rollback, and does it require a second Admin or a player quorum? |
+
+### Review trigger
+
+Accept before the first journal write, replay field, or rollback command. Revisit when Q-123/Q-124 are answered, when append cost or retention exceeds the Phase 6 disk/tick budget, when a content or schema migration strands a snapshot, or when D-038 changes the edit-batch shape.
 
 ---
 
