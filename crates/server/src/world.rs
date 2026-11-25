@@ -27,7 +27,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::thread;
 
-use core_blueprint::{load_tsbp, BlueprintLibrary, BlueprintLibraryError};
+use core_blueprint::{load_tsbp_with_dependency_issues, BlueprintLibrary, BlueprintLibraryError};
 use core_city::construction::{
     first_construction_payment, settle_first_installment, ConstructionError, ConstructionStore,
 };
@@ -239,6 +239,25 @@ fn fnv_update(mut hash: u64, bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     hash
+}
+
+/// Whether `id` is a D-006 content namespace (`mymod`) or namespaced id
+/// (`mymod:pack`): `^[a-z0-9_]+(:[a-z0-9_]+)?$`.
+///
+/// This mirrors the `ModManifest` id rule, so an active content registry can
+/// only list ids a manifest could actually declare.
+fn is_valid_content_id(id: &str) -> bool {
+    fn valid_part(part: &str) -> bool {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    }
+
+    match id.split_once(':') {
+        None => valid_part(id),
+        Some((namespace, pack)) => valid_part(namespace) && valid_part(pack),
+    }
 }
 
 /// Player role for one protocol v0 session.
@@ -641,6 +660,13 @@ pub struct ServerWorld {
     /// hex hash or it is rejected with `content_hash.mismatch`, before any
     /// session state is mutated.
     pub content_hash: Option<String>,
+    /// Active content ids used to validate blueprint dependencies (server
+    /// configuration, not save data).
+    ///
+    /// Always includes `base`; a live pack may add its manifest id and
+    /// namespace. Sorted and deduplicated by
+    /// [`Self::set_active_content_ids`], and excluded from [`Self::checksum`].
+    pub active_content_ids: Vec<String>,
     /// Per-session interest viewport centre `[x, z]` in metres.
     ///
     /// View state only: excluded from [`Self::checksum`] and not saved.
@@ -743,6 +769,7 @@ impl ServerWorld {
             blueprint_library: None,
             policies: None,
             content_hash: None,
+            active_content_ids: vec!["base".to_string()],
             blueprint_locks: BTreeMap::new(),
             lock_lease_ticks: DEFAULT_BLUEPRINT_LOCK_LEASE_TICKS,
             retain_locks_on_disconnect: false,
@@ -840,6 +867,40 @@ impl ServerWorld {
                 Some(value.to_string())
             }
         };
+        Ok(())
+    }
+
+    /// Replace the active content ids used for blueprint dependency checks.
+    ///
+    /// Ids are trimmed, validated, sorted, and deduplicated. `base` is always
+    /// accepted and normally included; an empty list or a malformed id rejects
+    /// with `content.invalid_registry` and leaves the previous list untouched.
+    /// This is process configuration, excluded from the save and checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns `content.invalid_registry` for an empty or malformed list.
+    pub fn set_active_content_ids(&mut self, ids: &[&str]) -> Result<(), Rejection> {
+        if ids.is_empty() {
+            return Err(Rejection::new(
+                crate::protocol::codes::CONTENT_INVALID_REGISTRY,
+                "active content registry must not be empty",
+            ));
+        }
+        let mut normalized = Vec::with_capacity(ids.len());
+        for raw in ids {
+            let id = raw.trim();
+            if !is_valid_content_id(id) {
+                return Err(Rejection::new(
+                    crate::protocol::codes::CONTENT_INVALID_REGISTRY,
+                    format!("invalid active content id `{id}`"),
+                ));
+            }
+            normalized.push(id.to_string());
+        }
+        normalized.sort();
+        normalized.dedup();
+        self.active_content_ids = normalized;
         Ok(())
     }
 
@@ -953,6 +1014,7 @@ impl ServerWorld {
             blueprint_library: None,
             policies: None,
             content_hash: None,
+            active_content_ids: vec!["base".to_string()],
             blueprint_locks: BTreeMap::new(),
             lock_lease_ticks: DEFAULT_BLUEPRINT_LOCK_LEASE_TICKS,
             retain_locks_on_disconnect: false,
@@ -2203,12 +2265,28 @@ impl ServerWorld {
                 )
             }
         };
-        let blueprint = match load_tsbp(&path) {
+        let active_ids: Vec<&str> = self.active_content_ids.iter().map(String::as_str).collect();
+        let blueprint = match load_tsbp_with_dependency_issues(&path, &active_ids) {
             Ok(blueprint) => blueprint,
+            Err(error) if !error.issues.is_empty() => {
+                let missing = error
+                    .issues
+                    .iter()
+                    .map(|issue| format!("{} ({})", issue.id, issue.reason.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return reject_with(
+                    crate::protocol::codes::BLUEPRINT_MISSING_DEPENDENCY,
+                    format!("blueprint package {hash} requires missing content: {missing}"),
+                );
+            }
             Err(error) => {
                 return reject_with(
                     crate::protocol::codes::PLACEMENT_PACKAGE_INVALID,
-                    format!("blueprint package {hash} failed validation: {error}"),
+                    format!(
+                        "blueprint package {hash} failed validation: {}",
+                        error.error
+                    ),
                 )
             }
         };
@@ -6551,6 +6629,33 @@ mod tests {
         hash
     }
 
+    fn write_dependency_package(dir: &PlacementTempDir, id: &str, mods: &[&str]) -> String {
+        let library_root = dir.library();
+        std::fs::create_dir_all(&library_root).expect("library root");
+        let mut volume =
+            VoxelVolume::new(VolumeConfig::new(1, 1, 1).expect("config")).expect("volume");
+        volume
+            .fill_box(VolumePos::new(0, 0, 0), VolumePos::new(1, 1, 1), 1)
+            .expect("fill");
+        let mut metadata = BlueprintMetadata::new(id, "Dependency House");
+        metadata.stats.material_cost = 1_000.0;
+        metadata.stats.resident_capacity = 2;
+        metadata.stats.job_slots = 1;
+        metadata.dependencies.mods = mods.iter().map(|value| (*value).to_string()).collect();
+        let blueprint = Blueprint::new(metadata, volume);
+        let package = dir.path().join(format!("{}.tsbp", id.replace(':', "_")));
+        let hash = save_tsbp_with_hash(&package, &blueprint).expect("save package");
+        BlueprintLibrary::new(&library_root)
+            .expect("open library")
+            .insert_file_with_dependencies(&package, &{
+                let mut active = vec!["base"];
+                active.extend(mods.iter().copied());
+                active
+            })
+            .expect("insert package");
+        hash
+    }
+
     fn placement_world(dir: &PlacementTempDir) -> ServerWorld {
         let mut world = ServerWorld::with_role(SEED, ClientRole::Mayor);
         world.set_blueprint_library(dir.library()).expect("library");
@@ -7130,6 +7235,84 @@ mod tests {
         assert!(world.set_policy_registry(invalid).is_err());
         assert!(world.policies.is_none());
         assert_eq!(world.checksum(), checksum);
+    }
+
+    #[test]
+    fn active_content_ids_validate_sort_and_reject_invalid() {
+        let mut world = ServerWorld::new(SEED);
+        assert_eq!(world.active_content_ids, vec!["base".to_string()]);
+        world
+            .set_active_content_ids(&[" mymod:pack ", "base", "mymod"])
+            .expect("valid registry");
+        assert_eq!(
+            world.active_content_ids,
+            vec![
+                "base".to_string(),
+                "mymod".to_string(),
+                "mymod:pack".to_string()
+            ]
+        );
+        let before = world.active_content_ids.clone();
+        for invalid in [
+            Vec::<&str>::new(),
+            vec![""],
+            vec!["UPPER"],
+            vec!["a:b:c"],
+            vec!["mymod:"],
+            vec!["has space"],
+        ] {
+            assert_eq!(
+                world.set_active_content_ids(&invalid).unwrap_err().code,
+                crate::protocol::codes::CONTENT_INVALID_REGISTRY,
+                "{invalid:?}"
+            );
+            assert_eq!(
+                world.active_content_ids, before,
+                "{invalid:?} mutates nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn placement_rejects_missing_content_dependencies_before_mutation() {
+        let dir = PlacementTempDir::new("missing-dep");
+        let hash = write_dependency_package(&dir, "townsmith:missingdep", &["mymod"]);
+        let mut world = placement_world(&dir);
+        let before = placement_state(&world);
+
+        let rejected = world.apply(&place(&hash, 0.0, 0.0, 0));
+        assert_eq!(
+            rejection_code(&rejected),
+            crate::protocol::codes::BLUEPRINT_MISSING_DEPENDENCY
+        );
+        match &rejected {
+            ServerMessage::Reject { message, .. } => {
+                assert!(message.contains("mymod (missing mod)"), "{message}");
+            }
+            other => panic!("expected reject, got {other:?}"),
+        }
+        assert_eq!(placement_state(&world), before, "rejection mutates nothing");
+    }
+
+    #[test]
+    fn placement_accepts_active_mod_and_namespace_dependencies() {
+        let dir = PlacementTempDir::new("active-dep");
+        let exact = write_dependency_package(&dir, "townsmith:exact", &["mymod"]);
+        let namespace = write_dependency_package(&dir, "townsmith:namespace", &["mymod:pack"]);
+
+        let mut exact_world = placement_world(&dir);
+        exact_world
+            .set_active_content_ids(&["base", "mymod"])
+            .expect("registry");
+        let exact_result = exact_world.apply(&place(&exact, 0.0, 0.0, 0));
+        expect_placement_result(&exact_result);
+
+        let mut namespace_world = placement_world(&dir);
+        namespace_world
+            .set_active_content_ids(&["base", "mymod"])
+            .expect("registry");
+        let namespace_result = namespace_world.apply(&place(&namespace, 8.0, 0.0, 0));
+        expect_placement_result(&namespace_result);
     }
 
     #[test]
