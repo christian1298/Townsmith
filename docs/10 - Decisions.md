@@ -56,6 +56,7 @@ tags:
 | D-036 | Pack compatibility is explicit, never implicit | Proposed | 2026-11-24 | [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[42 - World Placement Bridge]] |
 | D-037 | Content-ID migrations are explicit and versioned | Proposed | 2026-11-24 | [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[42 - World Placement Bridge]] |
 | D-038 | Authoritative placed-blueprint voxel edits are bounded, revisioned, and lock-scoped | Proposed | 2026-11-25 | [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[35 - Editor Undo Redo]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]] |
+| D-039 | Settlement tax composes as a per-location surcharge on the district-weighted base | Proposed | 2026-11-25 | [[09 - Open Questions]], [[48 - Settlement Boundaries]], [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]], [[81 - Settlement Tax Composition]] |
 
 ---
 
@@ -2151,6 +2152,52 @@ Adopt the design in [[79 - Voxel Edit Sync]]:
 ### Review trigger
 
 Accept before the first live-edit protocol command or save migration. Revisit if Q-119 selects a merge model, if Q-120 requires reconnect retention, or if 10k edited placements exceed the save/interest budget.
+
+---
+
+## D-039 — Settlement tax composes as a per-location surcharge on the district-weighted base
+
+**Status:** Proposed · **Date:** 2026-11-25 · **Affects:** [[09 - Open Questions]], [[48 - Settlement Boundaries]], [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]], [[81 - Settlement Tax Composition]]
+
+### Context
+
+D-033 stores a settlement `tax_rate` in `0..=100` but no economy consumer reads it. D-030 already weights city tax income by the district multiplier at each resident's home and each job's workplace, and D-031 scales civic service upkeep by completed-site funding. Applying a settlement rate afterwards needs a defined precedence, overlap rule, rounding rule, and collection watermark.
+
+### Decision
+
+Adopt option A in [[81 - Settlement Tax Composition]]:
+
+1. Resolve one settlement per tax location with `owner_at` (nearest containing centre, lower id on a tie). Unowned or outside every settlement means rate `0`.
+2. Compute the combined per-location factor `min(8.0, m_i × (1 + s_i / 100))` in integer basis points with `u128` intermediates.
+3. Take the existing resident/job weighted mean of the **per-location** combined factors. Never multiply separate district and settlement means.
+4. Cap the combined factor at `8.0` (district maximum `4.0` × 100% surcharge `2.0`); reject values outside the existing `0.25..=4.0` district bounds as today.
+5. Collect once per economy day keyed by the persisted `days_elapsed` watermark; a rate change applies next tick, never retroactively; paused time collects nothing; dormant catch-up uses the stored rate per simulated day.
+6. Settlement tax is treasury revenue only in v1. D-031 service funding and all utility upkeep stay unchanged.
+7. A missing store, foreign seed, or malformed rate is neutral or a load rejection, never a silent clamp.
+
+### Consequences
+
+**Positive**
+
+- Preserves D-030's home/workplace weighting and D-031's separation of revenue from service upkeep.
+- One deterministic factor per location; the ledger can explain district and settlement components.
+- No new save field is required for the rate, and existing saves stay byte-identical.
+
+**Negative**
+
+- Requires a new combined-weights type or widened bounds because `PolicyTaxWeights` rejects values above `4.0`.
+- A tax-haven district dilutes a high settlement rate under the multiplicative rule.
+- The cap and rounding rule become economy contracts that need regression tests.
+
+### Alternatives considered
+
+- **Additive combined multiplier:** simpler, but a 100% settlement adds only 1.0× and can neutralize a district tax haven; kept as the balance alternative in Q-121.
+- **District first, then settlement:** mathematically the same product; only rounding/explanation differs.
+- **Settlement replaces district tax:** rejected; two authorities compete and the boundary becomes a cliff.
+
+### Review trigger
+
+Accept before the first treasury consumer reads `tax_rate`. Revisit if Q-121 selects the additive rule, if Q-122 changes the collection watermark, or if the cap forces a `PolicyTaxWeights` schema change.
 
 ---
 

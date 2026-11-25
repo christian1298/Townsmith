@@ -226,6 +226,8 @@ These support D-038 (Proposed, 2026-11-25) and [[79 - Voxel Edit Sync]].
 |---|---|---|---|
 | **Q-119** | What happens when two players edit the same voxel or submit overlapping batches? | **Recommendation:** exact-revision optimistic concurrency; reject a stale batch with `blueprint.revision_stale`, reload, and let the player retry. No CRDT or silent last-writer-wins. A merge UI and per-cell ownership are alternatives; if chosen, they must still produce one deterministic effective volume. | High |
 | **Q-120** | How long does a placement edit lock live, and does it survive reconnect? | **Recommendation:** a 300-tick lease refreshed by accepted edits, released on disconnect, Admin force-release; reconnect does not silently reclaim. Alternatives are explicit unlock only or a resume-time reclaim keyed by the session token. | High |
+| **Q-121** | Does the settlement tax compose multiplicatively with the D-030 district multiplier (option A, per-location cap 8.0), or additively (option C)? | **Recommendation:** option A: `min(8.0, m_i × (1 + s_i/100))` per location, then the existing weighted mean. It preserves the district signal and treats a settlement as a surcharge; option C is the balance alternative. | High |
+| **Q-122** | When is settlement tax collected, and how are mid-day rate changes and dormant catch-up attributed? | **Recommendation:** once per economy day keyed by the persisted `days_elapsed` watermark; rate changes apply next tick; paused time collects nothing; dormant catch-up uses the stored rate per simulated day. | High |
 
 ## Construction questions
 
@@ -387,3 +389,4 @@ These support D-038 (Proposed, 2026-11-25) and [[79 - Voxel Edit Sync]].
 | Q-111–Q-115 | Settlement ownership, membership, and permissions (Q-111 answered) |
 | Q-116–Q-118 | Content-pack identity in world saves (D-034 accepted; D-035 bridge v1; Q-116/Q-118 answered as proposed ADRs) |
 | Q-119–Q-120 | Authoritative placed-blueprint voxel edits (D-038 proposed) |
+| Q-121–Q-122 | Settlement tax composition and collection (D-039 proposed) |
