@@ -310,6 +310,41 @@ These support D-041 (Proposed, 2026-11-25) and [[83 - Remote Transport and Authe
 **Recommendation:** keep TLS in-process by default and enforce server-side expiry with no client-clock input. Measure reconnect friction before lengthening the token; do not add a refresh-token family until a real deployment needs it. If a proxy is supported, require an explicit trusted-proxy address and document that channel binding is disabled in that mode.
 **Status:** Open
 
+### Q-127 — Multiple active content packs and namespace merging
+
+**Priority:** Medium · **Affects:** D-034, D-036, D-042, [[06 - Modding and Resource Packs]], [[84 - Content Registry Modes]]
+
+**Question:** Can more than one content pack or resource pack be active at once, and how do their IDs and namespaces merge?
+
+**Why it matters:** D-034 currently binds a save to one active pack. A server registry with several entries is useful for mods and packs, but two packs claiming the same namespace make dependency resolution and save identity ambiguous.
+
+**Options**
+- **One D-034 pack plus explicit mods/packs:** preserves the current save identity; overlapping IDs are rejected.
+- **Multiple packs with a deterministic merge order:** more flexible, but the save must pin the whole ordered set and checksums.
+- **One pack only, no separate mod list:** simplest, but blocks mixed servers.
+
+**Current assumption:** v1 keeps one D-034 content pack and an explicit registry of additional mods/packs; duplicate IDs/namespaces across entries are rejected.
+**Recommendation:** keep the one-pack rule until a real mixed-server use case appears; then write a new ADR for ordered multi-pack identity rather than loosening D-034 silently.
+**Status:** Open
+
+### Q-128 — Registry distribution and trust
+
+**Priority:** Medium · **Affects:** D-042, [[12 - Technical Architecture]], [[83 - Remote Transport and Authentication]], [[84 - Content Registry Modes]]
+
+**Question:** How is the server content registry distributed and trusted across server and client, and who signs it?
+
+**Why it matters:** An operator-supplied local file is enough for a self-hosted server. A public server ecosystem needs a way to verify that the registry and packs came from the expected publisher, and clients need a mismatch story that does not auto-download.
+
+**Options**
+- **Local operator file only:** simplest; no signatures, no remote fetch.
+- **Signed registry with an embedded publisher key:** verifies provenance, but adds key distribution and rotation.
+- **Registry fetched from a URL with a pinned hash:** easier updates, but the URL becomes a trust and availability dependency.
+- **Workshop/Steam-managed distribution:** platform-native later, not a v1 requirement.
+
+**Current assumption:** v1 is an operator-supplied local manifest with exact checksums; no signatures, URLs, or auto-download.
+**Recommendation:** start local and exact; add signatures only when public servers or third-party registries exist. Never let a client supply the registry.
+**Status:** Open
+
 ## Construction questions
 
 | ID | Question | Current assumption / recommendation | Priority |
@@ -473,3 +508,4 @@ These support D-041 (Proposed, 2026-11-25) and [[83 - Remote Transport and Authe
 | Q-121–Q-122 | Settlement tax composition and collection (D-039 proposed) |
 | Q-123–Q-124 | Authoritative command journal and Admin rollback (D-040 proposed) |
 | Q-125–Q-126 | Remote transport and authentication (D-041 proposed) |
+| Q-127–Q-128 | Content registry modes and trust (D-042 proposed) |

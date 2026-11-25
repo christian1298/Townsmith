@@ -59,6 +59,7 @@ tags:
 | D-039 | Settlement tax composes as a per-location surcharge on the district-weighted base | Proposed | 2026-11-25 | [[09 - Open Questions]], [[48 - Settlement Boundaries]], [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]], [[81 - Settlement Tax Composition]] |
 | D-040 | Authoritative command journal with bounded replay and Admin rollback | Proposed | 2026-11-25 | [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[75 - Save Load Stress]], [[78 - Code Audit Findings]], [[82 - Journal and Rollback]] |
 | D-041 | Remote transport and authentication: TLS, account identity, session tokens, bans | Proposed | 2026-11-25 | [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[78 - Code Audit Findings]], [[83 - Remote Transport and Authentication]] |
+| D-042 | Server content registry modes: mods, resource packs, kinds, and checksums | Proposed | 2026-11-25 | [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[28 - Blueprint Package]], [[42 - World Placement Bridge]], [[78 - Code Audit Findings]], [[84 - Content Registry Modes]] |
 
 ---
 
@@ -2340,6 +2341,42 @@ Ban scope (server vs account-wide) and LAN plaintext are listed in [[83 - Remote
 ### Review trigger
 
 Accept before the first non-loopback listener, account file, token issuer, or ban list. Revisit when Q-125/Q-126 are answered, when a proxy or shared ban list is proposed, when restart-persistent resume is needed, or when a frozen v1 frame would have to change; in that last case write a protocol-version ADR instead.
+
+---
+
+## D-042 — Server content registry modes: mods, resource packs, kinds, and checksums
+
+**Status:** Proposed (2026-11-25)
+
+**Context.** #386 adds `--content-ids base[,mymod[,mymod:pack]]` and `ServerWorld.active_content_ids`; the default is base-only, IDs are normalized, and placement already fails closed on missing package dependencies. The list does not say whether an ID is a mod or a resource pack, cannot carry checksums, and cannot express "this exact reviewed set." A package requiring a resource pack could be satisfied by a same-named mod entry, or vice versa, which defeats the separate `MissingMod`/`MissingResourcePack` reasons.
+
+**Decision.**
+
+1. Keep `--content-ids` as the short form for base plus active IDs. It remains backwards compatible and cannot verify kinds or checksums.
+2. Add an optional `--content-registry PATH` manifest: `{format_version: 1, ids:[{id, kind, namespace, checksum}]}`, `kind` in `mod|resource_pack`, `base` implicit, max 256 entries/1 MiB.
+3. Normalize by lowercase ID, sort by `(kind, id)`, deduplicate, and reject duplicate IDs/namespaces across kinds. The active registry checksum is a deterministic hash over the normalized entries, not the file bytes.
+4. Map `.tsbp` `dependencies.mods` to `kind=mod` and `dependencies.resource_packs` to `kind=resource_pack`; exact ID or namespace matching only. A wrong-kind entry does not satisfy the requirement.
+5. Validate at startup before the listener binds; stable codes `content.invalid_registry`, `content.registry_io`, `content.unsupported_registry_version`, `content.unknown_id`, `content.kind_mismatch`, `content.pin_mismatch`, `content.cli_conflict`; exit 2.
+6. Keep the registry process-local: it is not saved, not in `ServerWorld::checksum`, and does not change the D-034 outer save identity. `--content-hash` remains an independent client pin.
+7. No auto-download, no fallback substitution, no multiple D-034 packs in v1.
+
+**Consequences.**
+
+- Positive: the server can state and verify the exact content set, placement failures distinguish missing mods from missing packs, and reviewed deployments can pin checksums.
+- Negative: another startup configuration file and failure surface; operators can still use the unverified short form; one-pack-at-a-time remains.
+- Neutral: base-only servers and dependency-free packages are unchanged.
+
+**Alternatives considered.**
+
+- **Keep only `--content-ids`:** simplest, but kind-agnostic and unverifiable.
+- **Infer kind from the ID prefix:** ambiguous for shared namespaces and cannot carry checksums.
+- **One registry per content format:** duplicates the same IDs and makes placement matching harder.
+- **Auto-download missing content:** violates the fail-closed and no-auto-download rules.
+- **Derive `--content-hash` from the registry:** couples a deployment pin to package metadata; keep it explicit.
+
+**Open questions.** Q-127 (multiple active packs/namespaces) and Q-128 (distribution and trust). See [[84 - Content Registry Modes]].
+
+**Review trigger.** Accept before the first non-loopback server with a non-base registry, before a resource pack may satisfy a package dependency, or before the registry is distributed off the operator's machine. Revisit when D-036/D-037 are accepted, multiple active packs are proposed, or remote/hot-reload registries are requested.
 
 ---
 
