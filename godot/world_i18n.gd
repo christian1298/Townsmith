@@ -291,6 +291,13 @@ const TABLES := {
 		"base.ui.dashboard.settlement_tax.unowned": "settlement.unowned",
 		"base.ui.dashboard.settlement_tax.failed": "{code}: {message}",
 
+		# Settlement claim control (Shift+C). Only the sentence is translated;
+		# bridge error codes, ids, player ids, and checksums stay verbatim.
+		"base.ui.dashboard.settlement_claim.success": "Claimed settlement #{id} as player #{player} · checksum {checksum}",
+		"base.ui.dashboard.settlement_claim.already_owned": "Settlement #{id} is already owned by player #{player}",
+		"base.ui.dashboard.settlement_claim.failed": "{code}: {message}",
+		"base.ui.dashboard.settlement_claim.register_failed": "Player registration failed: {code}: {message}",
+
 		# Compact dashboard policy editing. Bridge error codes, ids, and
 		# policy names stay verbatim parameters.
 		"base.ui.policies.created": "Policy {id} created: {name}",
@@ -669,6 +676,13 @@ const TABLES := {
 		"base.ui.dashboard.settlement_tax.success": "Siedlungssteuer: {rate} % · Prüfsumme {checksum}",
 		"base.ui.dashboard.settlement_tax.unowned": "Siedlung ohne Eigentümer (settlement.unowned)",
 		"base.ui.dashboard.settlement_tax.failed": "{code}: {message}",
+
+		# Siedlungsbeanspruchung (Umschalt+C). Nur der Satz ist übersetzt;
+		# Bridge-Fehlercodes, IDs, Spieler-IDs und Prüfsummen bleiben Parameter.
+		"base.ui.dashboard.settlement_claim.success": "Siedlung #{id} als Spieler #{player} beansprucht · Prüfsumme {checksum}",
+		"base.ui.dashboard.settlement_claim.already_owned": "Siedlung #{id} gehört bereits Spieler #{player}",
+		"base.ui.dashboard.settlement_claim.failed": "{code}: {message}",
+		"base.ui.dashboard.settlement_claim.register_failed": "Spielerregistrierung fehlgeschlagen: {code}: {message}",
 
 		# Kompakte Richtlinienbearbeitung im Dashboard. Fehlercodes, IDs und
 		# Richtliniennamen bleiben unveränderte Parameter.
