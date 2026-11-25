@@ -13,9 +13,9 @@ tags:
 # Phase 6 Remaining Work
 
 > [!abstract] Purpose
-> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `f9ddc70` (2026-11-25). It is a plan, not an implementation claim.
+> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `c5e37b9` (2026-11-25). It is a plan, not an implementation claim.
 
-Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/D-032/D-033/D-035/D-038/D-039/D-040, [[09 - Open Questions]] Q-101/Q-117/Q-119/Q-120/Q-121/Q-122/Q-123/Q-124, [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]], [[81 - Settlement Tax Composition]], [[82 - Journal and Rollback]].
+Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/D-032/D-033/D-035/D-038/D-039/D-040/D-041, [[09 - Open Questions]] Q-101/Q-117/Q-119/Q-120/Q-121/Q-122/Q-123/Q-124/Q-125/Q-126, [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]], [[81 - Settlement Tax Composition]], [[82 - Journal and Rollback]], [[83 - Remote Transport and Authentication]].
 
 ## 1. Where Phase 6 stands
 
@@ -32,6 +32,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 | ✅ Done | CI UI smokes, district tax readout, chat-panel EN/DE, dashboard tax control, settlement benchmark, this plan | #353–#358 |
 | ✅ Done | Settlement-tax ADR proposal (D-039), save-schema freeze tests, settlement loopback smoke, placement lock UI, settlement-editor/dashboard localization | #359–#364 |
 | ✅ Done | Pure D-039 tax helper, CI multiplayer smokes, nested content-mismatch smoke fix, bounded lock leases, district-panel membership rows, D-040 journal/rollback proposal | #366–#371 |
+| ✅ Done | Bounded outbound queue, lock-lease badge, opt-in lock retention, local bridge player registry, D-041 remote-auth proposal | #373–#377 |
 | ⛔ Blocked | Q-101 human playtest; 1M/RTX 3060 render gate | person / reference hardware |
 
 ## 2. Dependency order
@@ -40,8 +41,8 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 |---:|---|---|---|
 | 1 | Dashboard + connected-client settlement write controls | #343 bridge mutations | Makes the existing settlement protocol usable in play without new protocol/save surface |
 | 2 | Settlement tax treasury consumer after D-039 acceptance | 1, D-030/D-031 | The pure helper exists, but the rate is data-only; applying it needs a precedence decision against district weights |
-| 3 | Blueprint lock reconnect retention | #349 v0 locks, #363 UI, #369 leases | Prevents stale locks without changing placement authority; lease expiry is done |
-| 4 | Concurrent listener sessions + per-connection outbound queue | #269, #350 | Foundation for push, edit broadcast, and remote exposure |
+| 3 | Blueprint lock retention policy + CLI | #349 v0 locks, #363/#374 UI, #369 leases, #375 opt-in retention | Lease expiry and opt-in retention are done; expose configuration and decide multi-session semantics |
+| 4 | Concurrent listener sessions + outbound-queue wiring | #269, #350, #373 | The queue data structure exists; wire a writer and preserve deterministic order |
 | 5 | Chat push/broadcast | 4 | Replaces polling; must not duplicate entries or reorder sequences |
 | 6 | Voxel edit sync v1 | D-038 accepted, Q-119/Q-120, 3, 4 | The largest slice; do not start before the conflict/lease decisions |
 | 7 | Journal/rollback v1 after D-040/Q-123/Q-124 | 6 | Needs the edit command stream and a crash-safe boundary |
@@ -79,7 +80,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.3 Blueprint locks: UI, TTL, reconnect
 
-**Scope.** #349 ships advisory in-memory locks and player-wide release on disconnect; #363 adds the placement-UI lock badge and `L` toggle; #369 adds a lazy 300-tick lease (1–3600 clamp) and refreshes on same-holder lock. Remaining: reconnect retention for the same player id, optional config/CLI lease override, and explicit Admin force-unlock audit.
+**Scope.** #349 ships advisory in-memory locks and player-wide release on disconnect; #363 adds the placement-UI lock badge and `L` toggle; #369 adds a lazy 300-tick lease (1–3600 clamp) and refreshes on same-holder lock; #374 shows the lease; #375 adds opt-in retention across disconnect. Remaining: optional config/CLI switch for retention and lease length, a multi-session policy decision, and explicit Admin force-unlock audit.
 
 **Protocol/save.** Additive fields on the existing lock responses; if locks become durable, a new optional `ServerSave` store and `save.invalid_blueprint_locks`. Do not make locks authoritative for package identity.
 
@@ -91,7 +92,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.4 Concurrent listeners and outbound queue
 
-**Scope.** The current listen loop accepts `--sessions N` but processes sequentially. Add per-connection read/write tasks or a bounded outbound queue so one slow client cannot stall ticks or chat broadcast. Preserve deterministic command ordering per connection.
+**Scope.** The current listen loop accepts `--sessions N` but processes sequentially. #373 adds a bounded `OutboundQueue` data structure; wire a per-connection writer and the queue so one slow client cannot stall ticks or chat broadcast. Preserve deterministic command ordering per connection.
 
 **Protocol/save.** No wire-shape change. Add backpressure/closure codes and a bounded queue metric.
 
