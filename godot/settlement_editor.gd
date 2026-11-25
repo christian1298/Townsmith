@@ -24,11 +24,11 @@ extends Control
 ## marker:
 ##   SETTLEMENT_EDITOR status=ok actions=<n> checksum=<16 hex>
 ##
-## Strings are English-only developer text: this is a pre-dashboard tool and
-## the shared `base.ui.settlement.*` localization slice does not exist yet.
-## Settlement names, player ids, roles, and bridge error codes stay verbatim.
-## Display numbers go through `WorldI18n.format_int` so the tool already follows
-## the EN/DE number rules from `docs/16 - Localization.md`.
+## Strings resolve through the `base.ui.settlement_editor.*` keys in
+## `world_i18n.gd`; the standalone page follows the same EN/DE rules as the
+## in-game UI. Settlement names, player ids, roles, and bridge error codes stay
+## verbatim. Display numbers go through `WorldI18n.format_int` so grouping and
+## separators follow `docs/16 - Localization.md`.
 
 const WorldI18n = preload("res://world_i18n.gd")
 
@@ -76,6 +76,7 @@ var _selected_id := 0
 var _actions := 0
 var _failures := 0
 
+var _title_label: Label
 var _state_label: Label
 var _message_label: Label
 var _detail_label: Label
@@ -93,8 +94,10 @@ var _tax_spin: SpinBox
 
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
-	smoke_mode = args.has("--smoke")
+	smoke_mode = args.has("--smoke") or args.has("--smoke-de")
 	_i18n = WorldI18n.new()
+	if args.has("--smoke-de"):
+		_i18n.set_locale("de")
 	_build_ui()
 	_reset_session(true)
 	if smoke_mode:
@@ -111,7 +114,9 @@ func _reset_session(reset_seed: bool) -> void:
 	if reset_seed:
 		_seed = DEFAULT_SEED
 	_refresh()
-	_set_message("New empty settlement session for seed %s." % _i18n.format_int(_seed), false)
+	_set_message(_i18n.t("base.ui.settlement_editor.message.new_session", {
+		"seed": _i18n.format_int(_seed),
+	}), false)
 
 
 func _refresh() -> void:
@@ -125,14 +130,14 @@ func _refresh() -> void:
 		_settlements = []
 		_checksum = ""
 		_rebuild_list()
-		_apply_bridge_result("List", result)
+		_apply_bridge_result(_i18n.t("base.ui.settlement_editor.action.list"), result)
 		return
 	var records = result.get("settlements", [])
 	_settlements = records if records is Array else []
 	_checksum = str(result.get("checksum", ""))
 	if _find_record(_selected_id).is_empty():
 		if _selected_id != 0 and _form_title != null:
-			_form_title.text = "No settlement selected"
+			_form_title.text = _i18n.t("base.ui.settlement_editor.no_selection")
 		_selected_id = 0
 	_rebuild_list()
 
@@ -160,80 +165,96 @@ func _revision_of(id: int) -> int:
 
 func _found(name: String, x: int, z: int, radius: int) -> Dictionary:
 	if _core == null:
-		return _no_core("Found")
+		return _no_core(_i18n.t("base.ui.settlement_editor.action.found"))
 	var result: Dictionary = _core.settlement_found(
 		_seed, name, DEFAULT_OWNER_LABEL, x, z, radius
 	)
-	_apply_bridge_result("Found %s" % name, result)
+	_apply_bridge_result("%s %s" % [
+		_i18n.t("base.ui.settlement_editor.action.found"), name
+	], result)
 	_refresh()
 	return result
 
 
 func _claim(id: int, player_id: int) -> Dictionary:
 	if _core == null:
-		return _no_core("Claim")
+		return _no_core(_i18n.t("base.ui.settlement_editor.action.claim"))
 	var revision := _revision_of(id)
 	if revision < 0:
-		return _missing("Claim", id)
+		return _missing(_i18n.t("base.ui.settlement_editor.action.claim"), id)
 	var result: Dictionary = _core.settlement_claim(id, player_id, revision)
-	return _finish_mutation("Claim #%s" % _i18n.format_int(id), result)
+	return _finish_mutation("%s #%s" % [
+		_i18n.t("base.ui.settlement_editor.action.claim"), _i18n.format_int(id)
+	], result)
 
 
 func _rename(id: int, name: String) -> Dictionary:
 	if _core == null:
-		return _no_core("Rename")
+		return _no_core(_i18n.t("base.ui.settlement_editor.action.rename"))
 	var revision := _revision_of(id)
 	if revision < 0:
-		return _missing("Rename", id)
+		return _missing(_i18n.t("base.ui.settlement_editor.action.rename"), id)
 	var result: Dictionary = _core.settlement_rename(id, name, revision)
-	return _finish_mutation("Rename #%s" % _i18n.format_int(id), result)
+	return _finish_mutation("%s #%s" % [
+		_i18n.t("base.ui.settlement_editor.action.rename"), _i18n.format_int(id)
+	], result)
 
 
 func _transfer(id: int, player_id: int) -> Dictionary:
 	if _core == null:
-		return _no_core("Transfer")
+		return _no_core(_i18n.t("base.ui.settlement_editor.action.transfer"))
 	var revision := _revision_of(id)
 	if revision < 0:
-		return _missing("Transfer", id)
+		return _missing(_i18n.t("base.ui.settlement_editor.action.transfer"), id)
 	var result: Dictionary = _core.settlement_transfer(id, player_id, revision)
-	return _finish_mutation("Transfer #%s" % _i18n.format_int(id), result)
+	return _finish_mutation("%s #%s" % [
+		_i18n.t("base.ui.settlement_editor.action.transfer"), _i18n.format_int(id)
+	], result)
 
 
 func _invite(id: int, player_id: int, role: String) -> Dictionary:
 	if _core == null:
-		return _no_core("Invite")
+		return _no_core(_i18n.t("base.ui.settlement_editor.action.invite"))
 	var revision := _revision_of(id)
 	if revision < 0:
-		return _missing("Invite", id)
+		return _missing(_i18n.t("base.ui.settlement_editor.action.invite"), id)
 	var result: Dictionary = _core.settlement_invite(id, player_id, role, revision)
-	return _finish_mutation("Invite #%s" % _i18n.format_int(id), result)
+	return _finish_mutation("%s #%s" % [
+		_i18n.t("base.ui.settlement_editor.action.invite"), _i18n.format_int(id)
+	], result)
 
 
 func _set_role(id: int, player_id: int, role: String) -> Dictionary:
 	if _core == null:
-		return _no_core("Set role")
+		return _no_core(_i18n.t("base.ui.settlement_editor.action.set_role"))
 	var revision := _revision_of(id)
 	if revision < 0:
-		return _missing("Set role", id)
+		return _missing(_i18n.t("base.ui.settlement_editor.action.set_role"), id)
 	var result: Dictionary = _core.settlement_set_role(id, player_id, role, revision)
-	return _finish_mutation("Set role #%s" % _i18n.format_int(id), result)
+	return _finish_mutation("%s #%s" % [
+		_i18n.t("base.ui.settlement_editor.action.set_role"), _i18n.format_int(id)
+	], result)
 
 
 func _remove_member(id: int, player_id: int) -> Dictionary:
 	if _core == null:
-		return _no_core("Remove member")
+		return _no_core(_i18n.t("base.ui.settlement_editor.action.remove_member"))
 	var revision := _revision_of(id)
 	if revision < 0:
-		return _missing("Remove member", id)
+		return _missing(_i18n.t("base.ui.settlement_editor.action.remove_member"), id)
 	var result: Dictionary = _core.settlement_remove_member(id, player_id, revision)
-	return _finish_mutation("Remove member #%s" % _i18n.format_int(id), result)
+	return _finish_mutation("%s #%s" % [
+		_i18n.t("base.ui.settlement_editor.action.remove_member"), _i18n.format_int(id)
+	], result)
 
 
 func _set_tax(id: int, rate: int) -> Dictionary:
 	if _core == null:
-		return _no_core("Set tax")
+		return _no_core(_i18n.t("base.ui.settlement_editor.action.set_tax"))
 	var result: Dictionary = _core.settlement_set_tax(id, rate)
-	return _finish_mutation("Set tax #%s" % _i18n.format_int(id), result)
+	return _finish_mutation("%s #%s" % [
+		_i18n.t("base.ui.settlement_editor.action.set_tax"), _i18n.format_int(id)
+	], result)
 
 
 func _finish_mutation(context: String, result: Dictionary) -> Dictionary:
@@ -244,27 +265,33 @@ func _finish_mutation(context: String, result: Dictionary) -> Dictionary:
 
 
 func _no_core(context: String) -> Dictionary:
-	_set_message("%s failed: no_core (bridge not loaded)" % context, true)
+	_set_message(_i18n.t("base.ui.settlement_editor.message.no_core", {
+		"context": context,
+	}), true)
 	return {"ok": false, "error_code": "no_core", "error": "bridge not loaded"}
 
 
 func _missing(context: String, id: int) -> Dictionary:
-	_set_message(
-		"%s failed: settlement.unknown (no record #%s)" % [
-			context, _i18n.format_int(id)
-		],
-		true
-	)
+	_set_message(_i18n.t("base.ui.settlement_editor.message.missing", {
+		"context": context,
+		"id": _i18n.format_int(id),
+	}), true)
 	return {"ok": false, "error_code": "settlement.unknown", "error": "unknown settlement"}
 
 
 func _apply_bridge_result(context: String, result: Dictionary) -> bool:
 	if bool(result.get("ok", false)):
-		_set_message("%s: ok" % context, false)
+		_set_message(_i18n.t("base.ui.settlement_editor.message.ok", {
+			"context": context,
+		}), false)
 		return true
 	var code := str(result.get("error_code", "error"))
 	var message := str(result.get("error", ""))
-	_set_message("%s failed: %s (%s)" % [context, code, message], true)
+	_set_message(_i18n.t("base.ui.settlement_editor.message.failed", {
+		"context": context,
+		"code": code,
+		"message": message,
+	}), true)
 	return false
 
 
@@ -282,7 +309,7 @@ func _find_record(id: int) -> Dictionary:
 func _members_text(record: Dictionary) -> String:
 	var members = record.get("members", [])
 	if not (members is Array) or (members as Array).is_empty():
-		return "none"
+		return _i18n.t("base.ui.settlement_editor.members.none")
 	var parts := PackedStringArray()
 	for member in members:
 		parts.append(
@@ -297,19 +324,28 @@ func _members_text(record: Dictionary) -> String:
 func _owner_text(record: Dictionary) -> String:
 	var owner_id = record.get("owner_id", null)
 	if not bool(record.get("owned", false)) or owner_id == null:
-		return "unowned"
+		return _i18n.t("base.ui.settlement_editor.owner.unowned")
 	return _i18n.format_int(int(owner_id))
 
 
+## Locale-independent smoke marker. `_owner_text` is display text; the marker
+## contract stays `unowned`/raw id in both EN and DE runs.
+func _owner_marker(record: Dictionary) -> String:
+	var owner_id = record.get("owner_id", null)
+	if not bool(record.get("owned", false)) or owner_id == null:
+		return "unowned"
+	return str(int(owner_id))
+
+
 func _row_text(record: Dictionary) -> String:
-	return "#%s  %s  ·  %s  ·  rev %s  ·  tax %s%%  ·  members %s" % [
-		_i18n.format_int(int(record.get("id", 0))),
-		str(record.get("name", "")),
-		_owner_text(record),
-		_i18n.format_int(int(record.get("membership_revision", 0))),
-		_i18n.format_int(int(record.get("tax_rate", 0))),
-		_members_text(record),
-	]
+	return _i18n.t("base.ui.settlement_editor.row", {
+		"id": _i18n.format_int(int(record.get("id", 0))),
+		"name": str(record.get("name", "")),
+		"owner": _owner_text(record),
+		"revision": _i18n.format_int(int(record.get("membership_revision", 0))),
+		"tax": _i18n.format_int(int(record.get("tax_rate", 0))),
+		"members": _members_text(record),
+	})
 
 
 func _rebuild_list() -> void:
@@ -329,11 +365,11 @@ func _rebuild_list() -> void:
 func _refresh_state_label() -> void:
 	if _state_label == null:
 		return
-	_state_label.text = "Seed %s · %s settlements · checksum %s" % [
-		_i18n.format_int(_seed),
-		_i18n.format_int(_settlements.size()),
-		_checksum if not _checksum.is_empty() else "—",
-	]
+	_state_label.text = _i18n.t("base.ui.settlement_editor.state", {
+		"seed": _i18n.format_int(_seed),
+		"count": _i18n.format_int(_settlements.size()),
+		"checksum": _checksum if not _checksum.is_empty() else "—",
+	})
 
 
 func _refresh_detail() -> void:
@@ -341,11 +377,7 @@ func _refresh_detail() -> void:
 		return
 	var record := _find_record(_selected_id)
 	if record.is_empty():
-		_detail_label.text = (
-			"No settlement selected.\n"
-			+ "Select a row (or press its number) to inspect name, id, ownership, "
-			+ "revision, tax, and members."
-		)
+		_detail_label.text = _i18n.t("base.ui.settlement_editor.detail_empty")
 		return
 	var center = record.get("center", [])
 	var center_text := "?"
@@ -359,22 +391,28 @@ func _refresh_detail() -> void:
 		]
 	_detail_label.text = "\n".join([
 		str(record.get("name", "")),
-		"id %s · owned %s · owner id %s · owner label \"%s\"" % [
-			_i18n.format_int(int(record.get("id", 0))),
-			"yes" if bool(record.get("owned", false)) else "no",
-			_owner_text(record),
-			str(record.get("owner", "")),
-		],
-		"center %s · radius %s m · tax %s%%" % [
-			center_text,
-			_i18n.format_int(int(record.get("radius_m", 0))),
-			_i18n.format_int(int(record.get("tax_rate", 0))),
-		],
-		"membership revision %s · checksum %s" % [
-			_i18n.format_int(int(record.get("membership_revision", 0))),
-			str(record.get("membership_checksum", "—")),
-		],
-		"members: %s" % _members_text(record),
+		_i18n.t("base.ui.settlement_editor.detail.identity", {
+			"id": _i18n.format_int(int(record.get("id", 0))),
+			"owned": _i18n.t(
+				"base.ui.settlement_editor.owned.yes"
+				if bool(record.get("owned", false))
+				else "base.ui.settlement_editor.owned.no"
+			),
+			"owner": _owner_text(record),
+			"label": str(record.get("owner", "")),
+		}),
+		_i18n.t("base.ui.settlement_editor.detail.center", {
+			"center": center_text,
+			"radius": _i18n.format_int(int(record.get("radius_m", 0))),
+			"tax": _i18n.format_int(int(record.get("tax_rate", 0))),
+		}),
+		_i18n.t("base.ui.settlement_editor.detail.revision", {
+			"revision": _i18n.format_int(int(record.get("membership_revision", 0))),
+			"checksum": str(record.get("membership_checksum", "—")),
+		}),
+		_i18n.t("base.ui.settlement_editor.detail.members", {
+			"members": _members_text(record),
+		}),
 	])
 
 
@@ -388,14 +426,16 @@ func _set_message(text: String, is_error: bool) -> void:
 func _select(id: int) -> void:
 	if _find_record(id).is_empty():
 		_selected_id = 0
-		_form_title.text = "No settlement selected"
+		_form_title.text = _i18n.t("base.ui.settlement_editor.no_selection")
 		_rebuild_list()
 		return
 	_selected_id = id
 	var record := _find_record(id)
 	_name_edit.text = str(record.get("name", ""))
 	_tax_spin.set_value_no_signal(float(record.get("tax_rate", 0)))
-	_form_title.text = "Selected #%s" % _i18n.format_int(id)
+	_form_title.text = _i18n.t("base.ui.settlement_editor.form.selected", {
+		"id": _i18n.format_int(id),
+	})
 	for index in range(_list.item_count):
 		if int(_list.get_item_metadata(index)) == id:
 			_list.select(index)
@@ -411,7 +451,9 @@ func _select_number(index: int) -> void:
 
 func _selected_or_message(context: String) -> int:
 	if _selected_id == 0:
-		_set_message("%s failed: no_selection (select a settlement first)" % context, true)
+		_set_message(_i18n.t("base.ui.settlement_editor.message.no_selection", {
+			"context": context,
+		}), true)
 	return _selected_id
 
 
@@ -436,50 +478,50 @@ func _on_fixture_pressed() -> void:
 
 
 func _on_claim_pressed() -> void:
-	var id := _selected_or_message("Claim")
+	var id := _selected_or_message(_i18n.t("base.ui.settlement_editor.action.claim"))
 	if id != 0:
 		_claim(id, int(_player_spin.value))
 
 
 func _on_rename_pressed() -> void:
-	var id := _selected_or_message("Rename")
+	var id := _selected_or_message(_i18n.t("base.ui.settlement_editor.action.rename"))
 	if id != 0:
 		_rename(id, _name_edit.text.strip_edges())
 
 
 func _on_transfer_pressed() -> void:
-	var id := _selected_or_message("Transfer")
+	var id := _selected_or_message(_i18n.t("base.ui.settlement_editor.action.transfer"))
 	if id != 0:
 		_transfer(id, int(_player_spin.value))
 
 
 func _on_invite_pressed() -> void:
-	var id := _selected_or_message("Invite")
+	var id := _selected_or_message(_i18n.t("base.ui.settlement_editor.action.invite"))
 	if id != 0:
 		_invite(id, int(_player_spin.value), _selected_role())
 
 
 func _on_set_role_pressed() -> void:
-	var id := _selected_or_message("Set role")
+	var id := _selected_or_message(_i18n.t("base.ui.settlement_editor.action.set_role"))
 	if id != 0:
 		_set_role(id, int(_player_spin.value), _selected_role())
 
 
 func _on_remove_member_pressed() -> void:
-	var id := _selected_or_message("Remove member")
+	var id := _selected_or_message(_i18n.t("base.ui.settlement_editor.action.remove_member"))
 	if id != 0:
 		_remove_member(id, int(_player_spin.value))
 
 
 func _on_set_tax_pressed() -> void:
-	var id := _selected_or_message("Set tax")
+	var id := _selected_or_message(_i18n.t("base.ui.settlement_editor.action.set_tax"))
 	if id != 0:
 		_set_tax(id, int(_tax_spin.value))
 
 
 func _on_refresh_pressed() -> void:
 	_refresh()
-	_set_message("List refreshed.", false)
+	_set_message(_i18n.t("base.ui.settlement_editor.message.refreshed"), false)
 
 
 func _on_new_session_pressed() -> void:
@@ -587,6 +629,9 @@ func _check(label: String, condition: bool) -> bool:
 func _run_smoke() -> void:
 	print("SETTLEMENT_EDITOR_SMOKE start seed=%s" % _i18n.format_int(_seed))
 	_reset_session(true)
+	print("SETTLEMENT_EDITOR_UI locale=%s title=%s state=%s" % [
+		_i18n.locale(), _title_label.text, _state_label.text
+	])
 
 	var empty: Dictionary = _core.settlements()
 	_check(
@@ -685,7 +730,7 @@ func _run_smoke() -> void:
 		"SETTLEMENT_EDITOR_STATE count=%s id=2 owned=%s owner=%s revision=%s tax=%s members=%s" % [
 			_i18n.format_int(_settlements.size()),
 			"1" if bool(final_record.get("owned", false)) else "0",
-			_owner_text(final_record),
+			_owner_marker(final_record),
 			_i18n.format_int(int(final_record.get("membership_revision", 0))),
 			_i18n.format_int(int(final_record.get("tax_rate", 0))),
 			_members_text(final_record),
@@ -694,7 +739,7 @@ func _run_smoke() -> void:
 	print(
 		"SETTLEMENT_EDITOR_UNOWNED id=1 owned=%s owner=%s revision=%s" % [
 			"1" if bool(_fresh_record(1).get("owned", false)) else "0",
-			_owner_text(_fresh_record(1)),
+			_owner_marker(_fresh_record(1)),
 			_i18n.format_int(int(_fresh_record(1).get("membership_revision", 0))),
 		]
 	)
@@ -735,18 +780,13 @@ func _build_ui() -> void:
 	root.add_theme_constant_override("separation", 10)
 	margin.add_child(root)
 
-	var title := Label.new()
-	title.text = "Settlement ownership editor"
-	title.add_theme_font_size_override("font_size", 30)
-	root.add_child(title)
+	_title_label = Label.new()
+	_title_label.text = _i18n.t("base.ui.settlement_editor.title")
+	_title_label.add_theme_font_size_override("font_size", 30)
+	root.add_child(_title_label)
 
 	var subtitle := Label.new()
-	subtitle.text = (
-		"Developer tool over the local data-only bridge (docs/48 §2.2). "
-		+ "No server, protocol, simulation, or save changes: this edits the "
-		+ "in-memory settlement layer for one seed. Player ids are explicit and "
-		+ "bridge error codes are authoritative."
-	)
+	subtitle.text = _i18n.t("base.ui.settlement_editor.subtitle")
 	subtitle.add_theme_color_override("font_color", MUTED_COLOR)
 	subtitle.add_theme_font_size_override("font_size", 14)
 	subtitle.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -762,22 +802,19 @@ func _build_ui() -> void:
 	columns.add_child(_build_form_panel())
 
 	_message_label = Label.new()
-	_message_label.text = "Ready."
+	_message_label.text = _i18n.t("base.ui.settlement_editor.ready")
 	_message_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	root.add_child(_message_label)
 
 	var help := Label.new()
-	help.text = (
-		"Keys: 1–9 select · F found · C claim · R rename · T transfer · "
-		+ "I invite · P set role · X remove member · M set tax · N new session"
-	)
+	help.text = _i18n.t("base.ui.settlement_editor.help")
 	help.add_theme_color_override("font_color", MUTED_COLOR)
 	help.add_theme_font_size_override("font_size", 13)
 	help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	root.add_child(help)
 
 	var footer := Label.new()
-	footer.text = "Local bridge only · never contacts a server · errors never abort the tool."
+	footer.text = _i18n.t("base.ui.settlement_editor.footer")
 	footer.add_theme_color_override("font_color", MUTED_COLOR)
 	footer.add_theme_font_size_override("font_size", 12)
 	root.add_child(footer)
@@ -794,14 +831,24 @@ func _build_list_panel() -> Control:
 	panel.add_child(toolbar)
 
 	var seed_label := Label.new()
-	seed_label.text = "Seed %s" % _i18n.format_int(DEFAULT_SEED)
+	seed_label.text = _i18n.t("base.ui.settlement_editor.seed", {
+		"seed": _i18n.format_int(DEFAULT_SEED),
+	})
 	seed_label.add_theme_color_override("font_color", MUTED_COLOR)
 	toolbar.add_child(seed_label)
 
-	toolbar.add_child(_button("Found (F)", _on_found_pressed))
-	toolbar.add_child(_button("Fixture", _on_fixture_pressed))
-	toolbar.add_child(_button("Refresh", _on_refresh_pressed))
-	toolbar.add_child(_button("New session (N)", _on_new_session_pressed))
+	toolbar.add_child(_button("%s (F)" % _i18n.t(
+		"base.ui.settlement_editor.action.found"
+	), _on_found_pressed))
+	toolbar.add_child(_button(_i18n.t(
+		"base.ui.settlement_editor.button.fixture"
+	), _on_fixture_pressed))
+	toolbar.add_child(_button(_i18n.t(
+		"base.ui.settlement_editor.button.refresh"
+	), _on_refresh_pressed))
+	toolbar.add_child(_button(_i18n.t(
+		"base.ui.settlement_editor.button.new_session"
+	), _on_new_session_pressed))
 
 	_state_label = Label.new()
 	_state_label.add_theme_color_override("font_color", TEXT_COLOR)
@@ -821,7 +868,7 @@ func _build_detail_panel() -> Control:
 	panel.add_theme_constant_override("separation", 6)
 
 	var title := Label.new()
-	title.text = "Selected record"
+	title.text = _i18n.t("base.ui.settlement_editor.selected_record")
 	title.add_theme_font_size_override("font_size", 20)
 	panel.add_child(title)
 
@@ -838,7 +885,7 @@ func _build_form_panel() -> Control:
 	panel.add_theme_constant_override("separation", 8)
 
 	_form_title = Label.new()
-	_form_title.text = "No settlement selected"
+	_form_title.text = _i18n.t("base.ui.settlement_editor.no_selection")
 	_form_title.add_theme_font_size_override("font_size", 20)
 	panel.add_child(_form_title)
 
@@ -848,59 +895,69 @@ func _build_form_panel() -> Control:
 	grid.add_theme_constant_override("v_separation", 6)
 	panel.add_child(grid)
 
-	grid.add_child(_label("Name"))
+	grid.add_child(_label(_i18n.t("base.ui.settlement_editor.label.name")))
 	_name_edit = LineEdit.new()
-	_name_edit.text = "Settlement"
+	_name_edit.text = DEFAULT_NAME
 	_name_edit.custom_minimum_size = Vector2(240, 0)
 	grid.add_child(_name_edit)
 
-	grid.add_child(_label("Centre X"))
+	grid.add_child(_label(_i18n.t("base.ui.settlement_editor.label.center_x")))
 	_x_spin = _spin(-1000000, 1000000, 0)
 	grid.add_child(_x_spin)
 
-	grid.add_child(_label("Centre Z"))
+	grid.add_child(_label(_i18n.t("base.ui.settlement_editor.label.center_z")))
 	_z_spin = _spin(-1000000, 1000000, 0)
 	grid.add_child(_z_spin)
 
-	grid.add_child(_label("Radius m"))
+	grid.add_child(_label(_i18n.t("base.ui.settlement_editor.label.radius_m")))
 	_radius_spin = _spin(MIN_RADIUS_M, MAX_RADIUS_M, DEFAULT_RADIUS_M)
 	grid.add_child(_radius_spin)
 
-	grid.add_child(_label("Player id"))
+	grid.add_child(_label(_i18n.t("base.ui.settlement_editor.label.player_id")))
 	_player_spin = _spin(1, MAX_PLAYER_ID, 1)
 	grid.add_child(_player_spin)
 
-	grid.add_child(_label("Role"))
+	grid.add_child(_label(_i18n.t("base.ui.settlement_editor.label.role")))
 	_role_option = OptionButton.new()
 	for role in ROLES:
 		_role_option.add_item(role)
 	grid.add_child(_role_option)
 
-	grid.add_child(_label("Tax %"))
+	grid.add_child(_label(_i18n.t("base.ui.settlement_editor.label.tax_percent")))
 	_tax_spin = _spin(0, MAX_TAX_RATE, 0)
 	grid.add_child(_tax_spin)
 
 	var actions := HBoxContainer.new()
 	actions.add_theme_constant_override("separation", 6)
 	panel.add_child(actions)
-	actions.add_child(_button("Claim (C)", _on_claim_pressed))
-	actions.add_child(_button("Rename (R)", _on_rename_pressed))
-	actions.add_child(_button("Transfer (T)", _on_transfer_pressed))
+	actions.add_child(_button("%s (C)" % _i18n.t(
+		"base.ui.settlement_editor.action.claim"
+	), _on_claim_pressed))
+	actions.add_child(_button("%s (R)" % _i18n.t(
+		"base.ui.settlement_editor.action.rename"
+	), _on_rename_pressed))
+	actions.add_child(_button("%s (T)" % _i18n.t(
+		"base.ui.settlement_editor.action.transfer"
+	), _on_transfer_pressed))
 
 	var actions_two := HBoxContainer.new()
 	actions_two.add_theme_constant_override("separation", 6)
 	panel.add_child(actions_two)
-	actions_two.add_child(_button("Invite (I)", _on_invite_pressed))
-	actions_two.add_child(_button("Set role (P)", _on_set_role_pressed))
-	actions_two.add_child(_button("Remove member (X)", _on_remove_member_pressed))
-	actions_two.add_child(_button("Set tax (M)", _on_set_tax_pressed))
+	actions_two.add_child(_button("%s (I)" % _i18n.t(
+		"base.ui.settlement_editor.action.invite"
+	), _on_invite_pressed))
+	actions_two.add_child(_button("%s (P)" % _i18n.t(
+		"base.ui.settlement_editor.action.set_role"
+	), _on_set_role_pressed))
+	actions_two.add_child(_button("%s (X)" % _i18n.t(
+		"base.ui.settlement_editor.action.remove_member"
+	), _on_remove_member_pressed))
+	actions_two.add_child(_button("%s (M)" % _i18n.t(
+		"base.ui.settlement_editor.action.set_tax"
+	), _on_set_tax_pressed))
 
 	var note := Label.new()
-	note.text = (
-		"Claim needs an explicit positive player id. Rename/transfer/invite/"
-		+ "set-role/remove/tax use the current owner as actor; an unowned "
-		+ "settlement rejects them. The revision is re-read before every call."
-	)
+	note.text = _i18n.t("base.ui.settlement_editor.note")
 	note.add_theme_color_override("font_color", MUTED_COLOR)
 	note.add_theme_font_size_override("font_size", 12)
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
