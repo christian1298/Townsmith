@@ -180,6 +180,15 @@ pub mod codes {
     // Audit query. `unavailable` is specific to the transport-only session,
     // which keeps no audit ring.
     pub const AUDIT_UNAVAILABLE: &str = "audit.unavailable";
+
+    // Advisory blueprint edit locks (v0). `unavailable` is specific to the
+    // transport-only session, which keeps no lock table or player identity.
+    /// Blueprint locks require the authoritative executor.
+    pub const BLUEPRINT_UNAVAILABLE: &str = "blueprint.unavailable";
+    /// Another player holds the advisory lock. The message names the holder.
+    pub const BLUEPRINT_LOCKED: &str = "blueprint.locked";
+    /// `blueprint_unlock` named a hash with no advisory lock.
+    pub const BLUEPRINT_LOCK_UNKNOWN: &str = "blueprint.lock_unknown";
 }
 
 /// A framing or JSON failure. `code()` is stable for logs and tests.
@@ -452,6 +461,28 @@ pub enum ClientCommand {
         /// Revision the client believes is current.
         expected_revision: u32,
     },
+    /// Take or refresh an advisory blueprint edit lock (v0).
+    ///
+    /// Requires a hello/resume identity and the Mayor role. Re-locking the same
+    /// hash as the same player is accepted and refreshes the holder label and
+    /// tick; another player's lock rejects with [`codes::BLUEPRINT_LOCKED`].
+    /// Locks are in-memory, are not saved, and do not affect placement
+    /// ownership.
+    BlueprintLock {
+        /// Package hash, canonical or bare 64 lowercase hex.
+        hash: String,
+    },
+    /// Release an advisory blueprint edit lock (v0).
+    ///
+    /// The holder or an Admin may unlock; an unknown hash rejects with
+    /// [`codes::BLUEPRINT_LOCK_UNKNOWN`] and another holder with
+    /// [`codes::BLUEPRINT_LOCKED`].
+    BlueprintUnlock {
+        /// Package hash, canonical or bare 64 lowercase hex.
+        hash: String,
+    },
+    /// Read the advisory lock table in ascending hash order (Viewer).
+    BlueprintLocks,
     /// Bounded read of this session's audit ring (Admin only).
     ///
     /// The ring is per-session and in-memory: it is neither shared between
@@ -491,6 +522,9 @@ impl ClientCommand {
             ClientCommand::SettlementTransfer { .. } => "settlement_transfer",
             ClientCommand::SettlementSetTax { .. } => "settlement_set_tax",
             ClientCommand::SettlementRelease { .. } => "settlement_release",
+            ClientCommand::BlueprintLock { .. } => "blueprint_lock",
+            ClientCommand::BlueprintUnlock { .. } => "blueprint_unlock",
+            ClientCommand::BlueprintLocks => "blueprint_locks",
             ClientCommand::AuditLog { .. } => "audit_log",
             ClientCommand::Disconnect => "disconnect",
         }
@@ -636,6 +670,24 @@ pub struct SettlementView {
     pub membership_revision: u32,
     /// Settlement tax rate in whole percent, 0–100.
     pub tax_rate: u16,
+}
+
+/// One advisory blueprint edit lock on the wire.
+///
+/// This is a copy of the server's in-memory lock record. It is not saved and
+/// does not confer placement ownership: it only signals intent to edit or
+/// place a blueprint. `checksum` values that cover the lock table are separate
+/// from the world checksum.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlueprintLockView {
+    /// Canonical `blake3:<64 hex>` package hash.
+    pub hash: String,
+    /// Stable server-issued holder identity.
+    pub player_id: u64,
+    /// Holder display-name label at lock time.
+    pub player: String,
+    /// Authoritative tick of the last accepted lock/refresh.
+    pub tick: u64,
 }
 
 /// One entry in [`ServerMessage::AuditLog`].
@@ -786,6 +838,43 @@ pub enum ServerMessage {
         world_checksum: String,
         /// Copy of the stored placement without any server filesystem path.
         placement: PlacementView,
+    },
+    /// Accepted advisory blueprint lock or refresh (v0).
+    ///
+    /// `checksum` is a stable 16-hex FNV over the lock table's sorted
+    /// `hash`+`player_id`+`tick` records. It is not the world checksum, which
+    /// deliberately excludes locks.
+    BlueprintLockResult {
+        /// Authoritative tick after the accepted lock.
+        tick: u64,
+        /// The stored lock, including its refreshed holder label and tick.
+        lock: BlueprintLockView,
+        /// Number of locks currently held on the server.
+        locks_count: usize,
+        /// Stable checksum of the whole advisory lock table.
+        checksum: String,
+    },
+    /// Accepted advisory blueprint unlock (v0).
+    BlueprintUnlockResult {
+        /// Authoritative tick after the accepted unlock.
+        tick: u64,
+        /// Canonical hash that was released.
+        hash: String,
+        /// Number of locks still held on the server.
+        locks_count: usize,
+        /// Stable checksum of the whole advisory lock table.
+        checksum: String,
+    },
+    /// Read-only advisory blueprint lock list (v0), ascending hash.
+    BlueprintLockList {
+        /// Authoritative tick the query was evaluated at (never advanced).
+        tick: u64,
+        /// Number of retained locks.
+        count: usize,
+        /// Stable checksum of the whole advisory lock table.
+        checksum: String,
+        /// Retained locks in ascending canonical hash order.
+        locks: Vec<BlueprintLockView>,
     },
     /// Accepted authoritative settlement creation (D-033).
     SettlementFound {
@@ -997,6 +1086,9 @@ pub fn decode_client_command(payload: &[u8]) -> Result<ClientCommand, Rejection>
         "settlement_transfer",
         "settlement_set_tax",
         "settlement_release",
+        "blueprint_lock",
+        "blueprint_unlock",
+        "blueprint_locks",
         "audit_log",
         "disconnect",
     ];
@@ -1428,6 +1520,12 @@ impl Session {
             ClientCommand::AuditLog { .. } => reject(
                 codes::AUDIT_UNAVAILABLE,
                 "audit queries require the authoritative executor, not the transport-only session",
+            ),
+            ClientCommand::BlueprintLock { .. }
+            | ClientCommand::BlueprintUnlock { .. }
+            | ClientCommand::BlueprintLocks => reject(
+                codes::BLUEPRINT_UNAVAILABLE,
+                "blueprint locks require the authoritative executor with a player identity, not the transport-only session",
             ),
         }
     }
@@ -2273,6 +2371,28 @@ mod tests {
         expect_reject(
             &session.handle(ClientCommand::AuditLog { limit: None }),
             codes::AUDIT_UNAVAILABLE,
+        );
+    }
+
+    #[test]
+    fn transport_session_rejects_blueprint_locks_as_unavailable() {
+        let mut session = Session::new(LOOPBACK_SEED);
+        assert!(matches!(
+            session.handle(hello()).as_slice(),
+            [ServerMessage::Welcome { .. }]
+        ));
+        let hash = format!("{BLUEPRINT_HASH_PREFIX}{}", "ab".repeat(32));
+        expect_reject(
+            &session.handle(ClientCommand::BlueprintLock { hash: hash.clone() }),
+            codes::BLUEPRINT_UNAVAILABLE,
+        );
+        expect_reject(
+            &session.handle(ClientCommand::BlueprintUnlock { hash }),
+            codes::BLUEPRINT_UNAVAILABLE,
+        );
+        expect_reject(
+            &session.handle(ClientCommand::BlueprintLocks),
+            codes::BLUEPRINT_UNAVAILABLE,
         );
     }
 

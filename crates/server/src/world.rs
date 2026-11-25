@@ -49,9 +49,9 @@ use crate::protocol::{
     configure_stream, decode_client_command, frame_to_io, normalize_blueprint_hash, read_frame,
     read_json_frame, session_id_for_seed, validate_hello, validate_interest,
     validate_place_blueprint, validate_road, validate_tax_rates, write_json_frame, AuditLogEntry,
-    BuildingView, ChatEntry, ClientCommand, FrameError, PlacementView, Rejection, RoadView,
-    ServerMessage, SessionConfig, SettlementMemberView, SettlementView, TimeAction,
-    CHAT_LOG_CAPACITY, DEFAULT_INTEREST_RADIUS_M, LOOPBACK_SEED, MAX_CHAT_CHARS,
+    BlueprintLockView, BuildingView, ChatEntry, ClientCommand, FrameError, PlacementView,
+    Rejection, RoadView, ServerMessage, SessionConfig, SettlementMemberView, SettlementView,
+    TimeAction, CHAT_LOG_CAPACITY, DEFAULT_INTEREST_RADIUS_M, LOOPBACK_SEED, MAX_CHAT_CHARS,
     MAX_INTEREST_BUILDINGS, MAX_INTEREST_ROADS, PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
 };
 
@@ -271,10 +271,14 @@ impl ClientRole {
     pub fn required_role(tag: &str) -> Self {
         match tag {
             "hello" | "resume" | "ping" | "chat" | "chat_since" | "disconnect" | "time_vote"
-            | "set_interest" | "settlement_list" | "settlement_at" => Self::Viewer,
+            | "set_interest" | "settlement_list" | "settlement_at" | "blueprint_locks" => {
+                Self::Viewer
+            }
             "set_tax"
             | "place_road"
             | "place_blueprint"
+            | "blueprint_lock"
+            | "blueprint_unlock"
             | "found_settlement"
             | "settlement_invite"
             | "settlement_set_role"
@@ -395,6 +399,37 @@ fn audit_entry_hash(mut hash: u64, entry: &AuditEntry) -> u64 {
     hash = fnv_update(hash, &[0x1f]);
     hash = fnv_update(hash, entry.code.as_bytes());
     fnv_update(hash, &[0x1e])
+}
+
+/// One advisory blueprint edit lock.
+///
+/// This is process-local intent, not placement ownership: it is not saved, is
+/// excluded from [`ServerWorld::checksum`], and is released when the holder's
+/// session ends. `player` is a display label snapshot; `player_id` is the
+/// stable identity used for authorization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlueprintLock {
+    /// Canonical `blake3:<64 lowercase hex>` package hash.
+    pub hash: String,
+    /// Stable server-issued holder identity.
+    pub player_id: u64,
+    /// Holder display-name label at lock time.
+    pub player: String,
+    /// Authoritative tick of the last accepted lock/refresh.
+    pub tick: u64,
+}
+
+impl BlueprintLock {
+    /// Copy of this lock for the wire.
+    #[must_use]
+    pub fn view(&self) -> BlueprintLockView {
+        BlueprintLockView {
+            hash: self.hash.clone(),
+            player_id: self.player_id,
+            player: self.player.clone(),
+            tick: self.tick,
+        }
+    }
 }
 
 /// In-memory reconnect record for a disconnected session.
@@ -545,6 +580,13 @@ pub struct ServerWorld {
     /// District policy registry used by the placement gate (server config, not
     /// save data). A foreign-seed registry is never installed.
     pub policies: Option<DistrictPolicyStore>,
+    /// Advisory blueprint edit locks (v0).
+    ///
+    /// Keyed by canonical `blake3:<64 hex>` hash, ascending hash order. Locks
+    /// are in-memory only: they are not saved, are excluded from
+    /// [`Self::checksum`], and are released when the holder disconnects. They
+    /// carry intent only and do not confer placement ownership.
+    pub blueprint_locks: BTreeMap<String, BlueprintLock>,
     /// Optional pinned content-registry hash (server config, not save data).
     ///
     /// When set, every `hello` must carry this exact 64-character lowercase
@@ -653,6 +695,7 @@ impl ServerWorld {
             blueprint_library: None,
             policies: None,
             content_hash: None,
+            blueprint_locks: BTreeMap::new(),
             interest_center: [0.0, 0.0],
             interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
             paused: false,
@@ -833,6 +876,7 @@ impl ServerWorld {
             blueprint_library: None,
             policies: None,
             content_hash: None,
+            blueprint_locks: BTreeMap::new(),
             interest_center: [0.0, 0.0],
             interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
             paused: save.paused,
@@ -1031,6 +1075,13 @@ impl ServerWorld {
     }
 
     fn remember_disconnect(&mut self) {
+        // v0 locks are player-wide and process-local: ending one session
+        // releases every lock held by that identity, even if another session
+        // for the same player is still parked. Reconnect does not restore
+        // them; the editor lease/TTL follow-up can tighten this.
+        if let Some(player_id) = self.player_id {
+            self.release_blueprint_locks(player_id);
+        }
         let player = self.player.take();
         if let Some(name) = &player {
             self.online.remove(name);
@@ -1664,6 +1715,9 @@ impl ServerWorld {
                 settlement_id,
                 expected_revision,
             } => self.apply_settlement_release(*settlement_id, *expected_revision),
+            ClientCommand::BlueprintLock { hash } => self.apply_blueprint_lock(hash),
+            ClientCommand::BlueprintUnlock { hash } => self.apply_blueprint_unlock(hash),
+            ClientCommand::BlueprintLocks => self.apply_blueprint_locks(),
             ClientCommand::AuditLog { limit } => self.apply_audit_log(*limit),
             ClientCommand::SetInterest {
                 center_x,
@@ -2021,6 +2075,16 @@ impl ServerWorld {
                 format!("placement rotation {rotation} is not a multiple of 90 degrees"),
             );
         };
+        if self.role != ClientRole::Admin {
+            if let Some(lock) = self.blueprint_locks.get(&hash) {
+                if Some(lock.player_id) != self.player_id.map(PlayerId::get) {
+                    return reject_with(
+                        crate::protocol::codes::BLUEPRINT_LOCKED,
+                        format!("blueprint {hash} is locked by player #{}", lock.player_id),
+                    );
+                }
+            }
+        }
         if let Some((code, message)) = self.settlement_build_denial(x, z) {
             return reject_with(code, message);
         }
@@ -2362,6 +2426,117 @@ impl ServerWorld {
             checksum: self.audit_checksum(),
             entries,
         })
+    }
+
+    /// Release every advisory lock held by `player_id`.
+    ///
+    /// Locks are process-local intent and are not part of the world checksum,
+    /// so this neither advances the tick nor refreshes it.
+    fn release_blueprint_locks(&mut self, player_id: PlayerId) {
+        self.blueprint_locks
+            .retain(|_, lock| lock.player_id != player_id.get());
+    }
+
+    fn apply_blueprint_lock(&mut self, hash: &str) -> (Vec<ServerMessage>, &'static str) {
+        let hash = match normalize_blueprint_hash(hash) {
+            Ok(hash) => hash,
+            Err(rejection) => return from_rejection(rejection),
+        };
+        let Some(player_id) = self.player_id else {
+            return reject_with(
+                codes::PLAYER_IDENTITY,
+                "a stable player identity is required before locking a blueprint",
+            );
+        };
+        if let Some(existing) = self.blueprint_locks.get(&hash) {
+            if existing.player_id != player_id.get() {
+                return reject_with(
+                    crate::protocol::codes::BLUEPRINT_LOCKED,
+                    format!(
+                        "blueprint {hash} is locked by player #{}",
+                        existing.player_id
+                    ),
+                );
+            }
+        }
+        let player = self
+            .player
+            .clone()
+            .unwrap_or_else(|| format!("#{}", player_id.get()));
+        self.tick = self.tick.saturating_add(1);
+        let lock = BlueprintLock {
+            hash: hash.clone(),
+            player_id: player_id.get(),
+            player,
+            tick: self.tick,
+        };
+        self.blueprint_locks.insert(hash, lock.clone());
+        self.refresh_checksum();
+        accepted(ServerMessage::BlueprintLockResult {
+            tick: self.tick,
+            lock: lock.view(),
+            locks_count: self.blueprint_locks.len(),
+            checksum: self.blueprint_locks_checksum(),
+        })
+    }
+
+    fn apply_blueprint_unlock(&mut self, hash: &str) -> (Vec<ServerMessage>, &'static str) {
+        let hash = match normalize_blueprint_hash(hash) {
+            Ok(hash) => hash,
+            Err(rejection) => return from_rejection(rejection),
+        };
+        let Some(existing) = self.blueprint_locks.get(&hash) else {
+            return reject_with(
+                crate::protocol::codes::BLUEPRINT_LOCK_UNKNOWN,
+                format!("no advisory lock exists for blueprint {hash}"),
+            );
+        };
+        if self.role != ClientRole::Admin
+            && Some(existing.player_id) != self.player_id.map(PlayerId::get)
+        {
+            return reject_with(
+                crate::protocol::codes::BLUEPRINT_LOCKED,
+                format!(
+                    "blueprint {hash} is locked by player #{}",
+                    existing.player_id
+                ),
+            );
+        }
+        self.tick = self.tick.saturating_add(1);
+        self.blueprint_locks.remove(&hash);
+        self.refresh_checksum();
+        accepted(ServerMessage::BlueprintUnlockResult {
+            tick: self.tick,
+            hash,
+            locks_count: self.blueprint_locks.len(),
+            checksum: self.blueprint_locks_checksum(),
+        })
+    }
+
+    fn apply_blueprint_locks(&self) -> (Vec<ServerMessage>, &'static str) {
+        accepted(ServerMessage::BlueprintLockList {
+            tick: self.tick,
+            count: self.blueprint_locks.len(),
+            checksum: self.blueprint_locks_checksum(),
+            locks: self
+                .blueprint_locks
+                .values()
+                .map(BlueprintLock::view)
+                .collect(),
+        })
+    }
+
+    /// Stable checksum of the advisory lock table, independent of map hashing.
+    #[must_use]
+    pub fn blueprint_locks_checksum(&self) -> String {
+        let mut hash = FNV_OFFSET;
+        for lock in self.blueprint_locks.values() {
+            hash = fnv_update(hash, lock.hash.as_bytes());
+            hash = fnv_update(hash, &[0x1f]);
+            hash = fnv_update(hash, &lock.player_id.to_le_bytes());
+            hash = fnv_update(hash, &lock.tick.to_le_bytes());
+        }
+        format!("{hash:016x}")
     }
 
     fn settlement_store_mut(
@@ -6286,6 +6461,146 @@ mod tests {
                 .as_ref()
                 .map_or(0, ConstructionStore::site_count),
         )
+    }
+
+    fn lock_command(hash: &str) -> ClientCommand {
+        ClientCommand::BlueprintLock {
+            hash: hash.to_string(),
+        }
+    }
+
+    fn unlock_command(hash: &str) -> ClientCommand {
+        ClientCommand::BlueprintUnlock {
+            hash: hash.to_string(),
+        }
+    }
+
+    fn rejection_code(message: &ServerMessage) -> &str {
+        match message {
+            ServerMessage::Reject { code, .. } => code,
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn blueprint_locks_are_sorted_revisioned_and_released_on_disconnect() {
+        let dir = PlacementTempDir::new("lock-lifecycle");
+        let hash_b = write_test_package(&dir, "townsmith:lock_b", 100.0, None);
+        let hash_a = write_test_package(&dir, "townsmith:lock_a", 100.0, None);
+        let mut world = world_with_hello();
+
+        let lock_b = world.apply(&lock_command(&hash_b));
+        let (lock, count, checksum) = match &lock_b {
+            ServerMessage::BlueprintLockResult {
+                tick,
+                lock,
+                locks_count,
+                checksum,
+            } => {
+                assert_eq!(*tick, 1);
+                (lock, *locks_count, checksum.clone())
+            }
+            other => panic!("expected lock result, got {other:?}"),
+        };
+        assert_eq!(count, 1);
+        assert_eq!(lock.player_id, 1);
+        assert_eq!(lock.hash, hash_b);
+
+        world.apply(&lock_command(&hash_a));
+        let list = world.apply(&ClientCommand::BlueprintLocks);
+        let (list_tick, list_count, list_checksum, locks) = match &list {
+            ServerMessage::BlueprintLockList {
+                tick,
+                count,
+                checksum,
+                locks,
+            } => (*tick, *count, checksum.clone(), locks),
+            other => panic!("expected lock list, got {other:?}"),
+        };
+        assert_eq!(list_tick, 2);
+        assert_eq!(list_count, 2);
+        assert!(
+            locks.windows(2).all(|pair| pair[0].hash < pair[1].hash),
+            "list is sorted by canonical hash"
+        );
+        let listed: std::collections::BTreeSet<&str> =
+            locks.iter().map(|lock| lock.hash.as_str()).collect();
+        assert_eq!(
+            listed,
+            [hash_a.as_str(), hash_b.as_str()].into_iter().collect()
+        );
+        assert_ne!(list_checksum, checksum);
+
+        let before_tick = world.tick;
+        world.apply(&ClientCommand::BlueprintLocks);
+        assert_eq!(world.tick, before_tick, "list does not advance the tick");
+
+        let refreshed = world.apply(&lock_command(&hash_a));
+        match &refreshed {
+            ServerMessage::BlueprintLockResult {
+                tick,
+                locks_count,
+                checksum,
+                ..
+            } => {
+                assert_eq!(*tick, 3, "a re-lock refreshes the holder tick");
+                assert_eq!(*locks_count, 2);
+                assert_ne!(*checksum, list_checksum);
+            }
+            other => panic!("expected refresh, got {other:?}"),
+        }
+
+        let unlocked = world.apply(&unlock_command(&hash_b));
+        assert!(matches!(
+            unlocked,
+            ServerMessage::BlueprintUnlockResult { hash, locks_count: 1, .. }
+                if hash == hash_b
+        ));
+        assert_eq!(
+            rejection_code(&world.apply(&unlock_command(&hash_b))),
+            "blueprint.lock_unknown"
+        );
+
+        world.apply(&ClientCommand::Disconnect);
+        assert!(
+            world.blueprint_locks.is_empty(),
+            "disconnect releases every lock held by the player"
+        );
+    }
+
+    #[test]
+    fn blueprint_lock_blocks_a_different_holder_but_not_the_holder_or_admin() {
+        let dir = PlacementTempDir::new("lock-placement");
+        let hash = write_test_package(&dir, "townsmith:lock_place", 100.0, None);
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Mayor);
+        world.set_blueprint_library(dir.library()).expect("library");
+
+        let alice = world.open_connection();
+        assert!(matches!(
+            world.apply_session(alice, &hello_named("alice")).as_slice(),
+            [ServerMessage::Welcome { .. }]
+        ));
+        let bob = world.open_connection();
+        assert!(matches!(
+            world.apply_session(bob, &hello_named("bob")).as_slice(),
+            [ServerMessage::Welcome { .. }]
+        ));
+
+        assert!(matches!(
+            world.apply_session(bob, &lock_command(&hash)).as_slice(),
+            [ServerMessage::BlueprintLockResult { .. }]
+        ));
+        let before = placement_state(&world);
+        let denied = world.apply_session(alice, &place(&hash, 0.0, 0.0, 0));
+        assert_eq!(rejection_code(&denied[0]), "blueprint.locked");
+        assert_eq!(placement_state(&world), before, "denial mutates nothing");
+
+        let accepted = world.apply_session(bob, &place(&hash, 0.0, 0.0, 0));
+        expect_placement_result(&accepted[0]);
+
+        world.set_role(ClientRole::Admin);
+        let admin = world.apply_session(bob, &place(&hash, 10.0, 0.0, 0));
+        expect_placement_result(&admin[0]);
     }
 
     fn expect_placement_result(message: &ServerMessage) -> (&PlacementView, u64, &str, &str) {
