@@ -298,6 +298,14 @@ const TABLES := {
 		"base.ui.dashboard.settlement_claim.failed": "{code}: {message}",
 		"base.ui.dashboard.settlement_claim.register_failed": "Player registration failed: {code}: {message}",
 
+		# Settlement transfer control (Shift+Y). Only the sentence is
+		# translated; bridge error codes, ids, player ids, and revisions stay
+		# verbatim parameters.
+		"base.ui.dashboard.settlement_transfer.success": "Transferred settlement #{id}: player #{from} → player #{to} · revision {revision}",
+		"base.ui.dashboard.settlement_transfer.failed": "{code}: {message}",
+		"base.ui.dashboard.settlement_transfer.unowned": "Settlement #{id} is unowned; claim it before transferring",
+		"base.ui.dashboard.settlement_transfer.no_recipient": "No local transfer recipient for settlement #{id}",
+
 		# Compact dashboard policy editing. Bridge error codes, ids, and
 		# policy names stay verbatim parameters.
 		"base.ui.policies.created": "Policy {id} created: {name}",
@@ -683,6 +691,13 @@ const TABLES := {
 		"base.ui.dashboard.settlement_claim.already_owned": "Siedlung #{id} gehört bereits Spieler #{player}",
 		"base.ui.dashboard.settlement_claim.failed": "{code}: {message}",
 		"base.ui.dashboard.settlement_claim.register_failed": "Spielerregistrierung fehlgeschlagen: {code}: {message}",
+
+		# Siedlungsübertragung (Umschalt+Y). Nur der Satz ist übersetzt;
+		# Bridge-Fehlercodes, IDs, Spieler-IDs und Revisionen bleiben Parameter.
+		"base.ui.dashboard.settlement_transfer.success": "Siedlung #{id} übertragen: Spieler #{from} → Spieler #{to} · Revision {revision}",
+		"base.ui.dashboard.settlement_transfer.failed": "{code}: {message}",
+		"base.ui.dashboard.settlement_transfer.unowned": "Siedlung #{id} hat keinen Eigentümer; vor der Übertragung beanspruchen",
+		"base.ui.dashboard.settlement_transfer.no_recipient": "Kein lokaler Empfänger für Siedlung #{id}",
 
 		# Kompakte Richtlinienbearbeitung im Dashboard. Fehlercodes, IDs und
 		# Richtliniennamen bleiben unveränderte Parameter.
