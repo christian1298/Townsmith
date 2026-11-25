@@ -423,8 +423,10 @@ fn audit_entry_hash(mut hash: u64, entry: &AuditEntry) -> u64 {
 ///
 /// This is process-local intent, not placement ownership: it is not saved, is
 /// excluded from [`ServerWorld::checksum`], and is released when the holder's
-/// session ends. `player` is a display label snapshot; `player_id` is the
-/// stable identity used for authorization.
+/// session ends unless the server retains locks across disconnects
+/// ([`ServerWorld::retain_locks_on_disconnect`]) or another session for the
+/// same player is still online. `player` is a display label snapshot;
+/// `player_id` is the stable identity used for authorization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlueprintLock {
     /// Canonical `blake3:<64 lowercase hex>` package hash.
@@ -609,10 +611,12 @@ pub struct ServerWorld {
     ///
     /// Keyed by canonical `blake3:<64 hex>` hash, ascending hash order. Locks
     /// are in-memory only: they are not saved, are excluded from
-    /// [`Self::checksum`], and are released when the holder disconnects. Each
-    /// lock also carries a bounded lease ([`Self::lock_lease_ticks`]) so a
-    /// crashed or silent holder cannot block a package forever. Locks carry
-    /// intent only and do not confer placement ownership.
+    /// [`Self::checksum`], and are released when the holder's last online
+    /// session disconnects (or retained across the disconnect when
+    /// [`Self::retain_locks_on_disconnect`] is set). Each lock also carries a
+    /// bounded lease ([`Self::lock_lease_ticks`]) so a crashed or silent holder
+    /// cannot block a package forever. Locks carry intent only and do not
+    /// confer placement ownership.
     pub blueprint_locks: BTreeMap<String, BlueprintLock>,
     /// Advisory lock lease applied to new locks and refreshes, in ticks.
     ///
@@ -621,6 +625,16 @@ pub struct ServerWorld {
     /// and excluded from [`Self::checksum`]. Defaults to
     /// [`DEFAULT_BLUEPRINT_LOCK_LEASE_TICKS`].
     pub lock_lease_ticks: u64,
+    /// Whether a disconnect leaves the holder's advisory blueprint locks in
+    /// place for a reconnect instead of releasing them.
+    ///
+    /// Server configuration, not save data, and excluded from
+    /// [`Self::checksum`]. Defaults to `false`, which preserves immediate
+    /// release on disconnect. When `true`, the locks are left to expire by
+    /// their lease; a same-player reconnect can refresh or unlock them and
+    /// another player stays blocked until expiry. Locks never survive a
+    /// restart: they are not written to [`crate::save::ServerSave`].
+    pub retain_locks_on_disconnect: bool,
     /// Optional pinned content-registry hash (server config, not save data).
     ///
     /// When set, every `hello` must carry this exact 64-character lowercase
@@ -731,6 +745,7 @@ impl ServerWorld {
             content_hash: None,
             blueprint_locks: BTreeMap::new(),
             lock_lease_ticks: DEFAULT_BLUEPRINT_LOCK_LEASE_TICKS,
+            retain_locks_on_disconnect: false,
             interest_center: [0.0, 0.0],
             interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
             paused: false,
@@ -790,6 +805,20 @@ impl ServerWorld {
             MIN_BLUEPRINT_LOCK_LEASE_TICKS,
             MAX_BLUEPRINT_LOCK_LEASE_TICKS,
         );
+    }
+
+    /// Set whether a disconnect retains the holder's advisory blueprint locks.
+    ///
+    /// The default is `false`: the last online session for a player releases
+    /// that player's locks on disconnect, preserving the v0 behavior. When
+    /// `true`, the locks stay in the table and keep blocking other players
+    /// until their lease expires; the same player can reconnect and refresh or
+    /// unlock them. Process configuration, not save data: it is excluded from
+    /// [`Self::checksum`] and reset to `false` by a load. Even with retention
+    /// on, a lock is still dropped when its lease elapses, and nothing is
+    /// persisted across a server restart.
+    pub fn set_retain_locks_on_disconnect(&mut self, retain: bool) {
+        self.retain_locks_on_disconnect = retain;
     }
 
     /// Pin the content-registry hash required from every `hello`.
@@ -926,6 +955,7 @@ impl ServerWorld {
             content_hash: None,
             blueprint_locks: BTreeMap::new(),
             lock_lease_ticks: DEFAULT_BLUEPRINT_LOCK_LEASE_TICKS,
+            retain_locks_on_disconnect: false,
             interest_center: [0.0, 0.0],
             interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
             paused: save.paused,
@@ -1123,13 +1153,27 @@ impl ServerWorld {
             .map(|(connection_id, _)| *connection_id)
     }
 
+    /// Close the active session and open its reconnect window.
+    ///
+    /// Advisory lock release follows [`Self::retain_locks_on_disconnect`].
+    /// With the flag off, a player's locks are released only when no other
+    /// session for the same stable identity is still online. "Online" here
+    /// means a parked session in [`Self::sessions`] that has completed `hello`
+    /// and was never closed; the shared `online` name roster is not used
+    /// because [`Self::remember_disconnect`] removes the name on the first
+    /// disconnect. The protocol currently rejects a duplicate display name
+    /// while it is in that roster, so two same-identity sessions cannot both
+    /// be established through `hello` today; the parked-session check keeps
+    /// the multi-connection model correct if that restriction is relaxed.
     fn remember_disconnect(&mut self) {
-        // v0 locks are player-wide and process-local: ending one session
-        // releases every lock held by that identity, even if another session
-        // for the same player is still parked. Reconnect does not restore
-        // them; the editor lease/TTL follow-up can tighten this.
         if let Some(player_id) = self.player_id {
-            self.release_blueprint_locks(player_id);
+            let another_session = self
+                .sessions
+                .values()
+                .any(|state| state.hello && state.player_id == Some(player_id));
+            if !self.retain_locks_on_disconnect && !another_session {
+                self.release_blueprint_locks(player_id);
+            }
         }
         let player = self.player.take();
         if let Some(name) = &player {
@@ -6818,12 +6862,195 @@ mod tests {
         let hash = write_test_package(&dir, "townsmith:lease_disconnect", 100.0, None);
         let mut world = world_with_hello();
 
+        assert!(
+            !world.retain_locks_on_disconnect,
+            "immediate release on disconnect is the default"
+        );
         world.apply(&lock_command(&hash));
         assert_eq!(world.blueprint_locks.len(), 1);
         world.apply(&ClientCommand::Disconnect);
         assert!(
             world.blueprint_locks.is_empty(),
             "disconnect still releases an unexpired leased lock"
+        );
+    }
+
+    #[test]
+    fn retained_lock_survives_reconnect_and_blocks_until_expiry() {
+        let dir = PlacementTempDir::new("lock-retention");
+        let hash = write_test_package(&dir, "townsmith:retention", 100.0, None);
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Mayor);
+        world.set_blueprint_library(dir.library()).expect("library");
+        world.set_retain_locks_on_disconnect(true);
+        assert!(world.retain_locks_on_disconnect);
+
+        let alice = world.open_connection();
+        assert!(matches!(
+            world.apply_session(alice, &hello_named("alice")).as_slice(),
+            [ServerMessage::Welcome { .. }]
+        ));
+        let locked = world.apply_session(alice, &lock_command(&hash));
+        let lock_checksum = match &locked[0] {
+            ServerMessage::BlueprintLockResult {
+                tick,
+                lock,
+                locks_count,
+                checksum,
+            } => {
+                assert_eq!(*tick, 1);
+                assert_eq!(*locks_count, 1);
+                assert_eq!(lock.player_id, 1);
+                assert_eq!(lock.tick, 1);
+                assert_eq!(lock.expires_tick, 300, "evaluation tick 0 + lease 300");
+                checksum.clone()
+            }
+            other => panic!("expected lock result, got {other:?}"),
+        };
+
+        let world_checksum = world.checksum();
+        world.close_connection(alice);
+        assert_eq!(
+            world.tick, 1,
+            "retaining or releasing locks does not advance the tick"
+        );
+        assert_eq!(
+            world.checksum(),
+            world_checksum,
+            "locks stay outside the world checksum"
+        );
+        assert_eq!(world.blueprint_locks.len(), 1, "the lock is retained");
+        assert_eq!(
+            world.blueprint_locks_checksum(),
+            lock_checksum,
+            "a retained lock keeps its checksum"
+        );
+
+        let save = world.to_save_json_pretty().expect("save json");
+        assert!(
+            !save.contains("blueprint_locks")
+                && !save.contains("lock_lease_ticks")
+                && !save.contains("retain_locks_on_disconnect"),
+            "lock state and the retention flag are not save fields"
+        );
+        let loaded = ServerWorld::from_save_json(&save).expect("load");
+        assert_eq!(loaded.checksum(), world_checksum);
+        assert!(
+            !loaded.retain_locks_on_disconnect,
+            "load restores the default"
+        );
+        assert!(
+            loaded.blueprint_locks.is_empty(),
+            "locks do not survive save/load"
+        );
+
+        let alice_again = world.open_connection();
+        assert!(matches!(
+            world
+                .apply_session(alice_again, &hello_named("alice"))
+                .as_slice(),
+            [ServerMessage::Welcome { .. }]
+        ));
+        match &world.apply_session(alice_again, &ClientCommand::BlueprintLocks)[0] {
+            ServerMessage::BlueprintLockList {
+                tick, count, locks, ..
+            } => {
+                assert_eq!(*tick, 1, "listing does not advance the tick");
+                assert_eq!(*count, 1);
+                assert_eq!(locks.len(), 1);
+                assert_eq!(locks[0].player_id, 1, "same stable identity");
+                assert_eq!(locks[0].expires_tick, 300);
+            }
+            other => panic!("expected lock list, got {other:?}"),
+        }
+
+        world.tick = 10;
+        match &world.apply_session(alice_again, &lock_command(&hash))[0] {
+            ServerMessage::BlueprintLockResult {
+                tick,
+                lock,
+                locks_count,
+                ..
+            } => {
+                assert_eq!(*tick, 11, "a same-player re-lock refreshes the lease");
+                assert_eq!(lock.tick, 11);
+                assert_eq!(lock.expires_tick, 310);
+                assert_eq!(*locks_count, 1);
+            }
+            other => panic!("expected refresh, got {other:?}"),
+        }
+
+        let bob = world.open_connection();
+        assert!(matches!(
+            world.apply_session(bob, &hello_named("bob")).as_slice(),
+            [ServerMessage::Welcome { .. }]
+        ));
+        let before = placement_state(&world);
+        let denied = world.apply_session(bob, &place(&hash, 0.0, 0.0, 0));
+        assert_eq!(
+            rejection_code(&denied[0]),
+            "blueprint.locked",
+            "another player stays blocked while the retained lock is live"
+        );
+        assert_eq!(placement_state(&world), before, "denial mutates nothing");
+
+        world.tick = 310;
+        let accepted = world.apply_session(bob, &place(&hash, 0.0, 0.0, 0));
+        expect_placement_result(&accepted[0]);
+        assert!(
+            world.blueprint_locks.is_empty(),
+            "expiry frees the retained lock"
+        );
+    }
+
+    #[test]
+    fn another_online_session_for_the_same_player_keeps_locks() {
+        let dir = PlacementTempDir::new("lock-retention-multi");
+        let hash = write_test_package(&dir, "townsmith:retention_multi", 100.0, None);
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Mayor);
+        world.set_blueprint_library(dir.library()).expect("library");
+
+        let alice = world.open_connection();
+        assert!(matches!(
+            world.apply_session(alice, &hello_named("alice")).as_slice(),
+            [ServerMessage::Welcome { .. }]
+        ));
+        let player_id = world.player_id().expect("hello assigns an identity");
+        assert!(matches!(
+            world.apply_session(alice, &lock_command(&hash)).as_slice(),
+            [ServerMessage::BlueprintLockResult { .. }]
+        ));
+
+        // The wire rejects a duplicate display name while it is online, so a
+        // second live session for the same identity cannot be created through
+        // `hello` today. Seed the parked online state the multi-connection
+        // world model supports and keeps correct if that restriction changes.
+        let mut parked =
+            SessionState::new("parked-alice".to_string(), ClientRole::Mayor, world.tick);
+        parked.hello = true;
+        parked.player_id = Some(player_id);
+        world.sessions.insert(99, parked);
+
+        world.close_connection(alice);
+        assert_eq!(
+            world.blueprint_locks.len(),
+            1,
+            "another online session for the same identity keeps the lock"
+        );
+
+        // The last session for that identity going away releases it because
+        // the retention flag is still off.
+        world.sessions.remove(&99);
+        let alice_again = world.open_connection();
+        assert!(matches!(
+            world
+                .apply_session(alice_again, &hello_named("alice"))
+                .as_slice(),
+            [ServerMessage::Welcome { .. }]
+        ));
+        world.close_connection(alice_again);
+        assert!(
+            world.blueprint_locks.is_empty(),
+            "the last session's disconnect releases with retention off"
         );
     }
 
