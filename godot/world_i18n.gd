@@ -108,6 +108,26 @@ const TABLES := {
 		"base.ui.hud.selected_residents": "  ·  residents {names}",
 		"base.ui.hud.wilderness": "wilderness",
 
+		# Developer chat panel. Player names and message bodies stay raw.
+		"base.ui.chat.title": "Chat (developer panel)",
+		"base.ui.chat.placeholder": "Message (1–{max} characters)",
+		"base.ui.chat.send": "Send",
+		"base.ui.chat.help": "Enter: send · Esc: clear draft/error · Ctrl+L: focus draft",
+		"base.ui.chat.empty_log": "No messages yet.",
+		"base.ui.chat.char_counter": "{count}/{max} characters",
+		"base.ui.chat.status_signed_in": "Signed in as {name} (#{id})",
+		"base.ui.chat.status_no_identity": "No identity (set_identity)",
+		"base.ui.chat.error.line": "Error: {message} ({code})",
+		"base.ui.chat.error.unknown": "Unexpected chat error.",
+		"base.ui.chat.error.invalid_fallback": "Invalid chat message.",
+		"base.ui.chat.error.empty": "Chat message is empty.",
+		"base.ui.chat.error.too_long": "Chat message is too long ({max} characters max).",
+		"base.ui.chat.error.invalid": "Chat message contains a control character.",
+		"base.ui.chat.error.identity": "Sign in before sending chat.",
+		"base.ui.chat.error.malformed_sent": "chat_sent payload has a malformed entry",
+		"base.ui.chat.error.malformed_log": "chat_log payload has no entries list",
+		"base.ui.chat.error.malformed_entries": "chat_log payload has malformed entries",
+
 		# Modal messages: selection, placement, crew, save/load.
 		"base.ui.modal.select_building": "Select a building first (RMB)",
 		"base.ui.modal.select_building_full": "Select a building first (right-click)",
@@ -400,6 +420,26 @@ const TABLES := {
 		"base.ui.hud.selected_stories": "  ·  {system} {stories} Geschosse",
 		"base.ui.hud.selected_residents": "  ·  Bewohner {names}",
 		"base.ui.hud.wilderness": "Wildnis",
+
+		# Entwickler-Chatpanel. Spielernamen und Nachrichtentexte bleiben roh.
+		"base.ui.chat.title": "Chat (Entwicklerpanel)",
+		"base.ui.chat.placeholder": "Nachricht (1–{max} Zeichen)",
+		"base.ui.chat.send": "Senden",
+		"base.ui.chat.help": "Enter: senden · Esc: Entwurf/Fehler löschen · Strg+L: Entwurf fokussieren",
+		"base.ui.chat.empty_log": "Noch keine Nachrichten.",
+		"base.ui.chat.char_counter": "{count}/{max} Zeichen",
+		"base.ui.chat.status_signed_in": "Angemeldet als {name} (#{id})",
+		"base.ui.chat.status_no_identity": "Keine Identität (set_identity)",
+		"base.ui.chat.error.line": "Fehler: {message} ({code})",
+		"base.ui.chat.error.unknown": "Unerwarteter Chatfehler.",
+		"base.ui.chat.error.invalid_fallback": "Ungültige Chat-Nachricht.",
+		"base.ui.chat.error.empty": "Die Chat-Nachricht ist leer.",
+		"base.ui.chat.error.too_long": "Die Chat-Nachricht ist zu lang (maximal {max} Zeichen).",
+		"base.ui.chat.error.invalid": "Die Chat-Nachricht enthält ein Steuerzeichen.",
+		"base.ui.chat.error.identity": "Vor dem Senden von Chat anmelden.",
+		"base.ui.chat.error.malformed_sent": "chat_sent-Nutzlast hat einen fehlerhaften Eintrag",
+		"base.ui.chat.error.malformed_log": "chat_log-Nutzlast hat keine Eintragsliste",
+		"base.ui.chat.error.malformed_entries": "chat_log-Nutzlast hat fehlerhafte Einträge",
 
 		# Modalmeldungen: Auswahl, Platzierung, Crew, Speichern/Laden.
 		"base.ui.modal.select_building": "Zuerst ein Gebäude auswählen (RMB)",

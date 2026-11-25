@@ -10,6 +10,10 @@ extends PanelContainer
 ##
 ## This scene never connects, polls on a timer, or pushes anything by itself.
 ##
+## Display strings resolve through `WorldI18n` (`base.ui.chat.*`); the wire
+## commands, `_error_code`, and `snapshot()` keys stay locale-independent.
+## Player names and message bodies are never translated.
+##
 ## Run:
 ##   godot --path godot res://chat_panel.tscn
 ##   godot --headless --path godot res://chat_panel.tscn -- --smoke
@@ -18,10 +22,14 @@ extends PanelContainer
 
 signal command_issued(command: Dictionary)
 
+const WorldI18n = preload("res://world_i18n.gd")
+
 ## Mirrors `crates/server/src/protocol.rs` (`MAX_CHAT_CHARS`).
 const MAX_CHAT_CHARS := 280
 ## Mirrors `CHAT_LOG_CAPACITY`; also the local transcript display cap.
 const MAX_LINES := 64
+const DEFAULT_LOCALE := "en"
+const SUPPORTED_LOCALES := ["en", "de"]
 
 const ERROR_CODES := [
 	"chat.empty",
@@ -30,11 +38,11 @@ const ERROR_CODES := [
 	"chat.identity",
 ]
 
-const ERROR_LINES := {
-	"chat.empty": "Chat message is empty.",
-	"chat.too_long": "Chat message is too long (%d characters max)." % MAX_CHAT_CHARS,
-	"chat.invalid": "Chat message contains a control character.",
-	"chat.identity": "Sign in before sending chat.",
+const ERROR_KEYS := {
+	"chat.empty": "base.ui.chat.error.empty",
+	"chat.too_long": "base.ui.chat.error.too_long",
+	"chat.invalid": "base.ui.chat.error.invalid",
+	"chat.identity": "base.ui.chat.error.identity",
 }
 
 var player_id := 0
@@ -43,6 +51,7 @@ var player_name := ""
 ## Highest `seq` consumed so far. `poll_command` asks for everything after it.
 var last_seq := 0
 
+var _i18n = WorldI18n.new(DEFAULT_LOCALE)
 var _entries: Dictionary = {}
 var _status_text := ""
 var _error_code := ""
@@ -55,6 +64,7 @@ var _transcript: RichTextLabel
 var _status_label: Label
 var _draft_edit: LineEdit
 var _send_button: Button
+var _counter_label: Label
 var _help_label: Label
 
 
@@ -78,6 +88,19 @@ func set_identity(id: int, display_name: String) -> void:
 	player_id = id
 	player_name = display_name
 	_refresh()
+
+
+## Switch the display locale. `en` / `de` are supported (regional codes such as
+## `de_DE` map to their language); anything else falls back to English. Only
+## visible labels and status/error lines refresh: entries, `last_seq`, and the
+## transcript are untouched. Returns the resolved locale.
+func set_locale(locale: String) -> String:
+	var language := locale.strip_edges().to_lower().replace("-", "_").get_slice("_", 0)
+	if not SUPPORTED_LOCALES.has(language):
+		language = DEFAULT_LOCALE
+	_i18n.set_locale(language)
+	_refresh_labels()
+	return _i18n.locale()
 
 
 ## Replace the transcript with a `chat_log`-style entry list. Entries are
@@ -148,7 +171,7 @@ func poll_command() -> Dictionary:
 func apply_chat_sent(payload: Dictionary) -> bool:
 	var normalized := _normalized_entry(payload.get("entry"))
 	if normalized.is_empty():
-		set_error("chat.invalid", "chat_sent payload has a malformed entry")
+		set_error("chat.invalid", _i18n.t("base.ui.chat.error.malformed_sent"))
 		return false
 	var added := _merge_entry(normalized)
 	_refresh()
@@ -161,7 +184,7 @@ func apply_chat_sent(payload: Dictionary) -> bool:
 func apply_chat_log(payload: Dictionary) -> int:
 	var entries = payload.get("entries")
 	if not (entries is Array):
-		set_error("chat.invalid", "chat_log payload has no entries list")
+		set_error("chat.invalid", _i18n.t("base.ui.chat.error.malformed_log"))
 		return 0
 	var added := 0
 	var malformed := 0
@@ -174,7 +197,7 @@ func apply_chat_log(payload: Dictionary) -> int:
 			added += 1
 	_refresh()
 	if malformed > 0 and added == 0:
-		set_error("chat.invalid", "chat_log payload has malformed entries")
+		set_error("chat.invalid", _i18n.t("base.ui.chat.error.malformed_entries"))
 	return added
 
 
@@ -188,6 +211,7 @@ func submit(text: String) -> Dictionary:
 	clear_error()
 	if _draft_edit != null:
 		_draft_edit.text = ""
+		_refresh_counter()
 	var command: Dictionary = result["command"]
 	command_issued.emit(command.duplicate(true))
 	return result
@@ -247,7 +271,7 @@ func _build_ui() -> void:
 	margin.add_child(_box)
 
 	_title = Label.new()
-	_title.text = "Chat (developer panel)"
+	_title.text = ""
 	_title.add_theme_font_size_override("font_size", 16)
 	_box.add_child(_title)
 
@@ -274,35 +298,75 @@ func _build_ui() -> void:
 
 	_draft_edit = LineEdit.new()
 	_draft_edit.name = "Draft"
-	_draft_edit.placeholder_text = "Message (1–%d characters)" % MAX_CHAT_CHARS
+	_draft_edit.placeholder_text = ""
 	_draft_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_draft_edit.text_submitted.connect(_on_draft_submitted)
+	_draft_edit.text_changed.connect(_on_draft_changed)
 	draft_row.add_child(_draft_edit)
+
+	_counter_label = Label.new()
+	_counter_label.name = "CharCounter"
+	_counter_label.add_theme_font_size_override("font_size", 11)
+	_counter_label.add_theme_color_override("font_color", Color(0.62, 0.67, 0.74))
+	draft_row.add_child(_counter_label)
 
 	_send_button = Button.new()
 	_send_button.name = "Send"
-	_send_button.text = "Send"
+	_send_button.text = ""
 	_send_button.pressed.connect(_on_send_pressed)
 	draft_row.add_child(_send_button)
 
 	_help_label = Label.new()
 	_help_label.name = "KeyHelp"
-	_help_label.text = "Enter: send · Esc: clear draft/error · Ctrl+L: focus draft"
+	_help_label.text = ""
 	_help_label.add_theme_font_size_override("font_size", 11)
 	_help_label.add_theme_color_override("font_color", Color(0.62, 0.67, 0.74))
 	_box.add_child(_help_label)
+
+	_refresh_labels()
+
+
+func _refresh_labels() -> void:
+	if _title != null:
+		_title.text = _i18n.t("base.ui.chat.title")
+	if _draft_edit != null:
+		_draft_edit.placeholder_text = _i18n.t(
+			"base.ui.chat.placeholder", {"max": MAX_CHAT_CHARS}
+		)
+	if _send_button != null:
+		_send_button.text = _i18n.t("base.ui.chat.send")
+	if _help_label != null:
+		_help_label.text = _i18n.t("base.ui.chat.help")
+	_refresh_counter()
+	_refresh()
+
+
+func _refresh_counter() -> void:
+	if _counter_label == null or _draft_edit == null:
+		return
+	_counter_label.text = _i18n.t(
+		"base.ui.chat.char_counter",
+		{"count": _draft_edit.text.length(), "max": MAX_CHAT_CHARS}
+	)
 
 
 func _refresh() -> void:
 	if _transcript == null:
 		return
-	_transcript.text = "\n".join(transcript_lines())
+	var lines := transcript_lines()
+	_transcript.text = (
+		_i18n.t("base.ui.chat.empty_log") if lines.is_empty() else "\n".join(lines)
+	)
 	var has_error := _error_code != ""
 	_status_label.text = _status_line()
 	_status_label.add_theme_color_override(
 		"font_color",
 		Color(0.96, 0.42, 0.38) if has_error else Color(0.78, 0.82, 0.88)
 	)
+
+
+func _on_draft_changed(_text: String) -> void:
+	_refresh_counter()
 
 
 func _on_draft_submitted(text: String) -> void:
@@ -321,6 +385,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	if key_event.keycode == KEY_ESCAPE:
 		if _draft_edit != null:
 			_draft_edit.text = ""
+			_refresh_counter()
 		clear_error()
 		get_viewport().set_input_as_handled()
 	elif key_event.keycode == KEY_L and key_event.ctrl_pressed:
@@ -333,8 +398,15 @@ func _failure(code: String) -> Dictionary:
 	return {
 		"ok": false,
 		"code": code,
-		"message": str(ERROR_LINES.get(code, "Invalid chat message.")),
+		"message": _error_message(code),
 	}
+
+
+func _error_message(code: String) -> String:
+	return _i18n.t(
+		str(ERROR_KEYS.get(code, "base.ui.chat.error.invalid_fallback")),
+		{"max": MAX_CHAT_CHARS}
+	)
 
 
 func _has_control_character(text: String) -> bool:
@@ -411,17 +483,22 @@ func _status_line() -> String:
 	if _status_text != "":
 		return _status_text
 	if player_name != "" or player_id != 0:
-		return "Signed in as %s (#%d)" % [player_name, player_id]
-	return "No identity (set_identity)"
+		return _i18n.t(
+			"base.ui.chat.status_signed_in",
+			{"name": player_name, "id": player_id}
+		)
+	return _i18n.t("base.ui.chat.status_no_identity")
 
 
 func _error_line() -> String:
 	if _error_code == "":
 		return ""
-	var body := str(ERROR_LINES.get(_error_code, ""))
+	var body := ""
+	if ERROR_KEYS.has(_error_code):
+		body = _error_message(_error_code)
 	if body == "":
-		body = _error_detail if _error_detail != "" else "Unexpected chat error."
-	return "Error: %s (%s)" % [body, _error_code]
+		body = _error_detail if _error_detail != "" else _i18n.t("base.ui.chat.error.unknown")
+	return _i18n.t("base.ui.chat.error.line", {"message": body, "code": _error_code})
 
 
 func _canonical_render(lines: Array) -> String:
@@ -618,6 +695,20 @@ func _run_smoke() -> void:
 	var line := str(snapshot()["error_line"])
 	_check(line.begins_with("Error: ") and line.ends_with("(chat.too_long)"), "error.stable", line)
 	_check(not line.contains("server detail"), "error.hides_detail", line)
+	var lines_before_locale := int(snapshot()["line_count"])
+
+	_check(set_locale("de_DE") == "de", "locale.de_resolves")
+	var de_error := str(snapshot()["error_line"])
+	_check(de_error.begins_with("Fehler: ") and de_error.contains("zu lang"), "locale.de_error", de_error)
+	clear_error()
+	_check(str(snapshot()["status_line"]).contains("Angemeldet als alice (#7)"), "locale.de_status", str(snapshot()["status_line"]))
+	_check(set_locale("fr") == "en", "locale.unsupported_falls_back")
+	_check(str(snapshot()["status_line"]).begins_with("Signed in as alice (#7)"), "locale.fallback_en", str(snapshot()["status_line"]))
+	_check(set_locale("en") == "en", "locale.en_resolves")
+	_check(int(snapshot()["line_count"]) == lines_before_locale, "locale.transcript_unchanged")
+	_case("locale")
+	print("CHAT_PANEL_LOCALE de=ok fr=en en=ok lines=%d" % lines_before_locale)
+
 	set_error("chat.future", "new server detail")
 	_check(str(snapshot()["error_line"]).contains("new server detail"), "error.fallback")
 	clear_error()
