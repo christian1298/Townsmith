@@ -8,22 +8,31 @@
 //! - Four concurrent clients complete `hello`, one chats, and every other
 //!   client sees exactly one pushed `chat_sent` in sequence order; the accept
 //!   loop then joins every writer thread.
+//! - Eight concurrent senders each spend eight chats and every session sees
+//!   all 64 frames once, in per-sender sequence order.
 //! - A client that stops reading is closed by outbound backpressure while the
 //!   remaining clients keep complete request/response exchanges and the server
 //!   still accepts one more connection afterwards.
+//! - A sustained snapshot/chat workload keeps one client's queue bounded and
+//!   every response ordered; the separate slow-reader case covers backpressure.
 //! - A closed queue rejects later pushes with `outbound.closed` and ends the
 //!   session reader without a panic, whether the peer or the writer went away.
 //! - A session-cap trigger under concurrent command load joins every thread
 //!   within a bounded deadline and leaves the deterministic world checksum
 //!   unchanged.
+//! - Shutdown with unread response frames queued joins every session and
+//!   writer thread within the bounded deadline.
+//! - Pushes and responses interleave per producer without duplication, and a
+//!   session's own responses stay ahead of its later command responses.
 //! - `--sessions N` serves exactly N connections and never admits the next.
 //!
-//! Chat and ping never advance the authoritative tick, so every case ends at
-//! tick 0 with the fresh-world checksum.
+//! Chat and ping never advance the authoritative tick, so every case that uses
+//! only those commands ends at tick 0 with the fresh-world checksum. The
+//! snapshot case advances two ticks per wave and pins the resulting checksum.
 
 use std::collections::BTreeSet;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -65,6 +74,71 @@ const CHATS_PER_SENDER: usize = 40;
 
 /// Frames one sender receives per wave: its own responses plus every push.
 const FRAMES_PER_SENDER: usize = SENDERS * CHATS_PER_SENDER;
+
+/// Eight concurrent senders for the fan-out case.
+///
+/// Eight senders with eight chats each queue 64 frames per session (its own
+/// responses plus seven peers' pushes), a quarter of the 256-frame cap. This
+/// stays well clear of the #397 Windows limit: the old failure needed 320
+/// frames per session, not 64.
+const EIGHT_SENDERS: usize = 8;
+
+/// Chats each of the eight senders spends, below the 40-credit burst.
+const EIGHT_CHATS: usize = 8;
+
+/// Every frame one of the eight sessions must read.
+const EIGHT_FRAMES: usize = EIGHT_SENDERS * EIGHT_CHATS;
+
+/// Waves of snapshot/chat load sent while one peer refuses to read.
+///
+/// `SNAPSHOT_WAVES * SNAPSHOT_CHATS` is 12,800 pushed chat frames, slightly
+/// more than the 12,000 the existing backpressure case already proves is past
+/// the largest default TCP buffers plus the 256-frame queue. The active client
+/// reads every response, so its own queue peaks at 42 frames per wave.
+const SNAPSHOT_WAVES: u64 = 320;
+
+/// Chat pushes per wave. Chat is the only frame broadcast to other sessions.
+const SNAPSHOT_CHATS: usize = 40;
+
+/// `set_tax` snapshot exchanges per wave. Each advances the tick by one, which
+/// also refills the sender's command bucket so the following wave is never
+/// rate-limited.
+const SNAPSHOT_PER_WAVE: usize = 2;
+
+/// Frames the active client reads per wave: its chat responses plus snapshots.
+const SNAPSHOT_FRAMES: usize = SNAPSHOT_CHATS + SNAPSHOT_PER_WAVE;
+
+/// Senders in the push/response ordering case.
+const ORDER_SENDERS: usize = 4;
+
+/// Chats each ordering sender pipelines before its ping.
+const ORDER_CHATS: usize = 10;
+
+/// Frames each ordering session reads: every chat plus one pong.
+const ORDER_FRAMES: usize = ORDER_SENDERS * ORDER_CHATS + 1;
+
+/// Sessions joined while unread response frames are still queued.
+const SHUTDOWN_SESSIONS: usize = 8;
+
+/// Chats per shutdown session.
+const SHUTDOWN_CHATS: usize = 16;
+
+/// Pings per shutdown session.
+const SHUTDOWN_PINGS: usize = 12;
+
+/// Commands read per shutdown session before the half-close.
+const SHUTDOWN_COMMANDS: usize = 1 + SHUTDOWN_CHATS + SHUTDOWN_PINGS;
+
+/// Frames each shutdown session queues if it never reads: every sender's chats
+/// plus its own pongs. 140 is comfortably below the 256-frame cap.
+const SHUTDOWN_FRAMES: usize = SHUTDOWN_SESSIONS * SHUTDOWN_CHATS + SHUTDOWN_PINGS;
+
+// Keep every case under the per-connection queue cap on every platform. A
+// compile-time guard makes a future count change fail here instead of as a
+// flaky push rejection on Windows.
+const _: () = assert!(EIGHT_FRAMES < 256);
+const _: () = assert!(ORDER_FRAMES < 256);
+const _: () = assert!(SHUTDOWN_FRAMES < 256);
 
 /// Connections accepted by the backpressure case: the slow peer, every wave
 /// sender, and one healthy probe after the slow peer is gone.
@@ -224,6 +298,118 @@ fn four_clients_receive_one_ordered_chat_push_each() {
     assert_eq!(
         report.commands, 12,
         "four hello, four chat, and four disconnect frames"
+    );
+    assert_untouched_world(&report);
+}
+
+#[test]
+fn eight_senders_fan_out_all_their_chats_once() {
+    let (listener, address) = bind();
+    let server = start_server(listener, EIGHT_SENDERS as u64);
+
+    // Complete every hello before anyone writes a chat: a push only reaches
+    // sessions already marked hello in the registry, and this keeps the
+    // expected 64-frame window independent of accept order.
+    let names: Vec<String> = (0..EIGHT_SENDERS)
+        .map(|index| format!("sender-{index}"))
+        .collect();
+    let mut streams: Vec<TcpStream> = names
+        .iter()
+        .map(|name| hello_client(address, name))
+        .collect();
+
+    // Pipeline eight uniquely tagged chats per sender without reading. All
+    // eight writes fit comfortably, so no sender is blocked by backpressure.
+    for (sender, stream) in streams.iter_mut().enumerate() {
+        let mut batch = Vec::new();
+        for message in 0..EIGHT_CHATS {
+            write_json_frame(
+                &mut batch,
+                &chat(&format!("sender-{sender}-message-{message}")),
+            )
+            .expect("encode chat");
+        }
+        use std::io::Write;
+        stream.write_all(&batch).expect("write chat burst");
+        stream.flush().expect("flush chat burst");
+    }
+
+    for (sender, stream) in streams.iter_mut().enumerate() {
+        let mut seqs = BTreeSet::new();
+        let mut counts = vec![0usize; EIGHT_SENDERS];
+        let mut last_seq = [0u64; EIGHT_SENDERS];
+        let mut own_texts = BTreeSet::new();
+
+        for _ in 0..EIGHT_FRAMES {
+            let entry = expect_chat_sent(read_message(stream));
+            assert!(
+                seqs.insert(entry.seq),
+                "session {sender} saw chat sequence {} twice",
+                entry.seq
+            );
+            let producer = names
+                .iter()
+                .position(|name| *name == entry.player)
+                .unwrap_or_else(|| panic!("session {sender} saw unknown player {}", entry.player));
+            assert!(
+                entry.seq > last_seq[producer],
+                "session {sender} saw {} sequence {} after {}",
+                entry.player,
+                entry.seq,
+                last_seq[producer]
+            );
+            last_seq[producer] = entry.seq;
+            counts[producer] += 1;
+
+            if producer == sender {
+                assert!(
+                    entry.text.starts_with(&format!("sender-{sender}-message-")),
+                    "session {sender} received another sender's chat as its own response: {entry:?}"
+                );
+                assert!(
+                    own_texts.insert(entry.text.clone()),
+                    "session {sender} saw its own `{}` twice",
+                    entry.text
+                );
+            }
+        }
+
+        assert_eq!(
+            counts,
+            vec![EIGHT_CHATS; EIGHT_SENDERS],
+            "session {sender} must see every sender exactly {EIGHT_CHATS} times"
+        );
+        assert_eq!(
+            seqs.len(),
+            EIGHT_FRAMES,
+            "session {sender} must see {EIGHT_FRAMES} distinct entries"
+        );
+        assert_eq!(
+            own_texts.len(),
+            EIGHT_CHATS,
+            "session {sender} must get exactly one response per own chat"
+        );
+        for message in 0..EIGHT_CHATS {
+            assert!(
+                own_texts.contains(&format!("sender-{sender}-message-{message}")),
+                "session {sender} lost its own message {message}"
+            );
+        }
+    }
+
+    for stream in &mut streams {
+        assert_eq!(
+            exchange(stream, &ClientCommand::Disconnect).expect("disconnect"),
+            ServerMessage::Goodbye
+        );
+    }
+
+    let report = join_within(server);
+    assert_eq!(report.sessions, EIGHT_SENDERS as u64);
+    assert_eq!(
+        report.commands,
+        EIGHT_SENDERS as u64 * (1 + EIGHT_CHATS as u64 + 1),
+        "hello, eight chats, and disconnect per session"
     );
     assert_untouched_world(&report);
 }
@@ -421,6 +607,92 @@ fn a_non_reading_peer_is_dropped_without_hurting_other_clients() {
 }
 
 #[test]
+fn snapshot_exchanges_stay_complete_under_sustained_load() {
+    // A single client pipelines 40 max-length chats and two `set_tax` snapshots
+    // per wave, then reads all 42 responses before the next wave. This keeps
+    // the client's own queue bounded while exercising sustained request/
+    // response ordering; the slow-reader case separately covers backpressure.
+    let (listener, address) = bind();
+    let server = start_server(listener, 1);
+
+    let mut active = hello_client(address, "active-snapshot");
+    let text = "s".repeat(MAX_CHAT_CHARS);
+    for wave in 0..SNAPSHOT_WAVES {
+        let mut batch = Vec::new();
+        for _ in 0..SNAPSHOT_CHATS {
+            write_json_frame(&mut batch, &chat(&text)).expect("encode chat");
+        }
+        for _ in 0..SNAPSHOT_PER_WAVE {
+            write_json_frame(
+                &mut batch,
+                &ClientCommand::SetTax {
+                    resident_rate: 12,
+                    business_rate: 8,
+                },
+            )
+            .expect("encode set_tax");
+        }
+        use std::io::Write;
+        active.write_all(&batch).expect("write snapshot wave");
+        active.flush().expect("flush snapshot wave");
+
+        for frame in 0..SNAPSHOT_FRAMES {
+            match read_message(&mut active) {
+                ServerMessage::ChatSent { entry, .. } => {
+                    assert_eq!(entry.player, "active-snapshot");
+                    assert_eq!(entry.text, text);
+                }
+                ServerMessage::Snapshot { tick, .. } => {
+                    let snapshot = (frame - SNAPSHOT_CHATS) as u64;
+                    assert_eq!(
+                        tick,
+                        wave * SNAPSHOT_PER_WAVE as u64 + snapshot + 1,
+                        "wave {wave} snapshot {snapshot} tick"
+                    );
+                }
+                other => panic!("wave {wave} frame {frame}: unexpected response {other:?}"),
+            }
+        }
+    }
+
+    assert_eq!(
+        exchange(&mut active, &ClientCommand::Disconnect).expect("active disconnect"),
+        ServerMessage::Goodbye
+    );
+
+    let report = join_within(server);
+    assert_eq!(report.sessions, 1);
+    let active_commands = 1 + SNAPSHOT_WAVES * SNAPSHOT_FRAMES as u64 + 1;
+    assert_eq!(
+        report.commands, active_commands,
+        "hello, every wave command, and disconnect"
+    );
+    assert_eq!(
+        report.saves, 0,
+        "the stress harness never configures a save"
+    );
+    assert_eq!(
+        report.tick,
+        SNAPSHOT_WAVES * SNAPSHOT_PER_WAVE as u64,
+        "only the two snapshot exchanges per wave advance the tick"
+    );
+
+    let mut reference = ServerWorld::new(LOOPBACK_SEED);
+    reference.apply(&hello("reference-check"));
+    for _ in 0..SNAPSHOT_WAVES * SNAPSHOT_PER_WAVE as u64 {
+        reference.apply(&ClientCommand::SetTax {
+            resident_rate: 12,
+            business_rate: 8,
+        });
+    }
+    assert_eq!(
+        report.checksum,
+        reference.checksum(),
+        "chat and ping load must not move the shared world checksum"
+    );
+}
+
+#[test]
 fn session_cap_trigger_joins_the_load_within_the_deadline() {
     const CLIENTS: usize = 8;
     let (listener, address) = bind();
@@ -494,6 +766,154 @@ fn session_cap_trigger_joins_the_load_within_the_deadline() {
         report.commands,
         CLIENTS as u64 * (2 + 25 + 1),
         "hello, 25 pings, one chat, and disconnect per session"
+    );
+    assert_untouched_world(&report);
+}
+
+#[test]
+fn shutdown_joins_sessions_with_queued_unread_responses() {
+    let (listener, address) = bind();
+    // The accept loop stops as soon as the eighth connection is accepted and
+    // joins every live session, while the clients still have unread responses.
+    let server = start_server(listener, SHUTDOWN_SESSIONS as u64);
+
+    let mut streams: Vec<TcpStream> = (0..SHUTDOWN_SESSIONS).map(|_| connect(address)).collect();
+    for (index, stream) in streams.iter_mut().enumerate() {
+        let mut batch = Vec::new();
+        write_json_frame(&mut batch, &hello(&format!("shutdown-{index}"))).expect("encode hello");
+        for message in 0..SHUTDOWN_CHATS {
+            write_json_frame(&mut batch, &chat(&format!("shutdown-{index}-{message}")))
+                .expect("encode chat");
+        }
+        for nonce in 0..SHUTDOWN_PINGS {
+            write_json_frame(&mut batch, &ping(nonce as u64)).expect("encode ping");
+        }
+        use std::io::Write;
+        stream.write_all(&batch).expect("write queued commands");
+        stream.flush().expect("flush queued commands");
+        // FIN at a frame boundary: the server reads every queued command, then
+        // drains the accepted responses through the writer before joining.
+        stream
+            .shutdown(Shutdown::Write)
+            .expect("shutdown client write half");
+    }
+
+    // Keep the sockets (and their read halves) open: a reset from dropping
+    // them early could discard frames the server has not read yet.
+    let report = join_within(server);
+    assert_eq!(report.sessions, SHUTDOWN_SESSIONS as u64);
+    assert_eq!(
+        report.commands,
+        SHUTDOWN_SESSIONS as u64 * SHUTDOWN_COMMANDS as u64,
+        "every queued command must be read before the half-close ends the session"
+    );
+    assert_untouched_world(&report);
+    drop(streams);
+}
+
+#[test]
+fn push_and_response_frames_stay_ordered_per_producer() {
+    let (listener, address) = bind();
+    let server = start_server(listener, ORDER_SENDERS as u64);
+
+    let names: Vec<String> = (0..ORDER_SENDERS)
+        .map(|index| format!("order-{index}"))
+        .collect();
+    let mut streams: Vec<TcpStream> = names
+        .iter()
+        .map(|name| hello_client(address, name))
+        .collect();
+
+    // Every sender pipelines its chats and then a ping. Its own responses are
+    // therefore queued in command order, while the other senders' pushes
+    // interleave from independent readers.
+    for (sender, stream) in streams.iter_mut().enumerate() {
+        let mut batch = Vec::new();
+        for message in 0..ORDER_CHATS {
+            write_json_frame(
+                &mut batch,
+                &chat(&format!("order-{sender}-message-{message}")),
+            )
+            .expect("encode chat");
+        }
+        write_json_frame(&mut batch, &ping(100 + sender as u64)).expect("encode ping");
+        use std::io::Write;
+        stream.write_all(&batch).expect("write ordering batch");
+        stream.flush().expect("flush ordering batch");
+    }
+
+    for (sender, stream) in streams.iter_mut().enumerate() {
+        let mut seqs = BTreeSet::new();
+        let mut counts = vec![0usize; ORDER_SENDERS];
+        let mut last_seq = [0u64; ORDER_SENDERS];
+        let mut last_own_frame = None;
+        let mut pong_frame = None;
+
+        for frame in 0..ORDER_FRAMES {
+            match read_message(stream) {
+                ServerMessage::ChatSent { entry, .. } => {
+                    let producer = names
+                        .iter()
+                        .position(|name| *name == entry.player)
+                        .unwrap_or_else(|| {
+                            panic!("session {sender} saw unknown player {}", entry.player)
+                        });
+                    assert!(
+                        entry.seq > last_seq[producer],
+                        "session {sender} saw {} sequence {} after {}",
+                        entry.player,
+                        entry.seq,
+                        last_seq[producer]
+                    );
+                    last_seq[producer] = entry.seq;
+                    counts[producer] += 1;
+                    assert!(
+                        seqs.insert(entry.seq),
+                        "session {sender} saw chat sequence {} twice",
+                        entry.seq
+                    );
+                    if producer == sender {
+                        last_own_frame = Some(frame);
+                    }
+                }
+                ServerMessage::Pong { nonce } => {
+                    assert_eq!(nonce, 100 + sender as u64);
+                    assert!(pong_frame.is_none(), "session {sender} saw two pongs");
+                    pong_frame = Some(frame);
+                }
+                other => panic!("session {sender} frame {frame}: unexpected {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            counts,
+            vec![ORDER_CHATS; ORDER_SENDERS],
+            "session {sender} must see every producer's {ORDER_CHATS} chats once"
+        );
+        assert_eq!(
+            seqs.len(),
+            ORDER_SENDERS * ORDER_CHATS,
+            "session {sender} must see no duplicate chat sequence"
+        );
+        assert!(
+            pong_frame.expect("missing pong") > last_own_frame.expect("missing own response"),
+            "session {sender} received its pong before its own chat responses"
+        );
+    }
+
+    for stream in &mut streams {
+        assert_eq!(
+            exchange(stream, &ClientCommand::Disconnect).expect("disconnect"),
+            ServerMessage::Goodbye
+        );
+    }
+
+    let report = join_within(server);
+    assert_eq!(report.sessions, ORDER_SENDERS as u64);
+    assert_eq!(
+        report.commands,
+        ORDER_SENDERS as u64 * (1 + ORDER_CHATS as u64 + 1 + 1),
+        "hello, ten chats, one ping, and disconnect per session"
     );
     assert_untouched_world(&report);
 }
