@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use core_sim::{Cohort, CohortSimulation};
+use townsmith_server::chat_smoke::run_chat_smoke;
 use townsmith_server::listen::{run_listen, run_save_load_smoke, ListenConfig};
 use townsmith_server::placement::{run_placement_smoke, write_placement_fixture};
 use townsmith_server::protocol::{run_loopback_smoke, LOOPBACK_SEED};
@@ -160,6 +161,20 @@ fn main() {
             Ok(report) => print_time_vote(&report),
             Err(error) => {
                 eprintln!("SERVER_TIME_VOTE status=error error={error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if has_flag("--chat-smoke") {
+        match run_chat_smoke() {
+            Ok(report) => println!(
+                "SERVER_CHAT status=ok messages={} entries={} chat_checksum={} world_checksum={}",
+                report.messages, report.entries, report.chat_checksum, report.world_checksum
+            ),
+            Err(error) => {
+                eprintln!("SERVER_CHAT status=error error={error}");
                 std::process::exit(1);
             }
         }
