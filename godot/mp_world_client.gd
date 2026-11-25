@@ -195,6 +195,7 @@ const CHAT_LAYER := 2
 const CHAT_MARGIN := 12.0
 const CHAT_PANEL_WIDTH := 540.0
 const CHAT_PANEL_HEIGHT := 430.0
+const CHAT_UNREAD_MAX := 999
 
 var _peer: StreamPeerTCP
 var _phase: int = Phase.CONNECTING
@@ -320,6 +321,11 @@ var _chat_action_index := 0
 var _chat_awaiting := ""
 var _chat_panel = null
 var _chat_marker := ""
+# Pushed `chat_sent` lines observed while the transcript is not being read.
+# Debug English only; this client is not localized.
+var _chat_unread := 0
+var _chat_pushes := 0
+var _chat_unread_label: Label
 
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
@@ -1006,6 +1012,56 @@ func _on_goodbye() -> void:
 
 # --- Opt-in chat (`--chat`) -------------------------------------------------
 
+## Update the unread badge. Only shown while there is at least one line, so a
+## quiet session keeps the HUD clean. `total` counts pushed lines this session
+## ever, not the current badge value.
+func _chat_unread_text() -> String:
+	return "MP_CHAT_UNREAD unread=%d total=%d" % [_chat_unread, _chat_pushes]
+
+func _set_chat_unread(value: int) -> void:
+	var clamped := clampi(value, 0, CHAT_UNREAD_MAX)
+	if clamped == _chat_unread:
+		return
+	_chat_unread = clamped
+	_refresh_chat_unread_hud()
+	# Change-only marker: the sender's own response never moves the counter, so
+	# it prints nothing; a passive listener prints 1 and then 0 on catch-up.
+	if _chat_enabled:
+		print(_chat_unread_text())
+
+func _refresh_chat_unread_hud() -> void:
+	if _chat_unread_label == null:
+		return
+	_chat_unread_label.text = "Chat: %d new" % _chat_unread
+	_chat_unread_label.visible = _chat_unread > 0
+
+## True when the mounted panel (or a child) owns keyboard focus, i.e. the player
+## is reading/typing and a pushed line should not be counted. The smoke model is
+## tree-less, so it is never focused.
+func _chat_panel_focused() -> bool:
+	if _chat_panel == null or not _chat_panel.is_inside_tree():
+		return false
+	var focused: Control = _chat_panel.get_viewport().gui_get_focus_owner()
+	if focused == null:
+		return false
+	return _chat_panel == focused or _chat_panel.is_ancestor_of(focused)
+
+## A pushed line counts only for a live chat session whose transcript is not on
+## screen. `added` already deduplicates against `chat_log`/`chat_since`, and the
+## sender's own scripted response is handled before this is reached.
+func _chat_should_count_push(message: Dictionary) -> bool:
+	if not _chat_enabled:
+		return false
+	if _phase == Phase.CHAT_ACTIVE and _chat_panel_focused():
+		return false
+	var entry_raw: Variant = message.get("entry", null)
+	if typeof(entry_raw) == TYPE_DICTIONARY:
+		# The server never pushes a line back to its sender, but an interactive
+		# send can race the scripted exchange; never count our own name.
+		if str(entry_raw.get("player", "")) == _player_name:
+			return false
+	return true
+
 ## Start the transcript exchange: ask for every retained line, then run the
 ## scripted actions. Chat never advances the authoritative tick or checksum.
 func _chat_begin() -> void:
@@ -1013,6 +1069,7 @@ func _chat_begin() -> void:
 		return
 	_chat_awaiting = "log"
 	_phase = Phase.CHAT_ACTIVE
+	_set_chat_unread(0)
 	_arm_deadline(_timeout_ms)
 	_set_status("Chat connected; polling the transcript.")
 
@@ -1033,6 +1090,7 @@ func _chat_advance() -> void:
 		if not _send({"type": "chat", "text": text}):
 			return
 		_chat_awaiting = "sent"
+		_set_chat_unread(0)
 		_set_status("Chat: sent \"%s\"." % text)
 	else:
 		if not _send(_chat_panel.poll_command()):
@@ -1061,6 +1119,9 @@ func _on_chat_sent(message: Dictionary) -> void:
 	# `chat_log` remains the catch-up path after a reconnect.
 	if not added:
 		return
+	if _chat_should_count_push(message):
+		_chat_pushes += 1
+		_set_chat_unread(_chat_unread + 1)
 	_refresh_hud()
 	if _phase == Phase.CHAT_LISTEN:
 		_chat_push_match(message)
@@ -1088,16 +1149,20 @@ func _chat_push_match(message: Dictionary) -> void:
 		text,
 		digest,
 	])
-	if not _send({"type": "disconnect"}):
+	# Catch up through the normal poll path so the unread badge clears the same
+	# way it would for a real client, and print the reset marker.
+	if not _send(_chat_panel.poll_command()):
 		return
-	_phase = Phase.DISCONNECT_SENT
+	_chat_awaiting = "log"
 	_arm_deadline(_timeout_ms)
+	_set_status("Pushed line received; polling to clear unread.")
 
 func _on_chat_log(message: Dictionary) -> void:
 	if not _chat_enabled:
 		_fail("unexpected_message_chat_log")
 		return
-	if _phase != Phase.CHAT_ACTIVE or _chat_awaiting != "log":
+	var listening := _chat_listen and _phase == Phase.CHAT_LISTEN and _chat_awaiting == "log"
+	if not listening and (_phase != Phase.CHAT_ACTIVE or _chat_awaiting != "log"):
 		_fail("chat_log_in_%s" % _phase_name())
 		return
 	if typeof(message.get("entries", null)) != TYPE_ARRAY:
@@ -1108,7 +1173,16 @@ func _on_chat_log(message: Dictionary) -> void:
 		_fail("chat_log_invalid")
 		return
 	_chat_awaiting = ""
+	# A successful poll means the transcript is caught up: nothing is unread.
+	_set_chat_unread(0)
 	_refresh_hud()
+	if listening:
+		_set_status("Pushed line caught up; disconnecting.")
+		if not _send({"type": "disconnect"}):
+			return
+		_phase = Phase.DISCONNECT_SENT
+		_arm_deadline(_timeout_ms)
+		return
 	_chat_advance()
 
 ## Forward a panel-issued command while the chat exchange is live. Script and
@@ -1116,7 +1190,8 @@ func _on_chat_log(message: Dictionary) -> void:
 func _on_chat_command(command: Dictionary) -> void:
 	if not _chat_enabled or _phase != Phase.CHAT_ACTIVE:
 		return
-	_send(command)
+	if _send(command) and str(command.get("type", "")) == "chat":
+		_set_chat_unread(0)
 
 ## Deterministic 16-hex digest over the panel's ascending transcript lines
 ## (`#seq player: text`), which encode exactly seq/player/text.
@@ -2525,6 +2600,24 @@ func _build_hud() -> void:
 	_hud_label.add_theme_color_override("font_color", Color(0.86, 0.90, 0.95))
 	_hud_label.add_theme_font_size_override("font_size", 14)
 	panel.add_child(_hud_label)
+
+	# Unread chat badge. Separate from the status block above (and from the
+	# placement/interest lines) so the markers and HUD text stay comparable.
+	# Hidden at zero; this client is debug-only, so the label is English.
+	_chat_unread_label = Label.new()
+	_chat_unread_label.name = "WorldClientChatUnread"
+	_chat_unread_label.visible = false
+	_chat_unread_label.anchor_left = 1.0
+	_chat_unread_label.anchor_right = 1.0
+	_chat_unread_label.offset_left = -212.0
+	_chat_unread_label.offset_right = -12.0
+	_chat_unread_label.offset_top = 12.0
+	_chat_unread_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_chat_unread_label.add_theme_color_override("font_color", Color(1.0, 0.86, 0.45))
+	_chat_unread_label.add_theme_font_size_override("font_size", 16)
+	_hud_layer.add_child(_chat_unread_label)
+
+	_refresh_chat_unread_hud()
 	_refresh_hud()
 
 func _refresh_hud() -> void:
