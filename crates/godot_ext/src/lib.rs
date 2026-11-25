@@ -2902,6 +2902,28 @@ impl TownsmithCore {
         settlement_mutation_payload(store, outcome)
     }
 
+    /// Admin override: clear a settlement's owner and members without an actor.
+    ///
+    /// This mirrors the core/server Admin release and is local/developer-only:
+    /// the bridge has no capability gate, so the standalone settlement editor
+    /// is its only caller. The revision guard still applies.
+    #[func]
+    fn settlement_release(&self, id: i64, expected_revision: i64) -> VarDictionary {
+        let (id, expected_revision) = match settlement_mutation_args(id, expected_revision) {
+            Ok(args) => args,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        let mut guard = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(store) = guard.as_mut() else {
+            return settlement_error_result(&SettlementError::Unknown { id });
+        };
+        let outcome = settlement_release_in_store(store, id, expected_revision);
+        settlement_mutation_payload(store, outcome)
+    }
+
     /// Set the settlement tax rate as its current owner.
     #[func]
     fn settlement_set_tax(&self, id: i64, rate: i64) -> VarDictionary {
@@ -8859,6 +8881,21 @@ fn settlement_transfer_in_store(
         .map_err(|error| (error.code(), error.to_string()))
 }
 
+/// Clear ownership and every member without an owner actor (Admin override).
+///
+/// This is the bridge mirror of [`SettlementStore::force_release`]. The bridge
+/// has no capability gate, so the developer editor is the only caller; the
+/// revision guard still rejects a stale request.
+fn settlement_release_in_store(
+    store: &mut SettlementStore,
+    id: u64,
+    expected_revision: u32,
+) -> Result<Settlement, (&'static str, String)> {
+    store
+        .force_release(id, expected_revision)
+        .map_err(|error| (error.code(), error.to_string()))
+}
+
 fn settlement_set_tax_in_store(
     store: &mut SettlementStore,
     id: u64,
@@ -14287,6 +14324,95 @@ mod tests {
             settlement_rename_args(1, i64::from(u32::MAX)).expect("valid"),
             (1, u32::MAX)
         );
+    }
+
+    #[test]
+    fn settlement_release_args_reject_negative_and_overflowing_values() {
+        assert_eq!(
+            settlement_mutation_args(-1, 0).expect_err("negative id").0,
+            "invalid_id"
+        );
+        assert_eq!(
+            settlement_mutation_args(1, -1)
+                .expect_err("negative revision")
+                .0,
+            "invalid_revision"
+        );
+        assert_eq!(
+            settlement_mutation_args(1, i64::from(u32::MAX) + 1)
+                .expect_err("overflowing revision")
+                .0,
+            "invalid_revision"
+        );
+        assert_eq!(
+            settlement_mutation_args(1, i64::from(u32::MAX)).expect("valid"),
+            (1, u32::MAX)
+        );
+    }
+
+    #[test]
+    fn settlement_release_in_store_clears_owner_and_members() {
+        use core_city::settlement::SettlementRole;
+        let mut store = SettlementStore::new(2026);
+        let owner = core_city::player::PlayerId::new(1).expect("player id");
+        let member = core_city::player::PlayerId::new(2).expect("player id");
+        let found = store
+            .found_for_player(&bridge_settlement_request("Old Harbour"), owner)
+            .expect("found");
+        store
+            .invite(
+                owner,
+                found.id,
+                member,
+                SettlementRole::Manager,
+                found.membership_revision,
+            )
+            .expect("invite");
+        let before = store.checksum();
+        let revision = store.get(found.id).expect("settlement").membership_revision;
+        let released =
+            settlement_release_in_store(&mut store, found.id, revision).expect("release");
+        assert!(!released.is_owned());
+        assert_eq!(released.owner_id, None);
+        assert!(released.members.is_empty());
+        assert_eq!(released.membership_revision, revision + 1);
+        assert_ne!(store.checksum(), before);
+    }
+
+    #[test]
+    fn settlement_release_in_store_rejects_unknown_stale_and_unowned() {
+        use core_city::settlement::SettlementRole;
+        let mut store = SettlementStore::new(2026);
+        let owner = core_city::player::PlayerId::new(1).expect("player id");
+        let member = core_city::player::PlayerId::new(2).expect("player id");
+        let found = store
+            .found_for_player(&bridge_settlement_request("Old Harbour"), owner)
+            .expect("found");
+        store
+            .invite(
+                owner,
+                found.id,
+                member,
+                SettlementRole::Manager,
+                found.membership_revision,
+            )
+            .expect("invite");
+        let before = store.checksum();
+        let revision = store.get(found.id).expect("settlement").membership_revision;
+
+        let (code, _) = settlement_release_in_store(&mut store, 99, revision).expect_err("unknown");
+        assert_eq!(code, "settlement.unknown");
+        let (code, _) =
+            settlement_release_in_store(&mut store, found.id, revision - 1).expect_err("stale");
+        assert_eq!(code, "settlement.revision_conflict");
+        assert_eq!(store.checksum(), before);
+
+        settlement_release_in_store(&mut store, found.id, revision).expect("release");
+        let after_release = store.checksum();
+        let (code, _) = settlement_release_in_store(&mut store, found.id, revision + 1)
+            .expect_err("already released");
+        assert_eq!(code, "settlement.unowned");
+        assert_eq!(store.checksum(), after_release);
     }
 
     #[test]

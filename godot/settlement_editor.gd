@@ -6,9 +6,9 @@ extends Control
 ## it owns one `TownsmithCore` instance and only calls the local data-only
 ## bridge mutations (`settlement_found`, `settlement_claim`, `settlement_rename`,
 ## `settlement_transfer`, `settlement_invite`, `settlement_set_role`,
-## `settlement_remove_member`, `settlement_set_tax`) plus `settlements()` reads.
-## No server, protocol, simulation, treasury, or save/load code is involved. See
-## `docs/48 - Settlement Boundaries.md` §2.2.
+## `settlement_remove_member`, `settlement_set_tax`, `settlement_release`) plus
+## `settlements()` reads. No server, protocol, simulation, treasury, or save/load
+## code is involved. See `docs/48 - Settlement Boundaries.md` §2.2.
 ##
 ## Run:
 ##   godot --path godot res://settlement_editor.tscn
@@ -18,9 +18,10 @@ extends Control
 ## unowned, one claimed by player 1), invites a manager and a builder, renames,
 ## sets tax, transfers ownership twice, changes a role, removes a member, and
 ## rejects an already-owned claim, an unowned rename, a stale revision, the
-## owner role, removing the owner, and player id 0. Every mutation re-reads the
-## record's `membership_revision` first and re-reads `settlements()` after
-## success. Final
+## owner role, removing the owner, and player id 0. It then releases a separate
+## owned record through the two-press confirmation and rejects a second
+## release. Every mutation re-reads the record's `membership_revision` first and
+## re-reads `settlements()` after success. Final
 ## marker:
 ##   SETTLEMENT_EDITOR status=ok actions=<n> checksum=<16 hex>
 ##
@@ -110,6 +111,8 @@ var _tax_spin: SpinBox
 var _players: Array = []
 var _target_player_id := 1
 var _target_player_name := ""
+# Set by the first release press; a second press on the same record confirms.
+var _pending_release_id := 0
 
 
 func _ready() -> void:
@@ -133,6 +136,7 @@ func _reset_session(reset_seed: bool) -> void:
 	_selected_id = 0
 	_target_player_id = 1
 	_target_player_name = ""
+	_pending_release_id = 0
 	if reset_seed:
 		_seed = DEFAULT_SEED
 	if smoke_mode:
@@ -353,6 +357,47 @@ func _transfer(id: int, player_id: int) -> Dictionary:
 	], result)
 
 
+## Admin override: clear owner and every member without an actor. The first
+## press arms the selected record; the caller must press again to confirm, so a
+## single key press can never release a settlement.
+func _release(id: int, confirmed: bool) -> Dictionary:
+	if _core == null:
+		return _no_core("release")
+	if not confirmed:
+		var record := _fresh_record(id)
+		if record.is_empty():
+			_pending_release_id = 0
+			return _missing("release", id)
+		if not bool(record.get("owned", false)):
+			_pending_release_id = 0
+			_set_message("Release #%s: settlement is already unowned." % [
+				_i18n.format_int(id)
+			], true)
+			return {
+				"ok": false,
+				"error_code": "settlement.unowned",
+				"error": "settlement is unowned",
+			}
+		_pending_release_id = id
+		_set_message(
+			"Release #%s clears owner and members. Press Shift+X again to confirm."
+				% _i18n.format_int(id),
+			false
+		)
+		return {
+			"ok": false,
+			"error_code": "confirm_required",
+			"error": "release confirmation required",
+		}
+	var revision := _revision_of(id)
+	if revision < 0:
+		_pending_release_id = 0
+		return _missing("release", id)
+	_pending_release_id = 0
+	var result: Dictionary = _core.settlement_release(id, revision)
+	return _finish_mutation("release #%s" % _i18n.format_int(id), result)
+
+
 func _invite(id: int, player_id: int, role: String) -> Dictionary:
 	if _core == null:
 		return _no_core(_i18n.t("base.ui.settlement_editor.action.invite"))
@@ -399,6 +444,7 @@ func _set_tax(id: int, rate: int) -> Dictionary:
 
 
 func _finish_mutation(context: String, result: Dictionary) -> Dictionary:
+	_pending_release_id = 0
 	_apply_bridge_result(context, result)
 	if bool(result.get("ok", false)):
 		_refresh()
@@ -565,6 +611,7 @@ func _set_message(text: String, is_error: bool) -> void:
 
 
 func _select(id: int) -> void:
+	_pending_release_id = 0
 	if _find_record(id).is_empty():
 		_selected_id = 0
 		_form_title.text = _i18n.t("base.ui.settlement_editor.no_selection")
@@ -654,6 +701,13 @@ func _on_remove_member_pressed() -> void:
 		_remove_member(id, int(_player_spin.value))
 
 
+## Shift+X: first press arms, a second press on the same record confirms.
+func _on_release_pressed() -> void:
+	var id := _selected_or_message("release")
+	if id != 0:
+		_release(id, _pending_release_id == id)
+
+
 func _on_set_tax_pressed() -> void:
 	var id := _selected_or_message(_i18n.t("base.ui.settlement_editor.action.set_tax"))
 	if id != 0:
@@ -716,7 +770,10 @@ func _unhandled_key_input(event: InputEvent) -> void:
 			else:
 				_on_cycle_target_pressed()
 		KEY_X:
-			_on_remove_member_pressed()
+			if key.shift_pressed:
+				_on_release_pressed()
+			else:
+				_on_remove_member_pressed()
 		KEY_M:
 			_on_set_tax_pressed()
 		KEY_N:
@@ -980,16 +1037,61 @@ func _run_smoke() -> void:
 		]
 	)
 
+	# --- Release probe on a throwaway owned settlement. The first press only
+	# arms the record; the second clears owner + members and bumps revision. ---
+	var release_found := _found("Release Keep", 0, -1024, 256)
+	_expect_ok("release_probe_found", release_found)
+	var release_id := int(release_found.get("settlement", {}).get("id", -1))
+	_expect_ok("release_probe_claim", _claim(release_id, 1))
+	_expect_ok("release_probe_invite", _invite(release_id, 2, "manager"))
+	var release_revision := _revision_of(release_id)
+	var release_members := _members_text(_fresh_record(release_id))
+	_expect_error("release_arm", _release(release_id, false), "confirm_required")
+	_check(
+		"release_arm_unchanged",
+		_revision_of(release_id) == release_revision
+			and _members_text(_fresh_record(release_id)) == release_members
+	)
+	var released := _release(release_id, true)
+	_check("release_confirm", bool(released.get("ok", false)))
+	var released_record := _fresh_record(release_id)
+	_check(
+		"release_clears_owner_and_members",
+		not bool(released_record.get("owned", false))
+			and released_record.get("owner_id", null) == null
+			and _members_text(released_record) == _members_text({})
+			and int(released_record.get("membership_revision", 0)) == release_revision + 1
+	)
+	_expect_error("release_repeat", _release(release_id, true), "settlement.unowned")
+	print(
+		"SETTLEMENT_EDITOR_RELEASE phase=arm code=confirm_required revision=%s members=%s" % [
+			_i18n.format_int(release_revision), release_members
+		]
+	)
+	print(
+		"SETTLEMENT_EDITOR_RELEASE phase=confirm owned=%s owner=%s members=%s revision=%s checksum=%s" % [
+			"1" if bool(released_record.get("owned", false)) else "0",
+			_owner_marker(released_record),
+			_members_text(released_record),
+			_i18n.format_int(int(released_record.get("membership_revision", 0))),
+			_checksum,
+		]
+	)
+	print(
+		"SETTLEMENT_EDITOR_RELEASE phase=repeat code=settlement.unowned revision=%s" % (
+			_i18n.format_int(int(_fresh_record(release_id).get("membership_revision", 0)))
+		)
+	)
+
 	# --- Name-based invite path on a throwaway settlement. The main fixture
 	# markers and checksum above stay pinned; this probe proves that `P` set
 	# the pending id and `_on_invite_pressed` used that id. ---
 	var main_checksum := _checksum
-	_expect_ok(
-		"registry_probe_found",
-		_found("Registry Probe", 0, 1024, 256)
-	)
-	_expect_ok("registry_probe_claim", _claim(3, 1))
-	_select(3)
+	var probe_found := _found("Registry Probe", 0, 1024, 256)
+	_expect_ok("registry_probe_found", probe_found)
+	var probe_id := int(probe_found.get("settlement", {}).get("id", -1))
+	_expect_ok("registry_probe_claim", _claim(probe_id, 1))
+	_select(probe_id)
 	_target_player_id = 1
 	_target_player_name = "Mayor"
 	_refresh_target_label()
@@ -999,10 +1101,10 @@ func _run_smoke() -> void:
 		invite_target == 2 and _target_player_name == "Builder"
 	)
 	_on_invite_pressed()
-	var probe_record := _fresh_record(3)
-	print("SETTLEMENT_EDITOR_INVITE settlement=3 target=2 name=Builder members=%s" % (
-		_members_text(probe_record)
-	))
+	var probe_record := _fresh_record(probe_id)
+	print("SETTLEMENT_EDITOR_INVITE settlement=%s target=2 name=Builder members=%s" % [
+		_i18n.format_int(probe_id), _members_text(probe_record)
+	])
 	_check(
 		"invite_uses_selected_name_id",
 		_members_text(probe_record) == "1:owner, 2:manager"
@@ -1074,7 +1176,8 @@ func _build_ui() -> void:
 
 	var help := Label.new()
 	help.text = _i18n.t("base.ui.settlement_editor.help") + "\n" + \
-		"Players: N register · P cycle target · Shift+P set role · Shift+N new session"
+		"Players: N register · P cycle target · Shift+P set role · " + \
+		"Shift+X release (press twice) · Shift+N new session"
 	help.add_theme_color_override("font_color", MUTED_COLOR)
 	help.add_theme_font_size_override("font_size", 13)
 	help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -1232,6 +1335,11 @@ func _build_form_panel() -> Control:
 	actions_two.add_child(_button("%s (M)" % _i18n.t(
 		"base.ui.settlement_editor.action.set_tax"
 	), _on_set_tax_pressed))
+
+	var actions_three := HBoxContainer.new()
+	actions_three.add_theme_constant_override("separation", 6)
+	panel.add_child(actions_three)
+	actions_three.add_child(_button("Release (Shift+X)", _on_release_pressed))
 
 	var registry_actions := HBoxContainer.new()
 	registry_actions.add_theme_constant_override("separation", 6)
