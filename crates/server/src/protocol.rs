@@ -872,6 +872,12 @@ pub enum ServerMessage {
         locks_count: usize,
         /// Stable checksum of the whole advisory lock table.
         checksum: String,
+        /// True when an Admin released a lock held by another player.
+        #[serde(default)]
+        forced: bool,
+        /// Player id of the overridden holder when `forced` is true.
+        #[serde(default)]
+        holder_id: Option<u64>,
     },
     /// Read-only advisory blueprint lock list (v0), ascending hash.
     BlueprintLockList {
