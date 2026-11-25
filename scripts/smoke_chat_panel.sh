@@ -104,6 +104,14 @@ if [[ ! "$LINE" =~ $CONTRACT ]]; then
 	echo "Chat panel smoke contract mismatch: $LINE" >&2
 	exit 1
 fi
+if ! grep -q '^CHAT_PANEL_STAGE name=locale ' <<<"$FIRST"; then
+	echo "Chat panel smoke failed: missing locale stage" >&2
+	exit 1
+fi
+if ! grep -q '^CHAT_PANEL_LOCALE de=ok fr=en en=ok ' <<<"$FIRST"; then
+	echo "Chat panel smoke failed: missing EN/DE locale evidence" >&2
+	exit 1
+fi
 
 printf '%s\n' "$FIRST"
 echo "Chat panel smoke passed: usage probe + two identical synthetic runs"
