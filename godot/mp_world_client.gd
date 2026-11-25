@@ -282,8 +282,9 @@ var _ui_pending_hash := ""
 var _ui_pending_center := Vector2.ZERO
 var _ui_pending_rotation := 0
 # Advisory blueprint locks (`blueprint_locks` once after welcome). The map is
-# hash -> {player_id, player, tick}; `_ui_own_locks` marks hashes this session
-# locked, so the HUD can say "LOCKED you" without trusting a display name.
+# hash -> {player_id, player, tick, expires_tick}; `_ui_own_locks` marks hashes
+# this session locked, so the HUD can say "LOCKED you" without trusting a
+# display name.
 var _ui_locks := {}
 var _ui_own_locks := {}
 var _ui_lock_checksum := ""
@@ -1284,7 +1285,17 @@ func _ui_parse_lock(raw: Variant) -> Dictionary:
 	var tick := int(entry.get("tick", -1))
 	if tick < 0:
 		return {}
-	return {"hash": hash, "player_id": player_id, "player": player, "tick": tick}
+	# Older servers omit the lease; 0 means "unknown", never "expired now".
+	var expires_tick := int(entry.get("expires_tick", 0))
+	if expires_tick < 0:
+		expires_tick = 0
+	return {
+		"hash": hash,
+		"player_id": player_id,
+		"player": player,
+		"tick": tick,
+		"expires_tick": expires_tick,
+	}
 
 ## Read-only lock table response. Allowed in any place-UI phase because the
 ## request is sent immediately after `welcome`, before the road plan.
@@ -1357,7 +1368,7 @@ func _on_blueprint_lock_result(message: Dictionary) -> void:
 	_ui_checksum_stale = true
 	print((
 		"MP_PLACE_UI_LOCK status=ok selected=%d hash=%s player_id=%d"
-		+ " count=%d checksum=%s tick=%d lock=%s"
+		+ " count=%d checksum=%s tick=%d lock=%s lease=%s"
 	) % [
 			_ui_selected,
 			hash,
@@ -1366,6 +1377,7 @@ func _on_blueprint_lock_result(message: Dictionary) -> void:
 			checksum,
 			tick,
 			_ui_lock_marker_state(hash),
+			_ui_lock_lease_marker(hash),
 		])
 	_set_status("Blueprint lock held by this session.")
 	_refresh_hud()
@@ -1415,15 +1427,42 @@ func _on_blueprint_unlock_result(message: Dictionary) -> void:
 	_arm_deadline(_timeout_ms)
 	_ui_next_action()
 
+## Remaining lease ticks for a lock view, or -1 when the payload carries no
+## usable `expires_tick` (0 means an older server omitted the field) or no world
+## tick has been observed yet. Callers render `expires=<tick>` instead.
+func _ui_lock_remaining(lock: Dictionary) -> int:
+	var expires_tick := int(lock.get("expires_tick", 0))
+	if expires_tick <= 0 or _last_tick < 0:
+		return -1
+	return maxi(0, expires_tick - _last_tick)
+
 ## HUD suffix for the selected hash: empty when unlocked, `LOCKED you` for a
-## lock this session took, otherwise `LOCKED #<player_id>`.
+## lock this session took, otherwise `LOCKED #<player_id>`. The server lease is
+## appended as remaining ticks, or as the raw `expires=<tick>` when the
+## remaining count cannot be computed; a foreign holder never becomes "you".
 func _ui_lock_suffix(hash: String) -> String:
 	var lock: Dictionary = _ui_locks.get(hash, {})
 	if lock.is_empty():
 		return ""
-	if _ui_own_locks.has(hash):
-		return "LOCKED you"
-	return "LOCKED #%d" % int(lock.get("player_id", 0))
+	var suffix := (
+		"LOCKED you" if _ui_own_locks.has(hash)
+		else "LOCKED #%d" % int(lock.get("player_id", 0))
+	)
+	var remaining := _ui_lock_remaining(lock)
+	if remaining < 0:
+		return "%s · expires=%d" % [suffix, int(lock.get("expires_tick", 0))]
+	return "%s · %dt" % [suffix, remaining]
+
+## Path-free lease form for markers: remaining ticks (`299t`, `0t` at/after
+## expiry) or the raw `expires=<tick>` when it cannot be computed.
+func _ui_lock_lease_marker(hash: String) -> String:
+	var lock: Dictionary = _ui_locks.get(hash, {})
+	if lock.is_empty():
+		return "unlocked"
+	var remaining := _ui_lock_remaining(lock)
+	if remaining < 0:
+		return "expires=%d" % int(lock.get("expires_tick", 0))
+	return "%dt" % remaining
 
 ## Path-free marker form of the same state (`LOCKED_you`, `LOCKED_<id>`,
 ## `unlocked`); the HUD keeps the spaced human text.

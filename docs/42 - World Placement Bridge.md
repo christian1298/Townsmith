@@ -233,7 +233,7 @@ MP_PLACEMENT_SMOKE status=ok runs=2 id=1 placement_checksum=b93c2d35e4408a21 wor
 
 Limits: a single configured hash, no ghost preview, prediction, rollback, package upload/fetch, mod auto-download, server path on the wire, per-settlement permissions, or full placement UI. The server library must be pre-seeded, and the command is authorized by the global Mayor role. The client HUD keeps the last authoritative snapshot balance because `place_blueprint_result` carries no balance.
 
-The opt-in catalog UI (`--place-ui`) also exposes the advisory package locks from [[05 - Multiplayer]]: `L` sends `blueprint_lock`/`blueprint_unlock` for the selected hash, a foreign holder renders `LOCKED #<player_id>`, and the ghost is never blocked locally because `place_blueprint` enforces the lock on the server. Scripted `lock`/`unlock` actions make the lock round-trip deterministic; see the placement-UI section in [[05 - Multiplayer]] for the markers.
+The opt-in catalog UI (`--place-ui`) also exposes the advisory package locks from [[05 - Multiplayer]]: `L` sends `blueprint_lock`/`blueprint_unlock` for the selected hash, a foreign holder renders `LOCKED #<player_id>`, and the ghost is never blocked locally because `place_blueprint` enforces the lock on the server. Scripted `lock`/`unlock` actions make the lock round-trip deterministic; see the placement-UI section in [[05 - Multiplayer]] for the markers. The badge also shows the server lease from `expires_tick` as remaining ticks (`LOCKED you · 299t`, `0t` at or after expiry, or `expires=<tick>` when the remaining count cannot be computed); it only displays the server value and grants no authority.
 
 ## 3. Save format
 
