@@ -564,7 +564,11 @@ func _unhandled_input(event: InputEvent) -> void:
 					if dashboard_visible:
 						_cycle_settlement(1)
 				KEY_T:
-					_cycle_tax_policy()
+					if event.shift_pressed:
+						if dashboard_visible and selected_settlement_id >= 0:
+							_cycle_selected_settlement_tax()
+					else:
+						_cycle_tax_policy()
 				KEY_L:
 					_borrow()
 				KEY_Y:
@@ -3530,6 +3534,51 @@ func _settlement_detail_section(settlement: Dictionary, district: Dictionary, po
 ## `owner_id`, `members`, and `membership_revision`. Role counts are sorted by
 ## role name so the rebuilt dashboard text stays identical, and numbers use
 ## `WorldI18n.format_int`. An unowned record has no member/owner count to show.
+## Next settlement tax step. The store accepts 0..=100; out-of-range input is
+## clamped into that window first, and 100 wraps to 0 so the control never
+## sends an invalid rate. Pure so the smoke can pin the whole cycle.
+func _next_settlement_tax(current: int) -> int:
+	var clamped := clampi(current, 0, 100)
+	if clamped >= 100:
+		return 0
+	return clamped + 5
+
+## Shift+T: step the selected settlement's tax by 5% through the bridge.
+## Only the Settlements section writes here. The key is gated by the dashboard
+## and a valid selection; an unowned record is rejected locally without a
+## bridge call or a store mutation. Success refreshes the list/detail in place
+## (same selected id) and reports the returned rate and store checksum.
+func _cycle_selected_settlement_tax() -> bool:
+	var settlement := _selected_settlement()
+	if settlement.is_empty():
+		return false
+	if not bool(settlement.get("owned", false)):
+		_set_modal("settlement.unowned", true)
+		_update_hud()
+		return false
+	var id := int(settlement.get("id", -1))
+	if id < 0:
+		return false
+	var next_rate := _next_settlement_tax(int(settlement.get("tax_rate", 0)))
+	var result: Dictionary = core.settlement_set_tax(id, next_rate)
+	if not bool(result.get("ok", false)):
+		_set_modal("%s: %s" % [
+			str(result.get("error_code", "unknown")),
+			str(result.get("error", "")),
+		], true)
+		_update_hud()
+		return false
+	var updated: Dictionary = result.get("settlement", {})
+	var rate := int(updated.get("tax_rate", next_rate))
+	_set_modal("Settlement tax: %d%% · checksum %s" % [
+		rate,
+		str(result.get("checksum", "")),
+	], false)
+	dashboard_refresh_accum = 0.0
+	_update_dashboard()
+	_update_hud()
+	return true
+
 func _settlement_membership_line(settlement: Dictionary) -> String:
 	var revision: String = i18n.format_int(int(settlement.get("membership_revision", 0)))
 	if not bool(settlement.get("owned", false)):
@@ -4642,6 +4691,7 @@ func _run_scene_smoke() -> void:
 	var district_select_ok := false
 	var settlement_select_ok := false
 	var settlement_detail_ok := false
+	var dashboard_tax_ok := false
 	var heatmap_ui_ok := false
 	var heatmap_modes_ok := false
 	var advisor_i18n_ok := false
@@ -6035,6 +6085,60 @@ func _run_scene_smoke() -> void:
 				settlement_detail_ok = settlement_detail_ok and not dashboard_text.text.contains("!base.ui.")
 				settlement_select_ok = settlement_select_ok and _select_settlement(-1)
 				settlement_select_ok = settlement_select_ok and selected_settlement_id == -1
+				# Shift+T: the one settlement write control. The helper cycle is
+				# pure; unowned records reject locally; a claimed record persists
+				# through settlement_set_tax and refreshes the same selection.
+				dashboard_tax_ok = _next_settlement_tax(0) == 5
+				dashboard_tax_ok = dashboard_tax_ok and _next_settlement_tax(95) == 100
+				dashboard_tax_ok = dashboard_tax_ok and _next_settlement_tax(100) == 0
+				dashboard_tax_ok = dashboard_tax_ok and _next_settlement_tax(-3) == 5
+				dashboard_tax_ok = dashboard_tax_ok and _next_settlement_tax(250) == 0
+				_select_settlement(first_settlement_id)
+				var tax_before := int(_selected_settlement().get("tax_rate", -1))
+				var tax_checksum_before := str(core.settlement_checksum())
+				_set_modal("", false)
+				_smoke_press_key(KEY_T, true)
+				dashboard_tax_ok = dashboard_tax_ok and modal_label.text == "settlement.unowned"
+				dashboard_tax_ok = dashboard_tax_ok and int(_selected_settlement().get("tax_rate", -2)) == tax_before
+				dashboard_tax_ok = dashboard_tax_ok and str(core.settlement_checksum()) == tax_checksum_before
+				dashboard_tax_ok = dashboard_tax_ok and selected_settlement_id == first_settlement_id
+				# The shared smoke fixture founds unowned records. Claiming one
+				# makes the same key exercise the real bridge write and the
+				# detail refresh without touching any other scene or save.
+				var tax_claim: Dictionary = core.settlement_claim(
+					first_settlement_id,
+					1,
+					int(_selected_settlement().get("membership_revision", 0))
+				)
+				dashboard_tax_ok = dashboard_tax_ok and bool(tax_claim.get("ok", false))
+				dashboard_tax_ok = dashboard_tax_ok and _select_settlement(first_settlement_id)
+				_set_modal("", false)
+				_smoke_press_key(KEY_T, true)
+				var owned_tax := int(_selected_settlement().get("tax_rate", -1))
+				dashboard_tax_ok = dashboard_tax_ok and owned_tax == _next_settlement_tax(tax_before)
+				dashboard_tax_ok = dashboard_tax_ok and selected_settlement_id == first_settlement_id
+				dashboard_tax_ok = dashboard_tax_ok and modal_label.text.contains("Settlement tax: %d%%" % owned_tax)
+				dashboard_tax_ok = dashboard_tax_ok and modal_label.text.contains(str(core.settlement_checksum()))
+				dashboard_tax_ok = dashboard_tax_ok and dashboard_text.text.contains("tax %d%%" % owned_tax)
+				_set_modal("", false)
+				_smoke_press_key(KEY_T, true)
+				var owned_tax_next := int(_selected_settlement().get("tax_rate", -1))
+				dashboard_tax_ok = dashboard_tax_ok and owned_tax_next == _next_settlement_tax(owned_tax)
+				dashboard_tax_ok = dashboard_tax_ok and modal_label.text.contains("Settlement tax: %d%%" % owned_tax_next)
+				dashboard_tax_ok = dashboard_tax_ok and str(core.settlement_checksum()) == str(core.settlements().get("checksum", ""))
+				# No selection: the key is gated in the input handler, so neither
+				# the modal nor the store changes.
+				_select_settlement(-1)
+				_set_modal("", false)
+				var tax_no_selection_checksum := str(core.settlement_checksum())
+				_smoke_press_key(KEY_T, true)
+				dashboard_tax_ok = dashboard_tax_ok and modal_label.text == ""
+				dashboard_tax_ok = dashboard_tax_ok and str(core.settlement_checksum()) == tax_no_selection_checksum
+				print("DASHBOARD_TAX cycle=ok 0->5 95->100 100->0 unowned=ok owned=%d->%d checksum=%s" % [
+					owned_tax,
+					owned_tax_next,
+					str(core.settlement_checksum()),
+				])
 				_toggle_dashboard()
 				dashboard_ok = dashboard_ok and not dashboard_panel.visible
 				var heatmap_checksum := ""
@@ -6657,10 +6761,13 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and not settlement_detail_ok:
 		status = "settlement_detail_failed"
 
+	if status == "ok" and not dashboard_tax_ok:
+		status = "dashboard_tax_failed"
+
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s policy_edit=%s district_select=%s settlement_select=%s settlement_detail=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s policy_edit=%s district_select=%s settlement_select=%s settlement_detail=%s dashboard_tax=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -6706,6 +6813,7 @@ func _run_scene_smoke() -> void:
 		"ok" if district_select_ok else "failed",
 		"ok" if settlement_select_ok else "failed",
 		"ok" if settlement_detail_ok else "failed",
+		"ok" if dashboard_tax_ok else "failed",
 		"ok" if heatmap_ui_ok else "failed",
 		"ok" if heatmap_modes_ok else "failed",
 		"ok" if hud_i18n_ok else "failed",
