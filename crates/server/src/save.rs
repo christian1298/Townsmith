@@ -563,6 +563,9 @@ mod tests {
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    /// Optional `ServerSave` stores in the order the schema freeze covers them.
+    const OPTIONAL_STORES: [&str; 4] = ["placements", "construction", "players", "settlements"];
+
     struct TempDir(PathBuf);
 
     impl TempDir {
@@ -707,18 +710,24 @@ mod tests {
     }
 
     #[test]
-    fn old_and_unsupported_versions_are_rejected() {
+    fn format_version_zero_and_two_are_rejected() {
         let mut value: serde_json::Value = serde_json::from_str(
             &ServerWorld::new(LOOPBACK_SEED)
                 .to_save_json_pretty()
                 .unwrap(),
         )
         .unwrap();
-        for version in [0, SERVER_SAVE_FORMAT_VERSION + 1] {
+        // Version 2 is the next outer version (D-034); a v1 reader must not
+        // guess at it.
+        for version in [0u16, 2u16] {
             value["format_version"] = version.into();
             let error =
                 ServerWorld::from_save_json(&save_json(&value)).expect_err("unsupported version");
-            assert_eq!(error.code(), codes::UNSUPPORTED_VERSION);
+            assert_eq!(
+                error.code(),
+                codes::UNSUPPORTED_VERSION,
+                "version {version}"
+            );
         }
     }
 
@@ -952,7 +961,7 @@ mod tests {
         assert_eq!(loaded.checksum(), world.checksum());
     }
 
-    fn world_with_placement_and_site() -> ServerWorld {
+    fn placement_and_site_stores() -> (PlacementStore, ConstructionStore) {
         let hash = format!("blake3:{}", "ab".repeat(32));
         let request = PlacementRequest {
             blueprint_id: "townsmith:save_house".to_string(),
@@ -977,8 +986,37 @@ mod tests {
         construction
             .add_priced_site(1, 10, 100.0)
             .expect("construction site");
+        (placements, construction)
+    }
 
+    fn world_with_placement_and_site() -> ServerWorld {
+        let (placements, construction) = placement_and_site_stores();
         let mut world = ServerWorld::new(LOOPBACK_SEED);
+        world.placements = Some(placements);
+        world.construction = Some(construction);
+        world
+    }
+
+    /// Every optional store populated: registered player, owned settlement,
+    /// placement, and construction site.
+    fn world_with_all_optional_stores() -> ServerWorld {
+        let mut world = played_world();
+        let player = world.player_id().expect("hello assigns a player id");
+        let mut settlements = SettlementStore::new(LOOPBACK_SEED);
+        settlements
+            .found_for_player(
+                &core_city::settlement::SettlementRequest {
+                    name: "Combined".to_string(),
+                    owner: "mayor".to_string(),
+                    center: [4, -4],
+                    radius_m: 64,
+                },
+                player,
+            )
+            .expect("found settlement");
+        world.settlements = Some(settlements);
+
+        let (placements, construction) = placement_and_site_stores();
         world.placements = Some(placements);
         world.construction = Some(construction);
         world
@@ -1085,5 +1123,165 @@ mod tests {
         let error =
             ServerWorld::from_save_json(&save_json(&value)).expect_err("construction store");
         assert_eq!(error.code(), codes::INVALID_CONSTRUCTION);
+    }
+
+    #[test]
+    fn legacy_v1_json_without_optional_stores_loads_and_resaves_identically() {
+        let source = played_world();
+        let mut legacy = source.to_save();
+        legacy.players = None;
+        legacy.settlements = None;
+        legacy.placements = None;
+        legacy.construction = None;
+        let legacy_json = serde_json::to_string_pretty(&legacy).expect("legacy json");
+        let value: serde_json::Value = serde_json::from_str(&legacy_json).expect("value");
+        for field in OPTIONAL_STORES {
+            assert!(value.get(field).is_none(), "{field} must be absent");
+        }
+
+        let loaded = ServerWorld::from_save_json(&legacy_json).expect("legacy load");
+        assert!(loaded.players.is_empty());
+        assert!(loaded.settlements.is_none());
+        assert!(loaded.placements.is_none());
+        assert!(loaded.construction.is_none());
+        assert_eq!(loaded.checksum(), source.checksum());
+        assert_eq!(loaded.to_save_json_pretty().expect("re-save"), legacy_json);
+    }
+
+    #[test]
+    fn optional_stores_are_omitted_when_absent_and_present_when_populated() {
+        let empty_json = ServerWorld::new(LOOPBACK_SEED)
+            .to_save_json_pretty()
+            .expect("empty json");
+        let empty: serde_json::Value = serde_json::from_str(&empty_json).expect("value");
+        for field in OPTIONAL_STORES {
+            assert!(empty.get(field).is_none(), "{field} must be omitted");
+        }
+
+        // An explicitly empty player registry is still omitted: the rule is
+        // "no players", not "no registry object".
+        let mut no_players = ServerWorld::new(LOOPBACK_SEED);
+        no_players.players = PlayerRegistry::new(LOOPBACK_SEED);
+        let no_players_json = no_players.to_save_json_pretty().expect("json");
+        let no_players_value: serde_json::Value =
+            serde_json::from_str(&no_players_json).expect("value");
+        assert!(no_players_value.get("players").is_none());
+
+        let populated_json = world_with_all_optional_stores()
+            .to_save_json_pretty()
+            .expect("populated json");
+        let populated: serde_json::Value = serde_json::from_str(&populated_json).expect("value");
+        for field in OPTIONAL_STORES {
+            assert!(populated.get(field).is_some(), "{field} must be present");
+            assert!(!populated[field].is_null(), "{field} must not be null");
+        }
+    }
+
+    #[test]
+    fn combined_save_round_trips_every_optional_store() {
+        let world = world_with_all_optional_stores();
+        let json = world.to_save_json_pretty().expect("json");
+        let loaded = ServerWorld::from_save_json(&json).expect("load");
+
+        assert_eq!(loaded.players, world.players);
+        assert_eq!(loaded.settlements, world.settlements);
+        assert_eq!(loaded.placements, world.placements);
+        assert_eq!(loaded.construction, world.construction);
+        assert_eq!(loaded.to_save(), world.to_save());
+        assert_eq!(loaded.checksum(), world.checksum());
+    }
+
+    #[test]
+    fn foreign_seed_in_each_optional_store_is_rejected() {
+        let foreign = LOOPBACK_SEED + 1;
+        // Construction carries no seed; it is validated structurally instead.
+        let stores = [
+            (
+                "placements",
+                serde_json::to_value(PlacementStore::new(foreign)).expect("placements"),
+            ),
+            (
+                "players",
+                serde_json::to_value(PlayerRegistry::new(foreign)).expect("players"),
+            ),
+            (
+                "settlements",
+                serde_json::to_value(SettlementStore::new(foreign)).expect("settlements"),
+            ),
+        ];
+        let base = ServerWorld::new(LOOPBACK_SEED)
+            .to_save_json_pretty()
+            .expect("json");
+        for (field, store) in stores {
+            let mut value: serde_json::Value = serde_json::from_str(&base).expect("value");
+            value[field] = store;
+            let error = ServerWorld::from_save_json(&save_json(&value)).expect_err(field);
+            assert_eq!(error.code(), codes::SEED_MISMATCH, "{field}");
+        }
+    }
+
+    #[test]
+    fn malformed_players_and_settlements_are_rejected() {
+        let base = ServerWorld::new(LOOPBACK_SEED)
+            .to_save_json_pretty()
+            .expect("json");
+        let stores = [
+            (
+                "players",
+                codes::INVALID_PLAYERS,
+                serde_json::to_value(PlayerRegistry::new(LOOPBACK_SEED)).expect("players"),
+            ),
+            (
+                "settlements",
+                codes::INVALID_SETTLEMENTS,
+                serde_json::to_value(SettlementStore::new(LOOPBACK_SEED)).expect("settlements"),
+            ),
+        ];
+        for (field, code, mut store) in stores {
+            // An empty registry/store with next_id 0 breaks the id invariant.
+            store["next_id"] = 0.into();
+            let mut value: serde_json::Value = serde_json::from_str(&base).expect("value");
+            value[field] = store;
+            let error = ServerWorld::from_save_json(&save_json(&value)).expect_err(field);
+            assert_eq!(error.code(), code, "{field}");
+        }
+    }
+
+    #[test]
+    fn unknown_top_level_fields_are_ignored_and_not_resaved() {
+        let world = world_with_all_optional_stores();
+        let json = world.to_save_json_pretty().expect("json");
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("value");
+        value["future_layer"] = serde_json::json!({ "format_version": 99, "records": [1, 2, 3] });
+        value["future_scalar"] = 7.into();
+
+        let loaded = ServerWorld::from_save_json(&save_json(&value)).expect("forward compatible");
+        assert_eq!(loaded.to_save(), world.to_save());
+        assert_eq!(loaded.checksum(), world.checksum());
+
+        let resaved = loaded.to_save_json_pretty().expect("re-save");
+        assert_eq!(resaved, json, "unknown fields must not survive a re-save");
+        let resaved_value: serde_json::Value = serde_json::from_str(&resaved).expect("value");
+        assert!(resaved_value.get("future_layer").is_none());
+        assert!(resaved_value.get("future_scalar").is_none());
+    }
+
+    #[test]
+    fn empty_world_has_no_optional_keys_and_a_stable_checksum() {
+        let json = ServerWorld::new(LOOPBACK_SEED)
+            .to_save_json_pretty()
+            .expect("json");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("value");
+        for field in OPTIONAL_STORES {
+            assert!(value.get(field).is_none(), "{field} must be omitted");
+        }
+
+        let first = ServerWorld::from_save_json(&json).expect("first load");
+        let resaved = first.to_save_json_pretty().expect("re-save");
+        let second = ServerWorld::from_save_json(&resaved).expect("second load");
+
+        assert_eq!(resaved, json);
+        assert_eq!(first.checksum(), second.checksum());
+        assert_eq!(first.to_save(), second.to_save());
     }
 }

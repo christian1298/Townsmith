@@ -2,7 +2,7 @@
 title: Technical Architecture
 project: Townsmith
 status: proposed
-updated: 2026-11-24
+updated: 2026-11-25
 tags:
   - townsmith
   - architecture
@@ -341,6 +341,22 @@ D-032 is accepted and implemented (#306, master `61449ce`). Persistence follows 
 - **Idempotency and limits.** Exact placement identity (hash + centre + rotation) is the idempotency key; a repeat returns the existing record without a second charge. The existing per-session token bucket and audit ring apply. Per-player quotas, rollback, history, and GC are not v1.
 - **Policy and terrain.** The district policy registry is server-configured JSON loaded at startup and is not persisted in `ServerSave`; a missing or foreign-seed registry is neutral. Terrain validation uses the deterministic placeholder ground (the road constant) until the server streams terrain; the local preview keeps full terrain sampling.
 - **Bridge.** The local `world_place_blueprint` remains the single-player/dev path and is not removed. There is no full Godot placement UI, per-settlement permission, package upload/fetch, demolition, or refund in v1; the #309 debug 3D world client has an opt-in single-hash `place_blueprint` path (no ghost preview, prediction, or rollback). `interest_view.buildings` is placement-backed whenever a non-empty placement store exists and falls back to the synthetic fixture otherwise, with no completion-aware filtering (in-progress sites are included).
+
+### Server save schema freeze
+
+The v1 `ServerSave` envelope is frozen. Required top-level fields are `format_version`, `seed`, `tick`, `population`, `employed`, `buildings`, `paused`, `economy`, and `roads`. Four stores are optional and defaulted on load:
+
+| Field | Store | Omitted when |
+|---|---|---|
+| `placements` | `PlacementStore` (D-032) | no placement store |
+| `construction` | `ConstructionStore` (D-023/D-028) | no construction store |
+| `players` | `PlayerRegistry` (D-033) | no players, even if an empty registry object exists |
+| `settlements` | `SettlementStore` (D-019/D-033) | no settlement store |
+
+- **Omission rule.** Each optional field uses `#[serde(default, skip_serializing_if = "Option::is_none")]`: absent fields load as `None`, and a re-save omits them again. The document never writes `null` for these fields, so a legacy v1 save loads and re-saves byte-identically.
+- **Checked errors.** Load validates every present store. A foreign-seed `placements`, `players`, or `settlements` store returns `save.seed_mismatch` (construction carries no seed). Structural failures return `save.invalid_placements`, `save.invalid_construction`, `save.invalid_players`, or `save.invalid_settlements`. Any outer `format_version` other than 1 — including 0 and 2 — returns `save.unsupported_version`; the server save is always outer v1, and D-034's v2 envelope is bridge-only.
+- **Forward compatibility.** Unknown top-level fields are ignored on load and are not preserved by a re-save. Adding a server save field must keep the optional-field contract or bump `format_version`.
+- **Checksum stability.** An empty world has no optional keys, and load/save/load preserves the world checksum. The player registry is a session/identity sidecar and is excluded from the world checksum; settlements are included.
 
 ### Content identity (D-034, accepted; bridge v1)
 
