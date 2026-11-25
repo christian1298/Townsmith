@@ -2,7 +2,7 @@
 title: Decisions
 project: Townsmith
 status: active
-updated: 2026-11-24
+updated: 2026-11-25
 tags:
   - townsmith
   - adr
@@ -55,6 +55,7 @@ tags:
 | D-035 | Read-only inspection of content-bound worlds with a missing pack | Proposed (bridge v1 implemented) | 2026-11-24 | [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[78 - Code Audit Findings]] |
 | D-036 | Pack compatibility is explicit, never implicit | Proposed | 2026-11-24 | [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[42 - World Placement Bridge]] |
 | D-037 | Content-ID migrations are explicit and versioned | Proposed | 2026-11-24 | [[06 - Modding and Resource Packs]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[42 - World Placement Bridge]] |
+| D-038 | Authoritative placed-blueprint voxel edits are bounded, revisioned, and lock-scoped | Proposed | 2026-11-25 | [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[35 - Editor Undo Redo]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]] |
 
 ---
 
@@ -2093,6 +2094,63 @@ A failed plan leaves the save and library untouched. Re-running an applied plan 
 ### Review trigger
 
 The first renamed or removed content ID in a pack or in base content, the first save or `.tsbp` that needs repacking, or the first request to move content between namespaces. If a migration needs more than one step per release or a player-visible repair UI, revisit before accepting; do not add implicit remapping as a shortcut.
+
+---
+
+## D-038 — Authoritative placed-blueprint voxel edits are bounded, revisioned, and lock-scoped
+
+**Status:** Proposed · **Date:** 2026-11-25 · **Affects:** [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[35 - Editor Undo Redo]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]]
+
+### Context
+
+D-032 makes placement server-authoritative but deliberately excludes live-city voxel editing. D-026 schedules permissioned live editing after the workshop/creative editor. D-033 supplies stable player ids, membership, and the `build` bit. The server already has locks, rate limits, an audit ring, interest views, and content identity. There is no agreed command, conflict rule, replication shape, or save representation for editing a placed building.
+
+### Decision
+
+Adopt the design in [[79 - Voxel Edit Sync]]:
+
+1. **Scope:** v1 edits the volume of one placed building instance (`placement_id`). Terrain sculpting, destruction physics, upload/fetch, and package authoring are separate.
+2. **Command:** `edit_placement_voxels { placement_id, expected_revision, edits: [{pos:[u16;3], material:u16}] }`, at most 1,024 edits per batch.
+3. **Authority:** the server validates identity, global role, settlement `build`, placement/package existence, lock ownership, exact revision, bounds, material, duplicate positions, rate limit, and structure on a scratch copy. A rejection mutates nothing.
+4. **Conflict rule:** optimistic revision, no automatic merge and no CRDT. A stale revision rejects with `blueprint.revision_stale`; the client reloads and retries.
+5. **Locks:** live edits use a placement-scoped, lease-based lock separate from the package-level advisory lock. Locks are in-memory, released on disconnect, and Admin can force-release.
+6. **Replication:** the interest view carries bounded per-placement `edit_revision`/`checksum`; clients fetch deltas with `placement_edits { after_revision }` (at most 4,096 entries). Full volumes are never broadcast.
+7. **Persistence:** optional per-placement edit-log deltas in `ServerSave`, validated on load and omitted when empty so existing saves stay byte-identical. A missing pack follows D-034/D-035; strict load fails closed, read-only inspection retains opaque edits.
+8. **Undo:** local to the editing player, capped at 500 operations, and submitted as another guarded batch.
+9. **Non-goals:** destruction physics (D-008), arbitrary terrain, rollback/history, live permissions beyond D-033, and workshop upload/fetch.
+
+### Consequences
+
+**Positive**
+
+- One bounded, auditable path for live edits that composes with D-032/D-033/D-034.
+- No silent merges or client-trusted dimensions; a stale editor is told to reload.
+- Deltas keep saves and interest traffic proportional to actual edits.
+- Blueprint identity remains immutable; edits are instance data.
+
+**Negative**
+
+- Last-writer-loses is less convenient than a CRDT for simultaneous edits.
+- A per-placement lock plus the package lock adds two lease concepts.
+- Edit-log compaction and read-only missing-pack behavior need explicit tests.
+- The server must materialize package volumes lazily, which adds memory pressure at scale.
+
+**Neutral**
+
+- The feature is opt-in until the Phase 6 exit criteria pass.
+- The final mesher is not required to validate the numeric edit path.
+
+### Alternatives considered
+
+- **Client-authoritative edits with server checksums:** rejected; the server would still need to trust geometry and could not prevent invalid saves.
+- **CRDT/OT merge:** rejected for v1 because it hides conflicts and adds unbounded metadata.
+- **Full-volume replacement per edit:** rejected for bandwidth and save size.
+- **Package-level lock only:** rejected because independent placements of the same package must be editable separately.
+- **Persist edits inside the `.tsbp`:** rejected; it would mutate shared content and break content identity.
+
+### Review trigger
+
+Accept before the first live-edit protocol command or save migration. Revisit if Q-119 selects a merge model, if Q-120 requires reconnect retention, or if 10k edited placements exceed the save/interest budget.
 
 ---
 
