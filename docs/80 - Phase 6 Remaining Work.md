@@ -13,7 +13,7 @@ tags:
 # Phase 6 Remaining Work
 
 > [!abstract] Purpose
-> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `7e97494` (2026-11-25). It is a plan, not an implementation claim.
+> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `0e9ecc7` (2026-11-25). It is a plan, not an implementation claim.
 
 Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/D-032/D-033/D-035/D-038/D-039/D-040/D-041/D-042, [[09 - Open Questions]] Q-101/Q-117/Q-119/Q-120/Q-121/Q-122/Q-123/Q-124/Q-125/Q-126/Q-127/Q-128, [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]], [[81 - Settlement Tax Composition]], [[82 - Journal and Rollback]], [[83 - Remote Transport and Authentication]], [[84 - Content Registry Modes]].
 
@@ -33,6 +33,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 | ✅ Done | Settlement-tax ADR proposal (D-039), save-schema freeze tests, settlement loopback smoke, placement lock UI, settlement-editor/dashboard localization | #359–#364 |
 | ✅ Done | Pure D-039 tax helper, CI multiplayer smokes, nested content-mismatch smoke fix, bounded lock leases, district-panel membership rows, D-040 journal/rollback proposal | #366–#371 |
 | ✅ Done | D-042 content-registry proposal, dashboard release, player-scoped lock release, client chat-push listener, concurrent-listener stress matrix | #391–#395 |
+| ✅ Done | Wave reconciliation, Windows stress bound, chat unread HUD, audit-log filters, D-042 manifest parser, dashboard rename, extended listener stress | #396–#402 |
 | ✅ Done | Bounded outbound queue, lock-lease badge, opt-in lock retention, local bridge player registry, D-041 remote-auth proposal | #373–#377 |
 | ✅ Done | Server content-dependent placement, `--retain-locks`, settlement-editor player picker, dashboard claim, wired outbound writer | #379–#383 |
 | ✅ Done | Audited Admin force-unlock, `--content-ids`, local release, dashboard transfer, server chat push over concurrent listen | #385–#389 |
@@ -42,11 +43,11 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 | # | Slice | Depends on | Why this order |
 |---:|---|---|---|
-| 1 | Dashboard + connected-client settlement write controls | #343 bridge mutations | Makes the existing settlement protocol usable in play without new protocol/save surface |
+| 1 | Dashboard + connected-client settlement membership controls | #343 bridge mutations, #356/#382/#388/#392/#401 | Tax, claim, rename, transfer, and release are wired; invite/set-role/remove remain |
 | 2 | Settlement tax treasury consumer after D-039 acceptance | 1, D-030/D-031 | The pure helper exists, but the rate is data-only; applying it needs a precedence decision against district weights |
 | 3 | Blueprint lock reconnect-retention UX | #349 v0 locks, #363/#374 UI, #369 leases, #375 retention, #380 CLI, #393 player scope | Lease expiry, retention, CLI, and concurrent-session release are done; decide automatic renewal and client lock list |
-| 4 | Concurrent listener load hardening | #269, #350, #373, #383, #389, #395 | The #395 stress matrix covers slow readers, closed queues, shutdown, and the session cap; remote-load tuning remains |
-| 5 | Chat broadcast UI/metrics | #389, #394, #395 | Server push and the passive client listener are done; remaining is unread/push presentation and reconnect metrics |
+| 4 | Concurrent listener remote-load tuning | #269, #350, #373, #383, #389, #395, #402 | Slow readers, closed queues, shutdown, session cap, fan-out, and sustained load are covered; remote/network-latency tuning remains |
+| 5 | Chat panel badge/unread presentation | #389, #394, #395, #398 | Server push, passive client listener, and the 3D HUD unread count are done; remaining is the panel-level badge/reconnect presentation |
 | 6 | Voxel edit sync v1 | D-038 accepted, Q-119/Q-120, 3, 4 | The largest slice; do not start before the conflict/lease decisions |
 | 7 | Journal/rollback v1 after D-040/Q-123/Q-124 | 6 | Needs the edit command stream and a crash-safe boundary |
 | 8 | Save migration/versioning freeze | 1–7 | Freeze settlement/edit/journal/lock schemas before remote exposure |
@@ -57,7 +58,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.1 Settlement write controls
 
-**Scope.** Dashboard and a connected client should found, claim, rename, transfer, invite, set role, remove, release (Admin), and set tax through the bridge/server commands that already exist. The dashboard currently has the `Shift+T` tax cycle (#356), `Shift+C` unowned claim (#382), and `Shift+Y` transfer (#388); #370 adds full owner/member/permission rows to the read-only district panel; #381 adds local player selection and #387 release to the settlement editor, the full developer surface.
+**Scope.** Dashboard and a connected client should found, claim, rename, transfer, invite, set role, remove, release (Admin), and set tax through the bridge/server commands that already exist. The dashboard has the `Shift+T` tax cycle (#356), `Shift+C` unowned claim (#382), `Shift+Y` transfer (#388), `Shift+X` release (#392), and `Shift+R` rename (#401); #370 adds full owner/member/permission rows to the read-only district panel; #381 adds local player selection and #387 release to the settlement editor, the full developer surface. Invite/set-role/remove remain.
 
 **Protocol/save.** No new command or save field. Reuse `settlement_*` v1 shapes and `settlement_updated`.
 
@@ -107,7 +108,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.5 Chat push/broadcast
 
-**Scope.** Push `chat_sent`/`chat_log` deltas to connected clients instead of polling only; keep `chat_since` for reconnect. Bounded log and 64-line cap stay. Server push (#389) and the 3D passive listener (#394) are done; remaining is broadcast UI/metrics and multi-session ordering coverage (the #395 stress matrix covers the transport).
+**Scope.** Push `chat_sent`/`chat_log` deltas to connected clients instead of polling only; keep `chat_since` for reconnect. Bounded log and 64-line cap stay. Server push (#389), the 3D passive listener (#394), and the 3D unread HUD (#398) are done; remaining is the chat-panel badge and reconnect presentation. Multi-session ordering is covered by #395/#402.
 
 **Protocol/save.** Add a server push message or include chat deltas in the existing outbound stream; no save field. Sequence numbers remain authoritative.
 
@@ -200,10 +201,11 @@ Prove, on reference hardware and with four players:
 
 ## 7. Immediate order
 
-1. Verify the merged #385–#389 wave and refresh this table with [[08 - Roadmap]].
-2. Settlement rename/release/membership controls (§3.1) and the tax consumer after D-039 acceptance (§3.2).
-3. Blueprint lock multi-session policy (§3.3); leases, retention, CLI, and forced-unlock audit are done.
-4. Concurrent listener shutdown/backpressure stress (§3.4), then chat client listener wiring (§3.5); server push is done.
-5. Accept or revise D-038; answer Q-119/Q-120; then voxel edit v1 (§3.6).
-6. Journal after D-040/Q-123/Q-124 (§3.7), schema freeze (§3.8), remote auth after D-041 (§3.9).
-7. Run the exit scenarios (§3.10) and the human/hardware gates.
+1. Verify the merged #396–#402 wave and refresh this table with [[08 - Roadmap]].
+2. Settlement membership/role controls (§3.1) and the tax consumer after D-039 acceptance (§3.2); tax, claim, rename, transfer, and release are done.
+3. Blueprint lock reconnect policy (§3.3); leases, retention, CLI, player-scoped release, and forced-unlock audit are done.
+4. Concurrent listener remote-load tuning (§3.4) and the chat-panel badge/reconnect presentation (§3.5); push/client listener/HUD are done.
+5. Server content-registry manifest wiring after D-042/Q-127/Q-128; the parser exists in `core_city`.
+6. Accept or revise D-038; answer Q-119/Q-120; then voxel edit v1 (§3.6).
+7. Journal after D-040/Q-123/Q-124 (§3.7), schema freeze (§3.8), remote auth after D-041 (§3.9).
+8. Run the exit scenarios (§3.10) and the human/hardware gates.
