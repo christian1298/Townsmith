@@ -118,8 +118,13 @@ SETTLEMENT_EDITOR status=ok actions=<n> checksum=<16 hex>
 | `settlement_clear()` | `bool` | Clear records; keep seed/next id |
 | `settlement_remove(id)` | `bool` | Remove one |
 | `settlement_at(x, z)` | `Dictionary` | `found`, plus the owning settlement |
+| `players_register(name)` | `Dictionary` | Register or reuse a local player name; `{ok, player{id,name}, count, checksum}` |
+| `players_list()` | `Dictionary` | `{ok, count, checksum, players[{id,name}]}` in ascending id order |
+| `players_find(name)` | `Dictionary` | `{ok, found, player{id,name} or null}`; case-insensitive |
 
 A failed first settlement leaves no empty world store behind. A successful first settlement opens a `PlacementStore` for the seed, mirroring roads and lots.
+
+The local bridge player registry is a developer convenience, not server authentication: ids are stable only for the current bridge seed/process, a seed change resets the registry, and names are never written to world saves. It errors with `player.invalid_name`, `player.limit`, or `player.seed_mismatch`; the operator can use it to resolve names for local settlement/editor actions.
 
 ### Authoritative server (D-033 staged v1)
 

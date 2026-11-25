@@ -10,11 +10,11 @@ use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-use core_city::player::PlayerId;
+use core_city::player::{Player, PlayerError, PlayerId, PlayerRegistry};
 use godot::builtin::{
     PackedColorArray, PackedFloat32Array, PackedInt32Array, PackedVector2Array, PackedVector3Array,
     VarArray, Variant,
@@ -945,6 +945,9 @@ struct TownsmithCore {
     roads: Mutex<Option<RoadStore>>,
     lots: Mutex<Option<LotStore>>,
     settlements: Mutex<Option<SettlementStore>>,
+    /// Bridge-local player address book. Developer/local only: it is never
+    /// written to a world save and is reset when the world seed changes.
+    players: Mutex<LocalPlayers>,
     policies: Mutex<Option<DistrictPolicyStore>>,
     population: Mutex<Option<CityRuntime>>,
     named: Mutex<Option<NamedCitizens>>,
@@ -975,6 +978,7 @@ impl Default for TownsmithCore {
             roads: Mutex::new(None),
             lots: Mutex::new(None),
             settlements: Mutex::new(None),
+            players: Mutex::new(LocalPlayers::default()),
             policies: Mutex::new(None),
             population: Mutex::new(None),
             named: Mutex::new(None),
@@ -2955,6 +2959,98 @@ impl TownsmithCore {
             }
         }
         result
+    }
+
+    /// Bridge player registry for the current world seed.
+    ///
+    /// The seed follows the first open world, settlement, road, or lot layer;
+    /// those layers are kept in lockstep, so a disagreement is reported as
+    /// `player.seed_mismatch` instead of picking one. With no layer open the
+    /// seed is [`BRIDGE_PLAYER_DEFAULT_SEED`]. Every bridge player call
+    /// re-checks the seed: when it changes, the previous names are dropped and
+    /// ids restart at 1. No name is carried across seeds, and nothing is
+    /// persisted.
+    fn local_players(&self) -> Result<MutexGuard<'_, LocalPlayers>, (&'static str, &'static str)> {
+        let world = self
+            .world
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|store| store.seed);
+        let settlements = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|store| store.seed);
+        let roads = self
+            .roads
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|store| store.seed);
+        let lots = self
+            .lots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|store| store.seed);
+        let seed = bridge_player_seed([world, settlements, roads, lots])?;
+        let mut players = self
+            .players
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        player_registry_sync_seed(&mut players.0, seed);
+        Ok(players)
+    }
+
+    /// Register a local bridge player, or return the existing record.
+    ///
+    /// `name` is trimmed, must be 1–32 characters without control characters,
+    /// and is matched case-insensitively. Registering an existing name again is
+    /// idempotent and returns its original id and display casing. Ids are
+    /// stable per bridge seed and start at 1.
+    ///
+    /// Returns `{ ok, player: { id, name }, count, checksum }` on success.
+    /// Errors are `player.invalid_name`, `player.limit` (256 players), and
+    /// `player.seed_mismatch` when open world layers disagree. This is a local
+    /// developer address book, not server authentication, and it is not saved.
+    #[func]
+    fn players_register(&self, name: GString) -> VarDictionary {
+        let mut players = match self.local_players() {
+            Ok(players) => players,
+            Err((code, message)) => return placement_simple_error(code, message),
+        };
+        match players_register_in_store(&mut players.0, &name.to_string()) {
+            Ok(player) => players_register_payload(&players.0, &player),
+            Err((code, message)) => placement_simple_error(code, message),
+        }
+    }
+
+    /// List every local bridge player in ascending id order.
+    ///
+    /// Returns `{ ok, count, checksum, players: [{ id, name }] }`. The
+    /// checksum is the [`PlayerRegistry`] FNV-1a value as 16 lowercase hex
+    /// digits. Read-only: it never registers a name.
+    #[func]
+    fn players_list(&self) -> VarDictionary {
+        match self.local_players() {
+            Ok(players) => players_list_payload(&players.0),
+            Err((code, message)) => placement_simple_error(code, message),
+        }
+    }
+
+    /// Find a local bridge player by display name.
+    ///
+    /// The name is trimmed and matched case-insensitively. Returns
+    /// `{ ok, found, player: { id, name } or null }`; a missing name is not an
+    /// error.
+    #[func]
+    fn players_find(&self, name: GString) -> VarDictionary {
+        match self.local_players() {
+            Ok(players) => players_find_payload(&players.0, &name.to_string()),
+            Err((code, message)) => placement_simple_error(code, message),
+        }
     }
 
     /// Remove every placement. The seed and an empty store stay open.
@@ -8894,6 +8990,197 @@ fn settlement_to_dictionary(settlement: &Settlement) -> VarDictionary {
         &GString::from(payload.membership_checksum.as_str()),
     );
     result.set("tax_rate", i64::from(payload.tax_rate));
+    result
+}
+
+/// Bridge-local player name limit in characters.
+const BRIDGE_PLAYER_NAME_CHARS: usize = 32;
+
+/// Player seed used while no world layer is open.
+const BRIDGE_PLAYER_DEFAULT_SEED: u64 = 0;
+
+/// Bridge-local player address book.
+///
+/// A newtype so `#[class(init)]` can default the field without a `Default`
+/// impl on the engine-agnostic [`PlayerRegistry`].
+struct LocalPlayers(PlayerRegistry);
+
+impl Default for LocalPlayers {
+    fn default() -> Self {
+        Self(PlayerRegistry::new(BRIDGE_PLAYER_DEFAULT_SEED))
+    }
+}
+
+/// Resolve the bridge player seed from the open world layers.
+///
+/// Empty layers are ignored. The first open seed wins, but every other open
+/// layer must agree: a disagreement is reported instead of silently moving the
+/// registry. [`BRIDGE_PLAYER_DEFAULT_SEED`] is used when nothing is open.
+fn bridge_player_seed<I>(layers: I) -> Result<u64, (&'static str, &'static str)>
+where
+    I: IntoIterator<Item = Option<u64>>,
+{
+    let mut resolved: Option<u64> = None;
+    for seed in layers.into_iter().flatten() {
+        match resolved {
+            None => resolved = Some(seed),
+            Some(active) if active != seed => {
+                return Err((
+                    "player.seed_mismatch",
+                    "open world layers disagree about the seed",
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(resolved.unwrap_or(BRIDGE_PLAYER_DEFAULT_SEED))
+}
+
+/// Reset `registry` when the world seed changes.
+///
+/// Returns `true` when the registry was replaced. A reset drops every name and
+/// restarts ids at 1, so ids are stable only within one bridge seed.
+fn player_registry_sync_seed(registry: &mut PlayerRegistry, seed: u64) -> bool {
+    if registry.seed == seed {
+        return false;
+    }
+    *registry = PlayerRegistry::new(seed);
+    true
+}
+
+/// Validate and trim a bridge player name.
+fn bridge_player_name(name: &str) -> Result<&str, (&'static str, &'static str)> {
+    let name = name.trim();
+    let invalid = name.is_empty()
+        || name.chars().count() > BRIDGE_PLAYER_NAME_CHARS
+        || name.chars().any(char::is_control);
+    if invalid {
+        return Err((
+            "player.invalid_name",
+            "player name must be 1-32 characters without control characters",
+        ));
+    }
+    Ok(name)
+}
+
+/// Map a core player error to the bridge error vocabulary.
+///
+/// Name validation runs first, so a core name error should be unreachable; it
+/// still maps to `player.invalid_name` rather than leaking `empty_name` or
+/// `duplicate_name`. Id exhaustion is treated as the same hard limit as the
+/// 256-player cap.
+fn bridge_player_error(error: &PlayerError) -> (&'static str, String) {
+    let code = match error {
+        PlayerError::TooMany | PlayerError::IdExhausted => "player.limit",
+        _ => "player.invalid_name",
+    };
+    (code, error.to_string())
+}
+
+/// Register a bridge player, returning the existing record for a duplicate.
+///
+/// Case-insensitive duplicates are idempotent. Names are trimmed and limited
+/// to 32 characters here even though the core registry allows 48.
+fn players_register_in_store(
+    registry: &mut PlayerRegistry,
+    name: &str,
+) -> Result<Player, (&'static str, String)> {
+    let name = bridge_player_name(name).map_err(|(code, message)| (code, message.to_string()))?;
+    if let Some(existing) = registry.find_by_display_name(name).first() {
+        return Ok((*existing).clone());
+    }
+    registry
+        .register(name)
+        .map_err(|error| bridge_player_error(&error))
+}
+
+/// One bridge player record as exposed to GDScript.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BridgePlayerRecord {
+    id: u64,
+    name: String,
+}
+
+/// Read-only player registry snapshot, testable without a Godot engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BridgePlayersSnapshot {
+    count: usize,
+    checksum: String,
+    players: Vec<BridgePlayerRecord>,
+}
+
+fn bridge_player_record(player: &Player) -> BridgePlayerRecord {
+    BridgePlayerRecord {
+        id: player.id.get(),
+        name: player.display_name.clone(),
+    }
+}
+
+fn players_snapshot(registry: &PlayerRegistry) -> BridgePlayersSnapshot {
+    BridgePlayersSnapshot {
+        count: registry.count(),
+        checksum: format!("{:016x}", registry.checksum()),
+        players: registry
+            .players()
+            .iter()
+            .map(bridge_player_record)
+            .collect(),
+    }
+}
+
+/// Find one player by display name; `None` when the name is unknown or blank.
+fn players_find_record(registry: &PlayerRegistry, name: &str) -> Option<BridgePlayerRecord> {
+    registry
+        .find_by_display_name(name)
+        .first()
+        .map(|player| bridge_player_record(player))
+}
+
+fn bridge_player_dictionary(record: &BridgePlayerRecord) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("id", record.id as i64);
+    result.set("name", &GString::from(record.name.as_str()));
+    result
+}
+
+fn players_register_payload(registry: &PlayerRegistry, player: &Player) -> VarDictionary {
+    let snapshot = players_snapshot(registry);
+    let record = bridge_player_record(player);
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set("player", &bridge_player_dictionary(&record).to_variant());
+    result.set("count", snapshot.count as i64);
+    result.set("checksum", &GString::from(snapshot.checksum.as_str()));
+    result
+}
+
+fn players_list_payload(registry: &PlayerRegistry) -> VarDictionary {
+    let snapshot = players_snapshot(registry);
+    let mut players: Array<VarDictionary> = Array::new();
+    for record in &snapshot.players {
+        players.push(&bridge_player_dictionary(record));
+    }
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    result.set("count", snapshot.count as i64);
+    result.set("checksum", &GString::from(snapshot.checksum.as_str()));
+    result.set("players", &players.to_variant());
+    result
+}
+
+fn players_find_payload(registry: &PlayerRegistry, name: &str) -> VarDictionary {
+    let mut result = VarDictionary::new();
+    result.set("ok", true);
+    match players_find_record(registry, name) {
+        Some(record) => {
+            result.set("found", true);
+            result.set("player", &bridge_player_dictionary(&record).to_variant());
+        }
+        None => {
+            result.set("found", false);
+            result.set("player", &Variant::nil());
+        }
+    }
     result
 }
 
@@ -18177,5 +18464,154 @@ mod tests {
         // Master `db5c495` output for this fixture; the plain path is
         // unchanged by the reference field.
         assert_eq!(hash, 0xba02_8161_4bbf_8304);
+    }
+
+    fn bridge_player_registry() -> PlayerRegistry {
+        PlayerRegistry::new(BRIDGE_PLAYER_DEFAULT_SEED)
+    }
+
+    #[test]
+    fn players_register_assigns_first_id_one_and_second_id_two() {
+        let mut registry = bridge_player_registry();
+        let first = players_register_in_store(&mut registry, "Ada").expect("first");
+        assert_eq!(first.id.get(), 1);
+        assert_eq!(first.display_name, "Ada");
+        let second = players_register_in_store(&mut registry, "Grace").expect("second");
+        assert_eq!(second.id.get(), 2);
+        assert_eq!(second.display_name, "Grace");
+        assert_eq!(registry.count(), 2);
+    }
+
+    #[test]
+    fn players_register_reuses_a_case_insensitive_duplicate() {
+        let mut registry = bridge_player_registry();
+        let first = players_register_in_store(&mut registry, "Ada").expect("first");
+        let before = registry.checksum();
+        let again = players_register_in_store(&mut registry, "  aDA  ").expect("duplicate");
+        assert_eq!(again.id, first.id);
+        assert_eq!(again.display_name, "Ada", "the original casing is kept");
+        assert_eq!(registry.count(), 1);
+        assert_eq!(
+            registry.checksum(),
+            before,
+            "an idempotent call mutates nothing"
+        );
+    }
+
+    #[test]
+    fn players_register_trims_names_and_accepts_the_32_char_limit() {
+        let mut registry = bridge_player_registry();
+        let name = "x".repeat(BRIDGE_PLAYER_NAME_CHARS);
+        let player =
+            players_register_in_store(&mut registry, &format!("  {name}  ")).expect("32 chars");
+        assert_eq!(player.display_name, name);
+    }
+
+    #[test]
+    fn players_register_rejects_empty_control_and_overlong_names() {
+        let mut registry = bridge_player_registry();
+        let overlong = "x".repeat(BRIDGE_PLAYER_NAME_CHARS + 1);
+        for name in ["", "   ", "a\nb", "a\tb", overlong.as_str()] {
+            let (code, _) = players_register_in_store(&mut registry, name).expect_err(name);
+            assert_eq!(code, "player.invalid_name", "name {name:?}");
+        }
+        assert!(registry.is_empty());
+        assert_eq!(registry.checksum(), PlayerRegistry::new(0).checksum());
+    }
+
+    #[test]
+    fn players_register_reports_the_256_player_limit() {
+        let mut registry = bridge_player_registry();
+        for index in 0..core_city::player::MAX_PLAYERS {
+            players_register_in_store(&mut registry, &format!("Player {index}"))
+                .expect("under the limit");
+        }
+        assert_eq!(registry.count(), core_city::player::MAX_PLAYERS);
+        let (code, _) =
+            players_register_in_store(&mut registry, "Player 256").expect_err("full registry");
+        assert_eq!(code, "player.limit");
+        assert_eq!(registry.count(), core_city::player::MAX_PLAYERS);
+        let existing = players_register_in_store(&mut registry, "player 0")
+            .expect("a duplicate is still idempotent at the cap");
+        assert_eq!(existing.id.get(), 1);
+    }
+
+    #[test]
+    fn players_list_is_sorted_and_carries_the_registry_checksum() {
+        let mut registry = bridge_player_registry();
+        players_register_in_store(&mut registry, "Ada").expect("ada");
+        players_register_in_store(&mut registry, "Grace").expect("grace");
+        let snapshot = players_snapshot(&registry);
+        assert_eq!(snapshot.count, 2);
+        assert_eq!(
+            snapshot.players,
+            vec![
+                BridgePlayerRecord {
+                    id: 1,
+                    name: "Ada".to_string(),
+                },
+                BridgePlayerRecord {
+                    id: 2,
+                    name: "Grace".to_string(),
+                },
+            ]
+        );
+        assert_eq!(snapshot.checksum, format!("{:016x}", registry.checksum()));
+        assert_eq!(snapshot.checksum.len(), 16);
+        assert!(snapshot
+            .checksum
+            .chars()
+            .all(|value| value.is_ascii_digit() || ('a'..='f').contains(&value)));
+    }
+
+    #[test]
+    fn players_find_matches_case_insensitively_and_misses_without_panicking() {
+        let mut registry = bridge_player_registry();
+        players_register_in_store(&mut registry, "Ada Lovelace").expect("ada");
+        let hit = players_find_record(&registry, "  ada lovelace ").expect("hit");
+        assert_eq!(hit.id, 1);
+        assert_eq!(hit.name, "Ada Lovelace");
+        assert!(players_find_record(&registry, "Grace").is_none());
+        assert!(players_find_record(&registry, "").is_none());
+        assert!(players_find_record(&registry, "a\u{0}b").is_none());
+    }
+
+    #[test]
+    fn players_reset_when_the_bridge_seed_changes() {
+        let mut registry = bridge_player_registry();
+        players_register_in_store(&mut registry, "Ada").expect("ada");
+        assert!(!player_registry_sync_seed(
+            &mut registry,
+            BRIDGE_PLAYER_DEFAULT_SEED
+        ));
+        assert_eq!(registry.count(), 1, "the same seed keeps the names");
+        assert!(player_registry_sync_seed(&mut registry, 7));
+        assert_eq!(registry.seed, 7);
+        assert!(registry.is_empty());
+        let player = players_register_in_store(&mut registry, "Ada").expect("ada on the new seed");
+        assert_eq!(player.id.get(), 1, "ids restart with a new seed");
+    }
+
+    #[test]
+    fn bridge_player_seed_requires_open_layers_to_agree() {
+        assert_eq!(
+            bridge_player_seed([None, None]),
+            Ok(BRIDGE_PLAYER_DEFAULT_SEED)
+        );
+        assert_eq!(bridge_player_seed([None, Some(7), None]), Ok(7));
+        assert_eq!(bridge_player_seed([Some(7), None, Some(7)]), Ok(7));
+        let (code, _) = bridge_player_seed([Some(7), Some(8)]).expect_err("mismatch");
+        assert_eq!(code, "player.seed_mismatch");
+    }
+
+    #[test]
+    fn bridge_player_names_are_labels_not_paths() {
+        let mut registry = bridge_player_registry();
+        let label = "../../etc/passwd";
+        let player = players_register_in_store(&mut registry, label).expect("label");
+        assert_eq!(player.display_name, label);
+        let snapshot = players_snapshot(&registry);
+        assert_eq!(snapshot.count, 1);
+        assert_eq!(snapshot.players[0].name, label);
     }
 }
