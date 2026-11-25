@@ -31,7 +31,10 @@ set -euo pipefail
 # `say:push-me|poll`, so the listener must consume the pushed `chat_sent` while
 # the sender still receives its own response exactly once (12 sent / 13
 # received). The listener must print `MP_CHAT_PUSH` with the deterministic
-# `seq|player|text` checksum and both sessions must end cleanly.
+# `seq|player|text` checksum, then `MP_CHAT_UNREAD unread=1 total=1`, poll
+# (`chat_since` after the pushed seq), print `MP_CHAT_UNREAD unread=0 total=1`,
+# and disconnect. The sender must never print an unread marker: its own
+# `chat_sent` response is not a push. Both sessions must end cleanly.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GODOT_BIN="${GODOT:-godot}"
@@ -214,6 +217,10 @@ run_block() {
 		echo "chat smoke ($name) failed: missing main, chat, or done marker" >&2
 		exit 1
 	fi
+	if grep -q '^MP_CHAT_UNREAD ' <<<"$output"; then
+		echo "chat smoke ($name) failed: scripted chat reported an unread line" >&2
+		exit 1
+	fi
 
 	if [[ ! "$main_line" =~ ^MP_WORLD_CLIENT\ status=ok\ tick=6\ population=3277\ balance=100000\ roads=6\ buildings=4\ truncated=false\ buildings_truncated=false\ checksum=[0-9a-f]{16}\ road_checksum=48aff8a44b921666\ building_checksum=a98d781faa5c1d5b\ rendered_roads=6\ rendered_buildings=4\ center=0\.0,0\.0\ radius=96\.0\ session=session-[0-9a-f]{16}(-[0-9]+)?$ ]]; then
 		echo "chat smoke ($name) main marker mismatch: $main_line" >&2
@@ -266,6 +273,10 @@ run_push_block() {
 	local sender_status
 	local push_line
 	local push_count
+	local unread_lines
+	local unread_count
+	local unread_first
+	local unread_reset
 	local main_line
 	local chat_line
 	local done_line
@@ -328,6 +339,27 @@ run_push_block() {
 		exit 1
 	fi
 
+	unread_lines="$(grep '^MP_CHAT_UNREAD ' <<<"$listener_output" || true)"
+	unread_count="$(grep -c '^MP_CHAT_UNREAD ' <<<"$listener_output" || true)"
+	if [[ "$unread_count" != "2" ]]; then
+		echo "chat push smoke failed: listener saw $unread_count unread markers (want 2)" >&2
+		exit 1
+	fi
+	unread_first="$(sed -n '1p' <<<"$unread_lines")"
+	unread_reset="$(sed -n '2p' <<<"$unread_lines")"
+	if [[ "$unread_first" != "MP_CHAT_UNREAD unread=1 total=1" ]]; then
+		echo "chat push smoke listener unread mismatch: $unread_first" >&2
+		exit 1
+	fi
+	if [[ "$unread_reset" != "MP_CHAT_UNREAD unread=0 total=1" ]]; then
+		echo "chat push smoke listener reset mismatch: $unread_reset" >&2
+		exit 1
+	fi
+	if grep -q '^MP_CHAT_UNREAD ' <<<"$sender_output"; then
+		echo "chat push smoke failed: sender counted its own chat_sent response" >&2
+		exit 1
+	fi
+
 	main_line="$(grep '^MP_WORLD_CLIENT status=ok ' <<<"$sender_output" | tail -1 || true)"
 	chat_line="$(grep '^MP_CHAT status=ok ' <<<"$sender_output" | tail -1 || true)"
 	done_line="$(grep '^MP_WORLD_CLIENT_DONE status=ok ' <<<"$sender_output" | tail -1 || true)"
@@ -348,14 +380,15 @@ run_push_block() {
 		exit 1
 	fi
 
-	# Listener command frames: hello, disconnect. Sender: hello, six roads,
-	# set_interest, chat_since, chat, chat_since, disconnect. The sender's 13
-	# received frames include exactly one chat_sent; a self-push would make 14.
-	wait_for_log "$SERVER_LOG" "$SERVER_PID" "SERVER_LISTEN status=ok sessions=2 commands=14 " 10
+	# Listener command frames: hello, chat_since (catch-up poll), disconnect.
+	# Sender: hello, six roads, set_interest, chat_since, chat, chat_since,
+	# disconnect. The sender's 13 received frames include exactly one
+	# chat_sent; a self-push would make 14. Server total: 15 commands.
+	wait_for_log "$SERVER_LOG" "$SERVER_PID" "SERVER_LISTEN status=ok sessions=2 commands=15 " 10
 	wait_for_exit "$SERVER_PID" 10
 	stop_server
-	if ! grep -Eq "SERVER_LISTEN status=ok sessions=2 commands=14 " "$SERVER_LOG"; then
-		echo "chat push smoke failed: server did not report two sessions with 14 commands" >&2
+	if ! grep -Eq "SERVER_LISTEN status=ok sessions=2 commands=15 " "$SERVER_LOG"; then
+		echo "chat push smoke failed: server did not report two sessions with 15 commands" >&2
 		cat "$SERVER_LOG" >&2
 		exit 1
 	fi
@@ -403,3 +436,4 @@ run_push_block "$THIRD_PORT"
 
 echo "MP_CHAT_SMOKE status=ok runs=2 entries=2 checksum=$(cat "$SMOKE_DIR/first.checksum") world_checksum=$(sed -n 's/.* checksum=\([0-9a-f]\{16\}\).*/\1/p' "$SMOKE_DIR/first.main") frames_sent=13 frames_received=14"
 echo "MP_CHAT_PUSH_SMOKE status=ok sessions=2 listener=$LISTENER_NAME sender=$PUSH_SENDER_NAME seq=1 text=$PUSH_TEXT checksum=$PUSH_MARKER_CHECKSUM sender_chat_checksum=$PUSH_CHAT_CHECKSUM sender_frames_sent=12 sender_frames_received=13"
+echo "MP_CHAT_UNREAD_SMOKE status=ok listener_unread=1 listener_total=1 listener_reset=0 sender_unread=0"
