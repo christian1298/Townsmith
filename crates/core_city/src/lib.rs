@@ -56,6 +56,7 @@ pub mod road;
 pub mod route_cache;
 pub mod services;
 pub mod settlement;
+pub mod tax_composition;
 pub mod trades;
 pub mod traffic;
 pub mod tutorial;
@@ -180,6 +181,10 @@ pub use settlement::{
     MAX_SETTLEMENTS_OWNED_PER_PLAYER, MAX_SETTLEMENT_ID, MAX_SETTLEMENT_MEMBERS,
     MAX_SETTLEMENT_NAME_CHARS, MAX_SETTLEMENT_OWNER_CHARS, MAX_SETTLEMENT_RADIUS_M,
     MIN_SETTLEMENT_RADIUS_M, SETTLEMENT_FORMAT_VERSION, SETTLEMENT_FORMAT_VERSION_V1,
+};
+pub use tax_composition::{
+    compose_tax_multiplier, TaxCompositionError, TaxLocation, MAX_TAX_COMPOSITION_SETTLEMENT_RATE,
+    TAX_COMPOSITION_CAP,
 };
 pub use trades::{Trade, TradeError, TradePool};
 pub use traffic::{

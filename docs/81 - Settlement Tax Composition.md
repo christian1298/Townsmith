@@ -107,6 +107,15 @@ The second answer is wrong. The implementation must resolve the settlement at ea
 
 The numbers are illustrative; the formula and rounding rule are the contract.
 
+> [!note] Helper landed (proposed)
+> `core_city::tax_composition` now ships the pure, data-only option-A math:
+>
+> - `TaxLocation::new(multiplier, settlement_rate)` requires a finite, non-negative multiplier and a rate in `0..=100`; `combined_multiplier()` returns `min(8.0, multiplier × (1 + settlement_rate / 100))`.
+> - `compose_tax_multiplier(&[TaxLocation]) -> Result<f64, TaxCompositionError>` returns the base-multiplier-weighted mean `Σ(m_i × combined_i) / Σ m_i`. Empty input, or zero total weight, is neutral `1.0`. Values are summed in a canonical order, so the same multiset is order-independent.
+> - Stable errors: `tax.composition.invalid_multiplier`, `tax.composition.invalid_settlement_rate`, `tax.composition.non_finite_result`.
+>
+> `TaxLocation` is not serialized. This change lands **no** treasury, server, bridge, or Godot consumer, and `Settlement.tax_rate` still has no economy reader. D-039 remains **Proposed**; Q-121/Q-122 remain open.
+
 ## 5. Treasury timing and idempotency
 
 - Collection runs once per economy day, keyed by the persisted `days_elapsed` watermark, not wall time.
