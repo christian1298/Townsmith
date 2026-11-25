@@ -173,6 +173,36 @@ jobs:
               bash "./scripts/$smoke.sh" 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
             fi
           done
+      - name: Run multiplayer client smokes
+        shell: bash
+        # Bounded by the scripts' own readiness polls; the step timeout only
+        # guards against a wedged server or Godot process.
+        timeout-minutes: 25
+        run: |
+          set -o pipefail
+          # The extension was built by smoke_godot.sh earlier in this job; the
+          # multiplayer scripts only need the debug server binary.
+          if [ ! -x target/debug/townsmith-server ]; then
+            cargo build -p townsmith-server 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
+          fi
+          # Each script inherits GODOT from the job env (set by the install
+          # step via $GITHUB_ENV) and starts its own loopback server.
+          for smoke in \
+            smoke_mp_client \
+            smoke_mp_world_client \
+            smoke_mp_placement \
+            smoke_mp_placement_ui; do
+            echo "== $smoke =="
+            bash "./scripts/$smoke.sh" 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
+          done
+          # The chat smoke lands in a separate PR; skip until the script exists
+          # so this workflow stays valid on either side of that merge.
+          if [ -f ./scripts/smoke_mp_chat.sh ]; then
+            echo "== smoke_mp_chat =="
+            bash ./scripts/smoke_mp_chat.sh 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
+          else
+            echo "== smoke_mp_chat (skipped: script not present) ==" | tee -a "$RUNNER_TEMP/godot-smoke.log"
+          fi
       - name: Upload smoke log
         if: always()
         uses: actions/upload-artifact@v4
