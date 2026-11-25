@@ -873,6 +873,9 @@ fn run_smoke_client(address: SocketAddr) -> io::Result<()> {
 mod network_faults;
 
 #[cfg(test)]
+mod stress;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
