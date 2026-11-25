@@ -25,14 +25,20 @@
 //!   waits indefinitely, and [`OutboundQueue::pop_timeout`] bounds the wait so
 //!   a writer thread can also check shutdown or flush timers.
 //!
-//! The module is not wired into [`serve_io`](super::serve_io) yet. The
-//! concurrent-listener slice will install it and remove the module-wide
-//! `dead_code` allowance below.
-#![allow(dead_code)]
+//! [`serve_session`](super::serve_session) installs one queue per accepted
+//! connection. The reader thread encodes responses and calls
+//! [`OutboundQueue::push`]; a writer thread owns a cloned `TcpStream` and
+//! drains it with [`drain`]. When either side ends, the queue is closed: the
+//! writer flushes everything already accepted and then exits. A full or closed
+//! queue is never silently ignored by the listener — the session stops reading
+//! commands, the connection is shut down, and the failure is logged with
+//! [`OutboundError::code`].
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::io::{self, Write};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+#[cfg(test)]
 use std::time::{Duration, Instant};
 
 /// Default bound for one connection's outbound frame backlog.
@@ -124,6 +130,7 @@ impl OutboundQueue {
     ///
     /// Never blocks. A closed queue still yields its remaining frames; `None`
     /// means the queue is empty, whether or not it has been closed.
+    #[cfg(test)]
     pub(crate) fn pop(&self) -> Option<Vec<u8>> {
         self.lock().frames.pop_front()
     }
@@ -153,6 +160,7 @@ impl OutboundQueue {
     /// Returns `None` when the queue is closed and drained or when the timeout
     /// expires. Queued frames are always returned before the timeout is
     /// considered, so a zero timeout still drains one frame.
+    #[cfg(test)]
     pub(crate) fn pop_timeout(&self, timeout: Duration) -> Option<Vec<u8>> {
         let mut state = self.lock();
         let deadline = Instant::now() + timeout;
@@ -186,21 +194,25 @@ impl OutboundQueue {
     }
 
     /// Whether [`Self::close`] has been called.
+    #[cfg(test)]
     pub(crate) fn is_closed(&self) -> bool {
         self.lock().closed
     }
 
     /// Number of frames currently queued.
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.lock().frames.len()
     }
 
     /// Whether no frames are currently queued.
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.lock().frames.is_empty()
     }
 
     /// Fixed maximum number of queued frames.
+    #[cfg(test)]
     pub(crate) const fn capacity(&self) -> usize {
         self.capacity
     }
@@ -222,6 +234,21 @@ impl Default for OutboundQueue {
     fn default() -> Self {
         Self::build(DEFAULT_CAPACITY)
     }
+}
+
+/// Write every queued frame to `writer`, blocking until the queue is closed and
+/// drained.
+///
+/// Frames are written verbatim, one at a time, and flushed before the next one
+/// is popped. That matches the inline path's per-frame flush and keeps the byte
+/// stream identical. A write error returns immediately; the caller closes the
+/// queue so the reader stops producing.
+pub(crate) fn drain<W: Write>(writer: &mut W, queue: &OutboundQueue) -> io::Result<()> {
+    while let Some(frame) = queue.pop_blocking() {
+        writer.write_all(&frame)?;
+        writer.flush()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -380,5 +407,68 @@ mod tests {
     fn queue_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<OutboundQueue>();
+    }
+
+    #[test]
+    fn drain_writes_raw_frames_in_fifo_order() {
+        let queue = Arc::new(OutboundQueue::new(8).expect("queue"));
+        for value in [10, 11, 12, 13] {
+            queue.push(frame(value)).expect("room");
+        }
+        queue.close();
+
+        let mut writer = Vec::new();
+        drain(&mut writer, &queue).expect("drain after close");
+
+        let expected: Vec<u8> = [10u32, 11, 12, 13]
+            .into_iter()
+            .flat_map(u32::to_be_bytes)
+            .collect();
+        assert_eq!(writer, expected);
+        assert!(queue.is_empty());
+    }
+
+    /// A writer that accepts `remaining` bytes and then fails.
+    struct FailAfter {
+        remaining: usize,
+        kind: io::ErrorKind,
+    }
+
+    impl Write for FailAfter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::new(self.kind, "injected write fault"));
+            }
+            let count = buffer.len().min(self.remaining);
+            self.remaining -= count;
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn drain_stops_on_the_first_write_error_and_leaves_later_frames() {
+        let queue = Arc::new(OutboundQueue::new(4).expect("queue"));
+        for value in [1, 2, 3] {
+            queue.push(frame(value)).expect("room");
+        }
+        queue.close();
+
+        let mut writer = FailAfter {
+            remaining: 3,
+            kind: io::ErrorKind::BrokenPipe,
+        };
+        let error = drain(&mut writer, &queue).expect_err("the injected fault must surface");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+
+        // The partially written frame is gone; frames behind it were never
+        // popped, so closing the queue did not discard them.
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.pop().map(value), Some(2));
+        assert_eq!(queue.pop().map(value), Some(3));
+        assert_eq!(queue.pop(), None);
     }
 }
