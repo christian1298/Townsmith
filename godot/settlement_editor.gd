@@ -24,11 +24,20 @@ extends Control
 ## marker:
 ##   SETTLEMENT_EDITOR status=ok actions=<n> checksum=<16 hex>
 ##
+## The page also uses the local bridge player registry (`players_register`,
+## `players_list`) as a developer address book: the header shows the roster,
+## `N` registers the next deterministic `Player <n>` name, and `P` cycles the
+## pending invite/transfer target so an id never has to be typed by hand. In
+## `--smoke` mode only, three names (`Mayor`, `Builder`, `Auditor`) are seeded
+## so the smoke can exercise name-to-id selection deterministically.
+##
 ## Strings resolve through the `base.ui.settlement_editor.*` keys in
 ## `world_i18n.gd`; the standalone page follows the same EN/DE rules as the
 ## in-game UI. Settlement names, player ids, roles, and bridge error codes stay
 ## verbatim. Display numbers go through `WorldI18n.format_int` so grouping and
-## separators follow `docs/16 - Localization.md`.
+## separators follow `docs/16 - Localization.md`. The new roster/target labels
+## stay literal English in this developer-only page because `world_i18n.gd` is
+## outside this slice; they are not missing-key leaks.
 
 const WorldI18n = preload("res://world_i18n.gd")
 
@@ -37,6 +46,11 @@ const DEFAULT_SEED := 2026
 const DEFAULT_NAME := "Settlement"
 const DEFAULT_OWNER_LABEL := "wilderness"
 const DEFAULT_RADIUS_M := 256
+
+# Smoke-only seed names. They prove name-to-id selection without wall-clock or
+# RNG input; normal runs start with an empty registry.
+const SMOKE_PLAYER_NAMES := ["Mayor", "Builder", "Auditor"]
+const PLAYER_REGISTRY_CAP := 256
 
 # Mirrors `core_city::settlement`: radius 16..2,000 m, tax 0..=100 percent.
 const MIN_RADIUS_M := 16
@@ -78,6 +92,8 @@ var _failures := 0
 
 var _title_label: Label
 var _state_label: Label
+var _roster_label: Label
+var _target_label: Label
 var _message_label: Label
 var _detail_label: Label
 var _list: ItemList
@@ -90,6 +106,10 @@ var _radius_spin: SpinBox
 var _player_spin: SpinBox
 var _role_option: OptionButton
 var _tax_spin: SpinBox
+
+var _players: Array = []
+var _target_player_id := 1
+var _target_player_name := ""
 
 
 func _ready() -> void:
@@ -111,12 +131,133 @@ func _reset_session(reset_seed: bool) -> void:
 	_settlements = []
 	_checksum = ""
 	_selected_id = 0
+	_target_player_id = 1
+	_target_player_name = ""
 	if reset_seed:
 		_seed = DEFAULT_SEED
+	if smoke_mode:
+		_seed_smoke_players()
+	_refresh_players()
 	_refresh()
 	_set_message(_i18n.t("base.ui.settlement_editor.message.new_session", {
 		"seed": _i18n.format_int(_seed),
 	}), false)
+
+
+# --- Player registry (local bridge address book) ---------------------------
+
+## Seed deterministic names for the smoke only. Normal runs start empty and the
+## developer registers names with `N` (or through another local bridge caller).
+func _seed_smoke_players() -> void:
+	if _core == null:
+		return
+	for player_name in SMOKE_PLAYER_NAMES:
+		_core.players_register(player_name)
+
+
+func _refresh_players() -> void:
+	_players = []
+	if _core != null:
+		var result: Dictionary = _core.players_list()
+		if bool(result.get("ok", false)):
+			var records = result.get("players", [])
+			_players = records if records is Array else []
+	_sync_target_name()
+	_refresh_roster_label()
+	_refresh_target_label()
+
+
+func _sync_target_name() -> void:
+	_target_player_name = ""
+	for player in _players:
+		if int(player.get("id", 0)) == _target_player_id:
+			_target_player_name = str(player.get("name", ""))
+			return
+
+
+func _roster_text() -> String:
+	if _players.is_empty():
+		return "Players: none"
+	var parts := PackedStringArray()
+	for player in _players:
+		parts.append("#%s %s" % [
+			_i18n.format_int(int(player.get("id", 0))),
+			str(player.get("name", "")),
+		])
+	return "Players: " + ", ".join(parts)
+
+
+func _target_text() -> String:
+	if _target_player_name.is_empty():
+		return "Target: #%s" % _i18n.format_int(_target_player_id)
+	return "Target: #%s %s" % [
+		_i18n.format_int(_target_player_id), _target_player_name
+	]
+
+
+func _refresh_roster_label() -> void:
+	if _roster_label != null:
+		_roster_label.text = _roster_text()
+
+
+func _refresh_target_label() -> void:
+	if _target_label != null:
+		_target_label.text = _target_text()
+
+
+func _player_count(core) -> int:
+	if core == null:
+		return 0
+	var result: Dictionary = core.players_list()
+	if bool(result.get("ok", false)):
+		return int(result.get("count", 0))
+	return 0
+
+
+## Register a name through the local bridge. UI state only changes for the
+## editor's own core; the cap probe reuses this helper on a throwaway core.
+func _register_player_on(core, player_name: String) -> Dictionary:
+	if core == null:
+		return _no_core("register player")
+	var result: Dictionary = core.players_register(player_name)
+	if core == _core:
+		_apply_bridge_result("register player", result)
+		_refresh_players()
+		if bool(result.get("ok", false)):
+			var player = result.get("player", {})
+			_set_message("Registered #%s %s." % [
+				_i18n.format_int(int(player.get("id", 0))),
+				str(player.get("name", "")),
+			], false)
+	return result
+
+
+func _register_next_player_on(core) -> Dictionary:
+	var next_name := "Player %d" % (_player_count(core) + 1)
+	return _register_player_on(core, next_name)
+
+
+## Cycle the pending invite/transfer target in ascending id order. With no
+## registered players the previous id is kept and the failure is reported.
+func _cycle_target() -> int:
+	if _players.is_empty():
+		_set_message("No players registered; keeping target #%s. Press N to register." % [
+			_i18n.format_int(_target_player_id)
+		], true)
+		return _target_player_id
+	var next_index := 0
+	for index in range(_players.size()):
+		if int(_players[index].get("id", 0)) == _target_player_id:
+			next_index = (index + 1) % _players.size()
+			break
+	var player: Dictionary = _players[next_index]
+	_target_player_id = int(player.get("id", _target_player_id))
+	_target_player_name = str(player.get("name", ""))
+	_refresh_target_label()
+	_set_message("Target: #%s %s" % [
+		_i18n.format_int(_target_player_id), _target_player_name
+	], false)
+	return _target_player_id
 
 
 func _refresh() -> void:
@@ -492,13 +633,13 @@ func _on_rename_pressed() -> void:
 func _on_transfer_pressed() -> void:
 	var id := _selected_or_message(_i18n.t("base.ui.settlement_editor.action.transfer"))
 	if id != 0:
-		_transfer(id, int(_player_spin.value))
+		_transfer(id, _target_player_id)
 
 
 func _on_invite_pressed() -> void:
 	var id := _selected_or_message(_i18n.t("base.ui.settlement_editor.action.invite"))
 	if id != 0:
-		_invite(id, int(_player_spin.value), _selected_role())
+		_invite(id, _target_player_id, _selected_role())
 
 
 func _on_set_role_pressed() -> void:
@@ -526,6 +667,14 @@ func _on_refresh_pressed() -> void:
 
 func _on_new_session_pressed() -> void:
 	_reset_session(true)
+
+
+func _on_register_player_pressed() -> void:
+	_register_next_player_on(_core)
+
+
+func _on_cycle_target_pressed() -> void:
+	_cycle_target()
 
 
 func _on_list_selected(index: int) -> void:
@@ -562,13 +711,19 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		KEY_I:
 			_on_invite_pressed()
 		KEY_P:
-			_on_set_role_pressed()
+			if key.shift_pressed:
+				_on_set_role_pressed()
+			else:
+				_on_cycle_target_pressed()
 		KEY_X:
 			_on_remove_member_pressed()
 		KEY_M:
 			_on_set_tax_pressed()
 		KEY_N:
-			_on_new_session_pressed()
+			if key.shift_pressed:
+				_on_new_session_pressed()
+			else:
+				_on_register_player_pressed()
 		_: handled = false
 	if handled:
 		get_viewport().set_input_as_handled()
@@ -626,6 +781,85 @@ func _check(label: String, condition: bool) -> bool:
 	return condition
 
 
+func _smoke_player_registry() -> void:
+	var seeded_ok := _players.size() == 3
+	if seeded_ok:
+		for index in range(SMOKE_PLAYER_NAMES.size()):
+			seeded_ok = seeded_ok \
+				and int(_players[index].get("id", 0)) == index + 1 \
+				and str(_players[index].get("name", "")) == SMOKE_PLAYER_NAMES[index]
+	print("SETTLEMENT_EDITOR_PLAYERS phase=seed count=%s roster=%s" % [
+		_i18n.format_int(_players.size()), _roster_text()
+	])
+	_check(
+		"players_seeded",
+		seeded_ok \
+			and _roster_label.text == "Players: #1 Mayor, #2 Builder, #3 Auditor"
+	)
+
+	var fourth := _register_next_player_on(_core)
+	_expect_ok("register_player_4", fourth)
+	var fourth_player = fourth.get("player", {})
+	print("SETTLEMENT_EDITOR_PLAYERS phase=register count=%s roster=%s" % [
+		_i18n.format_int(_players.size()), _roster_text()
+	])
+	_check(
+		"player_four_registered",
+		int(fourth_player.get("id", 0)) == 4
+			and str(fourth_player.get("name", "")) == "Player 4"
+			and _players.size() == 4
+			and _roster_label.text
+				== "Players: #1 Mayor, #2 Builder, #3 Auditor, #4 Player 4"
+	)
+
+	var cycle_one := _cycle_target()
+	print("SETTLEMENT_EDITOR_TARGET id=%s name=%s" % [
+		_i18n.format_int(cycle_one), _target_player_name
+	])
+	_check(
+		"cycle_target_builder",
+		cycle_one == 2 and _target_player_name == "Builder"
+	)
+	var cycle_two := _cycle_target()
+	print("SETTLEMENT_EDITOR_TARGET id=%s name=%s" % [
+		_i18n.format_int(cycle_two), _target_player_name
+	])
+	_check(
+		"cycle_target_auditor",
+		cycle_two == 3 and _target_player_name == "Auditor"
+	)
+
+	# Empty registry: keep the previous id and report it without crashing.
+	var saved_players := _players
+	var saved_name := _target_player_name
+	_players = []
+	var kept := _cycle_target()
+	var empty_message := _message_label.text.begins_with("No players registered")
+	_players = saved_players
+	_target_player_name = saved_name
+	_refresh_roster_label()
+	_refresh_target_label()
+	print("SETTLEMENT_EDITOR_TARGET_EMPTY kept=%s message=%s" % [
+		_i18n.format_int(kept), "1" if empty_message else "0"
+	])
+	_check(
+		"cycle_target_empty_keeps_target",
+		kept == 3 and empty_message
+	)
+
+	# Cap and invalid-name rejections on a throwaway core; the editor roster
+	# must stay untouched.
+	var cap_core = TownsmithCore.new()
+	for index in range(PLAYER_REGISTRY_CAP):
+		cap_core.players_register("Player %d" % (index + 1))
+	_expect_error("player_limit", _register_next_player_on(cap_core), "player.limit")
+	_expect_error(
+		"player_invalid_name",
+		_register_player_on(cap_core, ""),
+		"player.invalid_name"
+	)
+
+
 func _run_smoke() -> void:
 	print("SETTLEMENT_EDITOR_SMOKE start seed=%s" % _i18n.format_int(_seed))
 	_reset_session(true)
@@ -641,6 +875,8 @@ func _run_smoke() -> void:
 			and int(empty.get("count", -1)) == 0
 			and str(empty.get("checksum", "")) == "0000000000000000"
 	)
+
+	_smoke_player_registry()
 
 	# --- Fixture: one unowned, one claimed by player 1. ---
 	var alpha := _found("Smoke Commons", 0, 0, 256)
@@ -743,16 +979,46 @@ func _run_smoke() -> void:
 			_i18n.format_int(int(_fresh_record(1).get("membership_revision", 0))),
 		]
 	)
+
+	# --- Name-based invite path on a throwaway settlement. The main fixture
+	# markers and checksum above stay pinned; this probe proves that `P` set
+	# the pending id and `_on_invite_pressed` used that id. ---
+	var main_checksum := _checksum
+	_expect_ok(
+		"registry_probe_found",
+		_found("Registry Probe", 0, 1024, 256)
+	)
+	_expect_ok("registry_probe_claim", _claim(3, 1))
+	_select(3)
+	_target_player_id = 1
+	_target_player_name = "Mayor"
+	_refresh_target_label()
+	var invite_target := _cycle_target()
+	_check(
+		"target_before_registry_invite",
+		invite_target == 2 and _target_player_name == "Builder"
+	)
+	_on_invite_pressed()
+	var probe_record := _fresh_record(3)
+	print("SETTLEMENT_EDITOR_INVITE settlement=3 target=2 name=Builder members=%s" % (
+		_members_text(probe_record)
+	))
+	_check(
+		"invite_uses_selected_name_id",
+		_members_text(probe_record) == "1:owner, 2:manager"
+			and int(probe_record.get("membership_revision", -1)) == 2
+	)
+
 	if _failures > 0:
 		print("SETTLEMENT_EDITOR status=failed actions=%s failures=%s checksum=%s" % [
 			_i18n.format_int(_actions),
 			_i18n.format_int(_failures),
-			_checksum,
+			main_checksum,
 		])
 		get_tree().quit(1)
 		return
 	print("SETTLEMENT_EDITOR status=ok actions=%s checksum=%s" % [
-		_i18n.format_int(_actions), _checksum
+		_i18n.format_int(_actions), main_checksum
 	])
 	get_tree().quit(0)
 
@@ -807,7 +1073,8 @@ func _build_ui() -> void:
 	root.add_child(_message_label)
 
 	var help := Label.new()
-	help.text = _i18n.t("base.ui.settlement_editor.help")
+	help.text = _i18n.t("base.ui.settlement_editor.help") + "\n" + \
+		"Players: N register · P cycle target · Shift+P set role · Shift+N new session"
 	help.add_theme_color_override("font_color", MUTED_COLOR)
 	help.add_theme_font_size_override("font_size", 13)
 	help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -853,6 +1120,16 @@ func _build_list_panel() -> Control:
 	_state_label = Label.new()
 	_state_label.add_theme_color_override("font_color", TEXT_COLOR)
 	panel.add_child(_state_label)
+
+	var registry_row := HBoxContainer.new()
+	registry_row.add_theme_constant_override("separation", 18)
+	panel.add_child(registry_row)
+	_roster_label = Label.new()
+	_roster_label.add_theme_color_override("font_color", TEXT_COLOR)
+	registry_row.add_child(_roster_label)
+	_target_label = Label.new()
+	_target_label.add_theme_color_override("font_color", MUTED_COLOR)
+	registry_row.add_child(_target_label)
 
 	_list = ItemList.new()
 	_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -955,6 +1232,12 @@ func _build_form_panel() -> Control:
 	actions_two.add_child(_button("%s (M)" % _i18n.t(
 		"base.ui.settlement_editor.action.set_tax"
 	), _on_set_tax_pressed))
+
+	var registry_actions := HBoxContainer.new()
+	registry_actions.add_theme_constant_override("separation", 6)
+	panel.add_child(registry_actions)
+	registry_actions.add_child(_button("Register player (N)", _on_register_player_pressed))
+	registry_actions.add_child(_button("Next target (P)", _on_cycle_target_pressed))
 
 	var note := Label.new()
 	note.text = _i18n.t("base.ui.settlement_editor.note")

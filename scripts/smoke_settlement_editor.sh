@@ -3,7 +3,9 @@
 #
 # Runs `godot/settlement_editor.tscn --smoke` twice and requires the local
 # bridge walkthrough (found two, claim, invite manager/builder, rename, set tax,
-# transfer, change role, remove member, and six rejections). Every
+# transfer, change role, remove member, and six rejections) plus the local
+# player registry path (seed three names, register a fourth, cycle the invite
+# target, invite by the selected name's id, cap/invalid-name rejection). Every
 # `SETTLEMENT_EDITOR*` line is diffed between runs so the state checksum and
 # the action sequence are proven deterministic. No display or server is needed.
 set -euo pipefail
@@ -67,8 +69,8 @@ run_editor() {
 
 	local actions
 	actions="$(sed -E 's/^SETTLEMENT_EDITOR status=ok actions=([0-9]+) checksum=[0-9a-f]+$/\1/' <<<"$marker")"
-	if [[ "$actions" != "25" ]]; then
-		echo "Settlement editor smoke failed: expected 27 actions, got $actions" >&2
+	if [[ "$actions" != "37" ]]; then
+		echo "Settlement editor smoke failed: expected 37 actions, got $actions" >&2
 		exit 1
 	fi
 
@@ -78,13 +80,40 @@ run_editor() {
 		"claim_player_zero code=invalid_player_id expected=invalid_player_id match=1" \
 		"stale_revision code=settlement.revision_conflict expected=settlement.revision_conflict match=1" \
 		"owner_role_rejected code=settlement.role_invalid expected=settlement.role_invalid match=1" \
-		"remove_owner_rejected code=settlement.owner_required expected=settlement.owner_required match=1"
+		"remove_owner_rejected code=settlement.owner_required expected=settlement.owner_required match=1" \
+		"player_limit code=player.limit expected=player.limit match=1" \
+		"player_invalid_name code=player.invalid_name expected=player.invalid_name match=1"
 	do
 		if ! grep -Fq "name=${expected%% *} ${expected#* }" <<<"$output"; then
 			echo "Settlement editor smoke failed: rejection marker missing: $expected" >&2
 			exit 1
 		fi
 	done
+
+	if ! grep -Fxq 'SETTLEMENT_EDITOR_PLAYERS phase=seed count=3 roster=Players: #1 Mayor, #2 Builder, #3 Auditor' <<<"$output"; then
+		echo "Settlement editor smoke failed: seeded player roster missing" >&2
+		exit 1
+	fi
+	if ! grep -Fxq 'SETTLEMENT_EDITOR_PLAYERS phase=register count=4 roster=Players: #1 Mayor, #2 Builder, #3 Auditor, #4 Player 4' <<<"$output"; then
+		echo "Settlement editor smoke failed: registered player roster missing" >&2
+		exit 1
+	fi
+	if ! grep -Fxq 'SETTLEMENT_EDITOR_TARGET id=2 name=Builder' <<<"$output"; then
+		echo "Settlement editor smoke failed: first target cycle missing" >&2
+		exit 1
+	fi
+	if ! grep -Fxq 'SETTLEMENT_EDITOR_TARGET id=3 name=Auditor' <<<"$output"; then
+		echo "Settlement editor smoke failed: second target cycle missing" >&2
+		exit 1
+	fi
+	if ! grep -Fxq 'SETTLEMENT_EDITOR_TARGET_EMPTY kept=3 message=1' <<<"$output"; then
+		echo "Settlement editor smoke failed: empty-registry target guard missing" >&2
+		exit 1
+	fi
+	if ! grep -Fxq 'SETTLEMENT_EDITOR_INVITE settlement=3 target=2 name=Builder members=1:owner, 2:manager' <<<"$output"; then
+		echo "Settlement editor smoke failed: name-based invite marker missing" >&2
+		exit 1
+	fi
 
 	if ! grep -Eq '^SETTLEMENT_EDITOR_STATE count=2 id=2 owned=1 owner=3 revision=8 tax=12 members=1:manager, 2:manager, 3:owner$' <<<"$output"; then
 		echo "Settlement editor smoke failed: final state marker mismatch" >&2
