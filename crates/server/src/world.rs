@@ -114,6 +114,18 @@ pub const AUDIT_CAPACITY: usize = 256;
 /// Entries returned by `audit_log` when the client omits `limit`.
 pub const AUDIT_DEFAULT_LIMIT: usize = 64;
 
+/// Advisory blueprint lock lease, in authoritative ticks.
+///
+/// A lock is live while `world.tick < expires_tick` and is dropped lazily at
+/// the start of every lock/placement operation or on an economy tick advance.
+pub const DEFAULT_BLUEPRINT_LOCK_LEASE_TICKS: u64 = 300;
+
+/// Smallest accepted blueprint lock lease, in ticks.
+pub const MIN_BLUEPRINT_LOCK_LEASE_TICKS: u64 = 1;
+
+/// Largest accepted blueprint lock lease, in ticks.
+pub const MAX_BLUEPRINT_LOCK_LEASE_TICKS: u64 = 3_600;
+
 /// Audit code recorded for an accepted command.
 pub const AUDIT_ACCEPTED: &str = "ok";
 
@@ -423,6 +435,12 @@ pub struct BlueprintLock {
     pub player: String,
     /// Authoritative tick of the last accepted lock/refresh.
     pub tick: u64,
+    /// First tick at which the lock is expired (`tick >= expires_tick`).
+    ///
+    /// Computed from the tick the lock/refresh command was evaluated at plus
+    /// the world's current lease; a refresh renews it. It is included in the
+    /// lock-table checksum but not in the world checksum.
+    pub expires_tick: u64,
 }
 
 impl BlueprintLock {
@@ -434,6 +452,7 @@ impl BlueprintLock {
             player_id: self.player_id,
             player: self.player.clone(),
             tick: self.tick,
+            expires_tick: self.expires_tick,
         }
     }
 }
@@ -590,9 +609,18 @@ pub struct ServerWorld {
     ///
     /// Keyed by canonical `blake3:<64 hex>` hash, ascending hash order. Locks
     /// are in-memory only: they are not saved, are excluded from
-    /// [`Self::checksum`], and are released when the holder disconnects. They
-    /// carry intent only and do not confer placement ownership.
+    /// [`Self::checksum`], and are released when the holder disconnects. Each
+    /// lock also carries a bounded lease ([`Self::lock_lease_ticks`]) so a
+    /// crashed or silent holder cannot block a package forever. Locks carry
+    /// intent only and do not confer placement ownership.
     pub blueprint_locks: BTreeMap<String, BlueprintLock>,
+    /// Advisory lock lease applied to new locks and refreshes, in ticks.
+    ///
+    /// Server configuration, not save data. Clamped to
+    /// [`MIN_BLUEPRINT_LOCK_LEASE_TICKS`]`..=`[`MAX_BLUEPRINT_LOCK_LEASE_TICKS`]
+    /// and excluded from [`Self::checksum`]. Defaults to
+    /// [`DEFAULT_BLUEPRINT_LOCK_LEASE_TICKS`].
+    pub lock_lease_ticks: u64,
     /// Optional pinned content-registry hash (server config, not save data).
     ///
     /// When set, every `hello` must carry this exact 64-character lowercase
@@ -702,6 +730,7 @@ impl ServerWorld {
             policies: None,
             content_hash: None,
             blueprint_locks: BTreeMap::new(),
+            lock_lease_ticks: DEFAULT_BLUEPRINT_LOCK_LEASE_TICKS,
             interest_center: [0.0, 0.0],
             interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
             paused: false,
@@ -748,6 +777,19 @@ impl ServerWorld {
     pub fn set_role(&mut self, role: ClientRole) {
         self.role = role;
         self.default_role = role;
+    }
+
+    /// Set the advisory blueprint lock lease for new locks and refreshes.
+    ///
+    /// The value is clamped to
+    /// [`MIN_BLUEPRINT_LOCK_LEASE_TICKS`]`..=`[`MAX_BLUEPRINT_LOCK_LEASE_TICKS`]:
+    /// `0` becomes 1 and values above 3,600 become 3,600. Existing locks keep
+    /// the expiry they were granted; a same-holder refresh uses the new lease.
+    pub fn set_lock_lease_ticks(&mut self, ticks: u64) {
+        self.lock_lease_ticks = ticks.clamp(
+            MIN_BLUEPRINT_LOCK_LEASE_TICKS,
+            MAX_BLUEPRINT_LOCK_LEASE_TICKS,
+        );
     }
 
     /// Pin the content-registry hash required from every `hello`.
@@ -883,6 +925,7 @@ impl ServerWorld {
             policies: None,
             content_hash: None,
             blueprint_locks: BTreeMap::new(),
+            lock_lease_ticks: DEFAULT_BLUEPRINT_LOCK_LEASE_TICKS,
             interest_center: [0.0, 0.0],
             interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
             paused: save.paused,
@@ -2070,6 +2113,7 @@ impl ServerWorld {
         z: f64,
         rotation: i32,
     ) -> (Vec<ServerMessage>, &'static str) {
+        self.expire_blueprint_locks();
         if let Err(rejection) = validate_place_blueprint(blueprint_hash, x, z, rotation) {
             return from_rejection(rejection);
         }
@@ -2443,7 +2487,24 @@ impl ServerWorld {
             .retain(|_, lock| lock.player_id != player_id.get());
     }
 
+    /// Drop every advisory lock whose lease has elapsed at the current tick.
+    ///
+    /// Expiry is lazy: this runs at the start of `blueprint_lock`,
+    /// `blueprint_unlock`, `blueprint_locks`, `place_blueprint`, and after an
+    /// economy tick advance. There is no background task. Expiring a lock is
+    /// not a command: it neither advances the tick nor emits a message, so an
+    /// expired lock simply disappears from the list and checksum and stops
+    /// blocking placement. Returns the number of drops.
+    pub fn expire_blueprint_locks(&mut self) -> usize {
+        let now = self.tick;
+        let before = self.blueprint_locks.len();
+        self.blueprint_locks
+            .retain(|_, lock| now < lock.expires_tick);
+        before - self.blueprint_locks.len()
+    }
+
     fn apply_blueprint_lock(&mut self, hash: &str) -> (Vec<ServerMessage>, &'static str) {
+        self.expire_blueprint_locks();
         let hash = match normalize_blueprint_hash(hash) {
             Ok(hash) => hash,
             Err(rejection) => return from_rejection(rejection),
@@ -2469,12 +2530,16 @@ impl ServerWorld {
             .player
             .clone()
             .unwrap_or_else(|| format!("#{}", player_id.get()));
+        // The lease starts at the tick the command was evaluated at; the
+        // acceptance below advances the world tick.
+        let expires_tick = self.tick.saturating_add(self.lock_lease_ticks);
         self.tick = self.tick.saturating_add(1);
         let lock = BlueprintLock {
             hash: hash.clone(),
             player_id: player_id.get(),
             player,
             tick: self.tick,
+            expires_tick,
         };
         self.blueprint_locks.insert(hash, lock.clone());
         self.refresh_checksum();
@@ -2487,6 +2552,7 @@ impl ServerWorld {
     }
 
     fn apply_blueprint_unlock(&mut self, hash: &str) -> (Vec<ServerMessage>, &'static str) {
+        self.expire_blueprint_locks();
         let hash = match normalize_blueprint_hash(hash) {
             Ok(hash) => hash,
             Err(rejection) => return from_rejection(rejection),
@@ -2519,7 +2585,8 @@ impl ServerWorld {
         })
     }
 
-    fn apply_blueprint_locks(&self) -> (Vec<ServerMessage>, &'static str) {
+    fn apply_blueprint_locks(&mut self) -> (Vec<ServerMessage>, &'static str) {
+        self.expire_blueprint_locks();
         accepted(ServerMessage::BlueprintLockList {
             tick: self.tick,
             count: self.blueprint_locks.len(),
@@ -2533,14 +2600,23 @@ impl ServerWorld {
     }
 
     /// Stable checksum of the advisory lock table, independent of map hashing.
+    ///
+    /// Expired entries are skipped even if a caller has not run
+    /// [`Self::expire_blueprint_locks`], so the checksum always describes the
+    /// live table at [`Self::tick`].
     #[must_use]
     pub fn blueprint_locks_checksum(&self) -> String {
         let mut hash = FNV_OFFSET;
-        for lock in self.blueprint_locks.values() {
+        for lock in self
+            .blueprint_locks
+            .values()
+            .filter(|lock| self.tick < lock.expires_tick)
+        {
             hash = fnv_update(hash, lock.hash.as_bytes());
             hash = fnv_update(hash, &[0x1f]);
             hash = fnv_update(hash, &lock.player_id.to_le_bytes());
             hash = fnv_update(hash, &lock.tick.to_le_bytes());
+            hash = fnv_update(hash, &lock.expires_tick.to_le_bytes());
         }
         format!("{hash:016x}")
     }
@@ -3067,6 +3143,7 @@ impl ServerWorld {
             0,
         );
         self.tick = self.tick.saturating_add(1);
+        self.expire_blueprint_locks();
         let now = self.rate_clock_ms();
         self.rate.refill(now);
         self.refresh_checksum();
@@ -6571,6 +6648,182 @@ mod tests {
         assert!(
             world.blueprint_locks.is_empty(),
             "disconnect releases every lock held by the player"
+        );
+    }
+
+    #[test]
+    fn blueprint_lock_lease_expires_lazily_and_frees_placement() {
+        let dir = PlacementTempDir::new("lock-lease-expiry");
+        let hash = write_test_package(&dir, "townsmith:lease_expiry", 100.0, None);
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Mayor);
+        world.set_blueprint_library(dir.library()).expect("library");
+
+        let alice = world.open_connection();
+        assert!(matches!(
+            world.apply_session(alice, &hello_named("alice")).as_slice(),
+            [ServerMessage::Welcome { .. }]
+        ));
+        let bob = world.open_connection();
+        assert!(matches!(
+            world.apply_session(bob, &hello_named("bob")).as_slice(),
+            [ServerMessage::Welcome { .. }]
+        ));
+        assert_eq!(world.tick, 0, "hello does not advance the tick");
+
+        let locked = world.apply_session(alice, &lock_command(&hash));
+        let checksum = match &locked[0] {
+            ServerMessage::BlueprintLockResult {
+                tick,
+                lock,
+                locks_count,
+                checksum,
+            } => {
+                assert_eq!(*tick, 1);
+                assert_eq!(*locks_count, 1);
+                assert_eq!(lock.tick, 1);
+                assert_eq!(lock.expires_tick, 300, "evaluation tick 0 + lease 300");
+                checksum.clone()
+            }
+            other => panic!("expected lock result, got {other:?}"),
+        };
+
+        world.tick = 299;
+        let listed = world.apply_session(alice, &ClientCommand::BlueprintLocks);
+        match &listed[0] {
+            ServerMessage::BlueprintLockList {
+                tick,
+                count,
+                checksum: list_checksum,
+                locks,
+            } => {
+                assert_eq!(*tick, 299);
+                assert_eq!(*count, 1);
+                assert_eq!(list_checksum, &checksum, "live lock keeps the checksum");
+                assert_eq!(locks.len(), 1);
+            }
+            other => panic!("expected lock list, got {other:?}"),
+        }
+        let before = placement_state(&world);
+        let denied = world.apply_session(bob, &place(&hash, 0.0, 0.0, 0));
+        assert_eq!(rejection_code(&denied[0]), "blueprint.locked");
+        assert_eq!(placement_state(&world), before, "denial mutates nothing");
+
+        world.tick = 300;
+        let expired_list = world.apply_session(alice, &ClientCommand::BlueprintLocks);
+        match &expired_list[0] {
+            ServerMessage::BlueprintLockList {
+                tick,
+                count,
+                checksum: empty_checksum,
+                locks,
+            } => {
+                assert_eq!(*tick, 300);
+                assert_eq!(*count, 0);
+                assert!(locks.is_empty());
+                assert_ne!(empty_checksum, &checksum);
+            }
+            other => panic!("expected lock list, got {other:?}"),
+        }
+        assert!(
+            world.blueprint_locks.is_empty(),
+            "the list request drops the expired lock"
+        );
+        assert_eq!(
+            rejection_code(&world.apply_session(alice, &unlock_command(&hash))[0]),
+            "blueprint.lock_unknown",
+            "expired locks cannot be unlocked"
+        );
+
+        let accepted = world.apply_session(bob, &place(&hash, 0.0, 0.0, 0));
+        expect_placement_result(&accepted[0]);
+    }
+
+    #[test]
+    fn blueprint_lock_refresh_renews_the_lease() {
+        let dir = PlacementTempDir::new("lock-lease-refresh");
+        let hash = write_test_package(&dir, "townsmith:lease_refresh", 100.0, None);
+        let mut world = world_with_hello();
+
+        world.apply(&lock_command(&hash));
+        world.tick = 200;
+        let refreshed = world.apply(&lock_command(&hash));
+        match &refreshed {
+            ServerMessage::BlueprintLockResult { tick, lock, .. } => {
+                assert_eq!(*tick, 201);
+                assert_eq!(lock.tick, 201);
+                assert_eq!(lock.expires_tick, 500, "evaluation tick 200 + lease 300");
+            }
+            other => panic!("expected refresh, got {other:?}"),
+        }
+
+        world.tick = 499;
+        match &world.apply(&ClientCommand::BlueprintLocks) {
+            ServerMessage::BlueprintLockList { count, locks, .. } => {
+                assert_eq!(*count, 1);
+                assert_eq!(locks[0].expires_tick, 500);
+            }
+            other => panic!("expected lock list, got {other:?}"),
+        }
+        world.tick = 500;
+        match &world.apply(&ClientCommand::BlueprintLocks) {
+            ServerMessage::BlueprintLockList { count, locks, .. } => {
+                assert_eq!(*count, 0);
+                assert!(locks.is_empty());
+            }
+            other => panic!("expected lock list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn blueprint_lock_lease_is_clamped_and_expires_the_checksum() {
+        let dir = PlacementTempDir::new("lock-lease-clamp");
+        let hash = write_test_package(&dir, "townsmith:lease_clamp", 100.0, None);
+        let mut world = world_with_hello();
+        let empty_checksum = world.blueprint_locks_checksum();
+
+        world.set_lock_lease_ticks(0);
+        assert_eq!(world.lock_lease_ticks, MIN_BLUEPRINT_LOCK_LEASE_TICKS);
+        world.set_lock_lease_ticks(3_601);
+        assert_eq!(world.lock_lease_ticks, MAX_BLUEPRINT_LOCK_LEASE_TICKS);
+        world.set_lock_lease_ticks(1_200);
+        assert_eq!(world.lock_lease_ticks, 1_200);
+
+        world.set_lock_lease_ticks(0);
+        let locked = world.apply(&lock_command(&hash));
+        match &locked {
+            ServerMessage::BlueprintLockResult { lock, .. } => {
+                assert_eq!(lock.expires_tick, 1);
+            }
+            other => panic!("expected lock result, got {other:?}"),
+        }
+
+        world.tick = 1;
+        assert_eq!(
+            world.blueprint_locks_checksum(),
+            empty_checksum,
+            "an expired lock is excluded from the checksum before cleanup"
+        );
+        assert_eq!(
+            world.blueprint_locks.len(),
+            1,
+            "lazy expiry only on command"
+        );
+        assert_eq!(world.expire_blueprint_locks(), 1);
+        assert!(world.blueprint_locks.is_empty());
+    }
+
+    #[test]
+    fn blueprint_lock_disconnect_release_still_applies_with_a_lease() {
+        let dir = PlacementTempDir::new("lock-lease-disconnect");
+        let hash = write_test_package(&dir, "townsmith:lease_disconnect", 100.0, None);
+        let mut world = world_with_hello();
+
+        world.apply(&lock_command(&hash));
+        assert_eq!(world.blueprint_locks.len(), 1);
+        world.apply(&ClientCommand::Disconnect);
+        assert!(
+            world.blueprint_locks.is_empty(),
+            "disconnect still releases an unexpired leased lock"
         );
     }
 
