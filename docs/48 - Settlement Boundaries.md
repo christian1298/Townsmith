@@ -2,7 +2,7 @@
 title: Settlement Boundaries
 project: Townsmith
 status: active
-updated: 2026-11-24
+updated: 2026-11-25
 tags:
   - townsmith
   - phase-2
@@ -189,6 +189,7 @@ There are no bridge mutation methods for membership, claim, transfer, or removal
 
 - The dashboard's read-only Settlements section lists every record in ascending id order and selects one with `PageUp` / `PageDown` (or clears it through the leading `none` entry). The selection drives the dashboard's 256 m district query, containing-policy scan, and `F7` heatmap centre until cleared; `F6` building focus yields to it. While a record is selected, a read-only detail block under the list repeats its name, owner, id, centre, radius, the same 256 m district metrics (population, housing, vacancies, jobs, employed/unemployed, happiness, food/water/rest, commute, completed buildings, construction sites), and the smallest-id containing policy (name, tax, funding, construction flag, allowlist count). It uses only the existing `settlements()`, `district_summary`, and `district_policies_state` reads; it cannot mutate a settlement or policy. See [[57 - Dashboard and Advisor]] §5.2.
 - Save/load rebuilds rings and labels from the store; the dashboard revalidates a selected id after load and falls back to no settlement when it no longer exists.
+- The standalone read-only district overview (`godot/district_panel.gd`, [[57 - Dashboard and Advisor]] §4.3) shows each settlement's whole-percent `tax_rate` as `tax N%` in the list row, the selected identity line, and the membership summary (after the revision, e.g. `Unowned · revision 0 · tax 0%`). It stays display-only: no tax control, bridge mutation, or permission check is added, and no treasury or district-policy calculation collects the rate yet.
 - The dashboard selector and detail block are read-only. D-033's core model now defines membership and permission-gated actions, and `settlements()` exposes the read-only owner/member fields, but no role display, invite, rename, transfer, claim, or remove control exists yet.
 
 The ring is a developer overlay, not final art. It samples every segment endpoint with `world_height_at`; a segment can clip a very steep slope between endpoints.

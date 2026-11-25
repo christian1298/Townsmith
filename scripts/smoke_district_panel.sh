@@ -31,6 +31,7 @@ trap 'rm -rf "$SMOKE_DIR"' EXIT
 
 PANEL_CONTRACT='^DISTRICT_PANEL\ status=ok\ settlements=2\ selected=1\ population=0\ policy=1\ checksum=[0-9a-f]{8}$'
 EMPTY_CONTRACT='^DISTRICT_PANEL\ status=ok\ settlements=0\ selected=none\ population=0\ policy=none\ checksum=[0-9a-f]{8}$'
+TAX_CONTRACT='^DISTRICT_TAX\ alpha=0%\ beta=0%\ selected=0%$'
 
 run_panel() {
 	local mode="$1"
@@ -66,7 +67,20 @@ run_panel() {
 		exit 1
 	fi
 
-	grep '^DISTRICT_PANEL' <<<"$output" | grep -v '^DISTRICT_PANEL status=' >"$log" || true
+	if [[ "$mode" == "--smoke" ]]; then
+		local tax_marker
+		tax_marker="$(grep '^DISTRICT_TAX ' <<<"$output" | tail -1 || true)"
+		if [[ -z "$tax_marker" ]]; then
+			echo "District panel smoke failed ($mode): no DISTRICT_TAX marker" >&2
+			exit 1
+		fi
+		if [[ ! "$tax_marker" =~ $TAX_CONTRACT ]]; then
+			echo "District panel smoke tax contract mismatch ($mode): $tax_marker" >&2
+			exit 1
+		fi
+	fi
+
+	grep -E '^DISTRICT_PANEL|^DISTRICT_TAX' <<<"$output" | grep -v '^DISTRICT_PANEL status=' >"$log" || true
 	printf '%s\n' "$marker" >"$marker_file"
 }
 
