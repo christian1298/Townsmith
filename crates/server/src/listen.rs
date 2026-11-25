@@ -22,6 +22,10 @@ use crate::protocol::{
 use crate::save::{temp_path, SaveReport};
 use crate::world::ServerWorld;
 
+// Bounded per-connection outbound queue for the future concurrent listener and
+// chat push. Not wired into `serve_io` yet.
+mod outbound;
+
 /// Options for one listen run.
 #[derive(Debug, Clone, Default)]
 pub struct ListenConfig {
