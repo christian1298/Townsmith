@@ -60,6 +60,16 @@ fn has_flag(name: &str) -> bool {
     std::env::args().any(|argument| argument == name)
 }
 
+/// Whether `--retain-locks` appears in the supplied argument list.
+///
+/// This is a presence flag, never a key/value pair, so it does not consume the
+/// next argument. It is process configuration applied to the in-memory world
+/// after any load; it is not a [`townsmith_server::save::ServerSave`] field and
+/// therefore does not survive a restart.
+fn retain_locks_requested(args: &[String]) -> bool {
+    args.iter().any(|argument| argument == "--retain-locks")
+}
+
 fn percentile(samples: &[f64], fraction: f64) -> f64 {
     if samples.is_empty() {
         return 0.0;
@@ -361,6 +371,10 @@ fn run_listen_mode(port: &str) {
 
     let mut world = world;
     world.set_role(role);
+    // Apply the CLI retention choice after any load so a loaded world follows
+    // the process, not the save: the flag is not persisted.
+    let retain_locks = retain_locks_requested(&std::env::args().collect::<Vec<_>>());
+    world.set_retain_locks_on_disconnect(retain_locks);
     if let Some(hash) = arg_value("--content-hash") {
         if let Err(error) = world.set_content_hash(Some(&hash)) {
             eprintln!(
@@ -387,6 +401,10 @@ fn run_listen_mode(port: &str) {
         }
     };
 
+    println!(
+        "SERVER_LOCKS retention={}",
+        if retain_locks { "on" } else { "off" }
+    );
     println!(
         "SERVER_LISTEN status=ok address={address} seed={} tick={} checksum={} role={} save={} autosave_ticks={} sessions={}",
         world.seed,
@@ -548,4 +566,58 @@ fn run_harness() {
         sim.average_happiness(),
         sim.average_need()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn retain_locks_flag_parses_present_and_absent() {
+        assert!(!retain_locks_requested(&args(&["--listen", "0", "--once"])));
+        assert!(retain_locks_requested(&args(&["--retain-locks"])));
+        assert!(retain_locks_requested(&args(&[
+            "--listen",
+            "0",
+            "--retain-locks",
+            "--once",
+        ])));
+        assert!(
+            !retain_locks_requested(&args(&["--retain-locks=false"])),
+            "the flag has no value form"
+        );
+    }
+
+    #[test]
+    fn retain_locks_flag_does_not_consume_the_next_argument() {
+        let parsed = args(&["--retain-locks", "--once"]);
+        assert!(retain_locks_requested(&parsed));
+        assert!(
+            parsed.iter().any(|argument| argument == "--once"),
+            "a presence flag must leave the following argument in place"
+        );
+    }
+
+    #[test]
+    fn retain_locks_flag_is_process_state_only() {
+        let mut world = ServerWorld::new(LOOPBACK_SEED);
+        let checksum = world.checksum();
+        assert!(!world.retain_locks_on_disconnect, "off by default");
+
+        world.set_retain_locks_on_disconnect(retain_locks_requested(&args(&[
+            "--listen",
+            "0",
+            "--retain-locks",
+        ])));
+        assert!(world.retain_locks_on_disconnect);
+        assert_eq!(
+            world.checksum(),
+            checksum,
+            "the retention flag stays outside the world checksum"
+        );
+    }
 }
