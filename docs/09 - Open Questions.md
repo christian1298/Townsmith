@@ -269,6 +269,47 @@ These support D-040 (Proposed, 2026-11-25) and [[82 - Journal and Rollback]]. Th
 **Recommendation:** keep rollback Admin-only and two-step; require a second confirmation for a multi-player server, not a player vote. Record the authorization mode in the journal and audit entry.
 **Status:** Open
 
+## Remote transport and authentication questions
+
+These support D-041 (Proposed, 2026-11-25) and [[83 - Remote Transport and Authentication]]. The current listener is loopback-only and plaintext; the resume token is seed-derived and is not authentication (F-039). Nothing in this section is implemented.
+
+### Q-125 — Launch account provider
+
+**Priority:** High · **Affects:** D-041, [[05 - Multiplayer]], [[12 - Technical Architecture]], [[78 - Code Audit Findings]], [[83 - Remote Transport and Authentication]]
+
+**Question:** Which account provider ships at launch, and is a local account file enough for self-hosted servers?
+
+**Why it matters:** The provider decides whether a dedicated server can run without a third-party service, how accounts are provisioned and recovered, and whether `AccountId` is portable across saves and servers. It also decides whether Steam becomes a hard launch dependency.
+
+**Options**
+- **Local account file only:** operator-provisioned `{account_id, argon2id, display_name}` records; works offline and on DRM-free servers; no recovery flow beyond an operator reset.
+- **Steam identity first:** familiar login and friend graph; excludes non-Steam servers and makes Valve availability part of the join path.
+- **Both from day one:** best coverage, but two providers, two test matrices, and a UI that must explain the choice.
+- **Operator token / console only:** fine for a trusted LAN, not a remote co-op product.
+
+**Current assumption:** local account file first; Steam is the first later provider behind the same `AccountProvider` abstraction; no OAuth at launch.
+**Recommendation:** ship the local provider and keep provider selection a config choice. Add Steam after the transport contract is stable; do not make it the only way to join. A first authenticated join may create the account link, but account creation stays operator-controlled in v1.
+**Status:** Open
+
+### Q-126 — Token lifetime, renewal, and TLS termination
+
+**Priority:** High · **Affects:** D-041, [[05 - Multiplayer]], [[12 - Technical Architecture]], [[83 - Remote Transport and Authentication]]
+
+**Question:** What are the session-token lifetime and renewal rules, and does TLS terminate inside the server process or at a proxy?
+
+**Why it matters:** Token lifetime bounds the damage from a leaked token and the frequency of re-login. Rotation rules decide whether a lost response locks a player out. TLS termination decides whether channel binding is available or the process must trust a proxy header.
+
+**Options**
+- **In-process rustls, 24 h absolute token, rotate on every resume, reuse revokes the family:** simplest trust model and the strongest binding; a lost rotation response forces re-authentication.
+- **Short access token (15 min) plus a longer refresh token:** standard web shape; more moving parts and a second secret for a game session.
+- **Process-lifetime token with no rotation:** fewest reconnects; a leak lasts until restart or manual revocation.
+- **Proxy termination with a trusted header and binding disabled:** familiar ops and certificate automation; the process cannot distinguish a replayed token from a legitimate proxy-forwarded one without extra work.
+- **Proxy termination with a passthrough TLS exporter:** keeps binding, but requires proxy support and careful configuration.
+
+**Current assumption:** rustls in-process; 24 h absolute expiry; rotate on every resume; a stale generation revokes the family; failure codes `auth.expired` and `resume.revoked`. Proxy termination is opt-in only.
+**Recommendation:** keep TLS in-process by default and enforce server-side expiry with no client-clock input. Measure reconnect friction before lengthening the token; do not add a refresh-token family until a real deployment needs it. If a proxy is supported, require an explicit trusted-proxy address and document that channel binding is disabled in that mode.
+**Status:** Open
+
 ## Construction questions
 
 | ID | Question | Current assumption / recommendation | Priority |
@@ -431,3 +472,4 @@ These support D-040 (Proposed, 2026-11-25) and [[82 - Journal and Rollback]]. Th
 | Q-119–Q-120 | Authoritative placed-blueprint voxel edits (D-038 proposed) |
 | Q-121–Q-122 | Settlement tax composition and collection (D-039 proposed) |
 | Q-123–Q-124 | Authoritative command journal and Admin rollback (D-040 proposed) |
+| Q-125–Q-126 | Remote transport and authentication (D-041 proposed) |
