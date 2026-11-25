@@ -32,7 +32,7 @@ fi
 if [[ "$LINE" != *"rooms=4"* || "$LINE" != *"preview=ok"* || "$LINE" != *"water=ok"* || "$LINE" != *"rotate=ok"* || "$LINE" != *"edits=ok"* || "$LINE" != *"chunk_cells=ok"* || "$LINE" != *"place=ok"* || "$LINE" != *"roads=ok"* || "$LINE" != *"lots=ok"* || "$LINE" != *"settlements=ok"* || "$LINE" != *"build=ok"* || "$LINE" != *"done=ok"* || "$LINE" != *"trades=ok"* || "$LINE" != *"render=ok"* || "$LINE" != *"structure=ok"* || "$LINE" != *"age=ok"* || "$LINE" != *"research=ok"* || "$LINE" != *"tutorial=ok"* || "$LINE" != *"starter=ok"* || "$LINE" != *"named=ok"* || "$LINE" != *"citizens=ok"*
 		|| "$LINE" != *"citizen_rows=ok"*
 		|| "$LINE" != *"content_i18n=ok"* || "$LINE" != *"content_ui=ok"* || "$LINE" != *"follow=ok"* || "$LINE" != *"citizen_i18n=ok"* || "$LINE" != *"materialization=ok"* || "$LINE" != *"materialization_step=ok"* || "$LINE" != *"materialization_fade=ok"* || "$LINE" != *"movement_scene=ok"* || "$LINE" != *"movement_pool=ok"*
-		|| "$LINE" != *"movement_routes=ok"* || "$LINE" != *"movement_lod=ok"* || "$LINE" != *"occupancy=ok"* || "$LINE" != *"industry=ok"* || "$LINE" != *"utilities=ok"* || "$LINE" != *"services=ok"* || "$LINE" != *"economy=ok"* || "$LINE" != *"dashboard=ok"* || "$LINE" != *"district_ui=ok"* || "$LINE" != *"policy_ui=ok"* || "$LINE" != *"policy_edit=ok"* || "$LINE" != *"district_select=ok"* || "$LINE" != *"settlement_select=ok"* || "$LINE" != *"settlement_detail=ok"* || "$LINE" != *"dashboard_tax=ok"* || "$LINE" != *"dashboard_claim=ok"* || "$LINE" != *"heatmap_ui=ok"* || "$LINE" != *"heatmap_modes=ok"*
+		|| "$LINE" != *"movement_routes=ok"* || "$LINE" != *"movement_lod=ok"* || "$LINE" != *"occupancy=ok"* || "$LINE" != *"industry=ok"* || "$LINE" != *"utilities=ok"* || "$LINE" != *"services=ok"* || "$LINE" != *"economy=ok"* || "$LINE" != *"dashboard=ok"* || "$LINE" != *"district_ui=ok"* || "$LINE" != *"policy_ui=ok"* || "$LINE" != *"policy_edit=ok"* || "$LINE" != *"district_select=ok"* || "$LINE" != *"settlement_select=ok"* || "$LINE" != *"settlement_detail=ok"* || "$LINE" != *"dashboard_tax=ok"* || "$LINE" != *"dashboard_claim=ok"* || "$LINE" != *"dashboard_transfer=ok"* || "$LINE" != *"heatmap_ui=ok"* || "$LINE" != *"heatmap_modes=ok"*
 		|| "$LINE" != *"hud_i18n=ok"* || "$LINE" != *"hud_body_i18n=ok"* || "$LINE" != *"hud_status_i18n=ok"* || "$LINE" != *"dashboard_body_i18n=ok"*
 		|| "$LINE" != *"advisor_i18n=ok"*
 		|| "$LINE" != *"advisor_detail_i18n=ok"* || "$LINE" != *"modal_i18n=ok"*
@@ -60,5 +60,15 @@ if [[ -z "$CLAIM_LINE" ]]; then
 fi
 if [[ ! "$CLAIM_LINE" =~ DASHBOARD_CLAIM\ status=ok\ id=[0-9]+\ player=[0-9]+\ revision=0-\>1\ owned=[0-9]+\ second=rejected\ hidden=untouched\ checksum=[0-9a-f]{16} ]]; then
 	echo "World scene smoke claim contract mismatch: $CLAIM_LINE" >&2
+	exit 1
+fi
+
+TRANSFER_LINE="$(grep "DASHBOARD_TRANSFER " <<<"$OUTPUT" | tail -1 || true)"
+if [[ -z "$TRANSFER_LINE" ]]; then
+	echo "World scene smoke failed: no DASHBOARD_TRANSFER marker" >&2
+	exit 1
+fi
+if [[ ! "$TRANSFER_LINE" =~ DASHBOARD_TRANSFER\ status=ok\ id=[0-9]+\ from=[0-9]+\ to=[0-9]+\ revision=[0-9]+-\>[0-9]+\ back=[0-9]+ ]]; then
+	echo "World scene smoke transfer contract mismatch: $TRANSFER_LINE" >&2
 	exit 1
 fi

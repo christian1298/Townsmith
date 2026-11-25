@@ -579,7 +579,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				KEY_L:
 					_borrow()
 				KEY_Y:
-					_research_next()
+					if event.shift_pressed and dashboard_visible:
+						if selected_settlement_id >= 0:
+							_transfer_selected_settlement()
+					else:
+						_research_next()
 				KEY_V:
 					core.construction_add_materials(10000)
 					_update_hud()
@@ -3634,6 +3638,98 @@ func _claim_selected_settlement() -> bool:
 	_update_hud()
 	return true
 
+## Shift+Y: transfer the selected owned settlement to a deterministic local
+## recipient. Only the Settlements section writes here. The key is gated by
+## the dashboard and a valid selection. The local roster ensures "Mayor" is
+## registered, then uses the lowest registered id that is not the current
+## owner; when no other id exists it registers "Builder" once and retries.
+## The record's current membership revision is sent as the optimistic check.
+## Success refreshes the list/detail in place (same selected id) and reports
+## the old owner, new owner, and revision. A bridge failure shows the stable
+## code and leaves the selection, dashboard text, and store untouched.
+## Returns the bridge-shaped result so the smoke can call it without a key.
+func _transfer_selected_settlement() -> Dictionary:
+	var settlement := _selected_settlement()
+	if settlement.is_empty():
+		return {"ok": false, "error_code": "settlement.unknown", "error": ""}
+	var id := int(settlement.get("id", -1))
+	if id < 0:
+		return {"ok": false, "error_code": "settlement.unknown", "error": ""}
+	if not bool(settlement.get("owned", false)):
+		_set_modal(i18n.t("base.ui.dashboard.settlement_transfer.unowned", {
+			"id": i18n.format_int(id),
+		}), true)
+		_update_hud()
+		return {"ok": false, "error_code": "settlement.unowned", "error": "", "id": id}
+	var owner_value = settlement.get("owner_id", null)
+	var owner_id := int(owner_value) if owner_value != null else -1
+	var mayor := _mayor_player_id()
+	if mayor <= 0:
+		return {"ok": false, "error_code": "player.invalid_id", "error": "", "id": id}
+	var recipient := _transfer_recipient(owner_id)
+	if recipient <= 0:
+		_set_modal(i18n.t("base.ui.dashboard.settlement_transfer.no_recipient", {
+			"id": i18n.format_int(id),
+		}), true)
+		_update_hud()
+		return {"ok": false, "error_code": "settlement.no_recipient", "error": "", "id": id}
+	var revision := int(settlement.get("membership_revision", 0))
+	var result: Dictionary = core.settlement_transfer(id, recipient, revision)
+	if not bool(result.get("ok", false)):
+		_set_modal(i18n.t("base.ui.dashboard.settlement_transfer.failed", {
+			"code": str(result.get("error_code", "unknown")),
+			"message": str(result.get("error", "")),
+		}), true)
+		_update_hud()
+		return result
+	var updated: Dictionary = result.get("settlement", {})
+	var owner_after_value = updated.get("owner_id", recipient)
+	var owner_after := int(owner_after_value) if owner_after_value != null else recipient
+	var revision_after := int(updated.get("membership_revision", revision + 1))
+	_set_modal(i18n.t("base.ui.dashboard.settlement_transfer.success", {
+		"id": i18n.format_int(id),
+		"from": i18n.format_int(owner_id),
+		"to": i18n.format_int(owner_after),
+		"revision": i18n.format_int(revision_after),
+	}), false)
+	dashboard_refresh_accum = 0.0
+	_update_dashboard()
+	_update_hud()
+	result["id"] = id
+	result["from"] = owner_id
+	result["to"] = owner_after
+	result["revision"] = revision_after
+	return result
+
+## Lowest registered local player id that is not `owner_id`. The roster
+## registers "Mayor" first and "Builder" only when no other id exists yet.
+func _transfer_recipient(owner_id: int) -> int:
+	if _mayor_player_id() <= 0:
+		return -1
+	var recipient := _lowest_other_player(owner_id)
+	if recipient > 0:
+		return recipient
+	var registered: Dictionary = core.players_register("Builder")
+	if not bool(registered.get("ok", false)):
+		return -1
+	return _lowest_other_player(owner_id)
+
+## Lowest positive registered id different from `owner_id`; -1 when the
+## registry cannot be read or has no other player.
+func _lowest_other_player(owner_id: int) -> int:
+	var listed: Dictionary = core.players_list()
+	if not bool(listed.get("ok", false)):
+		return -1
+	var players_value = listed.get("players", [])
+	var players: Array = players_value if players_value is Array else []
+	var lowest := -1
+	for entry in players:
+		if entry is Dictionary:
+			var candidate := int(entry.get("id", -1))
+			if candidate > 0 and candidate != owner_id and (lowest < 0 or candidate < lowest):
+				lowest = candidate
+	return lowest
+
 ## Register the local developer player once and cache the stable bridge id.
 ## A failed registration shows the localized code/message and leaves the cache
 ## unset so the next attempt retries.
@@ -4774,6 +4870,7 @@ func _run_scene_smoke() -> void:
 	var settlement_detail_ok := false
 	var dashboard_tax_ok := false
 	var dashboard_claim_ok := false
+	var dashboard_transfer_ok := false
 	var heatmap_ui_ok := false
 	var heatmap_modes_ok := false
 	var advisor_i18n_ok := false
@@ -6318,6 +6415,87 @@ func _run_scene_smoke() -> void:
 					int(_selected_settlement().get("owner_id", -1)),
 					claim_checksum_after,
 				])
+
+				# Shift+Y: transfer the claimed record to a deterministic local
+				# recipient, then back. The old owner remains as Manager; stale
+				# revisions and unowned records are rejected without drift.
+				var transfer_builder: Dictionary = core.players_register("Builder")
+				var builder_id := int(transfer_builder.get("player", {}).get("id", -1))
+				dashboard_transfer_ok = bool(transfer_builder.get("ok", false)) and builder_id > 0
+				dashboard_transfer_ok = dashboard_transfer_ok and _select_settlement(claim_id)
+				var transfer_before := _selected_settlement()
+				var transfer_revision := int(transfer_before.get("membership_revision", -1))
+				_set_modal("", false)
+				var transfer_result: Dictionary = _transfer_selected_settlement()
+				var transfer_after := _selected_settlement()
+				dashboard_transfer_ok = dashboard_transfer_ok and bool(transfer_result.get("ok", false))
+				dashboard_transfer_ok = dashboard_transfer_ok and int(transfer_result.get("from", -1)) == claim_player_id
+				dashboard_transfer_ok = dashboard_transfer_ok and int(transfer_result.get("to", -1)) == builder_id
+				dashboard_transfer_ok = dashboard_transfer_ok and int(transfer_after.get("owner_id", -1)) == builder_id
+				dashboard_transfer_ok = dashboard_transfer_ok and int(transfer_after.get("membership_revision", -1)) == transfer_revision + 1
+				dashboard_transfer_ok = dashboard_transfer_ok and selected_settlement_id == claim_id
+				dashboard_transfer_ok = dashboard_transfer_ok and modal_label.text == i18n.t(
+					"base.ui.dashboard.settlement_transfer.success",
+					{
+						"id": i18n.format_int(claim_id),
+						"from": i18n.format_int(claim_player_id),
+						"to": i18n.format_int(builder_id),
+						"revision": i18n.format_int(transfer_revision + 1),
+					}
+				)
+				var old_owner_member := false
+				for member in transfer_after.get("members", []):
+					if int(member.get("player", -1)) == claim_player_id and str(member.get("role", "")) == "manager":
+						old_owner_member = true
+				dashboard_transfer_ok = dashboard_transfer_ok and old_owner_member
+				var transfer_checksum := str(core.settlement_checksum())
+				# The real Shift+Y path transfers back to the lowest other id.
+				_set_modal("", false)
+				_smoke_press_key(KEY_Y, true)
+				var transfer_back := _selected_settlement()
+				dashboard_transfer_ok = dashboard_transfer_ok and int(transfer_back.get("owner_id", -1)) == claim_player_id
+				dashboard_transfer_ok = dashboard_transfer_ok and int(transfer_back.get("membership_revision", -1)) == transfer_revision + 2
+				dashboard_transfer_ok = dashboard_transfer_ok and modal_label.text == i18n.t(
+					"base.ui.dashboard.settlement_transfer.success",
+					{
+						"id": i18n.format_int(claim_id),
+						"from": i18n.format_int(builder_id),
+						"to": i18n.format_int(claim_player_id),
+						"revision": i18n.format_int(transfer_revision + 2),
+					}
+				)
+				# A stale direct bridge call must not mutate the store.
+				var transfer_repeat_checksum := str(core.settlement_checksum())
+				var stale_transfer: Dictionary = core.settlement_transfer(
+					claim_id, builder_id, transfer_revision
+				)
+				dashboard_transfer_ok = dashboard_transfer_ok and not bool(stale_transfer.get("ok", true))
+				dashboard_transfer_ok = dashboard_transfer_ok and str(stale_transfer.get("error_code", "")) == "settlement.revision_conflict"
+				dashboard_transfer_ok = dashboard_transfer_ok and str(core.settlement_checksum()) == transfer_repeat_checksum
+				# Unowned selection: localized rejection, no bridge mutation.
+				dashboard_transfer_ok = dashboard_transfer_ok and _select_settlement(hidden_id)
+				var transfer_unowned_checksum := str(core.settlement_checksum())
+				_set_modal("", false)
+				var unowned_transfer: Dictionary = _transfer_selected_settlement()
+				dashboard_transfer_ok = dashboard_transfer_ok and not bool(unowned_transfer.get("ok", true))
+				dashboard_transfer_ok = dashboard_transfer_ok and str(unowned_transfer.get("error_code", "")) == "settlement.unowned"
+				dashboard_transfer_ok = dashboard_transfer_ok and modal_label.text == i18n.t(
+					"base.ui.dashboard.settlement_transfer.unowned",
+					{"id": i18n.format_int(hidden_id)}
+				)
+				dashboard_transfer_ok = dashboard_transfer_ok and str(core.settlement_checksum()) == transfer_unowned_checksum
+				print("DASHBOARD_TRANSFER status=%s id=%d from=%d to=%d revision=%d->%d back=%d stale=rejected unowned=rejected checksum=%s" % [
+					"ok" if dashboard_transfer_ok else "failed",
+					claim_id,
+					claim_player_id,
+					builder_id,
+					transfer_revision,
+					int(transfer_after.get("membership_revision", -1)),
+					int(transfer_back.get("membership_revision", -1)),
+					transfer_checksum,
+				])
+				_select_settlement(first_settlement_id)
+				_update_dashboard()
 				_toggle_dashboard()
 				dashboard_ok = dashboard_ok and not dashboard_panel.visible
 				var heatmap_checksum := ""
@@ -6946,10 +7124,13 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and not dashboard_claim_ok:
 		status = "dashboard_claim_failed"
 
+	if status == "ok" and not dashboard_transfer_ok:
+		status = "dashboard_transfer_failed"
+
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s policy_edit=%s district_select=%s settlement_select=%s settlement_detail=%s dashboard_tax=%s dashboard_claim=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s policy_edit=%s district_select=%s settlement_select=%s settlement_detail=%s dashboard_tax=%s dashboard_claim=%s dashboard_transfer=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -6997,6 +7178,7 @@ func _run_scene_smoke() -> void:
 		"ok" if settlement_detail_ok else "failed",
 		"ok" if dashboard_tax_ok else "failed",
 		"ok" if dashboard_claim_ok else "failed",
+		"ok" if dashboard_transfer_ok else "failed",
 		"ok" if heatmap_ui_ok else "failed",
 		"ok" if heatmap_modes_ok else "failed",
 		"ok" if hud_i18n_ok else "failed",
