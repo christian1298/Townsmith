@@ -47,18 +47,18 @@ const JOIN_DEADLINE: Duration = Duration::from_secs(20);
 
 /// Waves of chat senders used to fill a non-reading peer's transport buffers.
 ///
-/// One wave is eight fresh sessions that each spend their post-hello burst of
-/// 40 chats. That is 320 accepted lines per wave and 16,000 frames in total,
+/// One wave is six fresh sessions that each spend their post-hello burst of
+/// 40 chats. That is 240 accepted lines per wave and 12,000 frames in total,
 /// well past the largest default Linux TCP send/receive window plus the
 /// 256-frame outbound queue, so the slow peer's queue is guaranteed to reject a
 /// push instead of depending on a single machine's buffer autotuning. Sender
 /// names are reused across waves, so the registry stays small.
 const WAVES: u64 = 50;
 
-/// Chat senders per wave. Eight keeps each sender above the 256-frame queue
-/// but still drains while the test reads: it receives its own 40 responses
-/// plus seven peers' 40 pushes (320 total).
-const SENDERS: usize = 8;
+/// Chat senders per wave. Six keeps every healthy sender below the 256-frame
+/// queue: it receives its own 40 responses plus five peers' 40 pushes (240).
+/// Eight would exceed the queue and could drop a sender on a slower host.
+const SENDERS: usize = 6;
 
 /// Chat sends per sender per wave, at the session's 40-credit burst.
 const CHATS_PER_SENDER: usize = 40;
