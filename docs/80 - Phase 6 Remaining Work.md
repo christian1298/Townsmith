@@ -13,9 +13,9 @@ tags:
 # Phase 6 Remaining Work
 
 > [!abstract] Purpose
-> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `f92f168` (2026-11-25). It is a plan, not an implementation claim.
+> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `f9ddc70` (2026-11-25). It is a plan, not an implementation claim.
 
-Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/D-032/D-033/D-035/D-038, [[09 - Open Questions]] Q-101/Q-117/Q-119/Q-120, [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]].
+Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/D-032/D-033/D-035/D-038/D-039/D-040, [[09 - Open Questions]] Q-101/Q-117/Q-119/Q-120/Q-121/Q-122/Q-123/Q-124, [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]], [[81 - Settlement Tax Composition]], [[82 - Journal and Rollback]].
 
 ## 1. Where Phase 6 stands
 
@@ -31,6 +31,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 | ✅ Done | Chat client smoke, blueprint locks v0, chat loopback, content-aware placement, voxel-edit ADR | #348–#352 |
 | ✅ Done | CI UI smokes, district tax readout, chat-panel EN/DE, dashboard tax control, settlement benchmark, this plan | #353–#358 |
 | ✅ Done | Settlement-tax ADR proposal (D-039), save-schema freeze tests, settlement loopback smoke, placement lock UI, settlement-editor/dashboard localization | #359–#364 |
+| ✅ Done | Pure D-039 tax helper, CI multiplayer smokes, nested content-mismatch smoke fix, bounded lock leases, district-panel membership rows, D-040 journal/rollback proposal | #366–#371 |
 | ⛔ Blocked | Q-101 human playtest; 1M/RTX 3060 render gate | person / reference hardware |
 
 ## 2. Dependency order
@@ -38,12 +39,12 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 | # | Slice | Depends on | Why this order |
 |---:|---|---|---|
 | 1 | Dashboard + connected-client settlement write controls | #343 bridge mutations | Makes the existing settlement protocol usable in play without new protocol/save surface |
-| 2 | Settlement tax treasury consumer + composition ADR | 1, D-030/D-031 | The rate is data-only; applying it needs a precedence decision against district weights |
-| 3 | Blueprint lock UI, TTL, reconnect retention | #349 v0 locks | Prevents stale locks without changing placement authority; needs an injectable clock |
+| 2 | Settlement tax treasury consumer after D-039 acceptance | 1, D-030/D-031 | The pure helper exists, but the rate is data-only; applying it needs a precedence decision against district weights |
+| 3 | Blueprint lock reconnect retention | #349 v0 locks, #363 UI, #369 leases | Prevents stale locks without changing placement authority; lease expiry is done |
 | 4 | Concurrent listener sessions + per-connection outbound queue | #269, #350 | Foundation for push, edit broadcast, and remote exposure |
 | 5 | Chat push/broadcast | 4 | Replaces polling; must not duplicate entries or reorder sequences |
 | 6 | Voxel edit sync v1 | D-038 accepted, Q-119/Q-120, 3, 4 | The largest slice; do not start before the conflict/lease decisions |
-| 7 | Journal/rollback v1 | 6 | Needs the edit command stream and a crash-safe boundary |
+| 7 | Journal/rollback v1 after D-040/Q-123/Q-124 | 6 | Needs the edit command stream and a crash-safe boundary |
 | 8 | Save migration/versioning freeze | 1–7 | Freeze settlement/edit/journal/lock schemas before remote exposure |
 | 9 | Remote transport + authentication | 4, 8 | Resume tokens are not auth; F-039 documents the gap |
 | 10 | Phase 6 exit scenarios | 1–9 | The 4-player proof, not a feature |
@@ -52,7 +53,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.1 Settlement write controls
 
-**Scope.** Dashboard and a connected client should found, claim, rename, transfer, invite, set role, remove, release (Admin), and set tax through the bridge/server commands that already exist. The dashboard currently has only the merged `Shift+T` tax cycle (#356); the settlement editor is the full developer surface.
+**Scope.** Dashboard and a connected client should found, claim, rename, transfer, invite, set role, remove, release (Admin), and set tax through the bridge/server commands that already exist. The dashboard currently has only the merged `Shift+T` tax cycle (#356); #370 adds full owner/member/permission rows to the read-only district panel; the settlement editor is the full developer surface.
 
 **Protocol/save.** No new command or save field. Reuse `settlement_*` v1 shapes and `settlement_updated`.
 
@@ -64,7 +65,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.2 Settlement tax treasury consumer
 
-**Scope.** Give `Settlement.tax_rate` a defined economic effect. The open decision is composition with D-030 home/workplace weights and D-031 service funding: settlement surcharge first, district multiplier first, or cap the combined rate. Record the choice in an ADR before code.
+**Scope.** Give `Settlement.tax_rate` a defined economic effect. The open decision is composition with D-030 home/workplace weights and D-031 service funding: settlement surcharge first, district multiplier first, or cap the combined rate. D-039 records the proposed option A, and #366 adds the pure helper; record acceptance before wiring a consumer.
 
 **Protocol/save.** Prefer no protocol change; the rate already round-trips. If revenue is reported, extend the snapshot/audit read model, not the save.
 
@@ -78,7 +79,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.3 Blueprint locks: UI, TTL, reconnect
 
-**Scope.** #349 ships advisory in-memory locks and player-wide release on disconnect; #363 adds the placement-UI lock badge and `L` toggle. Add a lease with an injectable clock (not tick-only, to avoid the F-006 deadlock pattern), reconnect retention for the same player id, and explicit Admin force-unlock audit.
+**Scope.** #349 ships advisory in-memory locks and player-wide release on disconnect; #363 adds the placement-UI lock badge and `L` toggle; #369 adds a lazy 300-tick lease (1–3600 clamp) and refreshes on same-holder lock. Remaining: reconnect retention for the same player id, optional config/CLI lease override, and explicit Admin force-unlock audit.
 
 **Protocol/save.** Additive fields on the existing lock responses; if locks become durable, a new optional `ServerSave` store and `save.invalid_blueprint_locks`. Do not make locks authoritative for package identity.
 
@@ -124,7 +125,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.7 Journal/rollback v1
 
-**Scope.** Crash-safe command journal for accepted mutations plus a bounded rollback/history surface. The journal is for recovery and audit, not a second simulation state.
+**Scope.** Crash-safe command journal for accepted mutations plus a bounded rollback/history surface. The journal is for recovery and audit, not a second simulation state. D-040 and [[82 - Journal and Rollback]] propose the v1 contract; Q-123/Q-124 remain open.
 
 **Protocol/save.** Append-only journal with sequence and checksum; replay validates schema/version; rollback is Admin-only and audited.
 
