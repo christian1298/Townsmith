@@ -98,6 +98,8 @@ enum Phase {
 	UI_SNAPSHOT_SENT,
 	UI_VIEW_WAIT,
 	UI_PLACE_WAIT,
+	UI_LOCK_WAIT,
+	UI_UNLOCK_WAIT,
 	UI_ACTIVE,
 	PLACE_SENT,
 	CHAT_ACTIVE,
@@ -279,6 +281,18 @@ var _ui_last_error := ""
 var _ui_pending_hash := ""
 var _ui_pending_center := Vector2.ZERO
 var _ui_pending_rotation := 0
+# Advisory blueprint locks (`blueprint_locks` once after welcome). The map is
+# hash -> {player_id, player, tick}; `_ui_own_locks` marks hashes this session
+# locked, so the HUD can say "LOCKED you" without trusting a display name.
+var _ui_locks := {}
+var _ui_own_locks := {}
+var _ui_lock_checksum := ""
+var _ui_lock_pending_hash := ""
+var _ui_locks_taken := 0
+var _ui_locks_released := 0
+# Lock/unlock results carry only the lock-table checksum, not the world
+# checksum; the next placement refresh may legitimately move it.
+var _ui_checksum_stale := false
 var _ui_main_marker := ""
 var _ui_done_marker := ""
 var _ui_place_markers: Array = []
@@ -383,7 +397,7 @@ func _prepare_place_ui() -> bool:
 	if rotation < 0:
 		_fail("place_ui_rotation_invalid")
 		return false
-	var parsed := PlacementUI.parse_script(_place_ui_script)
+	var parsed := _parse_place_ui_script(_place_ui_script)
 	if not bool(parsed.get("ok", false)):
 		_fail("place_ui_script_%s" % str(parsed.get("error", "invalid")))
 		return false
@@ -397,6 +411,37 @@ func _prepare_place_ui() -> bool:
 	_ui_center = Vector2(roundf(_place_x), roundf(_place_z))
 	_ui_rotation = rotation
 	return true
+
+## Extend the shared `PlacementUI.parse_script` grammar with `lock` and
+## `unlock`. The tokens are parsed as `cancel` so the shared parser owns every
+## other validation and error index, then restored by position. Empty segments
+## are skipped by the shared parser, so only non-empty tokens are walked.
+func _parse_place_ui_script(text: String) -> Dictionary:
+	var source: Array = text.split(";", true)
+	var transformed: Array = []
+	var kinds: Array = []
+	for raw in source:
+		var token := str(raw).strip_edges()
+		if token == "lock" or token == "unlock":
+			transformed.append("cancel")
+			kinds.append(token)
+		else:
+			transformed.append(raw)
+			kinds.append("")
+	var parsed := PlacementUI.parse_script(";".join(transformed))
+	if not bool(parsed.get("ok", false)):
+		return parsed
+	var actions: Array = parsed.get("actions", [])
+	var kind_index := 0
+	for token_index in range(source.size()):
+		if str(source[token_index]).strip_edges().is_empty():
+			continue
+		if kind_index >= actions.size():
+			return {"ok": false, "error": "action_%d_invalid" % token_index, "actions": []}
+		if not str(kinds[token_index]).is_empty():
+			actions[kind_index] = {"kind": str(kinds[token_index])}
+		kind_index += 1
+	return {"ok": true, "error": "", "actions": actions}
 
 ## Validate the opt-in chat arguments and build the transcript model before the
 ## socket opens. A bad script fails fast with `chat_script_invalid`; the chat
@@ -549,6 +594,12 @@ func _handle_message(message: Dictionary) -> void:
 			_on_interest_view(message)
 		"place_blueprint_result":
 			_on_place_blueprint_result(message)
+		"blueprint_lock_list":
+			_on_blueprint_lock_list(message)
+		"blueprint_lock_result":
+			_on_blueprint_lock_result(message)
+		"blueprint_unlock_result":
+			_on_blueprint_unlock_result(message)
 		"chat_sent":
 			_on_chat_sent(message)
 		"chat_log":
@@ -583,6 +634,8 @@ func _on_welcome(message: Dictionary) -> void:
 	_last_tick = tick
 	if _chat_enabled:
 		_chat_panel.set_identity(0, _player_name)
+	if _place_ui and not _ui_request_locks():
+		return
 	_set_status("Welcome %s; placing deterministic roads." % _session_id)
 	_refresh_hud()
 	_send_next_road()
@@ -669,6 +722,7 @@ func _on_snapshot(message: Dictionary) -> void:
 			return
 		_store_snapshot(tick, population, balance, checksum)
 		_set_status("Placement refresh snapshot received; awaiting the detail view.")
+		_ui_checksum_stale = false
 		_refresh_hud()
 		_phase = Phase.UI_VIEW_WAIT
 		_arm_deadline(_timeout_ms)
@@ -685,8 +739,11 @@ func _check_view_snapshot(
 		_fail("interest_tick_%d_after_%d" % [tick, _last_tick])
 		return false
 	if checksum != _last_checksum:
-		_fail("interest_checksum_changed")
-		return false
+		# Lock/unlock results carry only the lock-table checksum, so the world
+		# checksum is unknown until the next view refresh.
+		if not (_place_ui and _ui_checksum_stale and _phase == Phase.UI_SNAPSHOT_SENT):
+			_fail("interest_checksum_changed")
+			return false
 	if not _is_pair_close(message.get("interest_center", null), center, 0.001):
 		_fail("interest_center")
 		return false
@@ -884,7 +941,11 @@ func _on_place_blueprint_result(message: Dictionary) -> void:
 	_arm_deadline(_timeout_ms)
 
 func _on_reject(message: Dictionary) -> void:
-	if _place_ui and _phase == Phase.UI_PLACE_WAIT:
+	if _place_ui and (
+		_phase == Phase.UI_PLACE_WAIT
+		or _phase == Phase.UI_LOCK_WAIT
+		or _phase == Phase.UI_UNLOCK_WAIT
+	):
 		_on_ui_reject(message)
 		return
 	_fail("reject_%s_code=%s" % [_phase_name(), str(message.get("code", "missing"))])
@@ -1056,6 +1117,10 @@ func _ui_next_action() -> void:
 			_ui_rotate(int(action.get("rotation", 0)))
 		"place":
 			_ui_place()
+		"lock":
+			_ui_lock_action()
+		"unlock":
+			_ui_unlock_action()
 		"cancel":
 			_ui_finish()
 		_:
@@ -1181,6 +1246,7 @@ func _on_ui_place_result(message: Dictionary) -> void:
 			tick,
 		])
 	_store_snapshot(tick, _last_population, _last_balance, world_checksum)
+	_ui_checksum_stale = false
 	_ui_render_authoritative()
 	_set_status("Placement accepted; refreshing the authoritative view.")
 	if not _send({
@@ -1193,12 +1259,260 @@ func _on_ui_place_result(message: Dictionary) -> void:
 	_phase = Phase.UI_SNAPSHOT_SENT
 	_arm_deadline(_timeout_ms)
 
+## Send `blueprint_locks` once after a successful welcome. The reply may arrive
+## in any phase: it is read-only, never advances the tick, and does not change
+## the road/interest/placement state machine.
+func _ui_request_locks() -> bool:
+	return _send({"type": "blueprint_locks"})
+
+## Parse one wire lock view. Returns `{}` on a malformed record or a hash that
+## is not already canonical, so neither the list nor a result can inject an
+## unvalidated hash into the map.
+func _ui_parse_lock(raw: Variant) -> Dictionary:
+	if typeof(raw) != TYPE_DICTIONARY:
+		return {}
+	var entry: Dictionary = raw
+	var hash := PlacementUI.canonical_hash(str(entry.get("hash", "")))
+	if hash.is_empty() or hash != str(entry.get("hash", "")):
+		return {}
+	var player_id := int(entry.get("player_id", 0))
+	if player_id < 1:
+		return {}
+	var player := str(entry.get("player", ""))
+	if player.is_empty() or player.length() > 128:
+		return {}
+	var tick := int(entry.get("tick", -1))
+	if tick < 0:
+		return {}
+	return {"hash": hash, "player_id": player_id, "player": player, "tick": tick}
+
+## Read-only lock table response. Allowed in any place-UI phase because the
+## request is sent immediately after `welcome`, before the road plan.
+func _on_blueprint_lock_list(message: Dictionary) -> void:
+	if not _place_ui:
+		_fail("unexpected_message_blueprint_lock_list")
+		return
+	var tick := int(message.get("tick", -1))
+	var count := int(message.get("count", -1))
+	var checksum := str(message.get("checksum", ""))
+	var raw: Variant = message.get("locks", null)
+	if tick < 0 or count < 0 or not _is_hex16(checksum) or typeof(raw) != TYPE_ARRAY:
+		_fail("blueprint_lock_list_fields")
+		return
+	var locks_raw: Array = raw
+	if count != locks_raw.size():
+		_fail("blueprint_lock_list_count")
+		return
+	var locks := {}
+	for entry in locks_raw:
+		var lock := _ui_parse_lock(entry)
+		if lock.is_empty():
+			_fail("blueprint_lock_list_entry")
+			return
+		var hash := str(lock.get("hash", ""))
+		if locks.has(hash):
+			_fail("blueprint_lock_list_duplicate")
+			return
+		locks[hash] = lock
+	_ui_locks = locks
+	_ui_lock_checksum = checksum
+	print(
+		"MP_PLACE_UI_LOCKS status=ok count=%d checksum=%s tick=%d"
+		% [locks.size(), checksum, tick]
+	)
+	_refresh_hud()
+
+## Accepted `blueprint_lock` result: update the map, mark the hash as this
+## session's, and continue the script or return to interactive placement.
+func _on_blueprint_lock_result(message: Dictionary) -> void:
+	if not _place_ui or _phase != Phase.UI_LOCK_WAIT:
+		_fail("lock_result_in_%s" % _phase_name())
+		return
+	var tick := int(message.get("tick", -1))
+	if tick != _last_tick + 1:
+		_fail("lock_tick_%d_after_%d" % [tick, _last_tick])
+		return
+	var lock := _ui_parse_lock(message.get("lock", null))
+	if lock.is_empty():
+		_fail("blueprint_lock_result_view")
+		return
+	var hash := str(lock.get("hash", ""))
+	if hash != _ui_lock_pending_hash:
+		_fail("blueprint_lock_result_hash")
+		return
+	if int(lock.get("tick", -1)) != tick:
+		_fail("blueprint_lock_result_tick")
+		return
+	var locks_count := int(message.get("locks_count", -1))
+	var checksum := str(message.get("checksum", ""))
+	if locks_count < 1 or not _is_hex16(checksum):
+		_fail("blueprint_lock_result_fields")
+		return
+	_ui_locks[hash] = lock
+	_ui_own_locks[hash] = true
+	_ui_lock_checksum = checksum
+	_ui_locks_taken += 1
+	_ui_lock_pending_hash = ""
+	_last_tick = tick
+	_ui_checksum_stale = true
+	print((
+		"MP_PLACE_UI_LOCK status=ok selected=%d hash=%s player_id=%d"
+		+ " count=%d checksum=%s tick=%d lock=%s"
+	) % [
+			_ui_selected,
+			hash,
+			int(lock.get("player_id", 0)),
+			locks_count,
+			checksum,
+			tick,
+			_ui_lock_marker_state(hash),
+		])
+	_set_status("Blueprint lock held by this session.")
+	_refresh_hud()
+	_phase = Phase.UI_ACTIVE
+	_arm_deadline(_timeout_ms)
+	_ui_next_action()
+
+## Accepted `blueprint_unlock` result: drop the map entry and continue.
+func _on_blueprint_unlock_result(message: Dictionary) -> void:
+	if not _place_ui or _phase != Phase.UI_UNLOCK_WAIT:
+		_fail("unlock_result_in_%s" % _phase_name())
+		return
+	var tick := int(message.get("tick", -1))
+	if tick != _last_tick + 1:
+		_fail("unlock_tick_%d_after_%d" % [tick, _last_tick])
+		return
+	var hash := str(message.get("hash", ""))
+	if hash != _ui_lock_pending_hash:
+		_fail("blueprint_unlock_result_hash")
+		return
+	var locks_count := int(message.get("locks_count", -1))
+	var checksum := str(message.get("checksum", ""))
+	if locks_count < 0 or not _is_hex16(checksum):
+		_fail("blueprint_unlock_result_fields")
+		return
+	_ui_locks.erase(hash)
+	_ui_own_locks.erase(hash)
+	_ui_lock_checksum = checksum
+	_ui_locks_released += 1
+	_ui_lock_pending_hash = ""
+	_last_tick = tick
+	_ui_checksum_stale = true
+	print((
+		"MP_PLACE_UI_UNLOCK status=ok selected=%d hash=%s count=%d"
+		+ " checksum=%s tick=%d lock=%s"
+	) % [
+			_ui_selected,
+			hash,
+			locks_count,
+			checksum,
+			tick,
+			_ui_lock_marker_state(hash),
+		])
+	_set_status("Blueprint unlocked.")
+	_refresh_hud()
+	_phase = Phase.UI_ACTIVE
+	_arm_deadline(_timeout_ms)
+	_ui_next_action()
+
+## HUD suffix for the selected hash: empty when unlocked, `LOCKED you` for a
+## lock this session took, otherwise `LOCKED #<player_id>`.
+func _ui_lock_suffix(hash: String) -> String:
+	var lock: Dictionary = _ui_locks.get(hash, {})
+	if lock.is_empty():
+		return ""
+	if _ui_own_locks.has(hash):
+		return "LOCKED you"
+	return "LOCKED #%d" % int(lock.get("player_id", 0))
+
+## Path-free marker form of the same state (`LOCKED_you`, `LOCKED_<id>`,
+## `unlocked`); the HUD keeps the spaced human text.
+func _ui_lock_marker_state(hash: String) -> String:
+	var lock: Dictionary = _ui_locks.get(hash, {})
+	if lock.is_empty():
+		return "unlocked"
+	if _ui_own_locks.has(hash):
+		return "LOCKED_you"
+	return "LOCKED_%d" % int(lock.get("player_id", 0))
+
+func _ui_selected_hash() -> String:
+	if _ui_entries.is_empty():
+		return ""
+	return str(_ui_entries[_ui_selected].get("hash", ""))
+
+## Scripted `lock`: always ask the server to lock (a re-lock refreshes), unless
+## another holder is already visible, in which case it fails locally and the
+## script continues without a wire command.
+func _ui_lock_action() -> void:
+	var hash := _ui_selected_hash()
+	if hash.is_empty():
+		_fail("place_ui_empty")
+		return
+	var lock: Dictionary = _ui_locks.get(hash, {})
+	if not lock.is_empty() and not _ui_own_locks.has(hash):
+		_ui_local_locked(hash, lock)
+		_ui_next_action()
+		return
+	_ui_send_lock(hash)
+
+## Scripted `unlock`: always send `blueprint_unlock`; an unknown/foreign lock
+## comes back as a rejection, which is recorded and does not abort the script.
+func _ui_unlock_action() -> void:
+	var hash := _ui_selected_hash()
+	if hash.is_empty():
+		_fail("place_ui_empty")
+		return
+	_ui_send_unlock(hash)
+
+## Key `L`: lock an unlocked hash, unlock a hash this session holds, and only
+## report `blueprint.locked` locally when another holder owns it. The ghost is
+## never blocked: the server stays authoritative on placement.
+func _ui_toggle_lock() -> void:
+	var hash := _ui_selected_hash()
+	if hash.is_empty():
+		return
+	var lock: Dictionary = _ui_locks.get(hash, {})
+	if lock.is_empty():
+		_ui_send_lock(hash)
+	elif _ui_own_locks.has(hash):
+		_ui_send_unlock(hash)
+	else:
+		_ui_local_locked(hash, lock)
+
+func _ui_local_locked(hash: String, lock: Dictionary) -> void:
+	_ui_last_error = "blueprint.locked"
+	_set_status("Blueprint locked by player #%d." % int(lock.get("player_id", 0)))
+	print((
+		"MP_PLACE_UI_LOCK_LOCAL status=ok selected=%d hash=%s player_id=%d"
+		+ " code=blueprint.locked"
+	) % [_ui_selected, hash, int(lock.get("player_id", 0))])
+	_refresh_hud()
+
+func _ui_send_lock(hash: String) -> bool:
+	_ui_lock_pending_hash = hash
+	_set_status("Requesting blueprint lock...")
+	if not _send({"type": "blueprint_lock", "hash": hash}):
+		return false
+	_phase = Phase.UI_LOCK_WAIT
+	_arm_deadline(_timeout_ms)
+	return true
+
+func _ui_send_unlock(hash: String) -> bool:
+	_ui_lock_pending_hash = hash
+	_set_status("Requesting blueprint unlock...")
+	if not _send({"type": "blueprint_unlock", "hash": hash}):
+		return false
+	_phase = Phase.UI_UNLOCK_WAIT
+	_arm_deadline(_timeout_ms)
+	return true
+
 func _on_ui_reject(message: Dictionary) -> void:
 	var code := str(message.get("code", "missing"))
 	_ui_rejected += 1
 	_ui_last_error = code
+	_ui_lock_pending_hash = ""
 	print("MP_PLACE_UI_REJECT status=ok index=%d code=%s" % [_ui_selected, code])
-	_set_status("Placement rejected: %s" % code)
+	_set_status("Rejected: %s" % code)
 	_phase = Phase.UI_ACTIVE
 	_arm_deadline(_timeout_ms)
 	_ui_next_action()
@@ -1209,7 +1523,8 @@ func _ui_finish() -> void:
 		return
 	print((
 		"MP_PLACE_UI_DONE status=ok mode=ui actions=%d accepted=%d rejected=%d"
-		+ " placements=%d selected=%d error=%s"
+		+ " placements=%d selected=%d error=%s locks=%d unlocks=%d"
+		+ " lock_checksum=%s"
 	) % [
 			_ui_actions_run,
 			_ui_accepted,
@@ -1217,6 +1532,9 @@ func _ui_finish() -> void:
 			_ui_placements.size(),
 			_ui_selected,
 			_ui_last_error if not _ui_last_error.is_empty() else "-",
+			_ui_locks_taken,
+			_ui_locks_released,
+			_ui_lock_checksum if not _ui_lock_checksum.is_empty() else "-",
 		])
 	_set_status("Placement UI complete; disconnecting.")
 	if not _send({"type": "disconnect"}):
@@ -1308,6 +1626,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				_ui_move(0, 1)
 			KEY_R:
 				_ui_rotate(_ui_rotation + 90)
+			KEY_L:
+				_ui_toggle_lock()
 			KEY_ENTER, KEY_KP_ENTER:
 				_ui_place()
 			KEY_ESCAPE:
@@ -2156,6 +2476,9 @@ func _refresh_hud() -> void:
 				_ui_last_error if not _ui_last_error.is_empty() else "-",
 			]
 		)
+		var lock_suffix := _ui_lock_suffix(_ui_selected_hash())
+		if not lock_suffix.is_empty():
+			text += " lock=%s" % lock_suffix
 	_hud_label.text = text
 
 func _set_status(text: String) -> void:

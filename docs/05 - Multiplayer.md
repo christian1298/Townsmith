@@ -757,19 +757,24 @@ GODOT=/path/to/godot ./scripts/smoke_mp_placement.sh
 
 This single-hash path is a debug client integration, not a production placement UI: there is no ghost preview, prediction, rollback, package upload/fetch, mod auto-download, or server path on the wire. The server's content-addressed library must be pre-seeded (the fixture helper is the smoke's only package source), and the command is authorized by the global Mayor role. The HUD reports the placement id and both checksums; the balance line remains the last authoritative snapshot value because the result carries no balance.
 
-**Placement UI (opt-in, `--place-ui`).** `--place-ui --library <abs-dir>` loads the local library catalog through `blueprint_library_entries` (via `ClassDB`, never a static `TownsmithCore` reference), draws a translucent `BoxMesh` ghost from the selected entry's `bounds_m` on the 1 m grid, and keeps placement mode active through authoritative results and rejects. Tab/Shift+Tab and the wheel cycle entries, arrows nudge 1 m, `R` rotates 90°, Enter places, and Esc cancels. `--place-ui-script "select:0;move:8,0;rotate:90;place;move:1,0;place;cancel"` provides the deterministic headless path; the second overlapping place must surface `PLACEMENT_OVERLAP` without leaving placement mode. A successful result renders the authoritative box under a UI-only node, refreshes with `set_interest`, and increments the accepted count; a reject records the code and continues. The markers are:
+**Placement UI (opt-in, `--place-ui`).** `--place-ui --library <abs-dir>` loads the local library catalog through `blueprint_library_entries` (via `ClassDB`, never a static `TownsmithCore` reference), draws a translucent `BoxMesh` ghost from the selected entry's `bounds_m` on the 1 m grid, and keeps placement mode active through authoritative results and rejects. Tab/Shift+Tab and the wheel cycle entries, arrows nudge 1 m, `R` rotates 90°, `L` locks the selected package (or unlocks it when this session holds the lock), Enter places, and Esc cancels. A lock held by another player renders `LOCKED #<player_id>` and the local `L` is refused with `blueprint.locked` without blocking the ghost; the server remains authoritative. `--place-ui-script "select:0;lock;unlock;move:8,0;rotate:90;place;move:1,0;place;cancel"` provides the deterministic headless path; `lock`/`unlock` wait for their result, and the second overlapping place must surface `PLACEMENT_OVERLAP` without leaving placement mode. A successful result renders the authoritative box under a UI-only node, refreshes with `set_interest`, and increments the accepted count; a reject records the code and continues. The markers are:
 
 ```text
+MP_PLACE_UI_LOCKS status=ok count=0 checksum=<16 hex> tick=0
 MP_PLACE_UI status=ok mode=ui entries=1 selected=0 id=local:client_smoke_house \
   hash=blake3:<64 hex> bounds=3.2,3.2,3.2 footprint=3.2,3.2 library_checksum=<16 hex>
+MP_PLACE_UI_LOCK status=ok selected=0 hash=blake3:<64 hex> player_id=1 count=1 \
+  checksum=<16 hex> tick=7 lock=LOCKED_you
+MP_PLACE_UI_UNLOCK status=ok selected=0 hash=blake3:<64 hex> count=0 \
+  checksum=<16 hex> tick=8 lock=unlocked
 MP_PLACE_UI_PLACE status=ok index=0 id=1 hash=blake3:<64 hex> center=40.0,32.0 \
-  rotation=90 footprint=3.2,3.2 placement_checksum=<16 hex> world_checksum=<16 hex> tick=7
+  rotation=90 footprint=3.2,3.2 placement_checksum=<16 hex> world_checksum=<16 hex> tick=9
 MP_PLACE_UI_REJECT status=ok index=0 code=PLACEMENT_OVERLAP
-MP_PLACE_UI_DONE status=ok mode=ui actions=7 accepted=1 rejected=1 placements=1 \
-  selected=0 error=PLACEMENT_OVERLAP
+MP_PLACE_UI_DONE status=ok mode=ui actions=9 accepted=1 rejected=1 placements=1 \
+  selected=0 error=PLACEMENT_OVERLAP locks=1 unlocks=1 lock_checksum=<16 hex>
 ```
 
-`scripts/smoke_mp_placement_ui.sh` seeds separate client/server fixture libraries, starts a fresh mayor server per run, and requires two identical `MP_PLACE_UI*` runs with 12 commands and 14 responses. Without `--place-ui`, the original `--place-hash` and zero-view flows, markers, checksums, and frame counts are unchanged. The UI is still debug-only: no prediction, rollback, upload/fetch, auto-download, per-settlement permissions, or production camera/input layer.
+`scripts/smoke_mp_placement_ui.sh` seeds separate client/server fixture libraries, starts a fresh mayor server per run, and requires two identical `MP_PLACE_UI*` runs with 15 commands and 17 responses. Without `--place-ui`, the original `--place-hash` and zero-view flows, markers, checksums, and frame counts are unchanged. The UI is still debug-only: no prediction, rollback, upload/fetch, auto-download, per-settlement permissions, or production camera/input layer.
 
 **Reconnect/resume is out of scope.** `godot/mp_client.gd --reconnect` already covers the `resume {session_id, last_tick}` wire path and its `MP_CLIENT_RECONNECT` golden. This scene is a one-shot render probe with its own phase machine, so duplicating the resume path would add no render coverage; it does not replay, predict, or fake authoritative state.
 
