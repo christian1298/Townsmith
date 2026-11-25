@@ -5,6 +5,7 @@
 //! [`save`], and the listen/save loop in [`listen`]. The binary in `main.rs`
 //! keeps the existing Phase 0 tick harness.
 
+pub mod chat_smoke;
 pub mod listen;
 pub mod placement;
 pub mod protocol;
