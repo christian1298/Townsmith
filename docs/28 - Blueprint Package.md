@@ -2,7 +2,7 @@
 title: Blueprint Package
 project: Townsmith
 status: active
-updated: 2026-11-24
+updated: 2026-11-25
 tags:
   - townsmith
   - vertical-slice
@@ -62,7 +62,7 @@ Fields:
 - `solid_voxels` must match the decoded stream.
 - `rooms` is filled by editor save-time room detection; `props` is written from the editor prop list and restored on load.
 - `materials` is a provisional key → count map until the content registry lands.
-- `dependencies` is parsed. `load_tsbp` and `insert_file` remain deny-all: non-empty mod/resource-pack lists produce a readable `MissingDependency` error. A caller that knows the live content (the bridge) can use `load_tsbp_with_dependencies` / `insert_file_with_dependencies` with active pack ids; required mods match by exact id or namespace (`mymod` vs `mymod:pack`), while resource packs still fail closed until a runtime registry exists. The game constraint is not enforced by the current semantic check.
+- `dependencies` is parsed. `load_tsbp` and `insert_file` remain deny-all: non-empty mod/resource-pack lists produce a readable `MissingDependency` error. A caller that knows the live content can use `load_tsbp_with_dependencies` / `load_tsbp_with_dependency_issues` / `insert_file_with_dependencies` with active pack ids; required mods match by exact id or namespace (`mymod` vs `mymod:pack`), while resource packs still fail closed until a runtime registry exists. The bridge placement path uses the structured variant and fails closed with `blueprint.missing_dependency` before mutating. The game constraint is not enforced by the current semantic check.
 - `structure` is optional. When present it declares the structural system, stories, height, optional span, ground system, and foundation depth; see [[60 - Structural Limits]]. Default metadata omits it, so packages written before Phase 4.2 keep their content hash. Invalid material limits may be saved as drafts; placement and load-time revalidation reject them. Declared fields are still checked: the declared height must match `bounds_m[1]` and the foundation depth is capped at 32 m (D-025).
 
 ## 3. `voxels.bin` v1
@@ -214,7 +214,7 @@ townsmith-server --listen 47015 --blueprint-library /srv/townsmith/blueprints
 - `place_blueprint_result` returns a `PlacementView` with no `blueprint_path`. The authoritative record stores the stable content-addressed reference `tsbp:blake3:<hex>` in its `blueprint_path` field, not the resolved library path; the server library root is process configuration and never enters the save/checksum, and a remote client never sees a filesystem path.
 - Missing or invalid packages use the stable placement codes `PLACEMENT_PACKAGE_MISSING` / `PLACEMENT_PACKAGE_INVALID`; a bad hash shape uses `PLACEMENT_HASH_INVALID`. The server never writes to or discovers into the library while serving.
 
-This does not change the `.tsbp` format, existing package hashes, or bridge save bytes. The default `load_tsbp` still fails any non-empty dependency list (`MissingDependency`); the additive `load_tsbp_with_dependencies` / `insert_file_with_dependencies` APIs let a caller that knows the live pack satisfy required mods. There is no mod auto-download.
+This does not change the `.tsbp` format, existing package hashes, or bridge save bytes. The default `load_tsbp` still fails any non-empty dependency list (`MissingDependency`); the additive `load_tsbp_with_dependencies` / `load_tsbp_with_dependency_issues` / `insert_file_with_dependencies` APIs let a caller that knows the live pack satisfy required mods. The bridge's `world_validate_placement` and `world_place_blueprint` use the structured variant and reject unresolved IDs before any placement or charge. There is no mod auto-download.
 
 ### 6.7 World content identity (D-034)
 

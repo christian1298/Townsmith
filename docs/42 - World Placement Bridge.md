@@ -2,7 +2,7 @@
 title: World Placement Bridge
 project: Townsmith
 status: active
-updated: 2026-11-24
+updated: 2026-11-25
 tags:
   - townsmith
   - phase-2
@@ -25,7 +25,7 @@ tags:
 
 | Method | Returns | Purpose |
 |---|---|---|
-| `world_validate_placement(seed, path, x, z, rotation)` | `Dictionary` | Load and validate a `.tsbp` site without mutating, including the district policy gate; `ok`, `center`, `foundation_m`, `footprint`, `rotation_deg`, `bounds`, `blueprint_hash`, `structure` |
+| `world_validate_placement(seed, path, x, z, rotation)` | `Dictionary` | Load and validate a `.tsbp` site without mutating, including content dependencies and the district policy gate; `ok`, `center`, `foundation_m`, `footprint`, `rotation_deg`, `bounds`, `blueprint_hash`, `structure` |
 | `progression_state(seed)` | `Dictionary` | Derived population age: `age`, `next_age`, `next_threshold`, `progress`, `materials` |
 | `world_blueprint_info(path)` | `Dictionary` | Metadata for the ghost/HUD: id, name, hash, bounds, rooms, capacity, jobs, cost |
 | `blueprint_library_summary(root_path)` | `Dictionary` | Read-only `ok`, `count`, `total_bytes`, `checksum` for an absolute local library root; no world-save field |
@@ -115,7 +115,9 @@ The sampler uses `WorldGenerator::height_at` on the 1 m grid, not the currently 
 | Containing policy has a non-empty allowlist without this exact blueprint id | `policy_blueprint_not_allowed` |
 | Containing policy is not enforceable (hand-built record) | Neutral; placement continues |
 
-Both errors use the usual `{ ok: false, error_code, error }` shape and the message `district policy <id> blocks placing blueprint <id> here`. `world_validate_placement` returns the same codes and message from the same shared check after its `.tsbp` request is validated, so a ghost preview that passes cannot fail later on policy. The rule is additive: a world without a registry places exactly as before, and the gate neither reads nor mutates the placement, construction, or economy checksums. Validation stays read-only: it never appends a placement, charges the treasury, or changes a checksum, and package, seed, age, terrain, and overlap validation keep their existing order and outcomes. It covers blueprint placement and its ghost preview only — utility and service placement and roads are not gated. Tax and service-funding multipliers are read by the treasury through `PolicyTaxWeights` (D-030) and `PolicyServiceWeight` (D-031); every other policy effect stays unwired. See [[57 - Dashboard and Advisor]] §4.1 for the registry and save contract.
+Both errors use the usual `{ ok: false, error_code, error }` shape and the message `district policy <id> blocks placing blueprint <id> here`. `world_validate_placement` returns the same codes and message from the same shared check after its `.tsbp` request is validated, so a ghost preview that passes cannot fail later on policy. The rule is additive: a world without a registry places exactly as before, and the gate neither reads nor mutates the placement, construction, or economy checksums. Validation stays read-only: it never appends a placement, charges the treasury, or changes a checksum, and package, seed, age, terrain, and overlap validation keep their existing order and outcomes. It covers blueprint placement and its ghost preview only — utility and service placement and roads are not gated.
+
+**Content dependencies.** `world_placement_request` now resolves the package's `dependencies.mods` and `dependencies.resource_packs` against the live `content_load_dir` registry before the policy, seed, age, terrain, overlap, or treasury checks. Base-only exposes the `base` namespace; one loaded pack contributes its manifest ID and namespace. A required mod matches by exact ID or namespace (`mymod` vs `mymod:pack`); every declared resource pack still fails closed because there is no pack registry. On failure the bridge returns `{ ok: false, error_code: "blueprint.missing_dependency", error, missing, missing_mods, missing_resource_packs, dependency_checksum }` with sorted, deduplicated IDs and a stable 16-hex checksum. The gate is fail-closed before any placement, construction site, treasury charge, or save write. A package with no dependencies behaves exactly as before. Tax and service-funding multipliers are read by the treasury through `PolicyTaxWeights` (D-030) and `PolicyServiceWeight` (D-031); every other policy effect stays unwired. See [[57 - Dashboard and Advisor]] §4.1 for the registry and save contract.
 
 The in-game dashboard is now a second CRUD consumer of the same registry through the compact editor in [[57 - Dashboard and Advisor]] §5.3. It creates, updates, and removes only the smallest-id policy containing the dashboard centre with `district_policy_create`, `district_policy_update`, and `district_policy_remove`, always re-sending the full record read from `district_policies_state`. Persistence is unchanged: `world_save` and `world_load` remain the only file path, the optional `policies` object and its validation are untouched, and the dashboard never saves or loads directly. A foreign-seed or rejected dashboard call leaves the registry, placement, population, and construction checksums unchanged.
 

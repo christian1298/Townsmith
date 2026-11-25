@@ -36,5 +36,6 @@ pub use metadata::{
     BlueprintMetadata, BlueprintStats, Dependencies, PropRecord, RoomRecord, FORMAT_VERSION,
 };
 pub use package::{
-    load_tsbp, load_tsbp_with_dependencies, save_tsbp, save_tsbp_with_hash, Blueprint,
+    load_tsbp, load_tsbp_with_dependencies, load_tsbp_with_dependency_issues, save_tsbp,
+    save_tsbp_with_hash, Blueprint, BlueprintDependencyError,
 };
