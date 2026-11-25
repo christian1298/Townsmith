@@ -272,6 +272,11 @@ var selected_settlement_id := -1
 ## confirmation; -1 means nothing is armed. A different key, a selection
 ## change, and closing the dashboard all clear it.
 var settlement_release_armed_id := -1
+## Shift+R rename overlay. The target id ties the open overlay to the record
+## it was opened for; -1 means closed. A selection change, dashboard close,
+## and Esc all cancel without a bridge call.
+var settlement_rename_visible := false
+var settlement_rename_target_id := -1
 ## Cached local bridge player id for the dashboard's developer "Mayor";
 ## -1 means not registered yet. Registration happens on first claim.
 var mayor_player_id := -1
@@ -296,6 +301,11 @@ var dashboard_visible := false
 var dashboard_title: Label
 var dashboard_hint: Label
 var dashboard_policy_hint: Label
+var settlement_rename_panel: PanelContainer
+var settlement_rename_title: Label
+var settlement_rename_input: LineEdit
+var settlement_rename_hint: Label
+var ui_layer: CanvasLayer
 var dashboard_refresh_accum := 0.0
 var citizen_panel: PanelContainer
 var citizen_text: RichTextLabel
@@ -477,6 +487,14 @@ func _process(delta: float) -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
+		# The rename overlay owns the keyboard while it is open: Enter commits,
+		# Esc cancels, and every other game hotkey is swallowed.
+		if settlement_rename_visible:
+			if event.physical_keycode == KEY_ESCAPE:
+				_cancel_settlement_rename()
+			elif event.physical_keycode == KEY_ENTER or event.physical_keycode == KEY_KP_ENTER:
+				_commit_settlement_rename()
+			return
 		# Shift+X is a two-press release; every other key cancels a pending
 		# release arm before its normal action runs.
 		var release_press: bool = event.physical_keycode == KEY_X and event.shift_pressed \
@@ -516,8 +534,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		if mode == "mayor":
 			match event.physical_keycode:
 				KEY_R:
-					rotation_deg = (rotation_deg + 90) % 360
-					_refresh_preview(true)
+					if event.shift_pressed:
+						if dashboard_visible and selected_settlement_id >= 0:
+							_open_settlement_rename()
+					else:
+						rotation_deg = (rotation_deg + 90) % 360
+						_refresh_preview(true)
 				KEY_B:
 					_cycle_starter()
 				KEY_X:
@@ -744,6 +766,7 @@ func _setup_world() -> void:
 
 func _setup_ui() -> void:
 	var layer := CanvasLayer.new()
+	ui_layer = layer
 	add_child(layer)
 	var panel := PanelContainer.new()
 	panel.position = Vector2(16.0, 16.0)
@@ -800,6 +823,40 @@ func _setup_ui() -> void:
 	dashboard_policy_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	dashboard_policy_hint.add_theme_color_override("font_color", Color(0.62, 0.78, 0.66))
 	dashboard_box.add_child(dashboard_policy_hint)
+
+	# Shift+R rename overlay. Small centered panel on the HUD layer with a
+	# title, a prefilled single-line field, and the Enter/Esc hint. It is
+	# hidden until an owned settlement is selected and the key is pressed.
+	settlement_rename_panel = PanelContainer.new()
+	settlement_rename_panel.name = "SettlementRename"
+	settlement_rename_panel.anchor_left = 0.5
+	settlement_rename_panel.anchor_right = 0.5
+	settlement_rename_panel.anchor_top = 0.5
+	settlement_rename_panel.anchor_bottom = 0.5
+	settlement_rename_panel.offset_left = -220.0
+	settlement_rename_panel.offset_right = 220.0
+	settlement_rename_panel.offset_top = -80.0
+	settlement_rename_panel.offset_bottom = 80.0
+	settlement_rename_panel.visible = false
+	layer.add_child(settlement_rename_panel)
+	var rename_box := VBoxContainer.new()
+	rename_box.add_theme_constant_override("separation", 6)
+	settlement_rename_panel.add_child(rename_box)
+	settlement_rename_title = Label.new()
+	settlement_rename_title.name = "SettlementRenameTitle"
+	settlement_rename_title.add_theme_font_size_override("font_size", 16)
+	rename_box.add_child(settlement_rename_title)
+	settlement_rename_input = LineEdit.new()
+	settlement_rename_input.name = "SettlementRenameInput"
+	settlement_rename_input.custom_minimum_size = Vector2(400.0, 0.0)
+	settlement_rename_input.text_submitted.connect(_on_settlement_rename_submitted)
+	settlement_rename_input.gui_input.connect(_on_settlement_rename_gui_input)
+	rename_box.add_child(settlement_rename_input)
+	settlement_rename_hint = Label.new()
+	settlement_rename_hint.name = "SettlementRenameHint"
+	settlement_rename_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	settlement_rename_hint.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
+	rename_box.add_child(settlement_rename_hint)
 
 	citizen_panel = PanelContainer.new()
 	citizen_panel.name = "CitizenPanel"
@@ -2379,6 +2436,7 @@ func _found_settlement() -> bool:
 func _clear_settlements() -> void:
 	core.settlement_clear()
 	_clear_settlement_nodes()
+	_cancel_settlement_rename()
 	settlement_release_armed_id = -1
 	selected_settlement_id = -1
 	if heatmap_visible:
@@ -2545,6 +2603,7 @@ func _validate_settlement_selection(state: Dictionary = {}) -> bool:
 	var center := _settlement_center(settlement)
 	if not settlement.is_empty() and is_finite(center.x) and is_finite(center.y):
 		return true
+	_cancel_settlement_rename()
 	settlement_release_armed_id = -1
 	selected_settlement_id = -1
 	return false
@@ -2559,6 +2618,7 @@ func _apply_settlement_selection(id: int) -> int:
 			next_id = id
 	if next_id != selected_settlement_id:
 		settlement_release_armed_id = -1
+		_cancel_settlement_rename()
 	selected_settlement_id = next_id
 	dashboard_refresh_accum = 0.0
 	if heatmap_visible:
@@ -3143,6 +3203,8 @@ func _update_citizen_panel() -> void:
 func _toggle_dashboard() -> bool:
 	dashboard_visible = not dashboard_visible
 	settlement_release_armed_id = -1
+	if not dashboard_visible:
+		_cancel_settlement_rename()
 	if dashboard_panel != null:
 		dashboard_panel.visible = dashboard_visible
 	dashboard_refresh_accum = 0.0
@@ -3778,6 +3840,135 @@ func _release_selected_settlement() -> Dictionary:
 	result["owner_before"] = owner_before
 	result["revision"] = revision_after
 	return result
+
+## Shift+R: open the rename overlay for the selected owned settlement. The
+## panel is already built in `_setup_ui`; this only fills it from the current
+## record. An unowned or missing selection returns false without a bridge call.
+func _open_settlement_rename() -> bool:
+	var settlement := _selected_settlement()
+	if settlement.is_empty() or not bool(settlement.get("owned", false)):
+		return false
+	var id := int(settlement.get("id", -1))
+	if id < 0 or settlement_rename_panel == null or settlement_rename_input == null:
+		return false
+	settlement_rename_target_id = id
+	settlement_rename_visible = true
+	settlement_rename_panel.visible = true
+	if settlement_rename_title != null:
+		settlement_rename_title.text = i18n.t(
+			"base.ui.dashboard.settlement_rename.title",
+			{"name": str(settlement.get("name", ""))}
+		)
+	if settlement_rename_hint != null:
+		settlement_rename_hint.text = i18n.t("base.ui.dashboard.settlement_rename.hint")
+	settlement_rename_input.text = str(settlement.get("name", ""))
+	settlement_rename_input.grab_focus()
+	settlement_rename_input.select_all()
+	return true
+
+## Hide the rename overlay and drop its target. Never touches the bridge.
+func _cancel_settlement_rename() -> void:
+	settlement_rename_visible = false
+	settlement_rename_target_id = -1
+	if settlement_rename_panel != null:
+		settlement_rename_panel.visible = false
+	if settlement_rename_input != null:
+		settlement_rename_input.release_focus()
+		settlement_rename_input.text = ""
+
+## Enter in the rename overlay. Empty and unchanged names reject locally with
+## a localized line and no bridge call. The real commit sends the trimmed name
+## and the record's membership revision as the optimistic check. Success keeps
+## the same selection, refreshes the list/detail in place, and prints the
+## deterministic smoke marker; a bridge rejection leaves the overlay open and
+## the store untouched. `expected_revision` is an optional test seam (-1 reads
+## the selected record) so the smoke can pin a stale revision deterministically.
+func _commit_settlement_rename(expected_revision := -1) -> Dictionary:
+	if not settlement_rename_visible:
+		return {"ok": false, "status": "rejected", "error_code": "settlement.rename_closed"}
+	var settlement := _selected_settlement()
+	var id := int(settlement.get("id", -1))
+	if settlement.is_empty() or id < 0 or id != settlement_rename_target_id:
+		_cancel_settlement_rename()
+		return {"ok": false, "status": "rejected", "error_code": "settlement.unknown"}
+	var current_name := str(settlement.get("name", ""))
+	var name := ""
+	if settlement_rename_input != null:
+		name = settlement_rename_input.text.strip_edges()
+	var revision := int(settlement.get("membership_revision", 0))
+	if expected_revision >= 0:
+		revision = expected_revision
+	if name == "":
+		_set_modal(i18n.t("base.ui.dashboard.settlement_rename.empty"), true)
+		print("DASHBOARD_RENAME status=rejected code=settlement.name_empty")
+		return {
+			"ok": false,
+			"status": "rejected",
+			"error_code": "settlement.name_empty",
+			"id": id,
+		}
+	if name == current_name:
+		_set_modal(i18n.t("base.ui.dashboard.settlement_rename.unchanged"), true)
+		print("DASHBOARD_RENAME status=rejected code=settlement.name_unchanged")
+		return {
+			"ok": false,
+			"status": "rejected",
+			"error_code": "settlement.name_unchanged",
+			"id": id,
+		}
+	var result: Dictionary = core.settlement_rename(id, name, revision)
+	if not bool(result.get("ok", false)):
+		var code := str(result.get("error_code", "unknown"))
+		_set_modal(i18n.t("base.ui.dashboard.settlement_rename.rejected", {
+			"code": code,
+			"message": str(result.get("error", "")),
+		}), true)
+		print("DASHBOARD_RENAME status=rejected code=%s" % code)
+		return {
+			"ok": false,
+			"status": "rejected",
+			"error_code": code,
+			"error": str(result.get("error", "")),
+			"id": id,
+		}
+	var updated: Dictionary = result.get("settlement", {})
+	var revision_after := int(updated.get("membership_revision", revision + 1))
+	var checksum := str(result.get("checksum", ""))
+	_cancel_settlement_rename()
+	_set_modal(i18n.t("base.ui.dashboard.settlement_rename.success", {
+		"id": i18n.format_int(id),
+		"revision": i18n.format_int(revision_after),
+		"checksum": checksum,
+	}), false)
+	dashboard_refresh_accum = 0.0
+	_update_dashboard()
+	_update_hud()
+	print("DASHBOARD_RENAME status=ok id=%d revision=%d->%d checksum=%s" % [
+		id,
+		revision,
+		revision_after,
+		checksum,
+	])
+	return {
+		"ok": true,
+		"status": "ok",
+		"id": id,
+		"name": str(updated.get("name", name)),
+		"revision_before": revision,
+		"revision_after": revision_after,
+		"checksum": checksum,
+	}
+
+func _on_settlement_rename_submitted(_text: String) -> void:
+	_commit_settlement_rename()
+
+## Esc inside the focused LineEdit cancels the overlay here and consumes the
+## event, so it can never reach the dashboard-close branch.
+func _on_settlement_rename_gui_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo \
+		and event.physical_keycode == KEY_ESCAPE:
+		settlement_rename_input.accept_event()
+		_cancel_settlement_rename()
 
 ## Lowest registered local player id that is not `owner_id`. The roster
 ## registers "Mayor" first and "Builder" only when no other id exists yet.
@@ -4950,6 +5141,7 @@ func _run_scene_smoke() -> void:
 	var dashboard_claim_ok := false
 	var dashboard_transfer_ok := false
 	var dashboard_release_ok := false
+	var dashboard_rename_ok := false
 	var heatmap_ui_ok := false
 	var heatmap_modes_ok := false
 	var advisor_i18n_ok := false
@@ -6543,6 +6735,100 @@ func _run_scene_smoke() -> void:
 						"revision": i18n.format_int(transfer_revision + 2),
 					}
 				)
+				# Shift+R: open the overlay through the real input handler,
+				# rename the owned record, and assert the revision bump and
+				# checksum change. Empty, unchanged, and stale names reject
+				# without touching the store; Esc closes only the overlay.
+				dashboard_rename_ok = _select_settlement(claim_id)
+				var rename_before := _selected_settlement()
+				var rename_id := int(rename_before.get("id", -1))
+				var rename_revision := int(rename_before.get("membership_revision", -1))
+				var rename_checksum_before := str(core.settlement_checksum())
+				_set_modal("", false)
+				_smoke_press_key(KEY_R, true)
+				dashboard_rename_ok = dashboard_rename_ok and settlement_rename_visible
+				dashboard_rename_ok = dashboard_rename_ok and settlement_rename_panel.visible
+				dashboard_rename_ok = dashboard_rename_ok and settlement_rename_input.text == "Smoke Claim"
+				dashboard_rename_ok = dashboard_rename_ok and settlement_rename_title.text == i18n.t(
+					"base.ui.dashboard.settlement_rename.title", {"name": "Smoke Claim"}
+				)
+				settlement_rename_input.text = "Riverside"
+				var rename_result: Dictionary = _commit_settlement_rename()
+				var renamed := _selected_settlement()
+				var rename_checksum_after := str(core.settlement_checksum())
+				dashboard_rename_ok = dashboard_rename_ok and bool(rename_result.get("ok", false))
+				dashboard_rename_ok = dashboard_rename_ok and int(rename_result.get("id", -1)) == rename_id
+				dashboard_rename_ok = dashboard_rename_ok and int(rename_result.get("revision_after", -1)) == rename_revision + 1
+				dashboard_rename_ok = dashboard_rename_ok and str(renamed.get("name", "")) == "Riverside"
+				dashboard_rename_ok = dashboard_rename_ok and int(renamed.get("membership_revision", -1)) == rename_revision + 1
+				dashboard_rename_ok = dashboard_rename_ok and rename_checksum_after != rename_checksum_before
+				dashboard_rename_ok = dashboard_rename_ok and not settlement_rename_visible
+				dashboard_rename_ok = dashboard_rename_ok and selected_settlement_id == rename_id
+				dashboard_rename_ok = dashboard_rename_ok and dashboard_text.text.contains("Riverside")
+				dashboard_rename_ok = dashboard_rename_ok and modal_label.text == i18n.t(
+					"base.ui.dashboard.settlement_rename.success",
+					{
+						"id": i18n.format_int(rename_id),
+						"revision": i18n.format_int(rename_revision + 1),
+						"checksum": rename_checksum_after,
+					}
+				)
+				# Empty name: localized local rejection, overlay stays open,
+				# and no bridge call or checksum drift. Shift+N must not clear
+				# settlements while the overlay owns the keyboard.
+				_smoke_press_key(KEY_R, true)
+				settlement_rename_input.text = "   "
+				_set_modal("", false)
+				var empty_rename: Dictionary = _commit_settlement_rename()
+				dashboard_rename_ok = dashboard_rename_ok and not bool(empty_rename.get("ok", true))
+				dashboard_rename_ok = dashboard_rename_ok and str(empty_rename.get("error_code", "")) == "settlement.name_empty"
+				dashboard_rename_ok = dashboard_rename_ok and settlement_rename_visible
+				dashboard_rename_ok = dashboard_rename_ok and modal_label.text == i18n.t("base.ui.dashboard.settlement_rename.empty")
+				var rename_count_before := int(core.settlement_count())
+				_smoke_press_key(KEY_N, true)
+				dashboard_rename_ok = dashboard_rename_ok and settlement_rename_visible
+				dashboard_rename_ok = dashboard_rename_ok and int(core.settlement_count()) == rename_count_before
+				dashboard_rename_ok = dashboard_rename_ok and str(core.settlement_checksum()) == rename_checksum_after
+				# Unchanged name: second local rejection, no bridge call.
+				settlement_rename_input.text = "Riverside"
+				_set_modal("", false)
+				var unchanged_rename: Dictionary = _commit_settlement_rename()
+				dashboard_rename_ok = dashboard_rename_ok and not bool(unchanged_rename.get("ok", true))
+				dashboard_rename_ok = dashboard_rename_ok and str(unchanged_rename.get("error_code", "")) == "settlement.name_unchanged"
+				dashboard_rename_ok = dashboard_rename_ok and settlement_rename_visible
+				dashboard_rename_ok = dashboard_rename_ok and modal_label.text == i18n.t("base.ui.dashboard.settlement_rename.unchanged")
+				dashboard_rename_ok = dashboard_rename_ok and str(core.settlement_checksum()) == rename_checksum_after
+				# Stale revision: the helper sends the pre-rename revision, the
+				# bridge rejects with revision_conflict, and nothing mutates.
+				settlement_rename_input.text = "Stale Riverside"
+				_set_modal("", false)
+				var stale_rename: Dictionary = _commit_settlement_rename(rename_revision)
+				dashboard_rename_ok = dashboard_rename_ok and not bool(stale_rename.get("ok", true))
+				dashboard_rename_ok = dashboard_rename_ok and str(stale_rename.get("error_code", "")) == "settlement.revision_conflict"
+				dashboard_rename_ok = dashboard_rename_ok and settlement_rename_visible
+				dashboard_rename_ok = dashboard_rename_ok and modal_label.text == i18n.t(
+					"base.ui.dashboard.settlement_rename.rejected",
+					{
+						"code": "settlement.revision_conflict",
+						"message": str(stale_rename.get("error", "")),
+					}
+				)
+				dashboard_rename_ok = dashboard_rename_ok and str(_selected_settlement().get("name", "")) == "Riverside"
+				dashboard_rename_ok = dashboard_rename_ok and int(_selected_settlement().get("membership_revision", -1)) == rename_revision + 1
+				dashboard_rename_ok = dashboard_rename_ok and str(core.settlement_checksum()) == rename_checksum_after
+				# Esc cancels the overlay before the dashboard-close branch.
+				_smoke_press_key(KEY_ESCAPE)
+				dashboard_rename_ok = dashboard_rename_ok and not settlement_rename_visible
+				dashboard_rename_ok = dashboard_rename_ok and not settlement_rename_panel.visible
+				dashboard_rename_ok = dashboard_rename_ok and dashboard_visible
+				dashboard_rename_ok = dashboard_rename_ok and dashboard_panel.visible
+				print("DASHBOARD_RENAME_SMOKE status=%s id=%d revision=%d->%d empty=rejected unchanged=rejected stale=rejected esc=ok checksum=%s" % [
+					"ok" if dashboard_rename_ok else "failed",
+					rename_id,
+					rename_revision,
+					rename_revision + 1,
+					rename_checksum_after,
+				])
 				# A stale direct bridge call must not mutate the store.
 				var transfer_repeat_checksum := str(core.settlement_checksum())
 				var stale_transfer: Dictionary = core.settlement_transfer(
@@ -7263,10 +7549,13 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and not dashboard_release_ok:
 		status = "dashboard_release_failed"
 
+	if status == "ok" and not dashboard_rename_ok:
+		status = "dashboard_rename_failed"
+
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s policy_edit=%s district_select=%s settlement_select=%s settlement_detail=%s dashboard_tax=%s dashboard_claim=%s dashboard_transfer=%s dashboard_release=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s policy_edit=%s district_select=%s settlement_select=%s settlement_detail=%s dashboard_tax=%s dashboard_claim=%s dashboard_transfer=%s dashboard_release=%s dashboard_rename=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -7316,6 +7605,7 @@ func _run_scene_smoke() -> void:
 		"ok" if dashboard_claim_ok else "failed",
 		"ok" if dashboard_transfer_ok else "failed",
 		"ok" if dashboard_release_ok else "failed",
+		"ok" if dashboard_rename_ok else "failed",
 		"ok" if heatmap_ui_ok else "failed",
 		"ok" if heatmap_modes_ok else "failed",
 		"ok" if hud_i18n_ok else "failed",

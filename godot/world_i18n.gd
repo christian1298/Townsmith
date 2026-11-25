@@ -314,6 +314,15 @@ const TABLES := {
 		"base.ui.dashboard.settlement_release.unavailable": "Settlement #{id} is no longer available",
 		"base.ui.dashboard.settlement_release.failed": "{code}: {message}",
 
+		# Settlement rename overlay (Shift+R). Only the sentences are
+		# translated; codes, names, ids, revisions, and checksums stay verbatim.
+		"base.ui.dashboard.settlement_rename.title": "Rename {name}",
+		"base.ui.dashboard.settlement_rename.hint": "Enter renames · Esc cancels",
+		"base.ui.dashboard.settlement_rename.empty": "A settlement name cannot be empty.",
+		"base.ui.dashboard.settlement_rename.unchanged": "That is already the settlement name.",
+		"base.ui.dashboard.settlement_rename.success": "Renamed settlement #{id} · revision {revision} · checksum {checksum}",
+		"base.ui.dashboard.settlement_rename.rejected": "{code}: {message}",
+
 		# Compact dashboard policy editing. Bridge error codes, ids, and
 		# policy names stay verbatim parameters.
 		"base.ui.policies.created": "Policy {id} created: {name}",
@@ -714,6 +723,15 @@ const TABLES := {
 		"base.ui.dashboard.settlement_release.unowned": "Siedlung #{id} hat keinen Eigentümer; nichts freizugeben",
 		"base.ui.dashboard.settlement_release.unavailable": "Siedlung #{id} ist nicht mehr verfügbar",
 		"base.ui.dashboard.settlement_release.failed": "{code}: {message}",
+
+		# Umbenennungs-Overlay (Umschalt+R). Nur die Sätze sind übersetzt;
+		# Codes, Namen, IDs, Revisionen und Prüfsummen bleiben Parameter.
+		"base.ui.dashboard.settlement_rename.title": "{name} umbenennen",
+		"base.ui.dashboard.settlement_rename.hint": "Eingabetaste benennt um · Esc bricht ab",
+		"base.ui.dashboard.settlement_rename.empty": "Ein Siedlungsname darf nicht leer sein.",
+		"base.ui.dashboard.settlement_rename.unchanged": "Das ist bereits der Name der Siedlung.",
+		"base.ui.dashboard.settlement_rename.success": "Siedlung #{id} umbenannt · Revision {revision} · Prüfsumme {checksum}",
+		"base.ui.dashboard.settlement_rename.rejected": "{code}: {message}",
 
 		# Kompakte Richtlinienbearbeitung im Dashboard. Fehlercodes, IDs und
 		# Richtliniennamen bleiben unveränderte Parameter.
