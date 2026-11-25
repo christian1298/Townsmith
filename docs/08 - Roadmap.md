@@ -249,12 +249,12 @@ The staged cut is in [[49 - Phase 3 Slice Plan]]: city ledger, households/needs,
 
 ### Phase 6 — Multiplayer (6–10 weeks)
 
-> [!info] Current status — in progress (master `f92f168`, 2026-11-25)
+> [!info] Current status — in progress (master `f9ddc70`, 2026-11-25)
 > **Landed:** protocol v1 and the authoritative executor; dev roles, rate limits, and audit; interest views with bounds (≤64 roads, ≤64 building records; #262/#266/#308); D-021 server-side time control including the 7-connection `--vote-smoke` pass/fail/cancel loop (#287); D-032 server-authoritative `place_blueprint` (#306/#308/#309); bridge content-addressed placement references (#311/#313); the catalog-driven Godot placement UI (#318); D-033 player identity, server persistence, bridge read model, placement `build` enforcement, and the settlement protocol — found/list/at/claim/rename/transfer/release plus invite/set-role/remove/set-tax (#319/#321–#330/#342/#343); the time-vote panel (#320); deterministic network-fault tests (#317); the server `--content-hash` hello pin (#331); D-035 read-only missing-pack inspection (#332); the district-panel membership display (#333); the settlement tax-rate model (#338), bridge rename (#341), and admin audit-log command (#337); the bounded pollable chat log (#344); the standalone settlement editor (#345); the synthetic chat panel (#346); the fail-closed client content-mismatch screen (#340); the opt-in 3D chat client (#348); advisory blueprint locks (#349); the two-connection chat loopback smoke (#350); fail-closed content-aware placement (#351); and the D-038 voxel-edit proposal (#352). F-003 is fixed by #287.
 >
-> **Landed after the plan:** CI UI contract smokes (#353), district-panel tax readout (#354), chat-panel EN/DE (#355), dashboard settlement tax control (#356), the capped settlement-store benchmark (#357), and [[80 - Phase 6 Remaining Work]] itself (#358); then #359 status reconciliation, #360 the D-039 tax-composition proposal, #361 save-schema freeze tests, #362 the settlement loopback smoke, #363 placement-UI locks, and #364 settlement-editor/dashboard localization. **Next:** settlement write controls beyond tax, tax treasury consumer, lock lease/TTL, concurrent listener queue, chat push, voxel edit v1 after D-038 acceptance, journal/rollback, schema freeze, remote transport/auth. The dependency order and acceptance criteria live in [[80 - Phase 6 Remaining Work]].
+> **Landed after the plan:** CI UI contract smokes (#353), district-panel tax readout (#354), chat-panel EN/DE (#355), dashboard settlement tax control (#356), the capped settlement-store benchmark (#357), and [[80 - Phase 6 Remaining Work]] itself (#358); then #359 status reconciliation, #360 the D-039 tax-composition proposal, #361 save-schema freeze tests, #362 the settlement loopback smoke, #363 placement-UI locks, and #364 settlement-editor/dashboard localization; #366 the pure D-039 composition helper, #367 CI multiplayer smokes, #368 the nested content-mismatch smoke fix, #369 bounded lock leases, #370 district-panel membership rows, and #371 the D-040 journal/rollback proposal. **Next:** settlement write controls beyond tax, tax treasury consumer, lock reconnect retention, concurrent listener queue, chat push, voxel edit v1 after D-038 acceptance, journal/rollback after D-040, schema freeze, remote transport/auth. The dependency order and acceptance criteria live in [[80 - Phase 6 Remaining Work]].
 >
-> **Gaps:** dashboard/connected-client settlement write controls beyond tax; a treasury consumer for the data-only tax rate; voxel edit sync (D-038 was only proposed by #352; Q-119/Q-120 remain open); blueprint lock lease/TTL and reconnect retention; journal/rollback; chat push/broadcast (the sequential listen loop has a pollable server log, and #348 wires a client poll; there is no broadcast path); remote transport and authentication; concurrent listener sessions.
+> **Gaps:** dashboard/connected-client settlement write controls beyond tax; a treasury consumer for the data-only tax rate (the pure D-039 helper landed in #366); voxel edit sync (D-038 was only proposed by #352; Q-119/Q-120 remain open); lock reconnect retention (leases landed in #369); journal/rollback v1 after D-040/Q-123/Q-124; chat push/broadcast (the sequential listen loop has a pollable server log, and #348 wires a client poll; there is no broadcast path); remote transport and authentication; concurrent listener sessions.
 
 **Goals**
 - Co-op that feels native, not bolted on.
@@ -391,15 +391,15 @@ The vertical slice is a small, complete version of the game used to validate the
 
 ## 7. Next tasks
 
-The dependency order, per-slice scope, test level, and exit mapping live in [[80 - Phase 6 Remaining Work]]. The short list at master `f92f168` (2026-11-25):
+The dependency order, per-slice scope, test level, and exit mapping live in [[80 - Phase 6 Remaining Work]]. The short list at master `f9ddc70` (2026-11-25):
 
 1. **Settlement write controls** in the dashboard and a connected client (found/claim/rename/transfer/membership/release/tax), reusing the existing bridge/server commands.
-2. **Settlement tax treasury consumer** plus an ADR for composition with D-030/D-031; the rate is data-only today.
-3. **Blueprint lock lease, TTL, and reconnect retention**; #349 ships the advisory in-memory v0 and #363 the placement UI.
+2. **Settlement tax treasury consumer** after D-039 acceptance; the pure composition helper exists but the rate is data-only today.
+3. **Blueprint lock reconnect retention**: #369 adds bounded leases and #363 the placement UI; decide whether a reconnect keeps its locks.
 4. **Concurrent listener sessions and a bounded outbound queue**, the prerequisite for push.
 5. **Chat push/broadcast** and reconnect catch-up, keeping `chat_since` polling.
 6. **Voxel edit sync v1** after D-038 acceptance and Q-119/Q-120 answers; [[79 - Voxel Edit Sync]] is the proposal.
-7. **Journal/rollback v1** on the accepted edit stream.
+7. **Journal/rollback v1** after D-040/Q-123/Q-124; [[82 - Journal and Rollback]] is the proposal.
 8. **Save schema freeze and migration fixtures** for settlements, edits, journal, and locks.
 9. **Remote transport and authentication**; resume tokens are not auth (F-039).
 10. **Phase 6 exit scenarios**: four players for one hour, concurrent edit/place, reconnect mid-edit, dedicated restart, time-control composition, and the human/hardware gates.
