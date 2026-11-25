@@ -58,6 +58,7 @@ tags:
 | D-038 | Authoritative placed-blueprint voxel edits are bounded, revisioned, and lock-scoped | Proposed | 2026-11-25 | [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[28 - Blueprint Package]], [[35 - Editor Undo Redo]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]] |
 | D-039 | Settlement tax composes as a per-location surcharge on the district-weighted base | Proposed | 2026-11-25 | [[09 - Open Questions]], [[48 - Settlement Boundaries]], [[53 - Treasury and Taxes]], [[57 - Dashboard and Advisor]], [[81 - Settlement Tax Composition]] |
 | D-040 | Authoritative command journal with bounded replay and Admin rollback | Proposed | 2026-11-25 | [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[75 - Save Load Stress]], [[78 - Code Audit Findings]], [[82 - Journal and Rollback]] |
+| D-041 | Remote transport and authentication: TLS, account identity, session tokens, bans | Proposed | 2026-11-25 | [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[78 - Code Audit Findings]], [[83 - Remote Transport and Authentication]] |
 
 ---
 
@@ -2267,6 +2268,78 @@ Adopt the v1 design in [[82 - Journal and Rollback]]:
 ### Review trigger
 
 Accept before the first journal write, replay field, or rollback command. Revisit when Q-123/Q-124 are answered, when append cost or retention exceeds the Phase 6 disk/tick budget, when a content or schema migration strands a snapshot, or when D-038 changes the edit-batch shape.
+
+---
+
+## D-041 — Remote transport and authentication: TLS, account identity, session tokens, bans
+
+**Status:** Proposed · **Date:** 2026-11-25 · **Affects:** [[05 - Multiplayer]], [[09 - Open Questions]], [[12 - Technical Architecture]], [[78 - Code Audit Findings]], [[83 - Remote Transport and Authentication]]
+
+### Context
+
+D-004 makes the server authoritative, but the current listener is a loopback/debug path. It speaks plain TCP, treats the display name in `hello` as identity, and returns a resume token derived from the seed (`session_id_for_seed`), which is a reconnect handle rather than authentication (F-039 in [[78 - Code Audit Findings]]). `PlayerId` is stable per save but keyed by display name (D-033); nothing above it owns the name across saves or clients. There is no TLS, account store, ban list, session revocation, or auth audit. `resume` is exempt from the token bucket. Anyone who can reach the port can spoof a name, replay or guess a resume token, read or alter traffic, flood the handshake, or reconnect after a kick. D-021 time votes, D-032 placement, D-033 settlement ownership, D-034/D-035 content identity, and D-040 journal/rollback all assume the peer is who the server thinks it is. Q-125 and Q-126 ask which account provider ships and how long tokens live.
+
+### Decision
+
+Adopt the v1 design in [[83 - Remote Transport and Authentication]], without implementing it here:
+
+1. **TLS off loopback.** Any bind address that is not loopback requires TLS (rustls first) with explicit certificate/key configuration, certificate and hostname validation, and no plaintext fallback by default. Loopback keeps a plaintext dev mode for the existing smokes.
+2. **Account identity provider.** An `AccountProvider` abstraction resolves a credential to a namespaced `AccountId` (`local:<uuid>`, later `steam:<steamid64>`). The local account file (Argon2id, `0600`) ships first; Steam/OpenID are later providers, not protocol changes.
+3. **Server-issued session token.** 32 random bytes, shown once and stored only as a BLAKE3 hash with claims `{account_id, server_id, issued_at, expires_at, generation, session_family, bound_channel}`. The token is bound to the TLS channel and auth nonces, never carries a `PlayerId`, role, or permission bit, and is revocable.
+4. **Resume rotation.** Every successful resume issues a new generation and invalidates the old token. Presenting an older generation revokes the family (`resume.revoked`); there is no silent replay grace. A lost rotation response requires re-authentication.
+5. **Identity mapping.** `AccountId` is deployment-wide; `PlayerId` stays per save (D-033). An optional additive save field links account to `PlayerId`; a display name remains a label, is unique per save, and cannot be claimed by a different account. Base-only saves stay byte-identical.
+6. **Handshake order.** Version and content negotiation run first on the existing `hello` (preserving the #331 `ServerWorld.content_hash` pin), then authentication, then a session. No `PlayerId`, token, or world state exists before auth succeeds. Auth frames are additive; frozen v1 shapes are unchanged.
+7. **Limits, bans, audit.** Per-IP and per-account handshake budgets, a pre-auth connection cap, a 10 s handshake deadline, a server-local ban list keyed by `AccountId` with expiry/reason, and audit entries for auth success/failure, bans, kicks, reuse detection, and TLS failures. Secrets and tokens never enter logs, metrics labels, audit, saves, or the journal.
+8. **Failure codes.** `auth.required`, `auth.invalid`, `auth.expired`, `auth.banned`, `auth.rate_limited`, `tls.required`, `tls.handshake_failed`, `resume.revoked`, `server.identity_mismatch`.
+9. **No scope creep.** No public server browser, matchmaking, Steam Workshop auth, account recovery, OAuth providers at launch, or end-to-end encryption beyond TLS. Auth is not anti-cheat and not a second permission model.
+
+### Consequences
+
+**Positive**
+
+- A remote session has a real peer identity, an encrypted channel, and a revocable credential instead of a derivable handle.
+- F-039 is closed: resume is rate-limited and no longer an authentication substitute.
+- Settlement ownership and placement authority (D-032/D-033) sit on an account that survives reconnects and name changes.
+- Bans, kicks, and logout take effect immediately and are auditable.
+- Loopback smokes and the single-player local server keep their current plaintext path and checksums.
+
+**Negative**
+
+- Operators must manage certificates, an account file, and secrets; certificate expiry becomes a startup/ops failure mode.
+- Token rotation and channel binding add handshake and test surface, and a lost rotation response can force a full re-login.
+- The auth-enabled handshake is longer than hello → welcome, and every pre-auth path needs a budget.
+- A TLS-terminating proxy weakens channel binding unless explicitly configured.
+- Persisting the account link adds an optional save field and a migration edge, even though base-only saves are unchanged.
+
+**Neutral**
+
+- The server stays authoritative (D-004); auth decides who connects, not what is accepted.
+- Time control (D-021), journal (D-040), and content identity (D-034/D-035) keep their models; auth events are audit entries, not journal commands.
+- `PlayerId` remains the game-facing key; the account is an owner above it, not a replacement.
+- Loopback resume keeps its current handle until auth is configured.
+
+### Alternatives considered
+
+- **Name-plus-password with no accounts:** cheap, but still name-keyed, with no revocation, no cross-save owner, and no ban target.
+- **Steam-only identity at launch:** good for distribution, but excludes DRM-free/self-hosted servers and makes Steam a hard dependency; keep it as a later provider.
+- **JWT/self-contained tokens:** no server-side revocation without a blocklist; an opaque hashed token is simpler to revoke and smaller to store.
+- **Permanent bearer token without rotation:** one leak is valid forever; rotation with reuse detection bounds the damage.
+- **TLS at a reverse proxy only:** operationally familiar, but the default process bind would still be plaintext and channel binding would be lost; support it as an explicit option, not the default.
+- **Plaintext with a shared secret:** encrypts nothing, still replayable and spoofable, and adds a secret to distribute.
+- **Auth before content negotiation:** hides the content hash from scanners, but breaks the existing fail-closed hello order and spends auth work on clients that cannot join. Keep `auth_first` as a config alternative only.
+
+### Open questions
+
+| ID | Question |
+|---|---|
+| Q-125 | Which account provider ships at launch, and is a local account file enough? |
+| Q-126 | What are the token lifetime and renewal rules, and does TLS terminate in the process or at a proxy? |
+
+Ban scope (server vs account-wide) and LAN plaintext are listed in [[83 - Remote Transport and Authentication]] §12 as unfiled items; they take the next Q IDs if still open at review.
+
+### Review trigger
+
+Accept before the first non-loopback listener, account file, token issuer, or ban list. Revisit when Q-125/Q-126 are answered, when a proxy or shared ban list is proposed, when restart-persistent resume is needed, or when a frozen v1 frame would have to change; in that last case write a protocol-version ADR instead.
 
 ---
 
