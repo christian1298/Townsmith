@@ -13,7 +13,7 @@ tags:
 # Phase 6 Remaining Work
 
 > [!abstract] Purpose
-> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `142da42` (2026-11-25). It is a plan, not an implementation claim.
+> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `4cd5316` (2026-11-25). It is a plan, not an implementation claim.
 
 Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/D-032/D-033/D-035/D-038, [[09 - Open Questions]] Q-101/Q-117/Q-119/Q-120, [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]].
 
@@ -29,7 +29,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 | ✅ Done | D-035 read-only missing-pack load, server content-hash pin, client content-mismatch screen | #331/#332/#340 |
 | ✅ Done | Bounded pollable chat log, chat panel, settlement editor, district membership readout | #333/#344/#345/#346 |
 | ✅ Done | Chat client smoke, blueprint locks v0, chat loopback, content-aware placement, voxel-edit ADR | #348–#352 |
-| 🔄 In flight | CI UI smokes, district tax readout, chat-panel EN/DE, dashboard tax control | #353–#356 |
+| ✅ Done | CI UI smokes, district tax readout, chat-panel EN/DE, dashboard tax control, settlement benchmark, this plan | #353–#358 |
 | ⛔ Blocked | Q-101 human playtest; 1M/RTX 3060 render gate | person / reference hardware |
 
 ## 2. Dependency order
@@ -51,7 +51,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.1 Settlement write controls
 
-**Scope.** Dashboard and a connected client should found, claim, rename, transfer, invite, set role, remove, release (Admin), and set tax through the bridge/server commands that already exist. The dashboard currently has only `Shift+T` tax in flight (#356); the settlement editor is the full developer surface.
+**Scope.** Dashboard and a connected client should found, claim, rename, transfer, invite, set role, remove, release (Admin), and set tax through the bridge/server commands that already exist. The dashboard currently has only the merged `Shift+T` tax cycle (#356); the settlement editor is the full developer surface.
 
 **Protocol/save.** No new command or save field. Reuse `settlement_*` v1 shapes and `settlement_updated`.
 
@@ -194,7 +194,7 @@ Prove, on reference hardware and with four players:
 
 ## 7. Immediate order
 
-1. Merge/verify #353–#356, then refresh this table and [[08 - Roadmap]].
+1. Verify the merged #353–#358 wave and refresh this table with [[08 - Roadmap]].
 2. Settlement write controls (§3.1) and the tax composition ADR (§3.2).
 3. Blueprint lock lease/UI (§3.3).
 4. Concurrent listener queue (§3.4), then chat push (§3.5).
