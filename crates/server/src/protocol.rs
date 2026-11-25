@@ -122,6 +122,8 @@ pub mod codes {
     pub const CONTENT_HASH_INVALID: &str = "content_hash.invalid";
     /// The client content hash does not match the server's pinned registry.
     pub const CONTENT_HASH_MISMATCH: &str = "content_hash.mismatch";
+    /// The configured active content registry is empty or malformed.
+    pub const CONTENT_INVALID_REGISTRY: &str = "content.invalid_registry";
     pub const SESSION_CLOSED: &str = "session.closed";
     /// `resume` is only implemented by the authoritative executor; the
     /// transport-only reference session rejects it.
@@ -145,6 +147,10 @@ pub mod codes {
     pub const PLACEMENT_PACKAGE_MISSING: &str = "PLACEMENT_PACKAGE_MISSING";
     /// The stored package failed `.tsbp` validation or metadata checks.
     pub const PLACEMENT_PACKAGE_INVALID: &str = "PLACEMENT_PACKAGE_INVALID";
+    /// The stored package declares a mod or resource pack that is not active
+    /// on this server. This is the bridge-compatible code; the message lists
+    /// the sorted missing IDs and never a filesystem path.
+    pub const BLUEPRINT_MISSING_DEPENDENCY: &str = "blueprint.missing_dependency";
     /// A district policy blocks the placement; the bridge policy code is in
     /// the message.
     pub const PLACEMENT_POLICY_DENIED: &str = "PLACEMENT_POLICY_DENIED";
