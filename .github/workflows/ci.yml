@@ -154,6 +154,25 @@ jobs:
         run: |
           set -o pipefail
           bash ./scripts/smoke_layout.sh 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
+      - name: Run standalone UI contract smokes
+        shell: bash
+        run: |
+          set -o pipefail
+          for smoke in \
+            smoke_chat_panel \
+            smoke_settlement_editor \
+            smoke_time_vote_ui \
+            smoke_district_panel \
+            smoke_content_mismatch \
+            smoke_policy_editor \
+            smoke_world_library; do
+            echo "== $smoke =="
+            if [ "$smoke" = "smoke_settlement_editor" ]; then
+              bash "./scripts/$smoke.sh" --smoke 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
+            else
+              bash "./scripts/$smoke.sh" 2>&1 | tee -a "$RUNNER_TEMP/godot-smoke.log"
+            fi
+          done
       - name: Upload smoke log
         if: always()
         uses: actions/upload-artifact@v4
