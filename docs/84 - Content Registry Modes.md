@@ -18,6 +18,18 @@ tags:
 
 Related: [[06 - Modding and Resource Packs]], [[28 - Blueprint Package]], [[42 - World Placement Bridge]], [[10 - Decisions]] D-006/D-027/D-034/D-035/D-036/D-037/D-042, [[09 - Open Questions]] Q-116/Q-117/Q-118/Q-127/Q-128.
 
+> [!note] Parser landed (proposed)
+> The pure manifest parser and validator now live in `crates/core_city/src/content_registry.rs`; tests run with `cargo test -p core_city`. The public API is:
+>
+> - `parse_content_registry_manifest(&str) -> Result<ContentRegistryManifest, ContentRegistryError>` (also `ContentRegistryManifest::parse` / `::validate`).
+> - `ContentRegistryManifest::implicit_ids()`, `::select(&[&str])`, and `::provides(&str)`.
+> - `ContentRegistryManifest { format_version, ids }` and `ContentRegistryEntry { id, kind, namespace, checksum }` with `ContentRegistryKind::{Mod, ResourcePack}`.
+> - `ContentRegistryError::code()` returning the stable `content.invalid_registry`, `content.unsupported_registry_version`, `content.unknown_id`, and `content.kind_mismatch` codes.
+>
+> The parser rejects unknown fields, `format_version` other than 1, explicit `base`, invalid IDs/namespaces, missing or non-canonical `blake3:<64 lowercase hex>` checksums, duplicate IDs/namespaces, and cross-kind claims. It enforces the §8 caps (256 entries, 1 MiB, 64-byte IDs).
+>
+> **No server or CLI wiring exists.** There is no `--content-registry` flag, no registry I/O, no `SERVER_CONTENT` status line, no placement or save behavior change, and no protocol or checksum change. D-042 remains **Proposed**; Q-127 and Q-128 remain **Open**.
+
 ## 1. Why now
 
 The server already has a process-local active-content list:

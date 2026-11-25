@@ -33,6 +33,7 @@
 
 pub mod advisor;
 pub mod construction;
+pub mod content_registry;
 pub mod district;
 pub mod economy;
 pub mod industry;
@@ -77,6 +78,13 @@ pub use construction::{
     CAMPAIGN_MAX_SECONDS_PER_GAME_DAY, CAMPAIGN_MIN_BUILD_DAYS, CAMPAIGN_MIN_SECONDS_PER_GAME_DAY,
     CAMPAIGN_SIZE_EXPONENT, CONSTRUCTION_FORMAT_VERSION, MAX_SITES as MAX_CONSTRUCTION_SITES,
     MAX_SITE_COST, MAX_TICK_SECONDS,
+};
+pub use content_registry::{
+    is_canonical_content_checksum, is_valid_content_id, parse_content_registry_manifest,
+    ContentRegistryEntry, ContentRegistryError, ContentRegistryKind, ContentRegistryManifest,
+    BASE_CONTENT_ID, CONTENT_CHECKSUM_HEX_LEN, CONTENT_CHECKSUM_PREFIX,
+    CONTENT_REGISTRY_FORMAT_VERSION, MAX_CONTENT_ID_BYTES, MAX_CONTENT_REGISTRY_BYTES,
+    MAX_CONTENT_REGISTRY_ENTRIES,
 };
 pub use core_structure::{StructuralSystem, StructureError, StructureSpec, StructureSummary};
 pub use district::{
