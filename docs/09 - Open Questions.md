@@ -229,6 +229,46 @@ These support D-038 (Proposed, 2026-11-25) and [[79 - Voxel Edit Sync]].
 | **Q-121** | Does the settlement tax compose multiplicatively with the D-030 district multiplier (option A, per-location cap 8.0), or additively (option C)? | **Recommendation:** option A: `min(8.0, m_i × (1 + s_i/100))` per location, then the existing weighted mean. It preserves the district signal and treats a settlement as a surcharge; option C is the balance alternative. | High |
 | **Q-122** | When is settlement tax collected, and how are mid-day rate changes and dormant catch-up attributed? | **Recommendation:** once per economy day keyed by the persisted `days_elapsed` watermark; rate changes apply next tick; paused time collects nothing; dormant catch-up uses the stored rate per simulated day. | High |
 
+## Journal and rollback questions
+
+These support D-040 (Proposed, 2026-11-25) and [[82 - Journal and Rollback]]. The journal is not implemented; the existing audit ring and 300-tick resume window are unchanged.
+
+### Q-123 — Journal retention, payload capture, and snapshot cadence
+
+**Priority:** High · **Affects:** D-040, [[05 - Multiplayer]], [[12 - Technical Architecture]], [[75 - Save Load Stress]], [[82 - Journal and Rollback]]
+
+**Question:** What are the default retention limits (entries and tick age), is raw command payload capture on by default or opt-in, and how often are state snapshots written?
+
+**Why it matters:** The defaults decide whether arbitrary-target rollback is possible, how much disk the journal consumes, and how much accepted work a crash can lose. Payload capture also decides whether chat or personal text could ever enter the journal.
+
+**Options**
+- **Hash-only, 100k entries / 7 in-game days, snapshot every 1,000 accepted entries:** smallest and private; rollback is limited to exact snapshot ticks.
+- **Payload capture with the same retention:** arbitrary-target rollback; larger disk and a wider privacy surface.
+- **Short hash-only (10k / 1 day) with dense snapshots:** tight loss window, more snapshot I/O.
+- **Long capture (1M / 30 days):** support-friendly, but not a Phase 6 disk or tick budget.
+
+**Current assumption:** hash-only default; 100,000 entries and 7 in-game days, whichever is reached first; snapshot every 1,000 accepted entries, on clean shutdown, and before a rollback; payload capture is an Admin opt-in with a bounded total budget.
+**Recommendation:** ship the hash-only default and measure append/replay cost at 100k entries before widening retention. Never capture chat, personal text, tokens, or credentials, even in payload mode.
+**Status:** Open
+
+### Q-124 — Rollback authorization and quorum
+
+**Priority:** High · **Affects:** D-040, [[05 - Multiplayer]], [[82 - Journal and Rollback]]
+
+**Question:** Who may authorize a rollback on a live server, and does it require a second Admin, the affected settlement owner, or an online-player vote?
+
+**Why it matters:** A rollback discards accepted commands for every online player at once. Too little authority makes griefing or an accident easy; too much makes recovery impossible during an incident.
+
+**Options**
+- **Single Admin, audited:** fastest recovery; relies on the Admin role and the two-step preview.
+- **Two Admin confirmations:** a second Admin or an operator token must confirm the preview; safer for shared servers.
+- **Affected settlement owner consent:** limits blast radius but leaves city-wide state unexplained and adds an offline-owner dead end.
+- **Online simple-majority vote:** matches D-021 time control, but recovery is not a gameplay preference and a griefer can stall the vote.
+
+**Current assumption:** single Admin on a local/self-hosted server, always with the dry-run preview and explicit apply; when more than one player is online, a second Admin or operator confirmation is recommended.
+**Recommendation:** keep rollback Admin-only and two-step; require a second confirmation for a multi-player server, not a player vote. Record the authorization mode in the journal and audit entry.
+**Status:** Open
+
 ## Construction questions
 
 | ID | Question | Current assumption / recommendation | Priority |
@@ -390,3 +430,4 @@ These support D-038 (Proposed, 2026-11-25) and [[79 - Voxel Edit Sync]].
 | Q-116–Q-118 | Content-pack identity in world saves (D-034 accepted; D-035 bridge v1; Q-116/Q-118 answered as proposed ADRs) |
 | Q-119–Q-120 | Authoritative placed-blueprint voxel edits (D-038 proposed) |
 | Q-121–Q-122 | Settlement tax composition and collection (D-039 proposed) |
+| Q-123–Q-124 | Authoritative command journal and Admin rollback (D-040 proposed) |
