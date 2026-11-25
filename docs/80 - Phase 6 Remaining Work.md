@@ -13,7 +13,7 @@ tags:
 # Phase 6 Remaining Work
 
 > [!abstract] Purpose
-> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `4cd5316` (2026-11-25). It is a plan, not an implementation claim.
+> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `f92f168` (2026-11-25). It is a plan, not an implementation claim.
 
 Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/D-032/D-033/D-035/D-038, [[09 - Open Questions]] Q-101/Q-117/Q-119/Q-120, [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]].
 
@@ -30,6 +30,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 | ✅ Done | Bounded pollable chat log, chat panel, settlement editor, district membership readout | #333/#344/#345/#346 |
 | ✅ Done | Chat client smoke, blueprint locks v0, chat loopback, content-aware placement, voxel-edit ADR | #348–#352 |
 | ✅ Done | CI UI smokes, district tax readout, chat-panel EN/DE, dashboard tax control, settlement benchmark, this plan | #353–#358 |
+| ✅ Done | Settlement-tax ADR proposal (D-039), save-schema freeze tests, settlement loopback smoke, placement lock UI, settlement-editor/dashboard localization | #359–#364 |
 | ⛔ Blocked | Q-101 human playtest; 1M/RTX 3060 render gate | person / reference hardware |
 
 ## 2. Dependency order
@@ -77,7 +78,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.3 Blueprint locks: UI, TTL, reconnect
 
-**Scope.** #349 ships advisory in-memory locks and player-wide release on disconnect. Add editor UI (lock/unlock/holder), a lease with an injectable clock (not tick-only, to avoid the F-006 deadlock pattern), reconnect retention for the same player id, and explicit Admin force-unlock audit.
+**Scope.** #349 ships advisory in-memory locks and player-wide release on disconnect; #363 adds the placement-UI lock badge and `L` toggle. Add a lease with an injectable clock (not tick-only, to avoid the F-006 deadlock pattern), reconnect retention for the same player id, and explicit Admin force-unlock audit.
 
 **Protocol/save.** Additive fields on the existing lock responses; if locks become durable, a new optional `ServerSave` store and `save.invalid_blueprint_locks`. Do not make locks authoritative for package identity.
 
@@ -194,7 +195,7 @@ Prove, on reference hardware and with four players:
 
 ## 7. Immediate order
 
-1. Verify the merged #353–#358 wave and refresh this table with [[08 - Roadmap]].
+1. Verify the merged #353–#364 wave and refresh this table with [[08 - Roadmap]].
 2. Settlement write controls (§3.1) and the tax composition ADR (§3.2).
 3. Blueprint lock lease/UI (§3.3).
 4. Concurrent listener queue (§3.4), then chat push (§3.5).
