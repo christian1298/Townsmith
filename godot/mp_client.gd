@@ -929,6 +929,9 @@ func _build_ui() -> void:
 	_content_mismatch_screen = ContentMismatchScene.instantiate()
 	_content_mismatch_screen.name = "ContentMismatch"
 	_content_mismatch_screen.visible = false
+	# A child scene must not run its own --smoke path when the parent probe is
+	# the one under test; it only builds the UI and waits for set_failure().
+	_content_mismatch_screen._suppress_smoke = true
 	add_child(_content_mismatch_screen)
 
 func _add_row(parent: VBoxContainer, key: String, value: String) -> Label:
