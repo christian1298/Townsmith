@@ -268,6 +268,9 @@ var district_focus_selection := false
 # survives dashboard rebuilds, and is revalidated after a world load (a removed
 # or foreign id falls back to no settlement and the camera/selection focus).
 var selected_settlement_id := -1
+## Cached local bridge player id for the dashboard's developer "Mayor";
+## -1 means not registered yet. Registration happens on first claim.
+var mayor_player_id := -1
 var follow_active := false
 var follow_target := Vector3.ZERO
 var follow_prev_target := Vector3.ZERO
@@ -512,7 +515,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				KEY_Z:
 					_edit_target(-1)
 				KEY_C:
-					_toggle_crew()
+					if event.shift_pressed:
+						if dashboard_visible and selected_settlement_id >= 0:
+							_claim_selected_settlement()
+					else:
+						_toggle_crew()
 				KEY_I:
 					_cycle_industry()
 				KEY_U:
@@ -3579,6 +3586,80 @@ func _cycle_selected_settlement_tax() -> bool:
 	_update_hud()
 	return true
 
+## Shift+C: claim the selected unowned settlement as the local developer
+## player. Only the Settlements section writes here. The key is gated by the
+## dashboard and a valid selection. An owned record is rejected locally with
+## the localized owner line and no bridge call; an unowned record registers the
+## cached "Mayor" player on first use, then calls `settlement_claim` with the
+## record's `membership_revision`. Success refreshes the list/detail in place
+## (same selected id) and reports the claimed id, player id, and checksum.
+func _claim_selected_settlement() -> bool:
+	var settlement := _selected_settlement()
+	if settlement.is_empty():
+		return false
+	var id := int(settlement.get("id", -1))
+	if id < 0:
+		return false
+	if bool(settlement.get("owned", false)):
+		var owner_value = settlement.get("owner_id", null)
+		var owner_id := int(owner_value) if owner_value != null else -1
+		_set_modal(i18n.t("base.ui.dashboard.settlement_claim.already_owned", {
+			"id": i18n.format_int(id),
+			"player": (i18n.format_int(owner_id) if owner_id > 0 else i18n.NOT_AVAILABLE),
+		}), true)
+		_update_hud()
+		return false
+	var player_id := _mayor_player_id()
+	if player_id <= 0:
+		return false
+	var revision := int(settlement.get("membership_revision", 0))
+	var result: Dictionary = core.settlement_claim(id, player_id, revision)
+	if not bool(result.get("ok", false)):
+		_set_modal(i18n.t("base.ui.dashboard.settlement_claim.failed", {
+			"code": str(result.get("error_code", "unknown")),
+			"message": str(result.get("error", "")),
+		}), true)
+		_update_hud()
+		return false
+	var updated: Dictionary = result.get("settlement", {})
+	var claimed_value = updated.get("owner_id", player_id)
+	var claimed_id := int(claimed_value) if claimed_value != null else player_id
+	_set_modal(i18n.t("base.ui.dashboard.settlement_claim.success", {
+		"id": i18n.format_int(id),
+		"player": i18n.format_int(claimed_id),
+		"checksum": str(result.get("checksum", "")),
+	}), false)
+	dashboard_refresh_accum = 0.0
+	_update_dashboard()
+	_update_hud()
+	return true
+
+## Register the local developer player once and cache the stable bridge id.
+## A failed registration shows the localized code/message and leaves the cache
+## unset so the next attempt retries.
+func _mayor_player_id() -> int:
+	if mayor_player_id > 0:
+		return mayor_player_id
+	var result: Dictionary = core.players_register("Mayor")
+	if not bool(result.get("ok", false)):
+		_set_modal(i18n.t("base.ui.dashboard.settlement_claim.register_failed", {
+			"code": str(result.get("error_code", "unknown")),
+			"message": str(result.get("error", "")),
+		}), true)
+		_update_hud()
+		return -1
+	var player: Dictionary = result.get("player", {})
+	var id := int(player.get("id", -1))
+	if id <= 0:
+		_set_modal(i18n.t("base.ui.dashboard.settlement_claim.register_failed", {
+			"code": "player.invalid_id",
+			"message": "",
+		}), true)
+		_update_hud()
+		return -1
+	mayor_player_id = id
+	return id
+
 func _settlement_membership_line(settlement: Dictionary) -> String:
 	var revision: String = i18n.format_int(int(settlement.get("membership_revision", 0)))
 	if not bool(settlement.get("owned", false)):
@@ -4692,6 +4773,7 @@ func _run_scene_smoke() -> void:
 	var settlement_select_ok := false
 	var settlement_detail_ok := false
 	var dashboard_tax_ok := false
+	var dashboard_claim_ok := false
 	var heatmap_ui_ok := false
 	var heatmap_modes_ok := false
 	var advisor_i18n_ok := false
@@ -6139,6 +6221,103 @@ func _run_scene_smoke() -> void:
 					owned_tax_next,
 					str(core.settlement_checksum()),
 				])
+				# Shift+C: seed one fresh unowned record through the local
+				# bridge. The first key press registers and caches "Mayor",
+				# claims with the record's membership revision, and refreshes
+				# the same selection. A second press rejects locally because
+				# the record is now owned. A hidden dashboard leaves a second
+				# unowned record and every checksum untouched (no bridge call).
+				var claim_found: Dictionary = core.settlement_found(
+					SEED, "Smoke Claim", "player", 900, 900, 64
+				)
+				var claim_record: Dictionary = claim_found.get("settlement", {})
+				var claim_id := int(claim_record.get("id", -1))
+				dashboard_claim_ok = bool(claim_found.get("ok", false)) and claim_id > 0
+				dashboard_claim_ok = dashboard_claim_ok and not bool(claim_record.get("owned", true))
+				dashboard_claim_ok = dashboard_claim_ok and int(claim_record.get("membership_revision", -1)) == 0
+				dashboard_claim_ok = dashboard_claim_ok and _select_settlement(claim_id)
+				dashboard_claim_ok = dashboard_claim_ok and selected_settlement_id == claim_id
+				var claim_registered: Dictionary = core.players_register("Mayor")
+				var claim_player: Dictionary = claim_registered.get("player", {})
+				var claim_player_id := int(claim_player.get("id", -1))
+				dashboard_claim_ok = dashboard_claim_ok and bool(claim_registered.get("ok", false))
+				dashboard_claim_ok = dashboard_claim_ok and claim_player_id > 0
+				mayor_player_id = -1
+				var claim_revision := int(_selected_settlement().get("membership_revision", -1))
+				var claim_world_before := str(core.world_placement_checksum())
+				var claim_population_before := str(core.population_checksum())
+				var claim_construction_before := str(core.construction_checksum())
+				_set_modal("", false)
+				_smoke_press_key(KEY_C, true)
+				var claimed_record: Dictionary = _selected_settlement()
+				var claim_checksum_after := str(core.settlement_checksum())
+				dashboard_claim_ok = dashboard_claim_ok and mayor_player_id == claim_player_id
+				dashboard_claim_ok = dashboard_claim_ok and bool(claimed_record.get("owned", false))
+				dashboard_claim_ok = dashboard_claim_ok and int(claimed_record.get("owner_id", -1)) == claim_player_id
+				dashboard_claim_ok = dashboard_claim_ok and int(claimed_record.get("membership_revision", -1)) == claim_revision + 1
+				dashboard_claim_ok = dashboard_claim_ok and selected_settlement_id == claim_id
+				dashboard_claim_ok = dashboard_claim_ok and modal_label.text == i18n.t(
+					"base.ui.dashboard.settlement_claim.success",
+					{
+						"id": i18n.format_int(claim_id),
+						"player": i18n.format_int(claim_player_id),
+						"checksum": claim_checksum_after,
+					}
+				)
+				dashboard_claim_ok = dashboard_claim_ok and dashboard_text.text.contains(
+					i18n.t("base.ui.dashboard.body.settlements_count", {
+						"count": i18n.format_int(3),
+						"selected": "Smoke Claim",
+					})
+				)
+				dashboard_claim_ok = dashboard_claim_ok and str(core.world_placement_checksum()) == claim_world_before
+				dashboard_claim_ok = dashboard_claim_ok and str(core.population_checksum()) == claim_population_before
+				dashboard_claim_ok = dashboard_claim_ok and str(core.construction_checksum()) == claim_construction_before
+				# Owned records reject locally: the second press shows the
+				# localized owner line without a bridge call or checksum drift.
+				_set_modal("", false)
+				_smoke_press_key(KEY_C, true)
+				dashboard_claim_ok = dashboard_claim_ok and modal_label.text == i18n.t(
+					"base.ui.dashboard.settlement_claim.already_owned",
+					{
+						"id": i18n.format_int(claim_id),
+						"player": i18n.format_int(claim_player_id),
+					}
+				)
+				dashboard_claim_ok = dashboard_claim_ok and str(core.settlement_checksum()) == claim_checksum_after
+				dashboard_claim_ok = dashboard_claim_ok and int(_selected_settlement().get("membership_revision", -1)) == claim_revision + 1
+				# Hidden dashboard: the real input handler gates the key, so a
+				# second unowned record stays unowned and no modal appears.
+				var hidden_found: Dictionary = core.settlement_found(
+					SEED, "Smoke Claim Hidden", "player", 1200, 900, 64
+				)
+				var hidden_record: Dictionary = hidden_found.get("settlement", {})
+				var hidden_id := int(hidden_record.get("id", -1))
+				dashboard_claim_ok = dashboard_claim_ok and bool(hidden_found.get("ok", false))
+				dashboard_claim_ok = dashboard_claim_ok and hidden_id > claim_id
+				dashboard_claim_ok = dashboard_claim_ok and not bool(hidden_record.get("owned", true))
+				dashboard_claim_ok = dashboard_claim_ok and _select_settlement(hidden_id)
+				var hidden_checksum_before := str(core.settlement_checksum())
+				_toggle_dashboard()
+				_set_modal("", false)
+				_smoke_press_key(KEY_C, true)
+				dashboard_claim_ok = dashboard_claim_ok and not dashboard_panel.visible
+				dashboard_claim_ok = dashboard_claim_ok and modal_label.text == ""
+				dashboard_claim_ok = dashboard_claim_ok and not bool(_selected_settlement().get("owned", true))
+				dashboard_claim_ok = dashboard_claim_ok and str(core.settlement_checksum()) == hidden_checksum_before
+				_toggle_dashboard()
+				_select_settlement(first_settlement_id)
+				_update_dashboard()
+				dashboard_claim_ok = dashboard_claim_ok and bool(_settlement_by_id(claim_id).get("owned", false))
+				print("DASHBOARD_CLAIM status=%s id=%d player=%d revision=%d->%d owned=%d second=rejected hidden=untouched checksum=%s" % [
+					"ok" if dashboard_claim_ok else "failed",
+					claim_id,
+					claim_player_id,
+					claim_revision,
+					int(_selected_settlement().get("membership_revision", -1)),
+					int(_selected_settlement().get("owner_id", -1)),
+					claim_checksum_after,
+				])
 				_toggle_dashboard()
 				dashboard_ok = dashboard_ok and not dashboard_panel.visible
 				var heatmap_checksum := ""
@@ -6764,10 +6943,13 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and not dashboard_tax_ok:
 		status = "dashboard_tax_failed"
 
+	if status == "ok" and not dashboard_claim_ok:
+		status = "dashboard_claim_failed"
+
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s policy_edit=%s district_select=%s settlement_select=%s settlement_detail=%s dashboard_tax=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s policy_edit=%s district_select=%s settlement_select=%s settlement_detail=%s dashboard_tax=%s dashboard_claim=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -6814,6 +6996,7 @@ func _run_scene_smoke() -> void:
 		"ok" if settlement_select_ok else "failed",
 		"ok" if settlement_detail_ok else "failed",
 		"ok" if dashboard_tax_ok else "failed",
+		"ok" if dashboard_claim_ok else "failed",
 		"ok" if heatmap_ui_ok else "failed",
 		"ok" if heatmap_modes_ok else "failed",
 		"ok" if hud_i18n_ok else "failed",
