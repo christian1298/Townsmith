@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GODOT_BIN="${GODOT:-godot}"
 FIXTURE_X="32"
 FIXTURE_Z="32"
-SCRIPT="select:0;move:8,0;rotate:90;place;move:1,0;place;cancel"
+SCRIPT="select:0;lock;unlock;move:8,0;rotate:90;place;move:1,0;place;cancel"
 
 if ! command -v "$GODOT_BIN" >/dev/null 2>&1; then
 	echo "Godot binary not found: $GODOT_BIN (set GODOT=/path/to/godot)" >&2
@@ -155,16 +155,22 @@ run_block() {
 	fi
 
 	local ui_line
+	local locks_line
+	local lock_line
+	local unlock_line
 	local place_line
 	local reject_line
 	local done_line
 	local client_done
 	ui_line="$(grep '^MP_PLACE_UI status=ok ' <<<"$output" | tail -1 || true)"
+	locks_line="$(grep '^MP_PLACE_UI_LOCKS status=ok ' <<<"$output" | tail -1 || true)"
+	lock_line="$(grep '^MP_PLACE_UI_LOCK status=ok ' <<<"$output" | tail -1 || true)"
+	unlock_line="$(grep '^MP_PLACE_UI_UNLOCK status=ok ' <<<"$output" | tail -1 || true)"
 	place_line="$(grep '^MP_PLACE_UI_PLACE status=ok ' <<<"$output" | tail -1 || true)"
 	reject_line="$(grep '^MP_PLACE_UI_REJECT status=ok ' <<<"$output" | tail -1 || true)"
 	done_line="$(grep '^MP_PLACE_UI_DONE status=ok ' <<<"$output" | tail -1 || true)"
 	client_done="$(grep '^MP_WORLD_CLIENT_DONE status=ok ' <<<"$output" | tail -1 || true)"
-	if [[ -z "$ui_line" || -z "$place_line" || -z "$reject_line" || -z "$done_line" || -z "$client_done" ]]; then
+	if [[ -z "$ui_line" || -z "$locks_line" || -z "$lock_line" || -z "$unlock_line" || -z "$place_line" || -z "$reject_line" || -z "$done_line" || -z "$client_done" ]]; then
 		echo "placement-UI smoke ($name) failed: missing UI markers" >&2
 		exit 1
 	fi
@@ -173,7 +179,19 @@ run_block() {
 		echo "placement-UI smoke ($name) catalog marker mismatch: $ui_line" >&2
 		exit 1
 	fi
-	if [[ ! "$place_line" =~ ^MP_PLACE_UI_PLACE\ status=ok\ index=0\ id=1\ hash=blake3:[0-9a-f]{64}\ center=40\.0,32\.0\ rotation=90\ footprint=3\.2,3\.2\ placement_checksum=[0-9a-f]{16}\ world_checksum=[0-9a-f]{16}\ tick=7$ ]]; then
+	if [[ ! "$locks_line" =~ ^MP_PLACE_UI_LOCKS\ status=ok\ count=0\ checksum=[0-9a-f]{16}\ tick=0$ ]]; then
+		echo "placement-UI smoke ($name) locks marker mismatch: $locks_line" >&2
+		exit 1
+	fi
+	if [[ ! "$lock_line" =~ ^MP_PLACE_UI_LOCK\ status=ok\ selected=0\ hash=blake3:[0-9a-f]{64}\ player_id=1\ count=1\ checksum=[0-9a-f]{16}\ tick=7\ lock=LOCKED_you$ ]]; then
+		echo "placement-UI smoke ($name) lock marker mismatch: $lock_line" >&2
+		exit 1
+	fi
+	if [[ ! "$unlock_line" =~ ^MP_PLACE_UI_UNLOCK\ status=ok\ selected=0\ hash=blake3:[0-9a-f]{64}\ count=0\ checksum=[0-9a-f]{16}\ tick=8\ lock=unlocked$ ]]; then
+		echo "placement-UI smoke ($name) unlock marker mismatch: $unlock_line" >&2
+		exit 1
+	fi
+	if [[ ! "$place_line" =~ ^MP_PLACE_UI_PLACE\ status=ok\ index=0\ id=1\ hash=blake3:[0-9a-f]{64}\ center=40\.0,32\.0\ rotation=90\ footprint=3\.2,3\.2\ placement_checksum=[0-9a-f]{16}\ world_checksum=[0-9a-f]{16}\ tick=9$ ]]; then
 		echo "placement-UI smoke ($name) place marker mismatch: $place_line" >&2
 		exit 1
 	fi
@@ -181,25 +199,28 @@ run_block() {
 		echo "placement-UI smoke ($name) reject marker mismatch: $reject_line" >&2
 		exit 1
 	fi
-	if [[ "$done_line" != "MP_PLACE_UI_DONE status=ok mode=ui actions=7 accepted=1 rejected=1 placements=1 selected=0 error=PLACEMENT_OVERLAP" ]]; then
+	if [[ ! "$done_line" =~ ^MP_PLACE_UI_DONE\ status=ok\ mode=ui\ actions=9\ accepted=1\ rejected=1\ placements=1\ selected=0\ error=PLACEMENT_OVERLAP\ locks=1\ unlocks=1\ lock_checksum=[0-9a-f]{16}$ ]]; then
 		echo "placement-UI smoke ($name) done marker mismatch: $done_line" >&2
 		exit 1
 	fi
-	if [[ ! "$client_done" =~ ^MP_WORLD_CLIENT_DONE\ status=ok\ session=session-[0-9a-f]{16}\ tick=7\ frames_sent=12\ frames_received=14$ ]]; then
+	if [[ ! "$client_done" =~ ^MP_WORLD_CLIENT_DONE\ status=ok\ session=session-[0-9a-f]{16}\ tick=9\ frames_sent=15\ frames_received=17$ ]]; then
 		echo "placement-UI smoke ($name) client done mismatch: $client_done" >&2
 		exit 1
 	fi
 
+	printf '%s\n' "$locks_line" >"$prefix.locks"
+	printf '%s\n' "$lock_line" >"$prefix.lock"
+	printf '%s\n' "$unlock_line" >"$prefix.unlock"
 	printf '%s\n' "$ui_line" >"$prefix.ui"
 	printf '%s\n' "$place_line" >"$prefix.place"
 	printf '%s\n' "$reject_line" >"$prefix.reject"
 	printf '%s\n' "$done_line" >"$prefix.done"
 	printf '%s\n' "$client_done" >"$prefix.client_done"
 
-	wait_for_log "$SERVER_LOG" "$SERVER_PID" "SERVER_LISTEN status=ok sessions=1 commands=12 " 10
+	wait_for_log "$SERVER_LOG" "$SERVER_PID" "SERVER_LISTEN status=ok sessions=1 commands=15 " 10
 	wait_for_exit "$SERVER_PID" 10
 	stop_server
-	if ! grep -Eq "SERVER_LISTEN status=ok sessions=1 commands=12 " "$SERVER_LOG"; then
+	if ! grep -Eq "SERVER_LISTEN status=ok sessions=1 commands=15 " "$SERVER_LOG"; then
 		echo "placement-UI smoke ($name) failed: server did not report one 12-command session" >&2
 		cat "$SERVER_LOG" >&2
 		exit 1
@@ -220,11 +241,11 @@ fi
 run_block first "$FIRST_PORT" "$SMOKE_DIR/first"
 run_block second "$SECOND_PORT" "$SMOKE_DIR/second"
 
-for marker in ui place reject done client_done; do
+for marker in locks lock unlock ui place reject done client_done; do
 	if ! diff -u "$SMOKE_DIR/first.$marker" "$SMOKE_DIR/second.$marker"; then
 		echo "placement-UI smoke failed: $marker markers differ between runs" >&2
 		exit 1
 	fi
 done
 
-echo "MP_PLACE_UI_SMOKE status=ok runs=2 entries=1 accepted=1 rejected=1 commands=12"
+echo "MP_PLACE_UI_SMOKE status=ok runs=2 entries=1 accepted=1 rejected=1 locks=1 unlocks=1 commands=15"
