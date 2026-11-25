@@ -2,7 +2,7 @@
 title: Multiplayer
 project: Townsmith
 status: proposed
-updated: 2026-11-24
+updated: 2026-11-25
 tags:
   - townsmith
   - multiplayer
@@ -257,8 +257,7 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. Protocol v
 | `settlement_release` | `settlement_id`, `expected_revision` (Admin) |
 | `audit_log` | `limit` (optional, default 64, clamped 1–256; Admin) |
 | `blueprint_lock` / `blueprint_unlock` | `hash` (canonical `blake3:` + 64 hex, or bare 64 hex) |
-| `blueprint_locks` | — |
-| `set_interest` | `center_x`, `center_z`, `radius_m` |
+| `blueprint_locks` | — || `set_interest` | `center_x`, `center_z`, `radius_m` |
 | `disconnect` | — |
 
 **Server messages**
@@ -275,7 +274,7 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. Protocol v
 | `settlement_list` | `tick`, `count`, `checksum`, `settlements` (ascending `SettlementView` records) |
 | `settlement_at` | `tick`, `found`, `settlement` (`SettlementView` or `null`) |
 | `audit_log` | `tick`, `capacity`, `checksum`, `entries` (newest `limit` × `{tick, role, tag, code, accepted}`) |
-| `blueprint_lock_result` | `tick`, `lock {hash, player_id, player, tick}`, `locks_count`, `checksum` |
+| `blueprint_lock_result` | `tick`, `lock {hash, player_id, player, tick, expires_tick}`, `locks_count`, `checksum` |
 | `blueprint_unlock_result` | `tick`, `hash`, `locks_count`, `checksum` |
 | `blueprint_lock_list` | `tick`, `count`, `checksum`, `locks` (ascending hash) |
 | `reject` | `code`, `message` |
@@ -315,7 +314,7 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. Protocol v
 
 `disconnect` is accepted before `hello` so a client can close cleanly. The global Mayor/Admin placement role, package checks, the district policy gate, the placement geometry rules, and the settlement `build` bit are implemented for `place_blueprint`. The settlement commands cover found/list/at/claim/rename/transfer/release plus membership invite/set-role/remove; the remaining simulation rules stay deferred.
 
-**Blueprint locks v0.** `blueprint_lock` / `blueprint_unlock` / `blueprint_locks` are advisory editor locks: they stop a second player from mutating or placing the same package while the holder is editing, but they are not placement ownership. The table is process-local and in-memory, excluded from the world checksum, and not persisted; a server restart clears it. A disconnected player's locks are released immediately, and reconnect does not restore them. A stale lock therefore cannot brick a package, but it also does not survive a restart. The full editor UI, lease/TTL, and reconnect retention are follow-ups.
+**Blueprint locks v0.** `blueprint_lock` / `blueprint_unlock` / `blueprint_locks` are advisory editor locks: they stop a second player from mutating or placing the same package while the holder is editing, but they are not placement ownership. The table is process-local and in-memory, excluded from the world checksum, and not persisted; a server restart clears it. A disconnected player's locks are released immediately, and reconnect does not restore them. Each lock carries a bounded lease: `expires_tick = evaluation tick + lock_lease_ticks`, renewed when the same holder re-locks. The default lease is 300 ticks; `set_lock_lease_ticks` clamps to 1–3600. Expiry is lazy (checked at the start of each lock/unlock/list/place command and on an economy tick advance; there is no background task): an expired lock disappears from the list and lock checksum, stops blocking placement, and may be taken by anyone. `blueprint.unlock` on an expired lock reports `blueprint.lock_unknown`. A stale or crashed holder therefore cannot brick a package forever, though reconnect retention is still a follow-up. The full editor UI, lease renewal UI, and reconnect retention are follow-ups.
 
 The listen server accepts `--content-hash <64 lowercase hex>` to pin the active content-registry hash. When pinned, every `hello` must carry the exact hash or the server rejects it with `content_hash.mismatch` before registering a player or mutating session state. The pin is process configuration, not save data. The full manifest is still Phase 6 work; the pinned-hash mismatch now has the presentation-only client screen described below.
 
@@ -420,9 +419,9 @@ Population, employment, and building counts are static for v1. `employed` is 60%
 | `set_tax` | Validates 0–100 and writes the treasury per-day rates; increments tick | `tax.rate_out_of_range`, `not_hello` |
 | `audit_log` | Admin only; returns the newest retained audit entries oldest-first with the ring capacity and checksum. Per-session, in-memory, not saved; does not advance the tick or change the world checksum | `not_hello`, `role.forbidden`, `audit.unavailable` (transport-only) |
 | `place_road` | Adds a 6 m wide, axis-aligned segment; increments tick | `road.empty`, `road.not_axis_aligned`, `road.out_of_bounds`, `road.too_long` (>512 cells), `road.duplicate`, `road.overlap`, `road.store_full`, `road.id_exhausted` |
-| `blueprint_lock` / `blueprint_unlock` | Mayor-only; requires a server-issued identity; re-lock by the holder refreshes the tick, another holder rejects `blueprint.locked`, unlock is holder-or-Admin; in-memory only, excluded from the world checksum, released on disconnect, not saved | `blueprint.locked`, `blueprint.lock_unknown`, `blueprint.unavailable` (transport-only), `player.identity`, `not_hello` |
-| `blueprint_locks` | Viewer-only read; ascending canonical hash, stable checksum, does not advance the tick | `blueprint.unavailable` (transport-only), `not_hello` |
-| `place_blueprint` | Mayor-only; resolves the hash in the configured library, validates package/policy/age/placeholder terrain/overlap/funds, appends the placement and priced site, charges the Survey installment, increments tick; a lock held by another player rejects `blueprint.locked`; an exact repeat returns the existing record without a second charge | `PLACEMENT_HASH_INVALID`, `PLACEMENT_LIBRARY_UNAVAILABLE`, `PLACEMENT_PACKAGE_MISSING`, `PLACEMENT_PACKAGE_INVALID`, `PLACEMENT_POLICY_DENIED`, `PLACEMENT_OUT_OF_RANGE`, `PLACEMENT_ROTATION_INVALID`, `PLACEMENT_OVERLAP`, `PLACEMENT_AGE_LOCKED`, `PLACEMENT_INSUFFICIENT_FUNDS`, `PLACEMENT_STORE_FULL`, `PLACEMENT_REJECTED`, `not_hello` |
+| `blueprint_lock` / `blueprint_unlock` | Mayor-only; requires a server-issued identity; a re-lock by the holder renews `expires_tick` (`evaluation tick + lock_lease_ticks`, default 300, clamp 1–3600, saturating), another holder rejects `blueprint.locked`, unlock is holder-or-Admin and an expired lock reports `blueprint.lock_unknown`; expiry is lazy and expired locks do not block placement; in-memory only, excluded from the world checksum, released on disconnect, not saved | `blueprint.locked`, `blueprint.lock_unknown`, `blueprint.unavailable` (transport-only), `player.identity`, `not_hello` |
+| `blueprint_locks` | Viewer-only read; expires stale locks first, then returns ascending canonical hash, stable checksum over `hash`+`player_id`+`tick`+`expires_tick`, does not advance the tick | `blueprint.unavailable` (transport-only), `not_hello` |
+| `place_blueprint` | Mayor-only; expires stale locks first; resolves the hash in the configured library, validates package/policy/age/placeholder terrain/overlap/funds, appends the placement and priced site, charges the Survey installment, increments tick; a live lock held by another player rejects `blueprint.locked`; an exact repeat returns the existing record without a second charge | `PLACEMENT_HASH_INVALID`, `PLACEMENT_LIBRARY_UNAVAILABLE`, `PLACEMENT_PACKAGE_MISSING`, `PLACEMENT_PACKAGE_INVALID`, `PLACEMENT_POLICY_DENIED`, `PLACEMENT_OUT_OF_RANGE`, `PLACEMENT_ROTATION_INVALID`, `PLACEMENT_OVERLAP`, `PLACEMENT_AGE_LOCKED`, `PLACEMENT_INSUFFICIENT_FUNDS`, `PLACEMENT_STORE_FULL`, `PLACEMENT_REJECTED`, `not_hello` |
 | `found_settlement` | Mayor-only; requires hello/resume and a stable `player_id`; validates name/radius/centre, creates the store on first use, assigns the caller as owner with revision 1; returns `settlement_found`; does not advance the tick | `duplicate_name`, `invalid_radius`, `name_too_long`, `empty_name`, `coordinate_out_of_range`, `too_many_owned`, `settlement.identity`, `settlement.seed_mismatch`, `not_hello`, `role.forbidden` |
 | `settlement_list` | Read-only; returns every record in ascending id order with the store checksum; an absent store returns count 0 and checksum `0000000000000000`; does not advance the tick | `settlement.seed_mismatch`, `not_hello` |
 | `settlement_invite` / `settlement_set_role` / `settlement_remove_member` | Mayor-only; checks the actor's core `members` permission, revision, role, member limit, and owner invariants; returns `settlement_updated`; does not advance the tick | `settlement.unknown`, `settlement.forbidden`, `settlement.not_member`, `settlement.revision_conflict`, `settlement.owner_required`, `settlement.role_invalid`, `settlement.identity`, `settlement.seed_mismatch`, `role.forbidden`, `not_hello` |

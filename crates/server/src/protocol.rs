@@ -688,6 +688,8 @@ pub struct BlueprintLockView {
     pub player: String,
     /// Authoritative tick of the last accepted lock/refresh.
     pub tick: u64,
+    /// First tick at which this lock is expired (`world.tick >= expires_tick`).
+    pub expires_tick: u64,
 }
 
 /// One entry in [`ServerMessage::AuditLog`].
@@ -842,8 +844,8 @@ pub enum ServerMessage {
     /// Accepted advisory blueprint lock or refresh (v0).
     ///
     /// `checksum` is a stable 16-hex FNV over the lock table's sorted
-    /// `hash`+`player_id`+`tick` records. It is not the world checksum, which
-    /// deliberately excludes locks.
+    /// `hash`+`player_id`+`tick`+`expires_tick` records. It is not the world
+    /// checksum, which deliberately excludes locks. Expired locks are omitted.
     BlueprintLockResult {
         /// Authoritative tick after the accepted lock.
         tick: u64,
