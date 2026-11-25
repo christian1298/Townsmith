@@ -10,5 +10,6 @@ pub mod listen;
 pub mod placement;
 pub mod protocol;
 pub mod save;
+pub mod settlement_smoke;
 pub mod vote;
 pub mod world;

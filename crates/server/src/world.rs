@@ -198,6 +198,12 @@ pub mod codes {
     pub const SETTLEMENT_SEED_MISMATCH: &str = "settlement.seed_mismatch";
     /// A settlement command carried an unknown or disallowed role.
     pub const SETTLEMENT_ROLE_INVALID: &str = "settlement.role_invalid";
+    /// The settlement already has an owner.
+    pub const SETTLEMENT_ALREADY_OWNED: &str = "settlement.already_owned";
+    /// The tax rate is outside the supported range.
+    pub const SETTLEMENT_TAX_OUT_OF_RANGE: &str = "settlement.tax_out_of_range";
+    /// The supplied membership revision is stale.
+    pub const SETTLEMENT_REVISION_CONFLICT: &str = "settlement.revision_conflict";
     /// No settlement store exists or the requested id is unknown.
     pub const SETTLEMENT_UNKNOWN: &str = "settlement.unknown";
     /// A transfer recipient is not in the server player registry.
