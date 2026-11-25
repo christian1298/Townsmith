@@ -24,12 +24,28 @@ set -euo pipefail
 #
 # This is a debug render/networking integration, not a gameplay chat UI test,
 # a benchmark gate, or the 1M render gate.
+#
+# A third scenario proves the server push path on one fresh `--sessions 2`
+# server. A passive listener (`--chat-listen --chat-expect push-me`) completes
+# hello first and sends no chat commands. A sender then runs
+# `say:push-me|poll`, so the listener must consume the pushed `chat_sent` while
+# the sender still receives its own response exactly once (12 sent / 13
+# received). The listener must print `MP_CHAT_PUSH` with the deterministic
+# `seq|player|text` checksum and both sessions must end cleanly.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GODOT_BIN="${GODOT:-godot}"
 CHAT_SCRIPT="say:hello|poll|say:world"
 # sha256("#1 mp-world-client: hello\n#2 mp-world-client: world")[:16]
 CHAT_CHECKSUM="c8ea9cd6475d80e8"
+PUSH_SCRIPT="say:push-me|poll"
+PUSH_TEXT="push-me"
+PUSH_SENDER_NAME="mp-world-client"
+LISTENER_NAME="mp-chat-listener"
+# sha256("1|mp-world-client|push-me")[:16]
+PUSH_MARKER_CHECKSUM="af94bd1e7ca9c364"
+# sha256("#1 mp-world-client: push-me")[:16]
+PUSH_CHAT_CHECKSUM="a664b2fdb8f94b8c"
 
 if ! command -v "$GODOT_BIN" >/dev/null 2>&1; then
 	echo "Godot binary not found: $GODOT_BIN (set GODOT=/path/to/godot)" >&2
@@ -114,7 +130,9 @@ PY
 
 SMOKE_DIR="$(mktemp -d)"
 SERVER_LOG="$(mktemp)"
+LISTENER_LOG="$(mktemp)"
 SERVER_PID=""
+LISTENER_PID=""
 
 stop_server() {
 	if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -126,17 +144,29 @@ stop_server() {
 	SERVER_PID=""
 }
 
+stop_listener() {
+	if [[ -n "$LISTENER_PID" ]] && kill -0 "$LISTENER_PID" 2>/dev/null; then
+		kill "$LISTENER_PID" 2>/dev/null || true
+	fi
+	if [[ -n "$LISTENER_PID" ]]; then
+		wait "$LISTENER_PID" 2>/dev/null || true
+	fi
+	LISTENER_PID=""
+}
+
 cleanup() {
+	stop_listener
 	stop_server
-	rm -f "$SERVER_LOG"
+	rm -f "$SERVER_LOG" "$LISTENER_LOG"
 	rm -rf "$SMOKE_DIR"
 }
 trap cleanup EXIT
 
 start_server() {
 	local port="$1"
+	local sessions="${2:-1}"
 	: >"$SERVER_LOG"
-	"$ROOT/target/debug/townsmith-server" --listen "$port" --sessions 1 >"$SERVER_LOG" 2>&1 &
+	"$ROOT/target/debug/townsmith-server" --listen "$port" --sessions "$sessions" >"$SERVER_LOG" 2>&1 &
 	SERVER_PID=$!
 	wait_for_log "$SERVER_LOG" "$SERVER_PID" "SERVER_LISTEN status=ok address=" 10
 }
@@ -185,7 +215,7 @@ run_block() {
 		exit 1
 	fi
 
-	if [[ ! "$main_line" =~ ^MP_WORLD_CLIENT\ status=ok\ tick=6\ population=3277\ balance=100000\ roads=6\ buildings=4\ truncated=false\ buildings_truncated=false\ checksum=[0-9a-f]{16}\ road_checksum=48aff8a44b921666\ building_checksum=a98d781faa5c1d5b\ rendered_roads=6\ rendered_buildings=4\ center=0\.0,0\.0\ radius=96\.0\ session=session-[0-9a-f]{16}$ ]]; then
+	if [[ ! "$main_line" =~ ^MP_WORLD_CLIENT\ status=ok\ tick=6\ population=3277\ balance=100000\ roads=6\ buildings=4\ truncated=false\ buildings_truncated=false\ checksum=[0-9a-f]{16}\ road_checksum=48aff8a44b921666\ building_checksum=a98d781faa5c1d5b\ rendered_roads=6\ rendered_buildings=4\ center=0\.0,0\.0\ radius=96\.0\ session=session-[0-9a-f]{16}(-[0-9]+)?$ ]]; then
 		echo "chat smoke ($name) main marker mismatch: $main_line" >&2
 		exit 1
 	fi
@@ -193,7 +223,7 @@ run_block() {
 		echo "chat smoke ($name) chat marker mismatch: $chat_line" >&2
 		exit 1
 	fi
-	if [[ ! "$done_line" =~ ^MP_WORLD_CLIENT_DONE\ status=ok\ session=session-[0-9a-f]{16}\ tick=6\ frames_sent=13\ frames_received=14$ ]]; then
+	if [[ ! "$done_line" =~ ^MP_WORLD_CLIENT_DONE\ status=ok\ session=session-[0-9a-f]{16}(-[0-9]+)?\ tick=6\ frames_sent=13\ frames_received=14$ ]]; then
 		echo "chat smoke ($name) done marker mismatch: $done_line" >&2
 		exit 1
 	fi
@@ -223,6 +253,114 @@ run_block() {
 	fi
 }
 
+# run_push_block PORT
+#
+# One fresh `--sessions 2` server. The passive listener completes hello and
+# waits; the sender chats once. The listener must see the pushed line and the
+# sender must see only its own response.
+run_push_block() {
+	local port="$1"
+	local listener_output
+	local listener_status
+	local sender_output
+	local sender_status
+	local push_line
+	local push_count
+	local main_line
+	local chat_line
+	local done_line
+
+	start_server "$port" 2
+
+	timeout 60s env -u DISPLAY -u WAYLAND_DISPLAY \
+		"$GODOT_BIN" --headless --path "$ROOT/godot" res://mp_world_client.tscn -- \
+		--smoke --chat-listen --chat-expect "$PUSH_TEXT" --port "$port" \
+		--name "$LISTENER_NAME" --timeout-ms 30000 >"$LISTENER_LOG" 2>&1 &
+	LISTENER_PID=$!
+	wait_for_log "$LISTENER_LOG" "$LISTENER_PID" "MP_CHAT_LISTEN status=ready" 15
+
+	set +e
+	sender_output="$(timeout 60s env -u DISPLAY -u WAYLAND_DISPLAY \
+		"$GODOT_BIN" --headless --path "$ROOT/godot" res://mp_world_client.tscn -- \
+		--smoke --chat --port "$port" --chat-script "$PUSH_SCRIPT" 2>&1)"
+	sender_status=$?
+	set -e
+	printf '%s\n' "$sender_output" >&2
+
+	wait_for_exit "$LISTENER_PID" 15
+	set +e
+	wait "$LISTENER_PID"
+	listener_status=$?
+	set -e
+	LISTENER_PID=""
+	listener_output="$(cat "$LISTENER_LOG")"
+	printf '%s\n' "$listener_output" >&2
+
+	if [[ $listener_status -ne 0 ]]; then
+		echo "chat push smoke failed: listener exited with status $listener_status" >&2
+		exit 1
+	fi
+	if grep -q '^MP_WORLD_CLIENT status=fail ' <<<"$listener_output"; then
+		echo "chat push smoke failed: listener reported a failure" >&2
+		exit 1
+	fi
+	if [[ $sender_status -ne 0 ]]; then
+		echo "chat push smoke failed: sender exited with status $sender_status" >&2
+		exit 1
+	fi
+	if grep -q '^MP_WORLD_CLIENT status=fail ' <<<"$sender_output"; then
+		echo "chat push smoke failed: sender reported a failure" >&2
+		exit 1
+	fi
+	if grep -q '^MP_WORLD_CLIENT_ZERO ' <<<"$sender_output"; then
+		echo "chat push smoke failed: sender ran the zero-view probe" >&2
+		exit 1
+	fi
+
+	push_line="$(grep '^MP_CHAT_PUSH status=ok ' <<<"$listener_output" | tail -1 || true)"
+	push_count="$(grep -c '^MP_CHAT_PUSH ' <<<"$listener_output" || true)"
+	if [[ "$push_count" != "1" ]]; then
+		echo "chat push smoke failed: listener saw $push_count push markers" >&2
+		exit 1
+	fi
+	if [[ "$push_line" != "MP_CHAT_PUSH status=ok player=$PUSH_SENDER_NAME seq=1 text=$PUSH_TEXT checksum=$PUSH_MARKER_CHECKSUM" ]]; then
+		echo "chat push smoke listener marker mismatch: $push_line" >&2
+		exit 1
+	fi
+
+	main_line="$(grep '^MP_WORLD_CLIENT status=ok ' <<<"$sender_output" | tail -1 || true)"
+	chat_line="$(grep '^MP_CHAT status=ok ' <<<"$sender_output" | tail -1 || true)"
+	done_line="$(grep '^MP_WORLD_CLIENT_DONE status=ok ' <<<"$sender_output" | tail -1 || true)"
+	if [[ -z "$main_line" || -z "$chat_line" || -z "$done_line" ]]; then
+		echo "chat push smoke failed: missing sender main, chat, or done marker" >&2
+		exit 1
+	fi
+	if [[ ! "$main_line" =~ ^MP_WORLD_CLIENT\ status=ok\ tick=6\ population=3277\ balance=100000\ roads=6\ buildings=4\ truncated=false\ buildings_truncated=false\ checksum=[0-9a-f]{16}\ road_checksum=48aff8a44b921666\ building_checksum=a98d781faa5c1d5b\ rendered_roads=6\ rendered_buildings=4\ center=0\.0,0\.0\ radius=96\.0\ session=session-[0-9a-f]{16}(-[0-9]+)?$ ]]; then
+		echo "chat push smoke sender main marker mismatch: $main_line" >&2
+		exit 1
+	fi
+	if [[ "$chat_line" != "MP_CHAT status=ok entries=1 checksum=$PUSH_CHAT_CHECKSUM" ]]; then
+		echo "chat push smoke sender chat marker mismatch: $chat_line" >&2
+		exit 1
+	fi
+	if [[ ! "$done_line" =~ ^MP_WORLD_CLIENT_DONE\ status=ok\ session=session-[0-9a-f]{16}(-[0-9]+)?\ tick=6\ frames_sent=12\ frames_received=13$ ]]; then
+		echo "chat push smoke sender done marker mismatch: $done_line" >&2
+		exit 1
+	fi
+
+	# Listener command frames: hello, disconnect. Sender: hello, six roads,
+	# set_interest, chat_since, chat, chat_since, disconnect. The sender's 13
+	# received frames include exactly one chat_sent; a self-push would make 14.
+	wait_for_log "$SERVER_LOG" "$SERVER_PID" "SERVER_LISTEN status=ok sessions=2 commands=14 " 10
+	wait_for_exit "$SERVER_PID" 10
+	stop_server
+	if ! grep -Eq "SERVER_LISTEN status=ok sessions=2 commands=14 " "$SERVER_LOG"; then
+		echo "chat push smoke failed: server did not report two sessions with 14 commands" >&2
+		cat "$SERVER_LOG" >&2
+		exit 1
+	fi
+}
+
 FIRST_PORT="$(pick_port "${MP_CHAT_PORT:-}")"
 SECOND_PORT="$(pick_port "${MP_CHAT_SECOND_PORT:-}")"
 for _ in 1 2 3 4 5; do
@@ -231,6 +369,15 @@ for _ in 1 2 3 4 5; do
 done
 if [[ "$SECOND_PORT" == "$FIRST_PORT" ]]; then
 	echo "chat smoke failed: both runs selected port $FIRST_PORT" >&2
+	exit 1
+fi
+THIRD_PORT="$(pick_port "${MP_CHAT_PUSH_PORT:-}")"
+for _ in 1 2 3 4 5; do
+	[[ "$THIRD_PORT" != "$FIRST_PORT" && "$THIRD_PORT" != "$SECOND_PORT" ]] && break
+	THIRD_PORT="$(pick_port "")"
+done
+if [[ "$THIRD_PORT" == "$FIRST_PORT" || "$THIRD_PORT" == "$SECOND_PORT" ]]; then
+	echo "chat smoke failed: push scenario selected a duplicate port $THIRD_PORT" >&2
 	exit 1
 fi
 
@@ -252,4 +399,7 @@ if [[ "$(cat "$SMOKE_DIR/first.checksum")" != "$(cat "$SMOKE_DIR/second.checksum
 	exit 1
 fi
 
+run_push_block "$THIRD_PORT"
+
 echo "MP_CHAT_SMOKE status=ok runs=2 entries=2 checksum=$(cat "$SMOKE_DIR/first.checksum") world_checksum=$(sed -n 's/.* checksum=\([0-9a-f]\{16\}\).*/\1/p' "$SMOKE_DIR/first.main") frames_sent=13 frames_received=14"
+echo "MP_CHAT_PUSH_SMOKE status=ok sessions=2 listener=$LISTENER_NAME sender=$PUSH_SENDER_NAME seq=1 text=$PUSH_TEXT checksum=$PUSH_MARKER_CHECKSUM sender_chat_checksum=$PUSH_CHAT_CHECKSUM sender_frames_sent=12 sender_frames_received=13"
