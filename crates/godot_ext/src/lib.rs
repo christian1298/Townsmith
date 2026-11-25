@@ -24,9 +24,9 @@ use godot::classes::{ArrayMesh, SurfaceTool};
 use godot::prelude::*;
 
 use core_blueprint::{
-    load_tsbp, save_tsbp_with_hash, Blueprint, BlueprintError, BlueprintLibrary,
-    BlueprintLibraryError, BlueprintMetadata, BlueprintStats, LibraryInsert, LibrarySummary,
-    PropRecord, RoomRecord,
+    load_tsbp, load_tsbp_with_dependency_issues, save_tsbp_with_hash, Blueprint, BlueprintError,
+    BlueprintLibrary, BlueprintLibraryError, BlueprintMetadata, BlueprintStats, DependencyReason,
+    LibraryInsert, LibrarySummary, PropRecord, RoomRecord,
 };
 use core_city::named::{age_years_from_days, slot_is_employed, MAX_AGE_DAYS};
 use core_city::{
@@ -606,6 +606,41 @@ struct ContentLoadError {
     code: &'static str,
     /// Human-readable message, safe to show in a mod manager.
     message: String,
+}
+
+/// Active content IDs used to resolve a `.tsbp` package's declared dependencies.
+///
+/// The view is derived from the live [`RuntimeContent`] slot, not from a package
+/// or a save. Base-only registries expose the always-present `base` namespace.
+/// One loaded pack adds its manifest ID and its namespace, so a package that
+/// requires `mymod` matches an active `mymod:pack` and a package that requires
+/// `mymod:pack` matches an active `mymod` (both sides split at the first `:`).
+/// There is no discovery, cross-mod lookup, resource-pack registry, or download.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DependencyView {
+    /// Trimmed active IDs, sorted and deduplicated.
+    ids: Vec<String>,
+}
+
+impl DependencyView {
+    /// The bundled base registry: only the always-present `base` namespace.
+    fn base() -> Self {
+        Self {
+            ids: vec!["base".to_string()],
+        }
+    }
+
+    /// Build the view from the live content slot.
+    fn from_content(content: &RuntimeContent) -> Self {
+        let mut view = Self::base();
+        if let Some(pack) = content.pack.as_ref() {
+            view.ids.push(pack.id.clone());
+            view.ids.push(pack.namespace.clone());
+        }
+        view.ids.sort();
+        view.ids.dedup();
+        view
+    }
 }
 
 impl Default for RuntimeContent {
@@ -1358,11 +1393,19 @@ impl TownsmithCore {
         z: f64,
         rotation: i64,
     ) -> VarDictionary {
-        let (seed, request) = match world_placement_request(seed, &path.to_string(), x, z, rotation)
-        {
-            Ok(value) => value,
-            Err(error) => return error,
+        let active_ids = {
+            let content = self
+                .content
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            DependencyView::from_content(&content).ids
         };
+        let active_refs: Vec<&str> = active_ids.iter().map(String::as_str).collect();
+        let (seed, request) =
+            match world_placement_request(seed, &path.to_string(), x, z, rotation, &active_refs) {
+                Ok(value) => value,
+                Err(error) => return error,
+            };
         {
             let policies = self
                 .policies
@@ -1606,11 +1649,19 @@ impl TownsmithCore {
         z: f64,
         rotation: i64,
     ) -> VarDictionary {
-        let (seed, request) = match world_placement_request(seed, &path.to_string(), x, z, rotation)
-        {
-            Ok(value) => value,
-            Err(error) => return error,
+        let active_ids = {
+            let content = self
+                .content
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            DependencyView::from_content(&content).ids
         };
+        let active_refs: Vec<&str> = active_ids.iter().map(String::as_str).collect();
+        let (seed, request) =
+            match world_placement_request(seed, &path.to_string(), x, z, rotation, &active_refs) {
+                Ok(value) => value,
+                Err(error) => return error,
+            };
         {
             let policies = self
                 .policies
@@ -8983,6 +9034,67 @@ fn placement_simple_error(code: &str, message: impl Into<String>) -> VarDictiona
     result
 }
 
+/// Map unresolved `.tsbp` dependencies to the bridge error shape.
+///
+/// A package whose dependencies cannot be resolved is rejected before any
+/// policy check, placement mutation, construction site, or treasury charge.
+/// The payload carries the sorted missing IDs split by reason plus a stable
+/// checksum, so a UI can show exactly what to install.
+fn placement_dependency_error(
+    path: &Path,
+    error: core_blueprint::BlueprintDependencyError,
+) -> VarDictionary {
+    if error.issues.is_empty() {
+        return placement_simple_error(
+            "blueprint_load_failed",
+            format!("{}: {}", path.display(), error.error),
+        );
+    }
+    let mut missing = Vec::with_capacity(error.issues.len());
+    let mut missing_mods = Vec::new();
+    let mut missing_resource_packs = Vec::new();
+    let mut checksum = 0xcbf2_9ce4_8422_2325_u64;
+    for issue in &error.issues {
+        let id = GString::from(issue.id.as_str());
+        missing.push(id.clone());
+        fnv1a_push(&mut checksum, issue.id.as_bytes());
+        match issue.reason {
+            DependencyReason::MissingMod => {
+                fnv1a_push(&mut checksum, b"mod");
+                missing_mods.push(id);
+            }
+            DependencyReason::MissingResourcePack => {
+                fnv1a_push(&mut checksum, b"pack");
+                missing_resource_packs.push(id);
+            }
+        }
+        fnv1a_push(&mut checksum, &[0x1f]);
+    }
+    let names: Vec<&str> = error.issues.iter().map(|issue| issue.id.as_str()).collect();
+    let mut result = placement_simple_error(
+        "blueprint.missing_dependency",
+        format!(
+            "{} requires unavailable content: {}",
+            path.display(),
+            names.join(", ")
+        ),
+    );
+    result.set(
+        "missing",
+        &PackedStringArray::from(missing.as_slice()).to_variant(),
+    );
+    result.set(
+        "missing_mods",
+        &PackedStringArray::from(missing_mods.as_slice()).to_variant(),
+    );
+    result.set(
+        "missing_resource_packs",
+        &PackedStringArray::from(missing_resource_packs.as_slice()).to_variant(),
+    );
+    result.set("dependency_checksum", format!("{checksum:016x}"));
+    result
+}
+
 /// Map a D-034 content-identity failure to the usual bridge error shape.
 fn content_identity_error_result(error: &ContentIdentityError) -> VarDictionary {
     placement_simple_error(error.code, error.message.as_str())
@@ -9843,18 +9955,15 @@ fn world_placement_request(
     x: f64,
     z: f64,
     rotation: i64,
+    active_content_ids: &[&str],
 ) -> Result<(u64, PlacementRequest), VarDictionary> {
     let seed = u64::try_from(seed)
         .map_err(|_| placement_simple_error("invalid_seed", "world seed must be non-negative"))?;
     let rotation = normalize_rotation(rotation).map_err(|error| placement_error_result(&error))?;
     let path = blueprint_path_from_arg(path)
         .map_err(|error| placement_simple_error("invalid_blueprint_path", error))?;
-    let blueprint = load_tsbp(&path).map_err(|error| {
-        placement_simple_error(
-            "blueprint_load_failed",
-            format!("{}: {error}", path.display()),
-        )
-    })?;
+    let blueprint = load_tsbp_with_dependency_issues(&path, active_content_ids)
+        .map_err(|error| placement_dependency_error(&path, error))?;
     let request = placement_request_from_blueprint(&blueprint, &path, x as f32, z as f32, rotation);
     Ok((seed, request))
 }
@@ -16495,6 +16604,15 @@ mod tests {
     }
 
     fn write_bridge_package(path: &Path, id: &str) -> String {
+        write_bridge_package_with_dependencies(path, id, &[], &[])
+    }
+
+    fn write_bridge_package_with_dependencies(
+        path: &Path,
+        id: &str,
+        mods: &[&str],
+        resource_packs: &[&str],
+    ) -> String {
         let mut volume =
             VoxelVolume::new(VolumeConfig::new(1, 1, 1).expect("config")).expect("volume");
         volume
@@ -16504,7 +16622,11 @@ mod tests {
                 EDITOR_FLOOR,
             )
             .expect("fill floor");
-        let blueprint = Blueprint::new(BlueprintMetadata::new(id, "Bridge Library House"), volume);
+        let mut metadata = BlueprintMetadata::new(id, "Bridge Library House");
+        metadata.dependencies.mods = mods.iter().map(|id| (*id).to_string()).collect();
+        metadata.dependencies.resource_packs =
+            resource_packs.iter().map(|id| (*id).to_string()).collect();
+        let blueprint = Blueprint::new(metadata, volume);
         save_tsbp_with_hash(path, &blueprint).expect("save package")
     }
 
@@ -18004,6 +18126,21 @@ mod tests {
                 .as_deref(),
             Some(format!("tsbp:{hash}").as_str())
         );
+    }
+
+    #[test]
+    fn placement_request_passes_active_ids_to_the_dependency_loader() {
+        let dir = TempBlueprintLibrary::new("placement-deps");
+        let path = dir.package("deps.tsbp");
+        write_bridge_package_with_dependencies(&path, "townsmith:deps", &["mymod"], &[]);
+        let path = path.to_string_lossy().into_owned();
+
+        let (_, request) = world_placement_request(7, &path, 1.0, 1.0, 0, &["mymod:pack"])
+            .expect("namespace match accepts mymod:pack");
+        assert_eq!(request.blueprint_id, "townsmith:deps");
+        let (_, request) = world_placement_request(7, &path, 1.0, 1.0, 0, &["mymod"])
+            .expect("exact id accepts mymod");
+        assert_eq!(request.blueprint_id, "townsmith:deps");
     }
 
     #[test]

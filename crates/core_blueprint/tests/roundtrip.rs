@@ -3,9 +3,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use core_blueprint::{
-    compute_hash, encode_voxels, load_tsbp, load_tsbp_with_dependencies, save_tsbp,
-    save_tsbp_with_hash, Blueprint, BlueprintError, BlueprintMetadata, BlueprintStats,
-    StructuralSystem, StructureSpec, FORMAT_VERSION,
+    compute_hash, encode_voxels, load_tsbp, load_tsbp_with_dependencies,
+    load_tsbp_with_dependency_issues, save_tsbp, save_tsbp_with_hash, Blueprint, BlueprintError,
+    BlueprintMetadata, BlueprintStats, DependencyIssue, DependencyReason, StructuralSystem,
+    StructureSpec, FORMAT_VERSION,
 };
 use core_voxel::volume::{VolumeConfig, VolumePos, VoxelVolume};
 
@@ -401,6 +402,17 @@ fn dependency_loaders_resolve_active_mods_but_default_stays_deny_all() {
         }
         other => panic!("expected MissingDependency, got {other:?}"),
     }
+
+    // The structured loader preserves the issues for a bridge payload.
+    let error = load_tsbp_with_dependency_issues(&path, &["othermod"]).expect_err("missing mod");
+    assert!(matches!(error.error, BlueprintError::MissingDependency(_)));
+    assert_eq!(
+        error.issues,
+        vec![DependencyIssue {
+            id: "mymod".to_string(),
+            reason: DependencyReason::MissingMod,
+        }]
+    );
     fs::remove_dir_all(dir).unwrap();
 }
 

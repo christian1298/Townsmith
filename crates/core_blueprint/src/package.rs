@@ -119,7 +119,7 @@ fn write_package(path: &Path, json: &[u8], voxels: &[u8]) -> Result<(), Blueprin
 pub fn load_tsbp(path: &Path) -> Result<Blueprint, BlueprintError> {
     let file = File::open(path)?;
     let archive = zip::ZipArchive::new(file)?;
-    load_archive(archive, None)
+    load_archive(archive, None, &mut Vec::new())
 }
 
 /// Load a `.tsbp` package, resolving mod dependencies against `active_ids`.
@@ -132,9 +132,38 @@ pub fn load_tsbp_with_dependencies(
     path: &Path,
     active_ids: &[&str],
 ) -> Result<Blueprint, BlueprintError> {
-    let file = File::open(path)?;
-    let archive = zip::ZipArchive::new(file)?;
-    load_archive(archive, Some(active_ids))
+    load_tsbp_with_dependency_issues(path, active_ids).map_err(|error| error.error)
+}
+
+/// A package load failure that keeps the structured dependency issues.
+///
+/// This is [`load_tsbp_with_dependencies`] with the missing ids exposed, so a
+/// caller can report every unsatisfied dependency instead of re-parsing the
+/// human-readable error string. `issues` is empty for every other failure.
+#[derive(Debug)]
+pub struct BlueprintDependencyError {
+    /// Underlying package error.
+    pub error: BlueprintError,
+    /// Unsatisfied dependencies, sorted by `(id, reason)` and deduplicated.
+    pub issues: Vec<DependencyIssue>,
+}
+
+/// Load a `.tsbp` package, resolving dependencies against `active_ids` and
+/// returning the structured issues on failure.
+///
+/// The validation, matching, and hash rules are exactly
+/// [`load_tsbp_with_dependencies`]. A caller that must fail closed before a
+/// mutation can inspect [`BlueprintDependencyError::issues`].
+pub fn load_tsbp_with_dependency_issues(
+    path: &Path,
+    active_ids: &[&str],
+) -> Result<Blueprint, BlueprintDependencyError> {
+    let mut issues = Vec::new();
+    let loaded = File::open(path)
+        .map_err(BlueprintError::from)
+        .and_then(|file| zip::ZipArchive::new(file).map_err(BlueprintError::from))
+        .and_then(|archive| load_archive(archive, Some(active_ids), &mut issues));
+    loaded.map_err(|error| BlueprintDependencyError { error, issues })
 }
 
 /// Load and verify a `.tsbp` package from bytes already held in memory.
@@ -145,7 +174,7 @@ pub fn load_tsbp_with_dependencies(
 /// input.
 pub(crate) fn load_tsbp_bytes(bytes: &[u8]) -> Result<Blueprint, BlueprintError> {
     let archive = zip::ZipArchive::new(Cursor::new(bytes))?;
-    load_archive(archive, None)
+    load_archive(archive, None, &mut Vec::new())
 }
 
 /// Load and verify a `.tsbp` package from bytes, resolving dependencies
@@ -157,12 +186,13 @@ pub(crate) fn load_tsbp_bytes_with_dependencies(
     active_ids: &[&str],
 ) -> Result<Blueprint, BlueprintError> {
     let archive = zip::ZipArchive::new(Cursor::new(bytes))?;
-    load_archive(archive, Some(active_ids))
+    load_archive(archive, Some(active_ids), &mut Vec::new())
 }
 
 fn load_archive<R: Read + Seek>(
     mut archive: zip::ZipArchive<R>,
     active_ids: Option<&[&str]>,
+    issues: &mut Vec<DependencyIssue>,
 ) -> Result<Blueprint, BlueprintError> {
     if archive.has_duplicate_names() {
         return Err(BlueprintError::DuplicateEntry(
@@ -236,12 +266,18 @@ fn load_archive<R: Read + Seek>(
     match active_ids {
         None => {
             if !metadata.dependencies.mods.is_empty() {
+                *issues = dependencies::validate(&metadata.dependencies, &[])
+                    .err()
+                    .unwrap_or_default();
                 return Err(BlueprintError::MissingDependency(format!(
                     "mods: {}",
                     metadata.dependencies.mods.join(", ")
                 )));
             }
             if !metadata.dependencies.resource_packs.is_empty() {
+                *issues = dependencies::validate(&metadata.dependencies, &[])
+                    .err()
+                    .unwrap_or_default();
                 return Err(BlueprintError::MissingDependency(format!(
                     "resource packs: {}",
                     metadata.dependencies.resource_packs.join(", ")
@@ -249,8 +285,11 @@ fn load_archive<R: Read + Seek>(
             }
         }
         Some(active) => {
-            if let Err(issues) = dependencies::validate(&metadata.dependencies, active) {
-                return Err(BlueprintError::MissingDependency(describe_issues(&issues)));
+            if let Err(unsatisfied) = dependencies::validate(&metadata.dependencies, active) {
+                *issues = unsatisfied;
+                return Err(BlueprintError::MissingDependency(describe_issues(
+                    issues.as_slice(),
+                )));
             }
         }
     }
