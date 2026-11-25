@@ -255,7 +255,7 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. Protocol v
 | `settlement_transfer` | `settlement_id`, `player_id`, `expected_revision` |
 | `settlement_set_tax` | `settlement_id`, `rate` (0–100) |
 | `settlement_release` | `settlement_id`, `expected_revision` (Admin) |
-| `audit_log` | `limit` (optional, default 64, clamped 1–256; Admin) |
+| `audit_log` | `limit` (optional, default 64, clamped 1–256), `tag` (optional, 1–32 lowercase ASCII letters/digits/underscore, trimmed), `accepted` (optional bool), `role` (optional, 1–16 lowercase ASCII letters/digits/underscore, trimmed); Admin |
 | `blueprint_lock` / `blueprint_unlock` | `hash` (canonical `blake3:` + 64 hex, or bare 64 hex) |
 | `blueprint_locks` | — || `set_interest` | `center_x`, `center_z`, `radius_m` |
 | `disconnect` | — |
@@ -273,7 +273,7 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. Protocol v
 | `settlement_updated` | `tick`, `settlement` (`SettlementView`), `settlement_checksum`, `world_checksum` |
 | `settlement_list` | `tick`, `count`, `checksum`, `settlements` (ascending `SettlementView` records) |
 | `settlement_at` | `tick`, `found`, `settlement` (`SettlementView` or `null`) |
-| `audit_log` | `tick`, `capacity`, `checksum`, `entries` (newest `limit` × `{tick, role, tag, code, accepted}`) |
+| `audit_log` | `tick`, `capacity`, `checksum`, `matched` (total filter matches before the limit), `entries` (newest `limit` × `{tick, role, tag, code, accepted}`) |
 | `blueprint_lock_result` | `tick`, `lock {hash, player_id, player, tick, expires_tick}`, `locks_count`, `checksum` |
 | `blueprint_unlock_result` | `tick`, `hash`, `locks_count`, `checksum`, `forced`, `holder_id` (`null` unless an Admin overrode another holder) |
 | `blueprint_lock_list` | `tick`, `count`, `checksum`, `locks` (ascending hash) |
@@ -419,7 +419,7 @@ Population, employment, and building counts are static for v1. `employed` is 60%
 | `time_control` step | Admin only; advances exactly one game day and one tick, even while paused | `not_hello`, `role.forbidden` |
 | `time_control` speed | Rejected; v1 has no real-time loop | `time.invalid_action` |
 | `set_tax` | Validates 0–100 and writes the treasury per-day rates; increments tick | `tax.rate_out_of_range`, `not_hello` |
-| `audit_log` | Admin only; returns the newest retained audit entries oldest-first with the ring capacity and checksum. Per-session, in-memory, not saved; does not advance the tick or change the world checksum | `not_hello`, `role.forbidden`, `audit.unavailable` (transport-only) |
+| `audit_log` | Admin only; optional `tag`/`accepted`/`role` filters apply in that order before `limit`, `matched` reports the total before slicing, and the newest matching entries are returned oldest-first. Well-formed unknown values match nothing; malformed values reject. Filters never mutate the ring, tick, or world checksum; the reported checksum covers the ring before the query is audited. Per-session, in-memory, not saved | `not_hello`, `role.forbidden`, `audit.filter_invalid`, `audit.unavailable` (transport-only) |
 | `place_road` | Adds a 6 m wide, axis-aligned segment; increments tick | `road.empty`, `road.not_axis_aligned`, `road.out_of_bounds`, `road.too_long` (>512 cells), `road.duplicate`, `road.overlap`, `road.store_full`, `road.id_exhausted` |
 | `blueprint_lock` / `blueprint_unlock` | Mayor-only; requires a server-issued identity; a re-lock by the holder renews `expires_tick` (`evaluation tick + lock_lease_ticks`, default 300, clamp 1–3600, saturating), another holder rejects `blueprint.locked`, unlock is holder-or-Admin and an expired lock reports `blueprint.lock_unknown`; an Admin override of another holder sets `forced=true`/`holder_id` and audits `blueprint.unlock_forced`; expiry is lazy and expired locks do not block placement; in-memory only, excluded from the world checksum; player-scoped release keeps them while another live session for the same stable id exists (active or parked with an open resume window), and the last disconnect releases unless `retain_locks_on_disconnect` is set; not saved | `blueprint.locked`, `blueprint.lock_unknown`, `blueprint.unavailable` (transport-only), `player.identity`, `not_hello` |
 | `blueprint_locks` | Viewer-only read; expires stale locks first, then returns ascending canonical hash, stable checksum over `hash`+`player_id`+`tick`+`expires_tick`, does not advance the tick | `blueprint.unavailable` (transport-only), `not_hello` |

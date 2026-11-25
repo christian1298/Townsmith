@@ -114,6 +114,12 @@ pub const AUDIT_CAPACITY: usize = 256;
 /// Entries returned by `audit_log` when the client omits `limit`.
 pub const AUDIT_DEFAULT_LIMIT: usize = 64;
 
+/// Longest accepted `audit_log` tag filter, in ASCII characters.
+pub const AUDIT_TAG_FILTER_MAX_LEN: usize = 32;
+
+/// Longest accepted `audit_log` role filter, in ASCII characters.
+pub const AUDIT_ROLE_FILTER_MAX_LEN: usize = 16;
+
 /// Advisory blueprint lock lease, in authoritative ticks.
 ///
 /// A lock is live while `world.tick < expires_tick` and is dropped lazily at
@@ -445,6 +451,21 @@ fn audit_entry_hash(mut hash: u64, entry: &AuditEntry) -> u64 {
     hash = fnv_update(hash, &[0x1f]);
     hash = fnv_update(hash, entry.code.as_bytes());
     fnv_update(hash, &[0x1e])
+}
+
+/// Trim and validate one `audit_log` filter value.
+///
+/// Returns the trimmed value on success. A filter must be non-empty, at most
+/// `max_len` ASCII bytes, and lowercase ASCII letters, digits, or underscores.
+/// Unknown but well-formed values are valid and simply match nothing.
+fn audit_filter(value: &str, max_len: usize) -> Option<&str> {
+    let trimmed = value.trim();
+    let valid = !trimmed.is_empty()
+        && trimmed.len() <= max_len
+        && trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+    valid.then_some(trimmed)
 }
 
 /// One advisory blueprint edit lock.
@@ -1913,7 +1934,12 @@ impl ServerWorld {
             ClientCommand::BlueprintLock { hash } => self.apply_blueprint_lock(hash),
             ClientCommand::BlueprintUnlock { hash } => self.apply_blueprint_unlock(hash),
             ClientCommand::BlueprintLocks => self.apply_blueprint_locks(),
-            ClientCommand::AuditLog { limit } => self.apply_audit_log(*limit),
+            ClientCommand::AuditLog {
+                limit,
+                tag,
+                accepted,
+                role,
+            } => self.apply_audit_log(*limit, tag.as_deref(), *accepted, role.as_deref()),
             ClientCommand::SetInterest {
                 center_x,
                 center_z,
@@ -2608,18 +2634,52 @@ impl ServerWorld {
         })
     }
 
-    /// Bounded read of the per-session audit ring.
+    /// Bounded, filterable read of the per-session audit ring.
     ///
     /// `limit` defaults to [`AUDIT_DEFAULT_LIMIT`] and is clamped to
-    /// `1..=AUDIT_CAPACITY`. Entries are the newest `limit` retained records,
-    /// oldest first. The reported checksum covers the ring before this query is
-    /// recorded, so it is a pure function of the audited commands. The query
-    /// never advances the tick or mutates the world.
-    fn apply_audit_log(&mut self, limit: Option<u32>) -> (Vec<ServerMessage>, &'static str) {
+    /// `1..=AUDIT_CAPACITY`. The optional `tag`, `accepted`, and `role` filters
+    /// are applied in that order before the limit; `matched` reports the total
+    /// match count before slicing. Entries are the newest `limit` matching
+    /// records, oldest first. The reported checksum covers the ring before this
+    /// query is recorded, so it is a pure function of the audited commands. The
+    /// query never advances the tick or mutates the world.
+    fn apply_audit_log(
+        &mut self,
+        limit: Option<u32>,
+        tag: Option<&str>,
+        accepted_filter: Option<bool>,
+        role: Option<&str>,
+    ) -> (Vec<ServerMessage>, &'static str) {
+        let tag =
+            match tag.map(|value| audit_filter(value, AUDIT_TAG_FILTER_MAX_LEN)) {
+                None => None,
+                Some(Some(value)) => Some(value),
+                Some(None) => return reject_with(
+                    crate::protocol::codes::AUDIT_FILTER_INVALID,
+                    "audit tag filter must be 1-32 lowercase ASCII letters, digits, or underscores",
+                ),
+            };
+        let role = match role.map(|value| audit_filter(value, AUDIT_ROLE_FILTER_MAX_LEN)) {
+            None => None,
+            Some(Some(value)) => Some(value),
+            Some(None) => return reject_with(
+                crate::protocol::codes::AUDIT_FILTER_INVALID,
+                "audit role filter must be 1-16 lowercase ASCII letters, digits, or underscores",
+            ),
+        };
         let requested = limit.map_or(AUDIT_DEFAULT_LIMIT, |value| value as usize);
         let limit = requested.clamp(1, AUDIT_CAPACITY);
-        let entries = self
+        let matching: Vec<&AuditEntry> = self
             .audit
+            .iter()
+            .filter(|entry| {
+                tag.is_none_or(|filter| entry.tag == filter)
+                    && accepted_filter.is_none_or(|filter| entry.accepted() == filter)
+                    && role.is_none_or(|filter| entry.role.as_str() == filter)
+            })
+            .collect();
+        let matched = matching.len() as u32;
+        let entries = matching
             .iter()
             .rev()
             .take(limit)
@@ -2636,6 +2696,7 @@ impl ServerWorld {
             tick: self.tick,
             capacity: AUDIT_CAPACITY,
             checksum: self.audit_checksum(),
+            matched,
             entries,
         })
     }
@@ -8872,11 +8933,17 @@ mod tests {
         let retained = world.audit_len();
         let audit_checksum = world.audit_checksum();
 
-        let message = world.apply(&ClientCommand::AuditLog { limit: None });
+        let message = world.apply(&ClientCommand::AuditLog {
+            limit: None,
+            tag: None,
+            accepted: None,
+            role: None,
+        });
         let ServerMessage::AuditLog {
             tick: message_tick,
             capacity,
             checksum,
+            matched,
             entries,
         } = &message
         else {
@@ -8887,6 +8954,7 @@ mod tests {
         assert_eq!(*capacity, AUDIT_CAPACITY);
         assert_eq!(*checksum, audit_checksum);
         assert_eq!(retained, 4, "hello plus three commands");
+        assert_eq!(*matched, 4, "no filters: all retained entries match");
         assert_eq!(entries.len(), retained);
         assert_eq!(entries[0].tag, "hello");
         assert_eq!(entries[1].tag, "set_tax");
@@ -8925,7 +8993,12 @@ mod tests {
         }
         assert_eq!(world.audit_len(), AUDIT_CAPACITY);
 
-        let message = world.apply(&ClientCommand::AuditLog { limit: None });
+        let message = world.apply(&ClientCommand::AuditLog {
+            limit: None,
+            tag: None,
+            accepted: None,
+            role: None,
+        });
         let ServerMessage::AuditLog { entries, .. } = &message else {
             panic!("expected audit_log, got {message:?}");
         };
@@ -8939,7 +9012,12 @@ mod tests {
             Some("synthetic")
         );
 
-        let message = world.apply(&ClientCommand::AuditLog { limit: Some(0) });
+        let message = world.apply(&ClientCommand::AuditLog {
+            limit: Some(0),
+            tag: None,
+            accepted: None,
+            role: None,
+        });
         let ServerMessage::AuditLog { entries, .. } = &message else {
             panic!("expected audit_log, got {message:?}");
         };
@@ -8948,6 +9026,9 @@ mod tests {
 
         let message = world.apply(&ClientCommand::AuditLog {
             limit: Some(u32::MAX),
+            tag: None,
+            accepted: None,
+            role: None,
         });
         let ServerMessage::AuditLog { entries, .. } = &message else {
             panic!("expected audit_log, got {message:?}");
@@ -8966,7 +9047,12 @@ mod tests {
     #[test]
     fn audit_log_requires_admin_and_rejects_lower_roles() {
         assert_eq!(
-            ClientRole::required_role_for(&ClientCommand::AuditLog { limit: None }),
+            ClientRole::required_role_for(&ClientCommand::AuditLog {
+                limit: None,
+                tag: None,
+                accepted: None,
+                role: None
+            }),
             ClientRole::Admin
         );
         assert_eq!(ClientRole::required_role("audit_log"), ClientRole::Admin);
@@ -8979,7 +9065,12 @@ mod tests {
             ));
             let tick = world.tick;
             let checksum = world.checksum();
-            let message = world.apply(&ClientCommand::AuditLog { limit: None });
+            let message = world.apply(&ClientCommand::AuditLog {
+                limit: None,
+                tag: None,
+                accepted: None,
+                role: None,
+            });
             expect_reject(&message, codes::FORBIDDEN);
             assert_eq!(world.tick, tick);
             assert_eq!(world.checksum(), checksum);
@@ -8989,5 +9080,221 @@ mod tests {
                 Some(role)
             );
         }
+    }
+
+    fn seed_audit(world: &mut ServerWorld) {
+        world.audit.clear();
+        let entries = [
+            (ClientRole::Admin, "alpha", AUDIT_ACCEPTED),
+            (
+                ClientRole::Admin,
+                "beta",
+                protocol_codes::TAX_RATE_OUT_OF_RANGE,
+            ),
+            (ClientRole::Mayor, "alpha", AUDIT_ACCEPTED),
+            (ClientRole::Mayor, "beta", AUDIT_ACCEPTED),
+            (
+                ClientRole::Viewer,
+                "alpha",
+                protocol_codes::TAX_RATE_OUT_OF_RANGE,
+            ),
+        ];
+        for (index, (role, tag, code)) in entries.into_iter().enumerate() {
+            world.audit.push_back(AuditEntry {
+                tick: index as u64,
+                role,
+                tag,
+                code,
+            });
+        }
+    }
+
+    fn audit_slice(message: &ServerMessage) -> (&[AuditLogEntry], u32) {
+        match message {
+            ServerMessage::AuditLog {
+                entries, matched, ..
+            } => (entries, *matched),
+            other => panic!("expected audit_log, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn audit_log_filters_by_tag_accepted_and_role() {
+        let mut world = world_with_hello();
+        seed_audit(&mut world);
+
+        let message = world.apply(&ClientCommand::AuditLog {
+            limit: None,
+            tag: Some("alpha".to_string()),
+            accepted: None,
+            role: None,
+        });
+        let (entries, matched) = audit_slice(&message);
+        assert_eq!(matched, 3);
+        assert_eq!(entries.len(), 3);
+        assert!(entries.iter().all(|entry| entry.tag == "alpha"));
+
+        let message = world.apply(&ClientCommand::AuditLog {
+            limit: None,
+            tag: None,
+            accepted: Some(true),
+            role: None,
+        });
+        let (entries, matched) = audit_slice(&message);
+        assert_eq!(
+            matched, 4,
+            "three seeded entries plus the prior audit_log query"
+        );
+        assert!(entries.iter().all(|entry| entry.accepted));
+
+        let message = world.apply(&ClientCommand::AuditLog {
+            limit: None,
+            tag: None,
+            accepted: None,
+            role: Some("mayor".to_string()),
+        });
+        let (entries, matched) = audit_slice(&message);
+        assert_eq!(matched, 2);
+        assert!(entries.iter().all(|entry| entry.role == "mayor"));
+
+        let message = world.apply(&ClientCommand::AuditLog {
+            limit: None,
+            tag: Some("alpha".to_string()),
+            accepted: Some(true),
+            role: Some("admin".to_string()),
+        });
+        let (entries, matched) = audit_slice(&message);
+        assert_eq!(matched, 1);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].role, "admin");
+        assert!(entries[0].accepted);
+
+        let message = world.apply(&ClientCommand::AuditLog {
+            limit: None,
+            tag: Some("missing".to_string()),
+            accepted: None,
+            role: None,
+        });
+        let (entries, matched) = audit_slice(&message);
+        assert_eq!(matched, 0);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn audit_log_filters_apply_before_the_limit() {
+        let mut world = world_with_hello();
+        world.audit.clear();
+        for index in 0..20 {
+            world.audit.push_back(AuditEntry {
+                tick: index,
+                role: ClientRole::Admin,
+                tag: if index % 2 == 0 { "alpha" } else { "beta" },
+                code: AUDIT_ACCEPTED,
+            });
+        }
+
+        let message = world.apply(&ClientCommand::AuditLog {
+            limit: Some(3),
+            tag: Some("alpha".to_string()),
+            accepted: None,
+            role: None,
+        });
+        let (entries, matched) = audit_slice(&message);
+        assert_eq!(matched, 10, "all alpha entries, before the limit");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(
+            entries.iter().map(|entry| entry.tick).collect::<Vec<_>>(),
+            vec![14, 16, 18],
+            "newest three matches, oldest first inside the slice"
+        );
+    }
+
+    #[test]
+    fn audit_log_rejects_malformed_filters_without_mutation() {
+        let mut world = world_with_hello();
+        seed_audit(&mut world);
+        let tick = world.tick;
+        let checksum = world.checksum();
+        let retained = world.audit_len();
+
+        for tag in [
+            "".to_string(),
+            "   ".to_string(),
+            "UPPER".to_string(),
+            "with space".to_string(),
+            "hyphen-tag".to_string(),
+            "a".repeat(AUDIT_TAG_FILTER_MAX_LEN + 1),
+            "café".to_string(),
+        ] {
+            let message = world.apply(&ClientCommand::AuditLog {
+                limit: None,
+                tag: Some(tag),
+                accepted: None,
+                role: None,
+            });
+            expect_reject(&message, protocol_codes::AUDIT_FILTER_INVALID);
+        }
+
+        for role in [
+            "".to_string(),
+            "ADMIN".to_string(),
+            "with space".to_string(),
+            "a".repeat(AUDIT_ROLE_FILTER_MAX_LEN + 1),
+            "café".to_string(),
+        ] {
+            let message = world.apply(&ClientCommand::AuditLog {
+                limit: None,
+                tag: None,
+                accepted: None,
+                role: Some(role),
+            });
+            expect_reject(&message, protocol_codes::AUDIT_FILTER_INVALID);
+        }
+
+        assert_eq!(world.tick, tick);
+        assert_eq!(world.checksum(), checksum);
+        assert_eq!(world.audit_len(), retained + 12, "rejections are audited");
+
+        let message = world.apply(&ClientCommand::AuditLog {
+            limit: None,
+            tag: Some("  alpha  ".to_string()),
+            accepted: None,
+            role: None,
+        });
+        let (entries, matched) = audit_slice(&message);
+        assert_eq!(matched, 3, "padded filters are trimmed and match");
+        assert!(entries.iter().all(|entry| entry.tag == "alpha"));
+    }
+
+    #[test]
+    fn audit_log_filters_leave_the_world_and_ring_prefix_unchanged() {
+        let mut world = world_with_hello();
+        seed_audit(&mut world);
+        let tick = world.tick;
+        let world_checksum = world.checksum();
+        let ring_before = world.audit_state();
+        let ring_checksum = world.audit_checksum();
+
+        let message = world.apply(&ClientCommand::AuditLog {
+            limit: Some(1),
+            tag: Some("alpha".to_string()),
+            accepted: Some(false),
+            role: Some("viewer".to_string()),
+        });
+        let (entries, matched) = audit_slice(&message);
+        assert_eq!(matched, 1);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(*entries[0].tag, *"alpha");
+
+        match &message {
+            ServerMessage::AuditLog { checksum, .. } => assert_eq!(checksum, &ring_checksum),
+            other => panic!("expected audit_log, got {other:?}"),
+        }
+        assert_eq!(world.tick, tick);
+        assert_eq!(world.checksum(), world_checksum);
+        let ring_after = world.audit_state();
+        assert_eq!(ring_after.len(), ring_before.len() + 1);
+        assert_eq!(&ring_after[..ring_before.len()], ring_before.as_slice());
+        assert_eq!(ring_after.last().map(|entry| entry.tag), Some("audit_log"));
     }
 }

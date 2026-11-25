@@ -184,8 +184,11 @@ pub mod codes {
     pub const SETTLEMENT_UNAVAILABLE: &str = "settlement.unavailable";
 
     // Audit query. `unavailable` is specific to the transport-only session,
-    // which keeps no audit ring.
+    // which keeps no audit ring; `filter_invalid` covers malformed filter
+    // strings (unknown but well-formed values simply match nothing).
     pub const AUDIT_UNAVAILABLE: &str = "audit.unavailable";
+    /// A `tag` or `role` filter is empty, too long, or not lowercase ASCII.
+    pub const AUDIT_FILTER_INVALID: &str = "audit.filter_invalid";
 
     // Advisory blueprint edit locks (v0). `unavailable` is specific to the
     // transport-only session, which keeps no lock table or player identity.
@@ -493,12 +496,26 @@ pub enum ClientCommand {
     ///
     /// The ring is per-session and in-memory: it is neither shared between
     /// connections nor written to a save. `limit` selects the newest entries,
-    /// defaults to 64, and is clamped to `1..=AUDIT_CAPACITY`. The query never
+    /// defaults to 64, and is clamped to `1..=AUDIT_CAPACITY`. The optional
+    /// `tag`, `accepted`, and `role` filters are applied before the limit;
+    /// unknown but well-formed values simply match nothing. The query never
     /// advances the tick or mutates the world; like every command it is itself
     /// audited.
     AuditLog {
-        /// Newest entries to return; `None` uses the default of 64.
+        /// Newest matching entries to return; `None` uses the default of 64.
+        #[serde(default)]
         limit: Option<u32>,
+        /// Exact command-tag filter, trimmed, 1–32 lowercase ASCII
+        /// letters/digits/underscores.
+        #[serde(default)]
+        tag: Option<String>,
+        /// Accept/reject filter.
+        #[serde(default)]
+        accepted: Option<bool>,
+        /// Exact session-role filter, trimmed, 1–16 lowercase ASCII
+        /// letters/digits/underscores.
+        #[serde(default)]
+        role: Option<String>,
     },
     Disconnect,
 }
@@ -935,9 +952,10 @@ pub enum ServerMessage {
     /// Bounded per-session audit ring (Admin only).
     ///
     /// `entries` are the retained ring, oldest first, truncated to the newest
-    /// `limit` entries. The envelope `checksum` covers the whole retained ring
-    /// *before* this query was recorded, so it stays a pure function of the
-    /// audited commands. The ring is per-session, in-memory, and not saved.
+    /// `limit` entries that match the optional filters. The envelope `checksum`
+    /// covers the whole retained ring *before* this query was recorded, so it
+    /// stays a pure function of the audited commands. The ring is per-session,
+    /// in-memory, and not saved.
     AuditLog {
         /// Authoritative tick the query was evaluated at.
         tick: u64,
@@ -945,7 +963,9 @@ pub enum ServerMessage {
         capacity: usize,
         /// FNV-1a checksum over the retained ring before this query.
         checksum: String,
-        /// Retained entries, oldest first, at most `limit`.
+        /// Total entries that matched the filters, before `limit` was applied.
+        matched: u32,
+        /// Matching entries, oldest first, at most `limit`.
         entries: Vec<AuditLogEntry>,
     },
     /// Vote snapshot/status, sent after every accepted vote command.
@@ -2337,7 +2357,15 @@ mod tests {
     fn audit_log_decodes_defaults_and_requires_admin() {
         let decoded =
             decode_client_command(br#"{"type":"audit_log","limit":4}"#).expect("audit_log decodes");
-        assert_eq!(decoded, ClientCommand::AuditLog { limit: Some(4) });
+        assert_eq!(
+            decoded,
+            ClientCommand::AuditLog {
+                limit: Some(4),
+                tag: None,
+                accepted: None,
+                role: None
+            }
+        );
         assert_eq!(decoded.tag(), "audit_log");
         assert_eq!(
             crate::world::ClientRole::required_role_for(&decoded),
@@ -2346,7 +2374,15 @@ mod tests {
 
         let default = decode_client_command(br#"{"type":"audit_log"}"#)
             .expect("audit_log defaults the limit");
-        assert_eq!(default, ClientCommand::AuditLog { limit: None });
+        assert_eq!(
+            default,
+            ClientCommand::AuditLog {
+                limit: None,
+                tag: None,
+                accepted: None,
+                role: None
+            }
+        );
         assert_eq!(
             crate::world::ClientRole::required_role("audit_log"),
             crate::world::ClientRole::Admin
@@ -2359,6 +2395,7 @@ mod tests {
             tick: 7,
             capacity: 256,
             checksum: "0123456789abcdef".to_string(),
+            matched: 1,
             entries: vec![AuditLogEntry {
                 tick: 6,
                 role: "admin".to_string(),
@@ -2383,7 +2420,12 @@ mod tests {
             [ServerMessage::Welcome { .. }]
         ));
         expect_reject(
-            &session.handle(ClientCommand::AuditLog { limit: None }),
+            &session.handle(ClientCommand::AuditLog {
+                limit: None,
+                tag: None,
+                accepted: None,
+                role: None,
+            }),
             codes::AUDIT_UNAVAILABLE,
         );
     }
