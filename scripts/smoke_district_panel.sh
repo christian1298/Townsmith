@@ -78,9 +78,34 @@ run_panel() {
 			echo "District panel smoke tax contract mismatch ($mode): $tax_marker" >&2
 			exit 1
 		fi
+
+		local member_marker
+		member_marker="$(grep '^DISTRICT_MEMBERS ' <<<"$output" || true)"
+		if [[ -z "$member_marker" ]]; then
+			echo "District panel smoke failed ($mode): no DISTRICT_MEMBERS marker" >&2
+			exit 1
+		fi
+		local needle
+		for needle in \
+			"en=Owner #7 · owner" \
+			"#11 manager · build/manage/tax/members" \
+			"#12 member · no permissions" \
+			"#13 builder · build" \
+			"de=Eigentümer #7 · owner" \
+			"#12 member · keine Berechtigungen" \
+			"unowned=Unowned"; do
+			if ! grep -Fq "$needle" <<<"$member_marker"; then
+				echo "District panel smoke member contract mismatch ($mode): missing '$needle'" >&2
+				exit 1
+			fi
+		done
+		if grep -Fq '!base.ui.' <<<"$output"; then
+			echo "District panel smoke failed ($mode): missing translation key" >&2
+			exit 1
+		fi
 	fi
 
-	grep -E '^DISTRICT_PANEL|^DISTRICT_TAX' <<<"$output" | grep -v '^DISTRICT_PANEL status=' >"$log" || true
+	grep -E '^DISTRICT_PANEL|^DISTRICT_TAX|^DISTRICT_MEMBERS' <<<"$output" | grep -v '^DISTRICT_PANEL status=' >"$log" || true
 	printf '%s\n' "$marker" >"$marker_file"
 }
 
