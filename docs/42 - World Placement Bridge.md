@@ -139,14 +139,30 @@ place_blueprint_result { tick, placement_id, blueprint_hash, placement_checksum,
 
 ### Library and policy configuration
 
-Both are opt-in process configuration, never save data:
+All three are opt-in process configuration, never save data:
 
 | Flag | Meaning |
 |---|---|
 | `--blueprint-library <absolute-dir>` | Open an existing content-addressed `.tsbp` library. The server resolves `blueprint_hash` there; no upload, download, or path from the client. |
 | `--policies <json>` | Load a `DistrictPolicyStore` JSON that must belong to the world seed. A foreign-seed or invalid registry exits before the listener binds. |
+| `--content-ids <ids>` | Active content ids for blueprint dependency checks, comma-separated (default `base`). Applied after any `--load` and validated by `ServerWorld::set_active_content_ids`. |
 
 `ServerWorld::set_blueprint_library(root)` and `set_policy_registry(store)` are the in-process equivalents; `clear_blueprint_library()` drops the library. A world without a library rejects placement with `PLACEMENT_LIBRARY_UNAVAILABLE`; a world without a registry treats policy as neutral. A world loaded from a save starts with both unset and must be reconfigured.
+
+### Server content registry
+
+`--content-ids <comma-separated>` configures the active ids that `place_blueprint` checks against `dependencies.mods` and `dependencies.resource_packs`. It accepts the same ids as `ServerWorld::set_active_content_ids`: entries are trimmed, empty segments are ignored, and the world validates, sorts, and deduplicates the result. Examples:
+
+```sh
+townsmith-server --listen 47015 --content-ids base
+townsmith-server --listen 47015 --content-ids base,mymod
+townsmith-server --listen 47015 --content-ids base,mymod:pack
+townsmith-server --listen 47015 --content-ids " base, mymod ,"
+```
+
+The flag is applied after world creation or `--load` and before the listener binds. An empty effective list or a malformed id fails closed: the server prints `SERVER_CONTENT status=error code=content.invalid_registry error=<message>` and exits `2` without binding. On success it prints `SERVER_CONTENT status=ok ids=<comma-joined>` once, sorted as `ServerWorld` stores the list, including the default `ids=base` when the flag is absent.
+
+The registry is process-local configuration: it is not part of `ServerSave`, the world checksum, or the protocol, and `--content-hash` remains an independent pin that may be set at the same time. A restarted server or a world restored from a save starts from `["base"]` and must be given the flag again to accept a modded package namespace. See [[57 - Dashboard and Advisor]] §4.1 for the registry and save contract.
 
 ### Validation order
 

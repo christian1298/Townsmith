@@ -13,7 +13,7 @@ use core_sim::{Cohort, CohortSimulation};
 use townsmith_server::chat_smoke::run_chat_smoke;
 use townsmith_server::listen::{run_listen, run_save_load_smoke, ListenConfig};
 use townsmith_server::placement::{run_placement_smoke, write_placement_fixture};
-use townsmith_server::protocol::{run_loopback_smoke, LOOPBACK_SEED};
+use townsmith_server::protocol::{run_loopback_smoke, Rejection, LOOPBACK_SEED};
 use townsmith_server::save::LoadedWorld;
 use townsmith_server::settlement_smoke::run_settlement_smoke;
 use townsmith_server::vote::run_time_vote_loopback;
@@ -70,6 +70,40 @@ fn retain_locks_requested(args: &[String]) -> bool {
     args.iter().any(|argument| argument == "--retain-locks")
 }
 
+/// Read `--content-ids` from an explicit argument list.
+///
+/// Mirrors [`arg_value`] but stays testable; a trailing flag with no value is
+/// treated as absent, like the other key/value flags.
+fn content_ids_arg(args: &[String]) -> Option<String> {
+    args.iter()
+        .position(|argument| argument == "--content-ids")
+        .and_then(|index| args.get(index + 1))
+        .cloned()
+}
+
+/// Tokenize a `--content-ids` value: split on commas, trim, drop empty entries.
+///
+/// This deliberately performs no id validation. [`ServerWorld::set_active_content_ids`]
+/// is the single authority for trimming, validity, sorting, and deduplication,
+/// so the CLI cannot drift from the in-process configuration.
+fn parse_content_ids(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Apply a raw `--content-ids` value to a world.
+///
+/// An empty effective list or an invalid id is rejected by the world with
+/// `content.invalid_registry` and leaves the previous registry untouched.
+fn apply_content_ids(world: &mut ServerWorld, raw: &str) -> Result<(), Rejection> {
+    let parsed = parse_content_ids(raw);
+    let ids: Vec<&str> = parsed.iter().map(String::as_str).collect();
+    world.set_active_content_ids(&ids)
+}
+
 fn percentile(samples: &[f64], fraction: f64) -> f64 {
     if samples.is_empty() {
         return 0.0;
@@ -78,9 +112,47 @@ fn percentile(samples: &[f64], fraction: f64) -> f64 {
     samples[index]
 }
 
+/// Print the server's command-line surface. `--help` is a presence flag.
+fn print_usage() {
+    print!(
+        "{}",
+        concat!(
+            "townsmith-server — headless authoritative server\n",
+            "\n",
+            "Usage:\n",
+            "  townsmith-server --listen PORT [options]\n",
+            "  townsmith-server --loopback-smoke | --placement-smoke | --resume-smoke\n",
+            "\n",
+            "Listen options:\n",
+            "  --bind ADDRESS             Bind address (default 127.0.0.1)\n",
+            "  --load PATH                Load a world save before serving\n",
+            "  --save PATH                Save path (defaults to --load when set)\n",
+            "  --seed N                   New-world seed\n",
+            "  --role ROLE                Default role: mayor, builder, viewer, admin\n",
+            "  --sessions N               Stop after N accepted sessions\n",
+            "  --once                     Shorthand for --sessions 1\n",
+            "  --autosave-ticks N         Autosave interval in ticks (0 disables)\n",
+            "  --retain-locks             Keep blueprint locks across a disconnect\n",
+            "  --content-hash HEX         Require this 64-hex content-registry hash in hello\n",
+            "  --content-ids IDS          Active content ids, comma-separated (default base)\n",
+            "                             e.g. --content-ids base,mymod,mymod:pack\n",
+            "  --blueprint-library DIR    Absolute content-addressed .tsbp library\n",
+            "  --policies PATH            District policy registry JSON for this seed\n",
+            "\n",
+            "--content-ids and --content-hash are independent process configuration;\n",
+            "neither is saved, and a loaded world starts from the base-only registry.\n",
+        )
+    );
+}
+
 /// Serve protocol v0 sessions sequentially on the IPv4 loopback interface
 /// until the process is stopped. v0 is single-connection-at-a-time by design.
 fn main() {
+    if has_flag("--help") {
+        print_usage();
+        return;
+    }
+
     if has_flag("--loopback-smoke") {
         match run_loopback_smoke() {
             Ok(report) => {
@@ -373,7 +445,8 @@ fn run_listen_mode(port: &str) {
     world.set_role(role);
     // Apply the CLI retention choice after any load so a loaded world follows
     // the process, not the save: the flag is not persisted.
-    let retain_locks = retain_locks_requested(&std::env::args().collect::<Vec<_>>());
+    let args: Vec<String> = std::env::args().collect();
+    let retain_locks = retain_locks_requested(&args);
     world.set_retain_locks_on_disconnect(retain_locks);
     if let Some(hash) = arg_value("--content-hash") {
         if let Err(error) = world.set_content_hash(Some(&hash)) {
@@ -384,6 +457,21 @@ fn run_listen_mode(port: &str) {
             std::process::exit(2);
         }
     }
+    // The registry is process configuration, not save data. Apply it after any
+    // load and before the listener binds so a bad list fails closed.
+    if let Some(raw) = content_ids_arg(&args) {
+        if let Err(error) = apply_content_ids(&mut world, &raw) {
+            eprintln!(
+                "SERVER_CONTENT status=error code={} error={}",
+                error.code, error.message
+            );
+            std::process::exit(2);
+        }
+    }
+    println!(
+        "SERVER_CONTENT status=ok ids={}",
+        world.active_content_ids.join(",")
+    );
     configure_placement(&mut world);
 
     let listener = match TcpListener::bind(address) {
@@ -619,5 +707,81 @@ mod tests {
             checksum,
             "the retention flag stays outside the world checksum"
         );
+    }
+
+    #[test]
+    fn content_ids_flag_parses_absent_single_and_csv() {
+        assert_eq!(content_ids_arg(&args(&["--listen", "0", "--once"])), None);
+        assert_eq!(
+            content_ids_arg(&args(&["--listen", "0", "--content-ids", "base"])),
+            Some("base".to_string())
+        );
+        assert_eq!(
+            parse_content_ids(" base , mymod:pack ,, "),
+            vec!["base".to_string(), "mymod:pack".to_string()]
+        );
+        assert!(
+            parse_content_ids(" , , ").is_empty(),
+            "empty segments alone yield an empty list"
+        );
+    }
+
+    #[test]
+    fn content_ids_apply_normalizes_and_keeps_the_checksum() {
+        let mut world = ServerWorld::new(LOOPBACK_SEED);
+        let checksum = world.checksum();
+        assert_eq!(world.active_content_ids, vec!["base".to_string()]);
+
+        apply_content_ids(&mut world, "base").expect("single id");
+        assert_eq!(world.active_content_ids, vec!["base".to_string()]);
+
+        apply_content_ids(&mut world, " base , mymod:pack ").expect("namespace");
+        assert_eq!(
+            world.active_content_ids,
+            vec!["base".to_string(), "mymod:pack".to_string()]
+        );
+
+        apply_content_ids(&mut world, "mymod, base , mymod").expect("duplicates are deduplicated");
+        assert_eq!(
+            world.active_content_ids,
+            vec!["base".to_string(), "mymod".to_string()]
+        );
+        assert_eq!(
+            world.checksum(),
+            checksum,
+            "the content registry stays outside the world checksum"
+        );
+    }
+
+    #[test]
+    fn content_ids_reject_empty_or_invalid_without_mutation() {
+        let mut world = ServerWorld::new(LOOPBACK_SEED);
+        apply_content_ids(&mut world, "base,mymod").expect("valid registry");
+        let before = world.active_content_ids.clone();
+        for raw in ["", " , , ", "UPPER", "a:b:c", "mymod:", "has space"] {
+            let error = apply_content_ids(&mut world, raw).unwrap_err();
+            assert_eq!(
+                error.code,
+                townsmith_server::protocol::codes::CONTENT_INVALID_REGISTRY,
+                "{raw:?}"
+            );
+            assert_eq!(world.active_content_ids, before, "{raw:?} mutates nothing");
+        }
+    }
+
+    #[test]
+    fn content_ids_and_content_hash_are_independent_process_config() {
+        let mut world = ServerWorld::new(LOOPBACK_SEED);
+        let checksum = world.checksum();
+        let hash = "a".repeat(64);
+        world.set_content_hash(Some(&hash)).expect("valid hash");
+        apply_content_ids(&mut world, "base,mymod").expect("valid registry");
+
+        assert_eq!(world.content_hash.as_deref(), Some(hash.as_str()));
+        assert_eq!(
+            world.active_content_ids,
+            vec!["base".to_string(), "mymod".to_string()]
+        );
+        assert_eq!(world.checksum(), checksum, "neither setting is saved");
     }
 }
