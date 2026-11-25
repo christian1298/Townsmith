@@ -15,6 +15,7 @@ use townsmith_server::listen::{run_listen, run_save_load_smoke, ListenConfig};
 use townsmith_server::placement::{run_placement_smoke, write_placement_fixture};
 use townsmith_server::protocol::{run_loopback_smoke, LOOPBACK_SEED};
 use townsmith_server::save::LoadedWorld;
+use townsmith_server::settlement_smoke::run_settlement_smoke;
 use townsmith_server::vote::run_time_vote_loopback;
 use townsmith_server::world::{
     run_authority_loopback, run_interest_loopback, run_resume_loopback, run_roles_loopback,
@@ -175,6 +176,20 @@ fn main() {
             ),
             Err(error) => {
                 eprintln!("SERVER_CHAT status=error error={error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if has_flag("--settlement-smoke") {
+        match run_settlement_smoke() {
+            Ok(report) => println!(
+                "SERVER_SETTLEMENT status=ok messages={} settlements={} members={} checksum={} world_checksum={}",
+                report.messages, report.settlements, report.members, report.checksum, report.world_checksum
+            ),
+            Err(error) => {
+                eprintln!("SERVER_SETTLEMENT status=error error={error}");
                 std::process::exit(1);
             }
         }
