@@ -268,6 +268,10 @@ var district_focus_selection := false
 # survives dashboard rebuilds, and is revalidated after a world load (a removed
 # or foreign id falls back to no settlement and the camera/selection focus).
 var selected_settlement_id := -1
+## Two-press Shift+X release arm. The value is the settlement id waiting for
+## confirmation; -1 means nothing is armed. A different key, a selection
+## change, and closing the dashboard all clear it.
+var settlement_release_armed_id := -1
 ## Cached local bridge player id for the dashboard's developer "Mayor";
 ## -1 means not registered yet. Registration happens on first claim.
 var mayor_player_id := -1
@@ -473,6 +477,12 @@ func _process(delta: float) -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
+		# Shift+X is a two-press release; every other key cancels a pending
+		# release arm before its normal action runs.
+		var release_press: bool = event.physical_keycode == KEY_X and event.shift_pressed \
+			and dashboard_visible
+		if not release_press:
+			settlement_release_armed_id = -1
 		if event.physical_keycode == KEY_M and mode == "architect":
 			_return_to_mayor()
 			return
@@ -511,7 +521,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				KEY_B:
 					_cycle_starter()
 				KEY_X:
-					_edit_target(1)
+					if event.shift_pressed:
+						if dashboard_visible and selected_settlement_id >= 0:
+							_release_selected_settlement()
+					else:
+						_edit_target(1)
 				KEY_Z:
 					_edit_target(-1)
 				KEY_C:
@@ -2365,6 +2379,7 @@ func _found_settlement() -> bool:
 func _clear_settlements() -> void:
 	core.settlement_clear()
 	_clear_settlement_nodes()
+	settlement_release_armed_id = -1
 	selected_settlement_id = -1
 	if heatmap_visible:
 		_refresh_heatmap()
@@ -2518,6 +2533,7 @@ func _settlement_focus_center() -> Vector2:
 	var center := _settlement_center(settlement)
 	if not settlement.is_empty() and is_finite(center.x) and is_finite(center.y):
 		return center
+	settlement_release_armed_id = -1
 	selected_settlement_id = -1
 	return Vector2(NAN, NAN)
 
@@ -2529,6 +2545,7 @@ func _validate_settlement_selection(state: Dictionary = {}) -> bool:
 	var center := _settlement_center(settlement)
 	if not settlement.is_empty() and is_finite(center.x) and is_finite(center.y):
 		return true
+	settlement_release_armed_id = -1
 	selected_settlement_id = -1
 	return false
 
@@ -2540,6 +2557,8 @@ func _apply_settlement_selection(id: int) -> int:
 		var center := _settlement_center(settlement)
 		if not settlement.is_empty() and is_finite(center.x) and is_finite(center.y):
 			next_id = id
+	if next_id != selected_settlement_id:
+		settlement_release_armed_id = -1
 	selected_settlement_id = next_id
 	dashboard_refresh_accum = 0.0
 	if heatmap_visible:
@@ -3123,6 +3142,7 @@ func _update_citizen_panel() -> void:
 
 func _toggle_dashboard() -> bool:
 	dashboard_visible = not dashboard_visible
+	settlement_release_armed_id = -1
 	if dashboard_panel != null:
 		dashboard_panel.visible = dashboard_visible
 	dashboard_refresh_accum = 0.0
@@ -3698,6 +3718,64 @@ func _transfer_selected_settlement() -> Dictionary:
 	result["id"] = id
 	result["from"] = owner_id
 	result["to"] = owner_after
+	result["revision"] = revision_after
+	return result
+
+## Shift+X: two-press release of the selected owned settlement. The first
+## press only arms the id; the second calls the local bridge force-release.
+## Unowned or unavailable records reject locally without a bridge call.
+func _release_selected_settlement() -> Dictionary:
+	var settlement := _selected_settlement()
+	if settlement.is_empty():
+		_set_modal(i18n.t("base.ui.dashboard.settlement_release.unavailable", {
+			"id": i18n.format_int(selected_settlement_id),
+		}), true)
+		_update_hud()
+		return {"ok": false, "error_code": "settlement.unknown", "error": ""}
+	var id := int(settlement.get("id", -1))
+	if id < 0:
+		_set_modal(i18n.t("base.ui.dashboard.settlement_release.unavailable", {
+			"id": i18n.format_int(selected_settlement_id),
+		}), true)
+		_update_hud()
+		return {"ok": false, "error_code": "settlement.unknown", "error": ""}
+	if not bool(settlement.get("owned", false)):
+		settlement_release_armed_id = -1
+		_set_modal(i18n.t("base.ui.dashboard.settlement_release.unowned", {
+			"id": i18n.format_int(id),
+		}), true)
+		_update_hud()
+		return {"ok": false, "error_code": "settlement.unowned", "error": "", "id": id}
+	if settlement_release_armed_id != id:
+		settlement_release_armed_id = id
+		_set_modal(i18n.t("base.ui.dashboard.settlement_release.armed", {
+			"id": i18n.format_int(id),
+		}), false)
+		_update_hud()
+		return {"ok": false, "armed": true, "id": id}
+	settlement_release_armed_id = -1
+	var owner_value = settlement.get("owner_id", null)
+	var owner_before := int(owner_value) if owner_value != null else -1
+	var revision := int(settlement.get("membership_revision", 0))
+	var result: Dictionary = core.settlement_release(id, revision)
+	if not bool(result.get("ok", false)):
+		_set_modal(i18n.t("base.ui.dashboard.settlement_release.failed", {
+			"code": str(result.get("error_code", "unknown")),
+			"message": str(result.get("error", "")),
+		}), true)
+		_update_hud()
+		return result
+	var updated: Dictionary = result.get("settlement", {})
+	var revision_after := int(updated.get("membership_revision", revision + 1))
+	_set_modal(i18n.t("base.ui.dashboard.settlement_release.success", {
+		"id": i18n.format_int(id),
+		"revision": i18n.format_int(revision_after),
+	}), false)
+	dashboard_refresh_accum = 0.0
+	_update_dashboard()
+	_update_hud()
+	result["id"] = id
+	result["owner_before"] = owner_before
 	result["revision"] = revision_after
 	return result
 
@@ -4871,6 +4949,7 @@ func _run_scene_smoke() -> void:
 	var dashboard_tax_ok := false
 	var dashboard_claim_ok := false
 	var dashboard_transfer_ok := false
+	var dashboard_release_ok := false
 	var heatmap_ui_ok := false
 	var heatmap_modes_ok := false
 	var advisor_i18n_ok := false
@@ -6494,6 +6573,60 @@ func _run_scene_smoke() -> void:
 					int(transfer_back.get("membership_revision", -1)),
 					transfer_checksum,
 				])
+				# Shift+X: arm, cancel with another key, re-arm, release, then
+				# reject the now-unowned selection without drift.
+				dashboard_release_ok = _select_settlement(claim_id)
+				var release_before := _selected_settlement()
+				var release_revision := int(release_before.get("membership_revision", -1))
+				var release_owner := int(release_before.get("owner_id", -1))
+				var release_checksum_before := str(core.settlement_checksum())
+				_set_modal("", false)
+				var release_arm: Dictionary = _release_selected_settlement()
+				dashboard_release_ok = dashboard_release_ok and not bool(release_arm.get("ok", true))
+				dashboard_release_ok = dashboard_release_ok and bool(release_arm.get("armed", false))
+				dashboard_release_ok = dashboard_release_ok and settlement_release_armed_id == claim_id
+				dashboard_release_ok = dashboard_release_ok and modal_label.text == i18n.t(
+					"base.ui.dashboard.settlement_release.armed",
+					{"id": i18n.format_int(claim_id)}
+				)
+				dashboard_release_ok = dashboard_release_ok and str(core.settlement_checksum()) == release_checksum_before
+				_smoke_press_key(KEY_R, false)
+				dashboard_release_ok = dashboard_release_ok and settlement_release_armed_id == -1
+				dashboard_release_ok = dashboard_release_ok and str(core.settlement_checksum()) == release_checksum_before
+				_set_modal("", false)
+				_smoke_press_key(KEY_X, true)
+				dashboard_release_ok = dashboard_release_ok and settlement_release_armed_id == claim_id
+				_smoke_press_key(KEY_X, true)
+				var released := _selected_settlement()
+				var release_checksum_after := str(core.settlement_checksum())
+				var release_revision_after := int(released.get("membership_revision", -1))
+				dashboard_release_ok = dashboard_release_ok and not bool(released.get("owned", true))
+				dashboard_release_ok = dashboard_release_ok and selected_settlement_id == claim_id
+				dashboard_release_ok = dashboard_release_ok and release_revision_after == release_revision + 1
+				dashboard_release_ok = dashboard_release_ok and release_checksum_after != release_checksum_before
+				dashboard_release_ok = dashboard_release_ok and modal_label.text == i18n.t(
+					"base.ui.dashboard.settlement_release.success",
+					{
+						"id": i18n.format_int(claim_id),
+						"revision": i18n.format_int(release_revision_after),
+					}
+				)
+				_set_modal("", false)
+				_smoke_press_key(KEY_X, true)
+				dashboard_release_ok = dashboard_release_ok and modal_label.text == i18n.t(
+					"base.ui.dashboard.settlement_release.unowned",
+					{"id": i18n.format_int(claim_id)}
+				)
+				dashboard_release_ok = dashboard_release_ok and not bool(_selected_settlement().get("owned", true))
+				dashboard_release_ok = dashboard_release_ok and str(core.settlement_checksum()) == release_checksum_after
+				print("DASHBOARD_RELEASE status=%s id=%d owner_before=%d revision=%d->%d second=rejected unowned=rejected checksum=%s" % [
+					"ok" if dashboard_release_ok else "failed",
+					claim_id,
+					release_owner,
+					release_revision,
+					release_revision_after,
+					release_checksum_after,
+				])
 				_select_settlement(first_settlement_id)
 				_update_dashboard()
 				_toggle_dashboard()
@@ -7127,10 +7260,13 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and not dashboard_transfer_ok:
 		status = "dashboard_transfer_failed"
 
+	if status == "ok" and not dashboard_release_ok:
+		status = "dashboard_release_failed"
+
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s policy_edit=%s district_select=%s settlement_select=%s settlement_detail=%s dashboard_tax=%s dashboard_claim=%s dashboard_transfer=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s policy_edit=%s district_select=%s settlement_select=%s settlement_detail=%s dashboard_tax=%s dashboard_claim=%s dashboard_transfer=%s dashboard_release=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -7179,6 +7315,7 @@ func _run_scene_smoke() -> void:
 		"ok" if dashboard_tax_ok else "failed",
 		"ok" if dashboard_claim_ok else "failed",
 		"ok" if dashboard_transfer_ok else "failed",
+		"ok" if dashboard_release_ok else "failed",
 		"ok" if heatmap_ui_ok else "failed",
 		"ok" if heatmap_modes_ok else "failed",
 		"ok" if hud_i18n_ok else "failed",
