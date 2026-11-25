@@ -13,9 +13,9 @@ tags:
 # Phase 6 Remaining Work
 
 > [!abstract] Purpose
-> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `54dc16b` (2026-11-25). It is a plan, not an implementation claim.
+> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `7e97494` (2026-11-25). It is a plan, not an implementation claim.
 
-Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/D-032/D-033/D-035/D-038/D-039/D-040/D-041, [[09 - Open Questions]] Q-101/Q-117/Q-119/Q-120/Q-121/Q-122/Q-123/Q-124/Q-125/Q-126, [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]], [[81 - Settlement Tax Composition]], [[82 - Journal and Rollback]], [[83 - Remote Transport and Authentication]].
+Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/D-032/D-033/D-035/D-038/D-039/D-040/D-041/D-042, [[09 - Open Questions]] Q-101/Q-117/Q-119/Q-120/Q-121/Q-122/Q-123/Q-124/Q-125/Q-126/Q-127/Q-128, [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]], [[81 - Settlement Tax Composition]], [[82 - Journal and Rollback]], [[83 - Remote Transport and Authentication]], [[84 - Content Registry Modes]].
 
 ## 1. Where Phase 6 stands
 
@@ -32,6 +32,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 | ✅ Done | CI UI smokes, district tax readout, chat-panel EN/DE, dashboard tax control, settlement benchmark, this plan | #353–#358 |
 | ✅ Done | Settlement-tax ADR proposal (D-039), save-schema freeze tests, settlement loopback smoke, placement lock UI, settlement-editor/dashboard localization | #359–#364 |
 | ✅ Done | Pure D-039 tax helper, CI multiplayer smokes, nested content-mismatch smoke fix, bounded lock leases, district-panel membership rows, D-040 journal/rollback proposal | #366–#371 |
+| ✅ Done | D-042 content-registry proposal, dashboard release, player-scoped lock release, client chat-push listener, concurrent-listener stress matrix | #391–#395 |
 | ✅ Done | Bounded outbound queue, lock-lease badge, opt-in lock retention, local bridge player registry, D-041 remote-auth proposal | #373–#377 |
 | ✅ Done | Server content-dependent placement, `--retain-locks`, settlement-editor player picker, dashboard claim, wired outbound writer | #379–#383 |
 | ✅ Done | Audited Admin force-unlock, `--content-ids`, local release, dashboard transfer, server chat push over concurrent listen | #385–#389 |
@@ -43,9 +44,9 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 |---:|---|---|---|
 | 1 | Dashboard + connected-client settlement write controls | #343 bridge mutations | Makes the existing settlement protocol usable in play without new protocol/save surface |
 | 2 | Settlement tax treasury consumer after D-039 acceptance | 1, D-030/D-031 | The pure helper exists, but the rate is data-only; applying it needs a precedence decision against district weights |
-| 3 | Blueprint lock multi-session policy | #349 v0 locks, #363/#374 UI, #369 leases, #375 retention, #380 CLI | Lease expiry, retention, and CLI configuration are done; decide reconnect/multi-session semantics |
-| 4 | Concurrent listener shutdown/backpressure stress | #269, #350, #373, #383, #389 | Sessions run concurrently; the multi-client shutdown-under-load matrix remains |
-| 5 | Chat client listener wiring | #389 | Server push exists; the client still polls and needs push handling without duplicates |
+| 3 | Blueprint lock reconnect-retention UX | #349 v0 locks, #363/#374 UI, #369 leases, #375 retention, #380 CLI, #393 player scope | Lease expiry, retention, CLI, and concurrent-session release are done; decide automatic renewal and client lock list |
+| 4 | Concurrent listener load hardening | #269, #350, #373, #383, #389, #395 | The #395 stress matrix covers slow readers, closed queues, shutdown, and the session cap; remote-load tuning remains |
+| 5 | Chat broadcast UI/metrics | #389, #394, #395 | Server push and the passive client listener are done; remaining is unread/push presentation and reconnect metrics |
 | 6 | Voxel edit sync v1 | D-038 accepted, Q-119/Q-120, 3, 4 | The largest slice; do not start before the conflict/lease decisions |
 | 7 | Journal/rollback v1 after D-040/Q-123/Q-124 | 6 | Needs the edit command stream and a crash-safe boundary |
 | 8 | Save migration/versioning freeze | 1–7 | Freeze settlement/edit/journal/lock schemas before remote exposure |
@@ -80,9 +81,9 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 **Not bundled.** Per-building tax, land value, bankruptcy changes, district budget UI.
 
-### 3.3 Blueprint locks: UI, TTL, reconnect
+### 3.3 Blueprint locks: leases, retention, reconnect UX
 
-**Scope.** #349 ships advisory in-memory locks and player-wide release on disconnect; #363 adds the placement-UI lock badge and `L` toggle; #369 adds a lazy 300-tick lease (1–3600 clamp) and refreshes on same-holder lock; #374 shows the lease; #375 adds opt-in retention across disconnect; #380 adds the `--retain-locks` CLI and `SERVER_LOCKS retention=on|off` marker. Remaining: a multi-session policy decision; #385 already makes an Admin force-unlock explicit and audits it.
+**Scope.** #349 ships advisory in-memory locks and player-wide release on disconnect; #363 adds the placement-UI lock badge and `L` toggle; #369 adds a lazy 300-tick lease (1–3600 clamp) and refreshes on same-holder lock; #374 shows the lease; #375 adds opt-in retention across disconnect; #380 adds the `--retain-locks` CLI and `SERVER_LOCKS retention=on|off` marker; #393 scopes release to the stable player id across concurrent sessions. Remaining: reconnect-retention UX (automatic renewal), a lock list in the connected client, and an optional lease override; #385 makes Admin force-unlock explicit and audits it.
 
 **Protocol/save.** Additive fields on the existing lock responses; if locks become durable, a new optional `ServerSave` store and `save.invalid_blueprint_locks`. Do not make locks authoritative for package identity.
 
@@ -98,7 +99,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 **Protocol/save.** No wire-shape change. Add backpressure/closure codes and a bounded queue metric.
 
-**Tests.** Network-fault matrix from #317 plus slow-reader, half-closed, concurrent broadcast, and shutdown-under-load cases; deterministic tick/checksum.
+**Tests.** Network-fault matrix from #317 plus the #395 slow-reader, closed-queue, concurrent-broadcast, shutdown-under-load, and session-cap cases; deterministic tick/checksum.
 
 **Benchmark.** 4 clients, 2k active agents, 10 Hz snapshots; p99 tick and queue depth.
 
@@ -106,7 +107,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.5 Chat push/broadcast
 
-**Scope.** Push `chat_sent`/`chat_log` deltas to connected clients instead of polling only; keep `chat_since` for reconnect. Bounded log and 64-line cap stay.
+**Scope.** Push `chat_sent`/`chat_log` deltas to connected clients instead of polling only; keep `chat_since` for reconnect. Bounded log and 64-line cap stay. Server push (#389) and the 3D passive listener (#394) are done; remaining is broadcast UI/metrics and multi-session ordering coverage (the #395 stress matrix covers the transport).
 
 **Protocol/save.** Add a server push message or include chat deltas in the existing outbound stream; no save field. Sequence numbers remain authoritative.
 
