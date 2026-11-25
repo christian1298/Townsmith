@@ -306,6 +306,14 @@ const TABLES := {
 		"base.ui.dashboard.settlement_transfer.unowned": "Settlement #{id} is unowned; claim it before transferring",
 		"base.ui.dashboard.settlement_transfer.no_recipient": "No local transfer recipient for settlement #{id}",
 
+		# Settlement release control (Shift+X, two presses). Only the
+		# sentence is translated; bridge codes/ids/revisions stay parameters.
+		"base.ui.dashboard.settlement_release.armed": "Press Shift+X again to release #{id}",
+		"base.ui.dashboard.settlement_release.success": "Released settlement #{id} · revision {revision}",
+		"base.ui.dashboard.settlement_release.unowned": "Settlement #{id} is unowned; nothing to release",
+		"base.ui.dashboard.settlement_release.unavailable": "Settlement #{id} is no longer available",
+		"base.ui.dashboard.settlement_release.failed": "{code}: {message}",
+
 		# Compact dashboard policy editing. Bridge error codes, ids, and
 		# policy names stay verbatim parameters.
 		"base.ui.policies.created": "Policy {id} created: {name}",
@@ -698,6 +706,14 @@ const TABLES := {
 		"base.ui.dashboard.settlement_transfer.failed": "{code}: {message}",
 		"base.ui.dashboard.settlement_transfer.unowned": "Siedlung #{id} hat keinen Eigentümer; vor der Übertragung beanspruchen",
 		"base.ui.dashboard.settlement_transfer.no_recipient": "Kein lokaler Empfänger für Siedlung #{id}",
+
+		# Siedlungsfreigabe (Umschalt+X, zwei Tastenanschläge). Nur der Satz
+		# ist übersetzt; Bridge-Codes/IDs/Revisionen bleiben Parameter.
+		"base.ui.dashboard.settlement_release.armed": "Umschalt+X erneut drücken, um Siedlung #{id} freizugeben",
+		"base.ui.dashboard.settlement_release.success": "Siedlung #{id} freigegeben · Revision {revision}",
+		"base.ui.dashboard.settlement_release.unowned": "Siedlung #{id} hat keinen Eigentümer; nichts freizugeben",
+		"base.ui.dashboard.settlement_release.unavailable": "Siedlung #{id} ist nicht mehr verfügbar",
+		"base.ui.dashboard.settlement_release.failed": "{code}: {message}",
 
 		# Kompakte Richtlinienbearbeitung im Dashboard. Fehlercodes, IDs und
 		# Richtliniennamen bleiben unveränderte Parameter.
