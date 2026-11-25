@@ -639,12 +639,14 @@ pub struct ServerWorld {
     ///
     /// Keyed by canonical `blake3:<64 hex>` hash, ascending hash order. Locks
     /// are in-memory only: they are not saved, are excluded from
-    /// [`Self::checksum`], and are released when the holder's last online
-    /// session disconnects (or retained across the disconnect when
-    /// [`Self::retain_locks_on_disconnect`] is set). Each lock also carries a
-    /// bounded lease ([`Self::lock_lease_ticks`]) so a crashed or silent holder
-    /// cannot block a package forever. Locks carry intent only and do not
-    /// confer placement ownership.
+    /// [`Self::checksum`], and are released when the holder's last live session
+    /// ends: another session with the same stable player id, whether still
+    /// online or parked with an open reconnect window, keeps the lock. With
+    /// [`Self::retain_locks_on_disconnect`] set, even the last disconnect keeps
+    /// the lock. Each lock also carries a bounded lease
+    /// ([`Self::lock_lease_ticks`]) so a crashed or silent holder cannot block
+    /// a package forever. Locks carry intent only and do not confer placement
+    /// ownership.
     pub blueprint_locks: BTreeMap<String, BlueprintLock>,
     /// Advisory lock lease applied to new locks and refreshes, in ticks.
     ///
@@ -657,9 +659,11 @@ pub struct ServerWorld {
     /// place for a reconnect instead of releasing them.
     ///
     /// Server configuration, not save data, and excluded from
-    /// [`Self::checksum`]. Defaults to `false`, which preserves immediate
-    /// release on disconnect. When `true`, the locks are left to expire by
-    /// their lease; a same-player reconnect can refresh or unlock them and
+    /// [`Self::checksum`]. Defaults to `false`: the last live session for the
+    /// player releases their locks, while ending one of several concurrent
+    /// sessions for the same identity keeps them. When `true`, every
+    /// disconnect keeps the locks, including the last one, until the lease
+    /// expires; a same-player reconnect can refresh or unlock them and
     /// another player stays blocked until expiry. Locks never survive a
     /// restart: they are not written to [`crate::save::ServerSave`].
     pub retain_locks_on_disconnect: bool,
@@ -1224,24 +1228,51 @@ impl ServerWorld {
             .map(|(connection_id, _)| *connection_id)
     }
 
+    /// Whether a live session other than `ending_connection` belongs to
+    /// `player_id`.
+    ///
+    /// A parked session is alive while it is still online (`hello`) or while
+    /// its reconnect window is open at the current tick; an expired parked
+    /// window is not. The active session is checked too unless it is the one
+    /// ending. `ending_connection` is `None` on the legacy single-slot path,
+    /// whose active slot is the session being closed.
+    fn other_session_for_player(
+        &self,
+        player_id: PlayerId,
+        ending_connection: Option<u64>,
+    ) -> bool {
+        let is_alive = |state: &SessionState| {
+            state.hello
+                || state
+                    .resume_window
+                    .as_ref()
+                    .is_some_and(|window| window.is_open_at(self.tick))
+        };
+        if self.active_connection != ending_connection
+            && self.hello
+            && self.player_id == Some(player_id)
+        {
+            return true;
+        }
+        self.sessions.iter().any(|(connection_id, state)| {
+            Some(*connection_id) != ending_connection
+                && state.player_id == Some(player_id)
+                && is_alive(state)
+        })
+    }
+
     /// Close the active session and open its reconnect window.
     ///
-    /// Advisory lock release follows [`Self::retain_locks_on_disconnect`].
-    /// With the flag off, a player's locks are released only when no other
-    /// session for the same stable identity is still online. "Online" here
-    /// means a parked session in [`Self::sessions`] that has completed `hello`
-    /// and was never closed; the shared `online` name roster is not used
-    /// because [`Self::remember_disconnect`] removes the name on the first
-    /// disconnect. The protocol currently rejects a duplicate display name
-    /// while it is in that roster, so two same-identity sessions cannot both
-    /// be established through `hello` today; the parked-session check keeps
-    /// the multi-connection model correct if that restriction is relaxed.
+    /// Advisory lock release is player-scoped: with
+    /// [`Self::retain_locks_on_disconnect`] off, the ending session releases
+    /// the player's locks only when [`Self::other_session_for_player`] finds no
+    /// other live session for the same stable identity. That keeps the locks
+    /// while a concurrent connection, or a parked session whose reconnect
+    /// window is still open, can resume the same player. An expired parked
+    /// window does not keep them.
     fn remember_disconnect(&mut self) {
         if let Some(player_id) = self.player_id {
-            let another_session = self
-                .sessions
-                .values()
-                .any(|state| state.hello && state.player_id == Some(player_id));
+            let another_session = self.other_session_for_player(player_id, self.active_connection);
             if !self.retain_locks_on_disconnect && !another_session {
                 self.release_blueprint_locks(player_id);
             }
@@ -7218,8 +7249,10 @@ mod tests {
         );
 
         // The last session for that identity going away releases it because
-        // the retention flag is still off.
+        // the retention flag is still off. The closed session's parked resume
+        // window still counts as alive, so advance past it first.
         world.sessions.remove(&99);
+        world.tick = 302;
         let alice_again = world.open_connection();
         assert!(matches!(
             world
@@ -7231,6 +7264,61 @@ mod tests {
         assert!(
             world.blueprint_locks.is_empty(),
             "the last session's disconnect releases with retention off"
+        );
+    }
+
+    #[test]
+    fn two_live_sessions_for_the_same_identity_keep_the_lock_until_the_last() {
+        let dir = PlacementTempDir::new("lock-retention-live");
+        let hash = write_test_package(&dir, "townsmith:retention_live", 100.0, None);
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Mayor);
+        world.set_blueprint_library(dir.library()).expect("library");
+
+        let first = world.open_connection();
+        assert!(matches!(
+            world.apply_session(first, &hello_named("alice")).as_slice(),
+            [ServerMessage::Welcome { .. }]
+        ));
+        let player_id = world.player_id().expect("identity");
+        assert!(matches!(
+            world.apply_session(first, &lock_command(&hash)).as_slice(),
+            [ServerMessage::BlueprintLockResult { .. }]
+        ));
+
+        // The exact-string online roster allows the case variant; the stable
+        // id resolution is case-insensitive, so this is the same player.
+        let second = world.open_connection();
+        assert!(matches!(
+            world
+                .apply_session(second, &hello_named("Alice"))
+                .as_slice(),
+            [ServerMessage::Welcome { .. }]
+        ));
+        assert_eq!(world.player_id(), Some(player_id));
+
+        world.close_connection(first);
+        assert_eq!(
+            world.blueprint_locks.len(),
+            1,
+            "the second live session keeps the lock"
+        );
+        assert_eq!(
+            world
+                .blueprint_locks
+                .values()
+                .next()
+                .expect("lock")
+                .player_id,
+            player_id.get()
+        );
+
+        // The first session's parked resume window still counts as alive; let
+        // it expire before the second session ends.
+        world.tick = 302;
+        world.close_connection(second);
+        assert!(
+            world.blueprint_locks.is_empty(),
+            "the last live session releases when retention is off"
         );
     }
 
