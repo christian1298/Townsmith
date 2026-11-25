@@ -99,6 +99,16 @@ const TABLES := {
 		"base.ui.heatmap.legend": "{metric} · Low → High · dark purple to bright yellow · 512 m radius · 32 m cells",
 		"base.ui.heatmap.empty": "No data in range",
 		"base.ui.heatmap.unavailable": "District heatmap unavailable: {code}",
+
+		# District overview (developer panel) settlement member block.
+		"base.ui.district.members.unowned": "Unowned",
+		"base.ui.district.members.owner": "Owner #{id} · {role}",
+		"base.ui.district.members.row": "#{id} {role} · {permissions}",
+		"base.ui.district.members.no_permissions": "no permissions",
+		"base.ui.district.members.permission.build": "build",
+		"base.ui.district.members.permission.manage": "manage",
+		"base.ui.district.members.permission.tax": "tax",
+		"base.ui.district.members.permission.members": "members",
 		"base.ui.hud.lifecycle": "Lifecycle: day {day} · {aged} aged · {died} died",
 		"base.ui.hud.selected_owner": "  ·  owner {owner}",
 		"base.ui.hud.selected_industry": "  ·  industry {kind}",
@@ -468,6 +478,16 @@ const TABLES := {
 		"base.ui.heatmap.legend": "{metric} · Niedrig → Hoch · dunkles Violett bis helles Gelb · 512 m Radius · 32 m Zellen",
 		"base.ui.heatmap.empty": "Keine Daten im Umkreis",
 		"base.ui.heatmap.unavailable": "Stadtteil-Heatmap nicht verfügbar: {code}",
+
+		# District overview (developer panel) settlement member block.
+		"base.ui.district.members.unowned": "Ohne Eigentümer",
+		"base.ui.district.members.owner": "Eigentümer #{id} · {role}",
+		"base.ui.district.members.row": "#{id} {role} · {permissions}",
+		"base.ui.district.members.no_permissions": "keine Berechtigungen",
+		"base.ui.district.members.permission.build": "bauen",
+		"base.ui.district.members.permission.manage": "verwalten",
+		"base.ui.district.members.permission.tax": "Steuern",
+		"base.ui.district.members.permission.members": "Mitglieder",
 		"base.ui.hud.lifecycle": "Lebenszyklus: Tag {day} · {aged} gealtert · {died} gestorben",
 		"base.ui.hud.selected_owner": "  ·  Eigentümer {owner}",
 		"base.ui.hud.selected_industry": "  ·  Industrie {kind}",

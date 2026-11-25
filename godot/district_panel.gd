@@ -17,20 +17,23 @@ extends Control
 ##   godot --headless --path godot res://district_panel.tscn -- --empty
 ##
 ## Headless smoke: starts empty, rejects a blank settlement, founds two
-## deterministic settlements, creates two overlapping policies, selects both
-## settlements, checks the 256 m district summary and the smallest-id containing
-## policy, exercises button/keyboard stepping, and checks the seed-mismatch
-## unavailable state without logging a push_error. Final marker:
+## deterministic settlements (the first claimed by player 7 and given manager,
+## member, and builder invites), creates two overlapping policies, selects both
+## settlements, checks the 256 m district summary, the smallest-id containing
+## policy, and the owned/unowned member blocks in EN and DE, exercises
+## button/keyboard stepping, and checks the seed-mismatch unavailable state
+## without logging a push_error. Final marker:
 ##   DISTRICT_PANEL status=ok settlements=2 selected=1 population=0 policy=1 checksum=<8 hex>
 ##
 ## `--empty` prints the empty contract:
 ##   DISTRICT_PANEL status=ok settlements=0 selected=none population=0 policy=none checksum=<8 hex>
 ##
-## Strings are English-only developer text; this is a pre-dashboard tool and the
-## shared `base.ui.policy.*` localization slice does not exist yet. Settlement
-## names, owners, bridge error codes, and policy ids stay verbatim. Display
-## numbers go through `WorldI18n.format_int`/`format_float` so the tool already
-## follows the EN/DE number rules from `docs/16 - Localization.md`.
+## Most chrome is still English-only developer text; the settlement member block
+## is keyed under `base.ui.district.*` so the panel already proves the EN/DE
+## slice. Settlement names, owners, roles, bridge error codes, and policy ids
+## stay verbatim; `--locale de` previews the localized block. Display numbers go
+## through `WorldI18n.format_int`/`format_float` so the tool follows the EN/DE
+## number rules from `docs/16 - Localization.md`.
 
 const WorldI18n = preload("res://world_i18n.gd")
 
@@ -49,9 +52,29 @@ const MAX_POLICY_RADIUS_M := 4096.0
 # district query cannot bleed into the other settlement. Both policies contain
 # settlement 1's centre; ids 1 and 2 make "smallest containing id" observable.
 # Settlement 2 sits outside both circles and must report no containing policy.
+# Settlement 1 is claimed by player 7 and gets three invites so one owned record
+# covers owner, manager, member (no permissions), and builder roles; settlement
+# 2 stays unowned and must render the unowned member line only.
 const FIXTURE_SETTLEMENTS := [
-	{"name": "Smoke Alpha", "owner": "player", "x": 0, "z": 0, "radius": 512},
+	{
+		"name": "Smoke Alpha",
+		"owner": "player",
+		"x": 0,
+		"z": 0,
+		"radius": 512,
+		"claim": 7,
+		"members": [[11, "manager"], [12, "member"], [13, "builder"]],
+	},
 	{"name": "Smoke Beta", "owner": "ai", "x": 1024, "z": 0, "radius": 256},
+]
+
+# Permission bit -> localized token. Mirrors `SettlementPermission` in
+# `core_city::settlement`; only granted tokens are rendered.
+const MEMBER_PERMISSION_KEYS := [
+	[1, "base.ui.district.members.permission.build"],
+	[2, "base.ui.district.members.permission.manage"],
+	[4, "base.ui.district.members.permission.tax"],
+	[8, "base.ui.district.members.permission.members"],
 ]
 const FIXTURE_POLICIES := [
 	{"name": "Smoke Core", "x": 0.0, "z": 0.0, "radius": 300.0, "tax": 1.25, "funding": 0.5},
@@ -73,6 +96,8 @@ var _seed := DEFAULT_SEED
 var _settlements: Array = []
 var _settlement_checksum := ""
 var _selected_id := 0
+var _locale_override := ""
+var _member_lines: Array[String] = []
 var _district: Dictionary = {}
 var _district_ok := false
 var _policies: Array = []
@@ -88,6 +113,7 @@ var _empty_label: Label
 var _summary_title: Label
 var _settlement_line: Label
 var _membership_line: Label
+var _members_box: VBoxContainer
 var _district_line: Label
 var _jobs_line: Label
 var _needs_line: Label
@@ -99,7 +125,12 @@ var _checksum_line: Label
 
 func _ready() -> void:
 	_parse_args()
-	_i18n = WorldI18n.new()
+	# The headless contract is pinned in English regardless of the host locale;
+	# `--locale de` opts into the preview and the smoke switches locales itself.
+	var locale := _locale_override
+	if locale.is_empty() and smoke_mode:
+		locale = "en"
+	_i18n = WorldI18n.new(locale)
 	_build_ui()
 	_reset_session(false)
 	if smoke_mode:
@@ -126,6 +157,9 @@ func _parse_args() -> void:
 			var raw: String = args[index]
 			if raw.is_valid_int() and int(raw) >= 0:
 				_seed = int(raw)
+		elif arg == "--locale" and index + 1 < args.size():
+			index += 1
+			_locale_override = args[index]
 		index += 1
 
 
@@ -268,6 +302,97 @@ func _membership_summary(settlement: Dictionary) -> String:
 	]
 
 
+## Render the read-only member block directly under the owner/revision/tax
+## line. Owned records get an owner line plus one row per payload member in
+## payload order; unowned records get a single line. A missing or non-array
+## `members` payload yields no rows rather than synthesized ones.
+func _render_members(settlement: Dictionary) -> void:
+	_clear_members()
+	if _members_box == null:
+		return
+	if not bool(settlement.get("owned", false)):
+		_add_member_line(_i18n.t("base.ui.district.members.unowned"))
+		return
+	var owner_id := _int_field(settlement.get("owner_id", null))
+	if owner_id < 0:
+		# `owned` without an identity is contradictory; show the safe fallback
+		# instead of inventing an owner line.
+		_add_member_line(_i18n.t("base.ui.district.members.unowned"))
+		return
+	var rows = settlement.get("members", [])
+	if not (rows is Array):
+		rows = []
+	var owner_role := ""
+	for member in rows:
+		if member is Dictionary and _int_field(member.get("player", null)) == owner_id:
+			owner_role = str(member.get("role", ""))
+			break
+	# The owner record is structurally the `owner` role; the payload repeats it.
+	if owner_role.is_empty():
+		owner_role = "owner"
+	_add_member_line(_i18n.t("base.ui.district.members.owner", {
+		"id": _i18n.format_int(owner_id),
+		"role": owner_role,
+	}))
+	for member in rows:
+		if not (member is Dictionary):
+			continue
+		var player := _int_field(member.get("player", null))
+		var role := str(member.get("role", ""))
+		var permissions := _int_field(member.get("permissions", null))
+		if player < 0 or role.is_empty() or permissions < 0:
+			continue
+		_add_member_line(_i18n.t("base.ui.district.members.row", {
+			"id": _i18n.format_int(player),
+			"role": role,
+			"permissions": _permission_tokens(permissions),
+		}))
+
+
+func _permission_tokens(bits: int) -> String:
+	var tokens: Array[String] = []
+	for entry in MEMBER_PERMISSION_KEYS:
+		if bits & int(entry[0]) != 0:
+			tokens.append(_i18n.t(str(entry[1])))
+	if tokens.is_empty():
+		return _i18n.t("base.ui.district.members.no_permissions")
+	return "/".join(tokens)
+
+
+func _int_field(value) -> int:
+	if value is int:
+		return int(value)
+	if value is float and is_finite(value):
+		return int(value)
+	return -1
+
+
+func _add_member_line(text: String) -> void:
+	_member_lines.append(text)
+	if _members_box != null:
+		_add_summary_label(_members_box, text, TEXT_COLOR)
+
+
+func _clear_members() -> void:
+	_member_lines.clear()
+	if _members_box == null:
+		return
+	for child in _members_box.get_children():
+		_members_box.remove_child(child)
+		child.free()
+
+
+func _member_block_text() -> String:
+	return "|".join(_member_lines)
+
+
+func _member_block_leaks() -> bool:
+	for line in _member_lines:
+		if line.contains("!base.ui."):
+			return true
+	return false
+
+
 func _policy_center(policy: Dictionary) -> Vector2:
 	return _xy_of(policy.get("center", []))
 
@@ -330,6 +455,7 @@ func _show_empty() -> void:
 	if _settlement_line != null:
 		_settlement_line.text = "—"
 		_membership_line.text = "—"
+		_clear_members()
 		_district_line.text = "—"
 		_jobs_line.text = "—"
 		_needs_line.text = "—"
@@ -363,6 +489,7 @@ func _show_unavailable(code: String, message: String) -> void:
 			else "Cannot read settlements: %s" % code
 		)
 		_membership_line.text = "—"
+		_clear_members()
 		_district_line.text = "District unavailable — the panel does not retry."
 		_jobs_line.text = "—"
 		_needs_line.text = "—"
@@ -398,6 +525,7 @@ func _render_selection() -> void:
 		]
 		if _membership_line != null:
 			_membership_line.text = _membership_summary(settlement)
+		_render_members(settlement)
 		_render_district()
 		_render_policy(center)
 		_checksum_line.text = "settlements %s · district %s · policies %s" % [
@@ -726,6 +854,10 @@ func _build_summary_panel() -> Control:
 	_settlement_line = _add_summary_label(box, "—", TEXT_COLOR)
 	_add_summary_heading(box, "Membership (read-only)")
 	_membership_line = _add_summary_label(box, "—", TEXT_COLOR)
+	_members_box = VBoxContainer.new()
+	_members_box.add_theme_constant_override("separation", 2)
+	_members_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	box.add_child(_members_box)
 	_add_summary_heading(box, "District (256 m around the settlement centre)")
 	_district_line = _add_summary_label(box, "—", TEXT_COLOR)
 	_jobs_line = _add_summary_label(box, "—", TEXT_COLOR)
@@ -835,6 +967,31 @@ func _load_fixture() -> bool:
 				true
 			)
 			return false
+		var created := _mutation_record(result)
+		var id := int(created.get("id", 0))
+		var revision := int(created.get("membership_revision", 0))
+		if entry.has("claim"):
+			var claim: Dictionary = _core.settlement_claim(
+				id, int(entry["claim"]), revision
+			)
+			if not bool(claim.get("ok", false)):
+				_set_message(
+					"Fixture claim failed: %s" % str(claim.get("error_code", "error")),
+					true
+				)
+				return false
+			revision = int(_mutation_record(claim).get("membership_revision", revision))
+		for invited in entry.get("members", []):
+			var invite: Dictionary = _core.settlement_invite(
+				id, int(invited[0]), str(invited[1]), revision
+			)
+			if not bool(invite.get("ok", false)):
+				_set_message(
+					"Fixture invite failed: %s" % str(invite.get("error_code", "error")),
+					true
+				)
+				return false
+			revision = int(_mutation_record(invite).get("membership_revision", revision))
 	for entry in FIXTURE_POLICIES:
 		var result: Dictionary = _core.district_policy_create(
 			_seed,
@@ -856,6 +1013,11 @@ func _load_fixture() -> bool:
 	_refresh()
 	_set_message("Deterministic fixture loaded (2 settlements, 2 policies).", false)
 	return true
+
+
+func _mutation_record(result: Dictionary) -> Dictionary:
+	var value = result.get("settlement", {})
+	return value if value is Dictionary else {}
 
 
 # --- Headless smoke --------------------------------------------------------
@@ -888,6 +1050,9 @@ func _run_smoke() -> void:
 	var contained_id := 0
 	var unavailable_code := "none"
 	var fixture_ok := false
+	var member_block_en := ""
+	var member_block_de := ""
+	var member_block_unowned := ""
 
 	# 1. Initial empty state: settlement layer closed, no list rows, no district
 	# query, and the empty label visible. No store may be created by a read.
@@ -965,8 +1130,24 @@ func _run_smoke() -> void:
 			status = "select_first_district_checksum"
 		elif not _settlement_line.text.contains("Smoke Alpha"):
 			status = "select_first_title"
-		elif not _membership_line.text.contains("Unowned"):
+		elif not _membership_line.text.contains("Owner #7"):
 			status = "select_first_membership"
+		elif not _membership_line.text.contains("revision 4"):
+			status = "select_first_membership_revision"
+		elif _member_lines.size() != 5 or _members_box.get_child_count() != 5:
+			status = "select_first_member_rows"
+		elif _member_lines[0] != "Owner #7 · owner":
+			status = "select_first_member_owner"
+		elif not _member_block_text().contains("#11 manager · build/manage/tax/members"):
+			status = "select_first_member_manager"
+		elif not _member_block_text().contains("#12 member · no permissions"):
+			status = "select_first_member_no_permissions"
+		elif not _member_block_text().contains("#13 builder · build"):
+			status = "select_first_member_builder"
+		elif not _member_block_text().contains("#7 owner · build/manage/tax/members"):
+			status = "select_first_member_owner_row"
+		elif _member_block_leaks():
+			status = "select_first_member_en_key"
 		elif not _settlement_line.text.contains("tax 0%"):
 			status = "select_first_tax"
 		elif not _membership_line.text.contains("tax 0%"):
@@ -975,6 +1156,25 @@ func _run_smoke() -> void:
 			status = "select_first_row"
 		elif not _policy_line.text.contains("#1") or not _policy_line.text.contains("Smoke Core"):
 			status = "select_first_policy_row"
+		else:
+			member_block_en = _member_block_text()
+
+	# 4b. The member block is keyed, not hardcoded English: the same selection
+	# renders German labels and never leaks `!base.ui.*!` for either locale.
+	if status == "ok":
+		_i18n.set_locale("de")
+		_render_selection()
+		member_block_de = _member_block_text()
+		if _member_block_leaks():
+			status = "select_first_member_de_key"
+		elif not member_block_de.contains("Eigentümer #7"):
+			status = "select_first_member_de_owner"
+		elif not member_block_de.contains("keine Berechtigungen"):
+			status = "select_first_member_de_no_permissions"
+		elif not member_block_de.contains("bauen/verwalten/Steuern/Mitglieder"):
+			status = "select_first_member_de_tokens"
+		_i18n.set_locale("en")
+		_render_selection()
 
 	# 5. Settlement 2 is 1,024 m away and outside both policy circles: the
 	# summary still succeeds and containment reports no policy.
@@ -990,8 +1190,16 @@ func _run_smoke() -> void:
 			status = "select_second_policy_row"
 		elif not _summary_title.text.contains("Smoke Beta"):
 			status = "select_second_title"
+		elif _member_lines.size() != 1 or _members_box.get_child_count() != 1:
+			status = "select_second_member_rows"
+		elif _member_lines[0] != _i18n.t("base.ui.district.members.unowned"):
+			status = "select_second_member_unowned"
+		elif _member_block_leaks():
+			status = "select_second_member_key"
 		elif not _settlement_line.text.contains("tax 0%"):
 			status = "select_second_tax"
+		else:
+			member_block_unowned = _member_block_text()
 
 	# 6. Keyboard/button stepping wraps in id order.
 	if status == "ok":
@@ -1073,6 +1281,9 @@ func _run_smoke() -> void:
 		beta_tax,
 		selected_tax,
 	])
+	print("DISTRICT_MEMBERS en=%s" % member_block_en)
+	print("DISTRICT_MEMBERS de=%s" % member_block_de)
+	print("DISTRICT_MEMBERS unowned=%s" % member_block_unowned)
 	_print_marker(status, _settlements.size(), selected_id, population, contained_id)
 	get_tree().quit(0 if status == "ok" else 1)
 
