@@ -40,10 +40,11 @@ trap 'rm -rf "$SMOKE_DIR"' EXIT
 run_editor() {
 	local log="$1"
 	local marker_file="$2"
+	local extra="${3:-}"
 	local output
 	local godot_status
 	set +e
-	output="$(timeout 120s "$GODOT_BIN" --headless --path "$ROOT/godot" res://settlement_editor.tscn -- --smoke 2>&1)"
+	output="$(timeout 120s "$GODOT_BIN" --headless --path "$ROOT/godot" res://settlement_editor.tscn -- --smoke $extra 2>&1)"
 	godot_status=$?
 	set -e
 	printf '%s\n' "$output" >&2
@@ -104,6 +105,7 @@ run_editor() {
 
 run_editor "$SMOKE_DIR/first.txt" "$SMOKE_DIR/first.marker"
 run_editor "$SMOKE_DIR/second.txt" "$SMOKE_DIR/second.marker"
+run_editor "$SMOKE_DIR/de.txt" "$SMOKE_DIR/de.marker" "--smoke-de"
 FIRST_MARKER="$(cat "$SMOKE_DIR/first.marker")"
 SECOND_MARKER="$(cat "$SMOKE_DIR/second.marker")"
 
@@ -116,6 +118,16 @@ fi
 
 if ! diff -u "$SMOKE_DIR/first.txt" "$SMOKE_DIR/second.txt"; then
 	echo "Settlement editor smoke failed: deterministic marker lines differ" >&2
+	exit 1
+fi
+
+if ! grep -Fq 'SETTLEMENT_EDITOR_UI locale=de title=Editor für Siedlungsbesitz state=Seed 2.026 · 0 Siedlungen · Prüfsumme 0000000000000000' "$SMOKE_DIR/de.txt"; then
+	echo "Settlement editor smoke failed: German UI marker missing" >&2
+	cat "$SMOKE_DIR/de.txt" >&2
+	exit 1
+fi
+if grep -q '!base.ui.' "$SMOKE_DIR/de.txt"; then
+	echo "Settlement editor smoke failed: untranslated key leak" >&2
 	exit 1
 fi
 

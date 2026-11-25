@@ -3553,7 +3553,7 @@ func _cycle_selected_settlement_tax() -> bool:
 	if settlement.is_empty():
 		return false
 	if not bool(settlement.get("owned", false)):
-		_set_modal("settlement.unowned", true)
+		_set_modal(i18n.t("base.ui.dashboard.settlement_tax.unowned"), true)
 		_update_hud()
 		return false
 	var id := int(settlement.get("id", -1))
@@ -3562,18 +3562,18 @@ func _cycle_selected_settlement_tax() -> bool:
 	var next_rate := _next_settlement_tax(int(settlement.get("tax_rate", 0)))
 	var result: Dictionary = core.settlement_set_tax(id, next_rate)
 	if not bool(result.get("ok", false)):
-		_set_modal("%s: %s" % [
-			str(result.get("error_code", "unknown")),
-			str(result.get("error", "")),
-		], true)
+		_set_modal(i18n.t("base.ui.dashboard.settlement_tax.failed", {
+			"code": str(result.get("error_code", "unknown")),
+			"message": str(result.get("error", "")),
+		}), true)
 		_update_hud()
 		return false
 	var updated: Dictionary = result.get("settlement", {})
 	var rate := int(updated.get("tax_rate", next_rate))
-	_set_modal("Settlement tax: %d%% · checksum %s" % [
-		rate,
-		str(result.get("checksum", "")),
-	], false)
+	_set_modal(i18n.t("base.ui.dashboard.settlement_tax.success", {
+		"rate": i18n.format_int(rate),
+		"checksum": str(result.get("checksum", "")),
+	}), false)
 	dashboard_refresh_accum = 0.0
 	_update_dashboard()
 	_update_hud()

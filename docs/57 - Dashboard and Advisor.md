@@ -40,7 +40,7 @@ Out:
 - clickable advice that selects or centres a building;
 - acknowledged, dismissed, or persisted notifications;
 - charts, history, trend lines, or time-series;
-- a new dashboard panel or window; the focus and settlement controls live inside the existing District and Settlements sections, and the Policies section adds eight read-only strings plus six compact-editor strings while the settlement section adds seventeen (ten selector + seven detail; the world table is now 265 keys); developer-only debug text stays English;
+- a new dashboard panel or window; the focus and settlement controls live inside the existing District and Settlements sections, and the Policies section adds eight read-only strings plus six compact-editor strings while the settlement section adds seventeen selector/detail strings plus three tax-control strings (the world table is now 333 keys); developer-only debug text stays English;
 - automated pause, advisor actions, or policy changes outside the compact dashboard editor;
 - per-citizen or per-household advice.
 
@@ -380,7 +380,7 @@ Clearing rules:
 - A payload whose `center` does not match the selected settlement centre (malformed or stale state) is treated as unavailable, so values never render under the wrong header.
 - Repeating the same selection rebuilds the identical block; the smoke compares the full dashboard text after a `none` → same-id cycle.
 
-All seven new strings are keyed in EN/DE under `base.ui.dashboard.body.*`: detail title, identity, district, jobs, buildings, containing policy, and no-containing-policy. The world table floor is now **265** keys. The membership summary is one compact read-only status line built from the selected record: unowned records show `Members — · revision N`; owned records show the owner id, member count, role counts in stable sorted role-name order, the revision, and the data-only tax rate. It adds no member list, role, or permission control.
+All seven new strings are keyed in EN/DE under `base.ui.dashboard.body.*`: detail title, identity, district, jobs, buildings, containing policy, and no-containing-policy. The world table floor is now **333** keys. The membership summary is one compact read-only status line built from the selected record: unowned records show `Members — · revision N`; owned records show the owner id, member count, role counts in stable sorted role-name order, the revision, and the data-only tax rate. It adds no member list, role, or permission control.
 
 All ten selector strings are keyed in EN/DE: section title, founded count, none/unavailable, row, selected row, focus line, focus hint, and the `PageUp`/`PageDown` hint. Settlement names, owners, ids, and centres stay verbatim.
 
@@ -400,7 +400,7 @@ The default create is deterministic: radius 64 m, tax 1.0, funding 1.0, construc
 
 Every update rebuilds the full request from the state record: `name`, `center`, `radius_m`, and `blueprint_allowlist` are copied unchanged unless the action names them (no compact action changes them), and a missing or mistyped field rejects locally as `invalid_record` instead of inventing a value. Numeric steps snap to 0.01 after the 0.25 step; a step that clamps back to the current value sends nothing. A failed call shows the localized `base.ui.policies.failed` line with the bridge `error_code` and leaves the registry, the containing record, the dashboard text, and the world/population/construction checksums unchanged; the smoke exercises this with a foreign-seed `district_policy_update`. A successful call shows a localized created/updated/removed line and refreshes the dashboard immediately.
 
-The footer adds the localized `base.ui.dashboard.policy_hint` line: `P create · Shift+P remove · J construction · [ ] tax · , . funding`. The six new strings are keyed in EN/DE under `base.ui.policies.*` and `base.ui.dashboard.policy_hint`; the world table floor is **265** keys. The standalone §4.2 editor remains the full form for name, centre, radius, allowlist, and direct validation testing.
+The footer adds the localized `base.ui.dashboard.policy_hint` line: `P create · Shift+P remove · J construction · [ ] tax · , . funding`. The six new strings are keyed in EN/DE under `base.ui.policies.*` and `base.ui.dashboard.policy_hint`; the world table floor is **333** keys. The standalone §4.2 editor remains the full form for name, centre, radius, allowlist, and direct validation testing.
 
 ### 5.4 Settlement tax control (`Shift+T`)
 
