@@ -55,6 +55,14 @@ extends Node3D
 ## `CanvasLayer`. The extra `MP_CHAT status=ok entries=N checksum=...` marker is
 ## printed before the normal done marker. Without `--chat` no chat code runs.
 ##
+## `--chat-listen --chat-expect "<text>"` is the passive push probe: after
+## `hello` it sends nothing (no `chat`, no `chat_since`) and waits for a
+## server-pushed `chat_sent` from another session. On a matching text it prints
+## `MP_CHAT_PUSH ...` and disconnects. A timeout or close before the match fails
+## with `chat_push_timeout`. It cannot be combined with `--chat-script` or
+## `--place-ui`. With `--chat`, incoming pushed lines are always applied to the
+## panel and never advance the script; `chat_since` remains the catch-up path.
+##
 ## `godot/mp_interest_render.gd` is reused for road parsing, the 64-road wire
 ## cap, and the deterministic 16-hex road checksum. Buildings are parsed
 ## defensively here (cap 64, ascending id, malformed entries skipped) with a
@@ -103,6 +111,7 @@ enum Phase {
 	UI_ACTIVE,
 	PLACE_SENT,
 	CHAT_ACTIVE,
+	CHAT_LISTEN,
 	DISCONNECT_SENT,
 }
 
@@ -299,8 +308,12 @@ var _ui_done_marker := ""
 var _ui_place_markers: Array = []
 var _ui_reject_markers: Array = []
 
-# Opt-in chat (`--chat`). Inert without the flag.
+# Opt-in chat (`--chat`) and the passive push listener (`--chat-listen`).
+# Inert without either flag.
 var _chat_enabled := false
+var _chat_listen := false
+var _chat_expect := ""
+var _chat_script_given := false
 var _chat_script := DEFAULT_CHAT_SCRIPT
 var _chat_actions: Array = []
 var _chat_action_index := 0
@@ -329,7 +342,10 @@ func _ready() -> void:
 	_library_root = _arg(args, "--library", "")
 	_place_ui_script = _arg(args, "--place-ui-script", "")
 
-	_chat_enabled = args.has("--chat")
+	_chat_listen = args.has("--chat-listen")
+	_chat_expect = _arg(args, "--chat-expect", "")
+	_chat_script_given = args.has("--chat-script")
+	_chat_enabled = args.has("--chat") or _chat_listen
 	_chat_script = _arg(args, "--chat-script", DEFAULT_CHAT_SCRIPT)
 
 	_container = Node3D.new()
@@ -447,8 +463,24 @@ func _parse_place_ui_script(text: String) -> Dictionary:
 ## Validate the opt-in chat arguments and build the transcript model before the
 ## socket opens. A bad script fails fast with `chat_script_invalid`; the chat
 ## probe cannot be combined with either placement flow because it skips the
-## zero-view step those flows depend on.
+## zero-view step those flows depend on. Listener mode requires an expected
+## text and rejects the scripted/placement combinations it cannot run.
 func _prepare_chat() -> bool:
+	if _chat_listen:
+		if _place_ui or not _place_hash.is_empty() or _chat_script_given:
+			_fail("chat_listen_conflict")
+			return false
+		if _chat_expect.strip_edges().is_empty():
+			_fail("chat_expect_missing")
+			return false
+		_chat_panel = ChatScene.instantiate()
+		var expect_result: Dictionary = _chat_panel.draft(_chat_expect)
+		if not bool(expect_result.get("ok", false)):
+			_fail("chat_expect_invalid")
+			return false
+		_chat_expect = str(expect_result.get("command", {}).get("text", ""))
+		_chat_panel.command_issued.connect(_on_chat_command)
+		return true
 	_chat_panel = ChatScene.instantiate()
 	var parsed := _parse_chat_script(_chat_script)
 	if not bool(parsed.get("ok", false)):
@@ -517,6 +549,9 @@ func _process(_delta: float) -> void:
 		# time out normally.
 		if _place_ui and _phase == Phase.UI_ACTIVE and _place_ui_script.is_empty():
 			_arm_deadline(_timeout_ms)
+		elif _chat_listen and _phase == Phase.CHAT_LISTEN:
+			_fail("chat_push_timeout")
+			return
 		else:
 			_fail("timeout_%s" % _phase_name())
 			return
@@ -542,7 +577,10 @@ func _process(_delta: float) -> void:
 		# Read the goodbye or final reject before treating FIN as a failure.
 		_drain()
 		if not _finished:
-			_fail("connection_lost_%s" % _phase_name())
+			if _chat_listen and _phase == Phase.CHAT_LISTEN:
+				_fail("chat_push_timeout")
+			else:
+				_fail("connection_lost_%s" % _phase_name())
 
 func _on_connected() -> void:
 	_set_status("Connected; sending hello.")
@@ -635,6 +673,12 @@ func _on_welcome(message: Dictionary) -> void:
 	_last_tick = tick
 	if _chat_enabled:
 		_chat_panel.set_identity(0, _player_name)
+	if _chat_listen:
+		print("MP_CHAT_LISTEN status=ready player=%s" % _player_name)
+		_phase = Phase.CHAT_LISTEN
+		_arm_deadline(_timeout_ms)
+		_set_status("Chat push listener ready; waiting for a pushed line.")
+		return
 	if _place_ui and not _ui_request_locks():
 		return
 	_set_status("Welcome %s; placing deterministic roads." % _session_id)
@@ -955,7 +999,7 @@ func _on_goodbye() -> void:
 	if _phase != Phase.DISCONNECT_SENT:
 		_fail("goodbye_in_%s" % _phase_name())
 		return
-	if _chat_enabled:
+	if _chat_enabled and not _chat_listen:
 		_chat_marker = _chat_marker_text()
 		print(_chat_marker)
 	_finish_ok()
@@ -1001,16 +1045,53 @@ func _on_chat_sent(message: Dictionary) -> void:
 	if not _chat_enabled:
 		_fail("unexpected_message_chat_sent")
 		return
-	if _phase != Phase.CHAT_ACTIVE or _chat_awaiting != "sent":
-		_fail("chat_sent_in_%s" % _phase_name())
+	var scripted := _phase == Phase.CHAT_ACTIVE and _chat_awaiting == "sent"
+	var added: bool = _chat_panel.apply_chat_sent(message)
+	if scripted:
+		if not added:
+			var error_code := str(_chat_panel.snapshot().get("error_code", ""))
+			_fail("chat_sent_%s" % (error_code if error_code != "" else "duplicate"))
+			return
+		_chat_awaiting = ""
+		_refresh_hud()
+		_chat_advance()
 		return
-	if not _chat_panel.apply_chat_sent(message):
-		var error_code := str(_chat_panel.snapshot().get("error_code", ""))
-		_fail("chat_sent_%s" % (error_code if error_code != "" else "duplicate"))
+	# A line pushed from another session (or a duplicate) outside the scripted
+	# exchange is transcript-only: never advance the script or fail on it.
+	# `chat_log` remains the catch-up path after a reconnect.
+	if not added:
 		return
-	_chat_awaiting = ""
 	_refresh_hud()
-	_chat_advance()
+	if _phase == Phase.CHAT_LISTEN:
+		_chat_push_match(message)
+
+## Complete the passive listener once its expected pushed line arrives. The
+## digest is SHA-256 over `seq|player|text`, first 16 hex, with no paths or
+## clock values.
+func _chat_push_match(message: Dictionary) -> void:
+	var entry_raw: Variant = message.get("entry", null)
+	if typeof(entry_raw) != TYPE_DICTIONARY:
+		return
+	var entry: Dictionary = entry_raw
+	var seq := int(entry.get("seq", 0))
+	var player := str(entry.get("player", ""))
+	var text := str(entry.get("text", ""))
+	if text != _chat_expect:
+		return
+	if seq < 1 or player.is_empty():
+		_fail("chat_push_fields")
+		return
+	var digest := ("%d|%s|%s" % [seq, player, text]).sha256_text().substr(0, 16)
+	print("MP_CHAT_PUSH status=ok player=%s seq=%d text=%s checksum=%s" % [
+		player,
+		seq,
+		text,
+		digest,
+	])
+	if not _send({"type": "disconnect"}):
+		return
+	_phase = Phase.DISCONNECT_SENT
+	_arm_deadline(_timeout_ms)
 
 func _on_chat_log(message: Dictionary) -> void:
 	if not _chat_enabled:
@@ -2613,6 +2694,8 @@ func _phase_name() -> String:
 			return "place_sent"
 		Phase.CHAT_ACTIVE:
 			return "chat_active"
+		Phase.CHAT_LISTEN:
+			return "chat_listen"
 		Phase.DISCONNECT_SENT:
 			return "disconnect_sent"
 		_:
