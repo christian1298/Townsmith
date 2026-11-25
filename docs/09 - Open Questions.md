@@ -2,7 +2,7 @@
 title: Open Questions
 project: Townsmith
 status: active
-updated: 2026-11-24
+updated: 2026-11-25
 tags:
   - townsmith
   - questions
@@ -218,6 +218,15 @@ These support D-034 (accepted 2026-11-23). The bridge v1 is implemented: a base-
 |---|---|---|---|
 | **Q-117** | How does a content-bound world load when the required pack is missing, and what can a read-only mode safely preserve? | **D-035 bridge v1 (Proposed):** strict load stays fail-closed; the opt-in `world_load_content_checked(..., true)` opens a read-only inspector with status `missing`/`mismatch`, keeps unknown IDs opaque, retains the recorded identity, and blocks saves with `content_read_only`. The server CLI flag, client mismatch screen, and a content-dependent simulation freeze list remain open. | High |
 
+## Voxel edit questions
+
+These support D-038 (Proposed, 2026-11-25) and [[79 - Voxel Edit Sync]].
+
+| ID | Question | Current assumption / recommendation | Priority |
+|---|---|---|---|
+| **Q-119** | What happens when two players edit the same voxel or submit overlapping batches? | **Recommendation:** exact-revision optimistic concurrency; reject a stale batch with `blueprint.revision_stale`, reload, and let the player retry. No CRDT or silent last-writer-wins. A merge UI and per-cell ownership are alternatives; if chosen, they must still produce one deterministic effective volume. | High |
+| **Q-120** | How long does a placement edit lock live, and does it survive reconnect? | **Recommendation:** a 300-tick lease refreshed by accepted edits, released on disconnect, Admin force-release; reconnect does not silently reclaim. Alternatives are explicit unlock only or a resume-time reclaim keyed by the session token. | High |
+
 ## Construction questions
 
 | ID | Question | Current assumption / recommendation | Priority |
@@ -377,3 +386,4 @@ These support D-034 (accepted 2026-11-23). The bridge v1 is implemented: a base-
 | Q-107–Q-110 | Server-authoritative blueprint placement |
 | Q-111–Q-115 | Settlement ownership, membership, and permissions (Q-111 answered) |
 | Q-116–Q-118 | Content-pack identity in world saves (D-034 accepted; D-035 bridge v1; Q-116/Q-118 answered as proposed ADRs) |
+| Q-119–Q-120 | Authoritative placed-blueprint voxel edits (D-038 proposed) |
