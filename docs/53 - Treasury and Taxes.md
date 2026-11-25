@@ -2,7 +2,7 @@
 title: Treasury, Loans, and Construction
 project: Townsmith
 status: active
-updated: 2026-11-23
+updated: 2026-11-25
 tags:
   - townsmith
   - phase-3
@@ -15,6 +15,9 @@ tags:
 
 > [!info] What this note is
 > Phase 3.6 completes the first economy loop: construction spends real money, loans bridge a cash gap, bankruptcy blocks new spending, and taxes can pull a city back. It is still a city-level ledger, not household finance.
+
+> [!warning] Settlement tax is data-only pending D-039
+> `Settlement.tax_rate` round-trips and has a dashboard control, but no treasury consumer reads it. [[81 - Settlement Tax Composition]] proposes the per-location surcharge rule, cap, rounding, and collection watermark; Q-121/Q-122 remain open. District weights (D-030) and service funding (D-031) are the only active tax levers until D-039 is accepted.
 
 ## 1. Scope
 
@@ -32,7 +35,7 @@ Out:
 
 - Construction is billed per phase; refunds, cancellation accounting, and asset sales remain out.
 - Bonds, grants, trade, subsidies, or a credit market.
-- Service funding by building type, district budgets, or settlement taxes.
+- Service funding by building type, district budgets, or settlement tax collection (pending D-039).
 - Household rent, food cost, net income, or private spending.
 - Bankruptcy consequences beyond blocking new placements and loans: no liquidation, takeover, or forced asset sale.
 - Loan defaults, variable rates, or renegotiation.
@@ -227,7 +230,7 @@ The world-scene smoke checks:
 - No refunds, cancellation accounting, or asset sales.
 - Loan interest is simple and fixed; no default, restructuring, or market rates.
 - Bankruptcy only blocks new placements and loans; existing sites and services continue.
-- Taxes are global; no district/settlement rates or service funding.
+- Settlement `tax_rate` is stored but inert pending D-039; district tax weights (D-030) and service funding (D-031) are the only tax levers today.
 - Wages remain a treasury expense and gross; no household rent or spending.
 - The smoke's tiny two-resident city needs extreme taxes to show a positive net; the 50-house runner is the meaningful recovery case.
 - English-only developer HUD.
