@@ -11,7 +11,8 @@ use std::io::{self, Cursor, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{serve_io, session_ended, ListenConfig};
+use super::outbound::{drain, OutboundError, OutboundQueue};
+use super::{serve_io, serve_io_outbound, session_ended, ListenConfig};
 use crate::protocol::{
     codes, read_frame, read_json_frame, write_frame, write_json_frame, ClientCommand, FrameError,
     ServerMessage, LOOPBACK_SEED, MAX_FRAME_LEN,
@@ -885,6 +886,132 @@ fn a_resume_after_the_window_is_rejected() {
     expect_reject_code(&second.responses[0], world_codes::RESUME_EXPIRED);
     assert!(!world.is_resumable());
     assert!(!world.hello_accepted());
+}
+
+#[test]
+fn queued_responses_are_byte_identical_and_leave_the_same_world() {
+    let commands = [hello(), ping(3), set_tax(12, 8), place_road(), ping(4)];
+    let bytes = encode_commands(&commands);
+    let config = ListenConfig::default();
+
+    let mut inline_world = mayor_world();
+    let mut inline_bytes = Vec::new();
+    let mut last_saved_tick = inline_world.tick;
+    let mut saves = 0;
+    let inline_commands = serve_io(
+        &mut ChunkedReader::new(bytes.clone(), 1),
+        &mut inline_bytes,
+        &mut inline_world,
+        &config,
+        &mut last_saved_tick,
+        &mut saves,
+    )
+    .expect("inline session");
+
+    let mut queued_world = mayor_world();
+    let queue = OutboundQueue::new(256).expect("queue");
+    let mut last_saved_tick = queued_world.tick;
+    let mut queued_saves = 0;
+    let outcome = serve_io_outbound(
+        &mut ChunkedReader::new(bytes, 1),
+        &queue,
+        &mut queued_world,
+        &config,
+        &mut last_saved_tick,
+        &mut queued_saves,
+    )
+    .expect("queued session");
+
+    assert_eq!(outcome.commands, inline_commands);
+    assert_eq!(outcome.outbound, None);
+    assert_eq!(queued_saves, saves);
+
+    queue.close();
+    let mut queued_bytes = Vec::new();
+    drain(&mut queued_bytes, &queue).expect("drain queued responses");
+    assert_eq!(queued_bytes, inline_bytes);
+    assert_eq!(decode_frames(&queued_bytes), decode_frames(&inline_bytes));
+
+    assert_eq!(queued_world.tick, inline_world.tick);
+    assert_eq!(queued_world.checksum(), inline_world.checksum());
+    assert_eq!(queued_world.commands(), inline_world.commands());
+}
+
+#[test]
+fn slow_reader_backpressure_stops_reading_and_keeps_accepted_frames() {
+    let commands = [hello(), ping(1), ping(2), ping(3), ping(4)];
+    let mut world = mayor_world();
+    let queue = OutboundQueue::new(2).expect("queue");
+    let mut reader = ChunkedReader::new(encode_commands(&commands), usize::MAX);
+    let mut last_saved_tick = world.tick;
+    let mut saves = 0;
+
+    let outcome = serve_io_outbound(
+        &mut reader,
+        &queue,
+        &mut world,
+        &ListenConfig::default(),
+        &mut last_saved_tick,
+        &mut saves,
+    )
+    .expect("backpressure ends the session cleanly");
+
+    // Welcome and the first pong fit. The first pong after that is rejected,
+    // so the remaining `ping(3)`/`ping(4)` frames are never read.
+    assert_eq!(outcome.commands, 3);
+    assert_eq!(outcome.outbound, Some(OutboundError::Full));
+    assert_eq!(
+        outcome.outbound.expect("full queue").code(),
+        "outbound.backpressure"
+    );
+
+    // No consumer ran, so the accepted backlog is still queued in order and
+    // can be drained after the close.
+    assert_eq!(queue.len(), 2);
+    queue.close();
+    let mut written = Vec::new();
+    drain(&mut written, &queue).expect("drain accepted frames");
+    let responses = decode_frames(&written);
+    assert_eq!(responses.len(), 2);
+    assert!(matches!(responses[0], ServerMessage::Welcome { .. }));
+    assert_eq!(responses[1], ServerMessage::Pong { nonce: 1 });
+
+    assert_eq!(world.commands(), 3);
+    assert_eq!(world.tick, 0);
+    assert_eq!(saves, 0);
+}
+
+#[test]
+fn a_closed_queue_ends_the_session_before_queueing_a_response() {
+    let mut world = mayor_world();
+    let queue = OutboundQueue::new(4).expect("queue");
+    queue.close();
+    let mut last_saved_tick = world.tick;
+    let mut saves = 0;
+
+    let outcome = serve_io_outbound(
+        &mut ChunkedReader::new(encode_commands(&[hello(), ping(9)]), usize::MAX),
+        &queue,
+        &mut world,
+        &ListenConfig::default(),
+        &mut last_saved_tick,
+        &mut saves,
+    )
+    .expect("closed queue ends the session cleanly");
+
+    assert_eq!(outcome.commands, 1);
+    assert_eq!(outcome.outbound, Some(OutboundError::Closed));
+    assert_eq!(
+        outcome.outbound.expect("closed queue").code(),
+        "outbound.closed"
+    );
+    assert!(queue.is_empty());
+    assert!(world.hello_accepted());
+    assert_eq!(
+        world.commands(),
+        1,
+        "the ping after the close is never read"
+    );
 }
 
 #[test]

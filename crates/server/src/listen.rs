@@ -10,21 +10,25 @@
 //! and optionally every `autosave_ticks` accepted tick changes. A session that
 //! read no command frame (a port probe or cancelled connect) writes no save.
 
-use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+#[cfg(test)]
+use std::io::Write;
+use std::io::{self, Read};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 
 use crate::protocol::{
-    configure_stream, decode_client_command, read_frame, read_json_frame, write_json_frame,
+    codes, configure_stream, decode_client_command, read_frame, read_json_frame, write_json_frame,
     ClientCommand, FrameError, ServerMessage, LOOPBACK_SEED, PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
 };
 use crate::save::{temp_path, SaveReport};
 use crate::world::ServerWorld;
 
-// Bounded per-connection outbound queue for the future concurrent listener and
-// chat push. Not wired into `serve_io` yet.
+// Bounded per-connection outbound queue drained by the session writer thread.
 mod outbound;
+
+use outbound::{drain, OutboundError, OutboundQueue};
 
 /// Options for one listen run.
 #[derive(Debug, Clone, Default)]
@@ -116,12 +120,26 @@ pub fn run_listen(
     })
 }
 
-/// Serve one session on a borrowed stream without letting a peer-side write
-/// failure escape as an error.
+/// Serve one session with a dedicated writer thread.
 ///
-/// `TcpStream` implements `Read`/`Write` for `&TcpStream`, so both halves can
-/// borrow the same socket; tests drive [`serve_io`] with independent reader and
-/// writer types.
+/// The reader keeps the accepted `TcpStream`; the writer owns a clone, so a
+/// blocking write cannot stall command decoding. Responses are encoded once and
+/// handed to a bounded [`OutboundQueue`] in the executor's order.
+///
+/// Lifecycle:
+///
+/// - The writer drains until the queue is closed and empty, then flushes and
+///   exits.
+/// - When the reader ends (EOF, `disconnect`, a fault, or a save failure) it
+///   closes the queue, so the writer flushes the accepted backlog and exits
+///   before the session is reported as done.
+/// - A writer error closes the queue and shuts down the socket, which wakes the
+///   reader out of `read_frame`; the error ends only this session.
+/// - A full or closed queue means the peer is not draining or the writer is
+///   gone. The reader stops accepting commands, the queue is closed, and the
+///   socket is shut down. The rejected frame is reported with the
+///   `outbound.backpressure` / `outbound.closed` code instead of being dropped
+///   silently; frames already accepted are written unless the peer is gone.
 fn serve_session(
     stream: &TcpStream,
     world: &mut ServerWorld,
@@ -129,47 +147,155 @@ fn serve_session(
     last_saved_tick: &mut u64,
     saves: &mut u64,
 ) -> io::Result<u64> {
+    let writer_stream = match stream.try_clone() {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!(
+                "SERVER_SESSION status=end reason=writer_clone_error code={} message={}",
+                codes::FRAME_IO,
+                error
+            );
+            return Ok(0);
+        }
+    };
+
+    let queue = Arc::new(
+        OutboundQueue::new(outbound::DEFAULT_CAPACITY).expect("default capacity is non-zero"),
+    );
+    let writer_queue = Arc::clone(&queue);
+    let writer = thread::spawn(move || {
+        let mut writer = writer_stream;
+        let result = drain(&mut writer, &writer_queue);
+        if result.is_err() {
+            // The reader may be blocked in `read_frame`; shutting down the
+            // shared socket makes that read return and ends the session.
+            let _ = writer.shutdown(Shutdown::Both);
+        }
+        writer_queue.close();
+        result
+    });
+
     let mut reader = stream;
-    let mut writer = stream;
-    serve_io(
-        &mut reader,
-        &mut writer,
-        world,
-        config,
-        last_saved_tick,
-        saves,
-    )
+    let served = serve_io_outbound(&mut reader, &queue, world, config, last_saved_tick, saves);
+
+    // No more responses can be produced, whatever ended the session.
+    queue.close();
+
+    let outcome = match served {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // A save failure is fatal for the listen run, but the writer still
+            // has to drain before the world is saved or the process exits.
+            let _ = writer.join();
+            return Err(error);
+        }
+    };
+
+    if outcome.outbound.is_some() {
+        // Do not wait indefinitely for a peer that is not reading: stop both
+        // directions. Frames already queued may be lost here, which is exactly
+        // the documented backpressure close path.
+        let _ = stream.shutdown(Shutdown::Both);
+    }
+
+    match writer.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            eprintln!(
+                "SERVER_SESSION status=end reason=write_error code={} message={}",
+                codes::FRAME_IO,
+                error
+            );
+        }
+        Err(_) => {
+            eprintln!(
+                "SERVER_SESSION status=end reason=writer_panic message=outbound writer thread panicked"
+            );
+        }
+    }
+
+    Ok(outcome.commands)
+}
+
+/// Why one response frame was not handed to the transport.
+#[derive(Debug)]
+enum FrameSinkError {
+    /// The frame could not be encoded or written.
+    Write(FrameError),
+    /// The bounded queue rejected the frame.
+    Outbound(OutboundError),
+}
+
+impl FrameSinkError {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::Write(error) => error.code(),
+            Self::Outbound(error) => error.code(),
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Self::Write(error) => error.message(),
+            Self::Outbound(error) => error.to_string(),
+        }
+    }
+}
+
+/// What one read/execute/write pass produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ServeOutcome {
+    /// Command frames read.
+    commands: u64,
+    /// Set when the queue rejected a response, which ends the session.
+    outbound: Option<OutboundError>,
 }
 
 /// Read and answer command frames until the peer leaves or the session closes.
 ///
 /// Returns the number of command frames read. The only `Err` is a save failure:
-/// a read error ends the session quietly and a response-write error (a reset or
-/// half-closed peer, or an oversized response) ends it too, without taking down
-/// the accept loop.
-fn serve_io<R: Read, W: Write>(
+/// a read error ends the session quietly and a response-write or queue error
+/// ends it too, without taking down the accept loop.
+fn serve_frames<R, F>(
     reader: &mut R,
-    writer: &mut W,
+    mut send: F,
     world: &mut ServerWorld,
     config: &ListenConfig,
     last_saved_tick: &mut u64,
     saves: &mut u64,
-) -> io::Result<u64> {
+) -> io::Result<ServeOutcome>
+where
+    R: Read,
+    F: FnMut(&ServerMessage) -> Result<(), FrameSinkError>,
+{
     let mut session_commands = 0u64;
     loop {
         let payload = match read_frame(&mut *reader) {
             Ok(payload) => payload,
             // A clean EOF at the frame boundary: the client closed without
             // `disconnect`.
-            Err(FrameError::Truncated { actual: 0, .. }) => return Ok(session_commands),
-            Err(FrameError::Io(error)) if session_ended(&error) => return Ok(session_commands),
+            Err(FrameError::Truncated { actual: 0, .. }) => {
+                return Ok(ServeOutcome {
+                    commands: session_commands,
+                    outbound: None,
+                });
+            }
+            Err(FrameError::Io(error)) if session_ended(&error) => {
+                return Ok(ServeOutcome {
+                    commands: session_commands,
+                    outbound: None,
+                });
+            }
             Err(error) => {
                 eprintln!(
                     "SERVER_PROTOCOL status=error code={} message={}",
                     error.code(),
                     error.message()
                 );
-                return Ok(session_commands);
+                return Ok(ServeOutcome {
+                    commands: session_commands,
+                    outbound: None,
+                });
             }
         };
         session_commands += 1;
@@ -180,18 +306,33 @@ fn serve_io<R: Read, W: Write>(
             Err(rejection) => vec![rejection.into_message()],
         };
         for response in &responses {
-            if let Err(error) = write_json_frame(&mut *writer, response) {
+            if let Err(error) = send(response) {
+                let outbound = match &error {
+                    FrameSinkError::Outbound(error) => Some(*error),
+                    FrameSinkError::Write(_) => None,
+                };
                 eprintln!(
-                    "SERVER_SESSION status=end reason=write_error code={} message={}",
+                    "SERVER_SESSION status=end reason={} code={} message={}",
+                    if outbound.is_some() {
+                        "outbound_error"
+                    } else {
+                        "write_error"
+                    },
                     error.code(),
                     error.message()
                 );
-                return Ok(session_commands);
+                return Ok(ServeOutcome {
+                    commands: session_commands,
+                    outbound,
+                });
             }
         }
 
         if world.is_closed() {
-            return Ok(session_commands);
+            return Ok(ServeOutcome {
+                commands: session_commands,
+                outbound: None,
+            });
         }
 
         if config.autosave_ticks > 0
@@ -205,6 +346,42 @@ fn serve_io<R: Read, W: Write>(
             }
         }
     }
+}
+
+/// Inline adapter used by the fault harness: writes each response frame
+/// directly to `writer`.
+#[cfg(test)]
+fn serve_io<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    world: &mut ServerWorld,
+    config: &ListenConfig,
+    last_saved_tick: &mut u64,
+    saves: &mut u64,
+) -> io::Result<u64> {
+    let send = |response: &ServerMessage| {
+        write_json_frame(&mut *writer, response).map_err(FrameSinkError::Write)
+    };
+    let outcome = serve_frames(reader, send, world, config, last_saved_tick, saves)?;
+    Ok(outcome.commands)
+}
+
+/// Listen-path adapter: encodes each response once and queues the exact bytes
+/// the writer will put on the socket.
+fn serve_io_outbound<R: Read>(
+    reader: &mut R,
+    queue: &OutboundQueue,
+    world: &mut ServerWorld,
+    config: &ListenConfig,
+    last_saved_tick: &mut u64,
+    saves: &mut u64,
+) -> io::Result<ServeOutcome> {
+    let send = |response: &ServerMessage| {
+        let mut frame = Vec::new();
+        write_json_frame(&mut frame, response).map_err(FrameSinkError::Write)?;
+        queue.push(frame).map_err(FrameSinkError::Outbound)
+    };
+    serve_frames(reader, send, world, config, last_saved_tick, saves)
 }
 
 fn session_ended(error: &io::Error) -> bool {
@@ -568,6 +745,79 @@ mod tests {
         assert_eq!(report.commands, 6);
         assert_eq!(report.tick, 1);
         assert!(report.saves == 0);
+    }
+
+    #[test]
+    fn writer_thread_preserves_multi_frame_order_over_tcp() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = thread::spawn(move || {
+            run_listen(
+                listener,
+                ServerWorld::new(LOOPBACK_SEED),
+                ListenConfig::default(),
+                Some(1),
+            )
+        });
+
+        let mut stream = TcpStream::connect_timeout(&address, SESSION_IO_TIMEOUT).expect("connect");
+        configure_stream(&stream).expect("configure");
+
+        // Coalesce four commands into one client write. The server must answer
+        // them in the same order through the queue and writer thread.
+        let mut encoded = Vec::new();
+        write_json_frame(&mut encoded, &hello()).expect("hello");
+        for nonce in [1, 2, 3] {
+            write_json_frame(&mut encoded, &ClientCommand::Ping { nonce }).expect("ping");
+        }
+        stream.write_all(&encoded).expect("coalesced commands");
+        stream.flush().expect("flush commands");
+
+        let welcome: ServerMessage = read_json_frame(&mut stream).expect("welcome");
+        assert!(matches!(welcome, ServerMessage::Welcome { tick: 0, .. }));
+        for nonce in [1, 2, 3] {
+            let pong: ServerMessage = read_json_frame(&mut stream).expect("pong");
+            assert_eq!(pong, ServerMessage::Pong { nonce });
+        }
+
+        write_json_frame(&mut stream, &ClientCommand::Disconnect).expect("disconnect");
+        let goodbye: ServerMessage = read_json_frame(&mut stream).expect("goodbye");
+        assert_eq!(goodbye, ServerMessage::Goodbye);
+
+        let report = server.join().expect("server thread").expect("listen");
+        assert_eq!(report.sessions, 1);
+        assert_eq!(report.commands, 5);
+        assert_eq!(report.tick, 0);
+    }
+
+    #[test]
+    fn reader_eof_shuts_the_outbound_writer_down() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = thread::spawn(move || {
+            run_listen(
+                listener,
+                ServerWorld::new(LOOPBACK_SEED),
+                ListenConfig::default(),
+                Some(1),
+            )
+        });
+
+        let mut stream = TcpStream::connect_timeout(&address, SESSION_IO_TIMEOUT).expect("connect");
+        configure_stream(&stream).expect("configure");
+        write_json_frame(&mut stream, &hello()).expect("hello");
+        let welcome: ServerMessage = read_json_frame(&mut stream).expect("welcome");
+        assert!(matches!(welcome, ServerMessage::Welcome { .. }));
+
+        // Dropping the client sends EOF. The server closes the queue, joins the
+        // writer, and returns from `run_listen`; a leaked writer thread would
+        // hang this test instead.
+        drop(stream);
+
+        let report = server.join().expect("server thread").expect("listen");
+        assert_eq!(report.sessions, 1);
+        assert_eq!(report.commands, 1);
+        assert_eq!(report.saves, 0);
     }
 
     #[test]
