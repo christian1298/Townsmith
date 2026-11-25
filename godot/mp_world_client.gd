@@ -47,6 +47,14 @@ extends Node3D
 ## nudge 1 m, R rotates 90°, Enter places, Esc cancels. Esc/q cancels. Without
 ## `--place-ui` none of this code runs.
 ##
+## Chat is a third opt-in path: `--chat [--chat-script "..."]`. After the main
+## interest view it skips the zero-view probe, sends `chat_since {after: 0}`,
+## runs `say:<text>` / `poll` actions in order, and disconnects. The developer
+## `godot/chat_panel.tscn` is instantiated as the transcript model; on a
+## non-headless, non-smoke run it is also mounted bottom-left in its own
+## `CanvasLayer`. The extra `MP_CHAT status=ok entries=N checksum=...` marker is
+## printed before the normal done marker. Without `--chat` no chat code runs.
+##
 ## `godot/mp_interest_render.gd` is reused for road parsing, the 64-road wire
 ## cap, and the deterministic 16-hex road checksum. Buildings are parsed
 ## defensively here (cap 64, ascending id, malformed entries skipped) with a
@@ -77,6 +85,7 @@ extends Node3D
 
 const InterestRender = preload("res://mp_interest_render.gd")
 const PlacementUI = preload("res://mp_placement_ui.gd")
+const ChatScene = preload("res://chat_panel.tscn")
 
 enum Phase {
 	CONNECTING,
@@ -91,6 +100,7 @@ enum Phase {
 	UI_PLACE_WAIT,
 	UI_ACTIVE,
 	PLACE_SENT,
+	CHAT_ACTIVE,
 	DISCONNECT_SENT,
 }
 
@@ -165,6 +175,15 @@ const COLOR_UI_GHOST := Color(0.40, 0.96, 0.72, 0.42)
 const COLOR_UI_PLACEMENT := Color(0.98, 0.64, 0.24)
 const UI_MOVE_STEP_M := 1.0
 const UI_MAX_ACTIONS := 256
+
+# Opt-in chat (`--chat`). Pipe-separated actions: `say:<text>` or `poll`.
+# Text is validated through the chat panel's server-mirrored rules.
+const DEFAULT_CHAT_SCRIPT := "say:hello|poll|say:world"
+const CHAT_MAX_ACTIONS := 64
+const CHAT_LAYER := 2
+const CHAT_MARGIN := 12.0
+const CHAT_PANEL_WIDTH := 540.0
+const CHAT_PANEL_HEIGHT := 430.0
 
 var _peer: StreamPeerTCP
 var _phase: int = Phase.CONNECTING
@@ -265,6 +284,15 @@ var _ui_done_marker := ""
 var _ui_place_markers: Array = []
 var _ui_reject_markers: Array = []
 
+# Opt-in chat (`--chat`). Inert without the flag.
+var _chat_enabled := false
+var _chat_script := DEFAULT_CHAT_SCRIPT
+var _chat_actions: Array = []
+var _chat_action_index := 0
+var _chat_awaiting := ""
+var _chat_panel = null
+var _chat_marker := ""
+
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
 	_smoke = args.has("--smoke")
@@ -286,6 +314,9 @@ func _ready() -> void:
 	_library_root = _arg(args, "--library", "")
 	_place_ui_script = _arg(args, "--place-ui-script", "")
 
+	_chat_enabled = args.has("--chat")
+	_chat_script = _arg(args, "--chat-script", DEFAULT_CHAT_SCRIPT)
+
 	_container = Node3D.new()
 	_container.name = "WorldClientRoot"
 	add_child(_container)
@@ -294,6 +325,9 @@ func _ready() -> void:
 		_ui_root.name = "WorldClientPlacementUI"
 		add_child(_ui_root)
 	_build_hud()
+
+	if _chat_enabled and not _prepare_chat():
+		return
 
 	var port_text := _arg(args, "--port", str(DEFAULT_PORT))
 	if not port_text.is_valid_int():
@@ -363,6 +397,70 @@ func _prepare_place_ui() -> bool:
 	_ui_center = Vector2(roundf(_place_x), roundf(_place_z))
 	_ui_rotation = rotation
 	return true
+
+## Validate the opt-in chat arguments and build the transcript model before the
+## socket opens. A bad script fails fast with `chat_script_invalid`; the chat
+## probe cannot be combined with either placement flow because it skips the
+## zero-view step those flows depend on.
+func _prepare_chat() -> bool:
+	_chat_panel = ChatScene.instantiate()
+	var parsed := _parse_chat_script(_chat_script)
+	if not bool(parsed.get("ok", false)):
+		_fail("chat_script_invalid")
+		return false
+	_chat_actions = parsed.get("actions", [])
+	if _place_ui or not _place_hash.is_empty():
+		_fail("chat_conflict")
+		return false
+	_chat_panel.command_issued.connect(_on_chat_command)
+	if not _smoke and DisplayServer.get_name() != "headless":
+		_mount_chat_panel()
+	return true
+
+## Parse `say:<text>|poll|...` into ordered actions. Each `say` text is checked
+## with the panel's `draft`, which mirrors the server's trim/length/control
+## rules, so an invalid script never reaches the wire.
+func _parse_chat_script(text: String) -> Dictionary:
+	var actions: Array = []
+	if text.strip_edges().is_empty():
+		return {"ok": false, "actions": actions}
+	for raw in text.split("|", true):
+		var action := raw.strip_edges()
+		if action == "poll":
+			actions.append({"type": "poll"})
+			continue
+		if not action.begins_with("say:"):
+			return {"ok": false, "actions": actions}
+		var message := action.substr(4).strip_edges()
+		if message.is_empty():
+			return {"ok": false, "actions": actions}
+		var draft: Dictionary = _chat_panel.draft(message)
+		if not bool(draft.get("ok", false)):
+			return {"ok": false, "actions": actions}
+		var command: Dictionary = draft.get("command", {})
+		actions.append({"type": "say", "text": str(command.get("text", ""))})
+	if actions.is_empty() or actions.size() > CHAT_MAX_ACTIONS:
+		return {"ok": false, "actions": actions}
+	return {"ok": true, "actions": actions}
+
+## Mount the developer panel bottom-left. `chat_panel.gd` runs its own headless
+## smoke when `_ready` sees `--smoke`, so the smoke path keeps the panel as a
+## tree-less model and only a real display gets a mounted Control.
+func _mount_chat_panel() -> void:
+	var layer := CanvasLayer.new()
+	layer.name = "WorldClientChat"
+	layer.layer = CHAT_LAYER
+	add_child(layer)
+	_chat_panel.name = "WorldClientChatPanel"
+	layer.add_child(_chat_panel)
+	_chat_panel.anchor_left = 0.0
+	_chat_panel.anchor_top = 1.0
+	_chat_panel.anchor_right = 0.0
+	_chat_panel.anchor_bottom = 1.0
+	_chat_panel.offset_left = CHAT_MARGIN
+	_chat_panel.offset_top = -CHAT_PANEL_HEIGHT - CHAT_MARGIN
+	_chat_panel.offset_right = CHAT_MARGIN + CHAT_PANEL_WIDTH
+	_chat_panel.offset_bottom = -CHAT_MARGIN
 
 func _process(_delta: float) -> void:
 	if _finished:
@@ -451,6 +549,10 @@ func _handle_message(message: Dictionary) -> void:
 			_on_interest_view(message)
 		"place_blueprint_result":
 			_on_place_blueprint_result(message)
+		"chat_sent":
+			_on_chat_sent(message)
+		"chat_log":
+			_on_chat_log(message)
 		"reject":
 			_on_reject(message)
 		"goodbye":
@@ -479,6 +581,8 @@ func _on_welcome(message: Dictionary) -> void:
 		_fail("welcome_tick")
 		return
 	_last_tick = tick
+	if _chat_enabled:
+		_chat_panel.set_identity(0, _player_name)
 	_set_status("Welcome %s; placing deterministic roads." % _session_id)
 	_refresh_hud()
 	_send_next_road()
@@ -663,6 +767,9 @@ func _on_interest_view(message: Dictionary) -> void:
 		if _place_ui:
 			_ui_begin()
 			return
+		if _chat_enabled:
+			_chat_begin()
+			return
 		if _smoke:
 			_set_status("Main view rendered; probing the zero-viewport case.")
 			if not _send({
@@ -786,7 +893,104 @@ func _on_goodbye() -> void:
 	if _phase != Phase.DISCONNECT_SENT:
 		_fail("goodbye_in_%s" % _phase_name())
 		return
+	if _chat_enabled:
+		_chat_marker = _chat_marker_text()
+		print(_chat_marker)
 	_finish_ok()
+
+# --- Opt-in chat (`--chat`) -------------------------------------------------
+
+## Start the transcript exchange: ask for every retained line, then run the
+## scripted actions. Chat never advances the authoritative tick or checksum.
+func _chat_begin() -> void:
+	if not _send({"type": "chat_since", "after": 0}):
+		return
+	_chat_awaiting = "log"
+	_phase = Phase.CHAT_ACTIVE
+	_arm_deadline(_timeout_ms)
+	_set_status("Chat connected; polling the transcript.")
+
+## Run the next scripted action, or disconnect once the script is exhausted.
+func _chat_advance() -> void:
+	if _chat_action_index >= _chat_actions.size():
+		_chat_awaiting = ""
+		_set_status("Chat exchange complete; disconnecting.")
+		if not _send({"type": "disconnect"}):
+			return
+		_phase = Phase.DISCONNECT_SENT
+		_arm_deadline(_timeout_ms)
+		return
+	var action: Dictionary = _chat_actions[_chat_action_index]
+	_chat_action_index += 1
+	if str(action.get("type", "")) == "say":
+		var text := str(action.get("text", ""))
+		if not _send({"type": "chat", "text": text}):
+			return
+		_chat_awaiting = "sent"
+		_set_status("Chat: sent \"%s\"." % text)
+	else:
+		if not _send(_chat_panel.poll_command()):
+			return
+		_chat_awaiting = "log"
+		_set_status("Chat: polling after #%d." % int(_chat_panel.last_seq))
+	_arm_deadline(_timeout_ms)
+
+func _on_chat_sent(message: Dictionary) -> void:
+	if not _chat_enabled:
+		_fail("unexpected_message_chat_sent")
+		return
+	if _phase != Phase.CHAT_ACTIVE or _chat_awaiting != "sent":
+		_fail("chat_sent_in_%s" % _phase_name())
+		return
+	if not _chat_panel.apply_chat_sent(message):
+		var error_code := str(_chat_panel.snapshot().get("error_code", ""))
+		_fail("chat_sent_%s" % (error_code if error_code != "" else "duplicate"))
+		return
+	_chat_awaiting = ""
+	_refresh_hud()
+	_chat_advance()
+
+func _on_chat_log(message: Dictionary) -> void:
+	if not _chat_enabled:
+		_fail("unexpected_message_chat_log")
+		return
+	if _phase != Phase.CHAT_ACTIVE or _chat_awaiting != "log":
+		_fail("chat_log_in_%s" % _phase_name())
+		return
+	if typeof(message.get("entries", null)) != TYPE_ARRAY:
+		_fail("chat_log_entries")
+		return
+	_chat_panel.apply_chat_log(message)
+	if str(_chat_panel.snapshot().get("error_code", "")) != "":
+		_fail("chat_log_invalid")
+		return
+	_chat_awaiting = ""
+	_refresh_hud()
+	_chat_advance()
+
+## Forward a panel-issued command while the chat exchange is live. Script and
+## interactive sends share the same socket path.
+func _on_chat_command(command: Dictionary) -> void:
+	if not _chat_enabled or _phase != Phase.CHAT_ACTIVE:
+		return
+	_send(command)
+
+## Deterministic 16-hex digest over the panel's ascending transcript lines
+## (`#seq player: text`), which encode exactly seq/player/text.
+func _chat_marker_text() -> String:
+	var snapshot: Dictionary = _chat_panel.snapshot()
+	var lines: Array = snapshot.get("lines", [])
+	var digest := "\n".join(lines).sha256_text().substr(0, 16)
+	return "MP_CHAT status=ok entries=%d checksum=%s" % [
+		int(snapshot.get("line_count", 0)),
+		digest,
+	]
+
+## Release the tree-less smoke model; a mounted panel is owned by the scene.
+func _free_chat_model() -> void:
+	if _chat_panel != null and not _chat_panel.is_inside_tree():
+		_chat_panel.free()
+		_chat_panel = null
 
 ## Load the local catalog through the bridge and enter placement mode.
 func _ui_begin() -> void:
@@ -1127,6 +1331,7 @@ func _finish_ok() -> void:
 		"MP_WORLD_CLIENT_DONE status=ok session=%s tick=%d frames_sent=%d frames_received=%d"
 		% [_session_id, _last_tick, _frames_sent, _frames_received]
 	)
+	_free_chat_model()
 	if _smoke:
 		get_tree().quit(0)
 
@@ -1164,6 +1369,7 @@ func _fail(reason: String) -> void:
 		"MP_WORLD_CLIENT status=fail error=%s session=%s frames_sent=%d frames_received=%d"
 		% [reason, _session_id, _frames_sent, _frames_received]
 	)
+	_free_chat_model()
 	if _smoke:
 		get_tree().quit(1)
 
@@ -2043,6 +2249,8 @@ func _phase_name() -> String:
 			return "ui_active"
 		Phase.PLACE_SENT:
 			return "place_sent"
+		Phase.CHAT_ACTIVE:
+			return "chat_active"
 		Phase.DISCONNECT_SENT:
 			return "disconnect_sent"
 		_:
