@@ -3,7 +3,8 @@
 #
 # Runs `godot/settlement_editor.tscn --smoke` twice and requires the local
 # bridge walkthrough (found two, claim, invite manager/builder, rename, set tax,
-# transfer, change role, remove member, and six rejections) plus the local
+# transfer, change role, remove member, two-press release, and seven rejections)
+# plus the local
 # player registry path (seed three names, register a fourth, cycle the invite
 # target, invite by the selected name's id, cap/invalid-name rejection). Every
 # `SETTLEMENT_EDITOR*` line is diffed between runs so the state checksum and
@@ -69,8 +70,8 @@ run_editor() {
 
 	local actions
 	actions="$(sed -E 's/^SETTLEMENT_EDITOR status=ok actions=([0-9]+) checksum=[0-9a-f]+$/\1/' <<<"$marker")"
-	if [[ "$actions" != "37" ]]; then
-		echo "Settlement editor smoke failed: expected 37 actions, got $actions" >&2
+	if [[ "$actions" != "45" ]]; then
+		echo "Settlement editor smoke failed: expected 45 actions, got $actions" >&2
 		exit 1
 	fi
 
@@ -81,6 +82,7 @@ run_editor() {
 		"stale_revision code=settlement.revision_conflict expected=settlement.revision_conflict match=1" \
 		"owner_role_rejected code=settlement.role_invalid expected=settlement.role_invalid match=1" \
 		"remove_owner_rejected code=settlement.owner_required expected=settlement.owner_required match=1" \
+		"release_repeat code=settlement.unowned expected=settlement.unowned match=1" \
 		"player_limit code=player.limit expected=player.limit match=1" \
 		"player_invalid_name code=player.invalid_name expected=player.invalid_name match=1"
 	do
@@ -110,8 +112,20 @@ run_editor() {
 		echo "Settlement editor smoke failed: empty-registry target guard missing" >&2
 		exit 1
 	fi
-	if ! grep -Fxq 'SETTLEMENT_EDITOR_INVITE settlement=3 target=2 name=Builder members=1:owner, 2:manager' <<<"$output"; then
+	if ! grep -Fxq 'SETTLEMENT_EDITOR_INVITE settlement=4 target=2 name=Builder members=1:owner, 2:manager' <<<"$output"; then
 		echo "Settlement editor smoke failed: name-based invite marker missing" >&2
+		exit 1
+	fi
+	if ! grep -Eq '^SETTLEMENT_EDITOR_RELEASE phase=arm code=confirm_required revision=2 members=1:owner, 2:manager$' <<<"$output"; then
+		echo "Settlement editor smoke failed: release arm marker missing" >&2
+		exit 1
+	fi
+	if ! grep -Eq '^SETTLEMENT_EDITOR_RELEASE phase=confirm owned=0 owner=unowned members=(none|keine) revision=3 checksum=[0-9a-f]{16}$' <<<"$output"; then
+		echo "Settlement editor smoke failed: release confirm marker missing" >&2
+		exit 1
+	fi
+	if ! grep -Fxq 'SETTLEMENT_EDITOR_RELEASE phase=repeat code=settlement.unowned revision=3' <<<"$output"; then
+		echo "Settlement editor smoke failed: release repeat marker missing" >&2
 		exit 1
 	fi
 
