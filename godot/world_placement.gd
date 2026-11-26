@@ -296,6 +296,11 @@ var settlement_rename_target_id := -1
 ## Cached local bridge player id for the dashboard's developer "Mayor";
 ## -1 means not registered yet. Registration happens on first claim.
 var mayor_player_id := -1
+
+## Local bridge player id -> name map for the D-033 membership rows and
+## action modals. Rebuilt once per membership refresh from `players_list()`;
+## unknown ids and failed reads keep the numeric `#id` fallback.
+var settlement_player_names := {}
 var follow_active := false
 var follow_target := Vector3.ZERO
 var follow_prev_target := Vector3.ZERO
@@ -3665,8 +3670,10 @@ func _settlement_detail_section(settlement: Dictionary, district: Dictionary, po
 ## D-033 membership block for the settlement detail. It reads only the
 ## `settlements()` record the list already rendered: `owned`, `owner_id`,
 ## `members`, `membership_revision`, and the data-only `tax_rate`. Rows follow
-## the payload's ascending member order and show the player id, role, and the
-## localized permission tokens. An unowned record keeps the compact fallback
+## the payload's ascending member order and show the player id, local bridge
+## name when one exists, role, and the localized permission tokens. Names are
+## cached once per refresh; an unknown id or failed `players_list()` keeps the
+## numeric fallback. An unowned record keeps the compact fallback
 ## and never invents an owner. Numbers use `WorldI18n.format_int`.
 ## Read-only D-039 preview: base multiplier 1.0 plus the record's whole-percent
 ## rate, capped by the core helper. It never mutates a store or the treasury.
@@ -3685,17 +3692,24 @@ func _settlement_membership_line(settlement: Dictionary) -> String:
 	var revision: String = i18n.format_int(int(settlement.get("membership_revision", 0)))
 	if not bool(settlement.get("owned", false)):
 		return i18n.t("base.ui.dashboard.settlement_members.unowned", {"revision": revision})
+	_refresh_settlement_player_names()
 	var owner_value = settlement.get("owner_id", null)
 	var owner_id := int(owner_value) if owner_value != null else -1
+	var owner_text: String = i18n.format_int(owner_id) if owner_id > 0 else i18n.NOT_AVAILABLE
+	var owner_name := _settlement_player_name(owner_id)
 	var rows_value = settlement.get("members", [])
 	var rows: Array = rows_value if rows_value is Array else []
 	var lines: Array[String] = []
-	lines.append(i18n.t("base.ui.dashboard.settlement_members.summary", {
-		"count": i18n.format_int(rows.size()),
-		"owner": i18n.format_int(owner_id) if owner_id > 0 else i18n.NOT_AVAILABLE,
-		"revision": revision,
-		"tax": i18n.format_int(int(settlement.get("tax_rate", 0))),
-	}))
+	lines.append(i18n.t(
+		"base.ui.dashboard.settlement_members.summary_named" if not owner_name.is_empty() else "base.ui.dashboard.settlement_members.summary",
+		{
+			"count": i18n.format_int(rows.size()),
+			"owner": owner_text,
+			"name": owner_name,
+			"revision": revision,
+			"tax": i18n.format_int(int(settlement.get("tax_rate", 0))),
+		}
+	))
 	if rows.is_empty():
 		lines.append(i18n.t("base.ui.dashboard.settlement_members.empty"))
 	else:
@@ -3706,6 +3720,32 @@ func _settlement_membership_line(settlement: Dictionary) -> String:
 	lines.append(i18n.t("base.ui.dashboard.settlement_members.hint_role"))
 	lines.append(i18n.t("base.ui.dashboard.settlement_members.hint_remove"))
 	return "\n".join(lines)
+
+## Rebuild the local player id -> name map. Called once per membership rebuild
+## or action, never per row. A failed or malformed `players_list()` clears the
+## map, so every lookup falls back to the numeric id.
+func _refresh_settlement_player_names() -> void:
+	var names := {}
+	var listed: Dictionary = core.players_list()
+	if bool(listed.get("ok", false)):
+		var players_value = listed.get("players", [])
+		var players: Array = players_value if players_value is Array else []
+		for entry in players:
+			if entry is Dictionary:
+				var player := int(entry.get("id", 0))
+				var name := str(entry.get("name", "")).strip_edges()
+				if player > 0 and not name.is_empty():
+					names[player] = name
+	settlement_player_names = names
+
+## Local bridge display name for one id; empty when unknown.
+func _settlement_player_name(player_id: int) -> String:
+	return str(settlement_player_names.get(player_id, ""))
+
+## Single-token name for smoke markers; unknown ids print `-`.
+func _settlement_marker_name(player_id: int) -> String:
+	var name := _settlement_player_name(player_id).replace(" ", "_").replace("\t", "_")
+	return name if not name.is_empty() else "-"
 
 ## Localized permission tokens for one D-033 `SettlementPermission` bitmask.
 ## Unknown bits are ignored; an empty mask renders the no-permissions token.
@@ -3718,14 +3758,22 @@ func _settlement_permission_tokens(permissions: int) -> String:
 		return i18n.t("base.ui.dashboard.settlement_members.no_permissions")
 	return ", ".join(tokens)
 
-## One member row: player id, role token, granted permission tokens. Role
-## tokens are the stable D-033 protocol names, like bridge error codes.
+## One member row: player id, local bridge name when known, role token, and
+## granted permission tokens. Role tokens are the stable D-033 protocol names,
+## like bridge error codes. Names come from the cached membership map, so an
+## unknown id or failed `players_list()` keeps the plain `#id` row.
 func _settlement_member_row(member: Dictionary) -> String:
-	return i18n.t("base.ui.dashboard.settlement_members.row", {
-		"id": i18n.format_int(int(member.get("player", 0))),
+	var player := int(member.get("player", 0))
+	var params := {
+		"id": i18n.format_int(player),
 		"role": str(member.get("role", "member")),
 		"permissions": _settlement_permission_tokens(int(member.get("permissions", 0))),
-	})
+	}
+	var name := _settlement_player_name(player)
+	if name.is_empty():
+		return i18n.t("base.ui.dashboard.settlement_members.row", params)
+	params["name"] = name
+	return i18n.t("base.ui.dashboard.settlement_members.row_named", params)
 
 ## Next role in the Shift+M cycle. The owner role never enters the cycle, so
 ## an unknown/owner value starts at `member`; `manager` wraps to `member`.
@@ -3856,6 +3904,7 @@ func _invite_selected_member(expected_revision := -1) -> Dictionary:
 		_update_hud()
 		print("DASHBOARD_INVITE status=rejected code=%s" % code)
 		return {"ok": false, "status": "rejected", "error_code": code, "id": id}
+	_refresh_settlement_player_names()
 	var revision := int(settlement.get("membership_revision", 0))
 	if expected_revision >= 0:
 		revision = expected_revision
@@ -3878,17 +3927,23 @@ func _invite_selected_member(expected_revision := -1) -> Dictionary:
 		}
 	var updated: Dictionary = result.get("settlement", {})
 	var revision_after := int(updated.get("membership_revision", revision + 1))
-	_set_modal(i18n.t("base.ui.dashboard.settlement_members.invite_success", {
-		"player": i18n.format_int(player),
-		"role": "member",
-		"revision": i18n.format_int(revision_after),
-	}), false)
+	var player_name := _settlement_player_name(player)
+	_set_modal(i18n.t(
+		"base.ui.dashboard.settlement_members.invite_success_named" if not player_name.is_empty() else "base.ui.dashboard.settlement_members.invite_success",
+		{
+			"player": i18n.format_int(player),
+			"name": player_name,
+			"role": "member",
+			"revision": i18n.format_int(revision_after),
+		}
+	), false)
 	dashboard_refresh_accum = 0.0
 	_update_dashboard()
 	_update_hud()
-	print("DASHBOARD_INVITE status=ok id=%d player=%d role=member revision=%d->%d" % [
+	print("DASHBOARD_INVITE status=ok id=%d player=%d name=%s role=member revision=%d->%d" % [
 		id,
 		player,
+		_settlement_marker_name(player),
 		revision,
 		revision_after,
 	])
@@ -3926,6 +3981,7 @@ func _cycle_selected_member_role(expected_revision := -1) -> Dictionary:
 		_update_hud()
 		print("DASHBOARD_ROLE status=rejected code=settlement.no_member")
 		return {"ok": false, "status": "rejected", "error_code": "settlement.no_member", "id": id}
+	_refresh_settlement_player_names()
 	var role := _next_settlement_role(_settlement_member_role(settlement, player))
 	var revision := int(settlement.get("membership_revision", 0))
 	if expected_revision >= 0:
@@ -3949,17 +4005,23 @@ func _cycle_selected_member_role(expected_revision := -1) -> Dictionary:
 		}
 	var updated: Dictionary = result.get("settlement", {})
 	var revision_after := int(updated.get("membership_revision", revision + 1))
-	_set_modal(i18n.t("base.ui.dashboard.settlement_members.role_success", {
-		"player": i18n.format_int(player),
-		"role": role,
-		"revision": i18n.format_int(revision_after),
-	}), false)
+	var player_name := _settlement_player_name(player)
+	_set_modal(i18n.t(
+		"base.ui.dashboard.settlement_members.role_success_named" if not player_name.is_empty() else "base.ui.dashboard.settlement_members.role_success",
+		{
+			"player": i18n.format_int(player),
+			"name": player_name,
+			"role": role,
+			"revision": i18n.format_int(revision_after),
+		}
+	), false)
 	dashboard_refresh_accum = 0.0
 	_update_dashboard()
 	_update_hud()
-	print("DASHBOARD_ROLE status=ok id=%d player=%d role=%s revision=%d->%d" % [
+	print("DASHBOARD_ROLE status=ok id=%d player=%d name=%s role=%s revision=%d->%d" % [
 		id,
 		player,
+		_settlement_marker_name(player),
 		role,
 		revision,
 		revision_after,
@@ -4001,11 +4063,17 @@ func _remove_selected_member(expected_revision := -1) -> Dictionary:
 		_update_hud()
 		print("DASHBOARD_REMOVE status=rejected code=settlement.no_member")
 		return {"ok": false, "status": "rejected", "error_code": "settlement.no_member", "id": id}
+	_refresh_settlement_player_names()
 	if settlement_remove_armed_id != id:
 		settlement_remove_armed_id = id
-		_set_modal(i18n.t("base.ui.dashboard.settlement_members.remove_armed", {
-			"player": i18n.format_int(player),
-		}), false)
+		var armed_name := _settlement_player_name(player)
+		_set_modal(i18n.t(
+			"base.ui.dashboard.settlement_members.remove_armed_named" if not armed_name.is_empty() else "base.ui.dashboard.settlement_members.remove_armed",
+			{
+				"player": i18n.format_int(player),
+				"name": armed_name,
+			}
+		), false)
 		_update_hud()
 		return {"ok": false, "armed": true, "id": id, "player": player}
 	settlement_remove_armed_id = -1
@@ -4031,16 +4099,22 @@ func _remove_selected_member(expected_revision := -1) -> Dictionary:
 		}
 	var updated: Dictionary = result.get("settlement", {})
 	var revision_after := int(updated.get("membership_revision", revision + 1))
-	_set_modal(i18n.t("base.ui.dashboard.settlement_members.remove_success", {
-		"player": i18n.format_int(player),
-		"revision": i18n.format_int(revision_after),
-	}), false)
+	var removed_name := _settlement_player_name(player)
+	_set_modal(i18n.t(
+		"base.ui.dashboard.settlement_members.remove_success_named" if not removed_name.is_empty() else "base.ui.dashboard.settlement_members.remove_success",
+		{
+			"player": i18n.format_int(player),
+			"name": removed_name,
+			"revision": i18n.format_int(revision_after),
+		}
+	), false)
 	dashboard_refresh_accum = 0.0
 	_update_dashboard()
 	_update_hud()
-	print("DASHBOARD_REMOVE status=ok id=%d player=%d revision=%d->%d" % [
+	print("DASHBOARD_REMOVE status=ok id=%d player=%d name=%s revision=%d->%d" % [
 		id,
 		player,
+		_settlement_marker_name(player),
 		revision,
 		revision_after,
 	])
@@ -7222,6 +7296,32 @@ func _run_scene_smoke() -> void:
 						"revision": i18n.format_int(transfer_revision + 2),
 					}
 				)
+				# Local bridge names resolve in membership rows; an unknown id
+				# keeps the numeric fallback. Run this after transfer so the
+				# recipient selection above is unchanged.
+				var named_builder: Dictionary = core.players_register("Builder")
+				var named_builder_id := int(named_builder.get("player", {}).get("id", -1))
+				var named_line: String = _settlement_membership_line({
+					"id": 9000,
+					"name": "Named Fixture",
+					"owned": true,
+					"owner_id": named_builder_id,
+					"membership_revision": 1,
+					"tax_rate": 0,
+					"members": [
+						{"player": named_builder_id, "role": "manager", "permissions": 15},
+						{"player": 9001, "role": "member", "permissions": 0},
+					],
+				})
+				var member_names_ok := bool(named_builder.get("ok", false)) and named_builder_id > 0
+				member_names_ok = member_names_ok and named_line.contains("Owner #%d Builder" % named_builder_id)
+				member_names_ok = member_names_ok and named_line.contains("#%d Builder · manager · build, manage, tax, members" % named_builder_id)
+				member_names_ok = member_names_ok and named_line.contains("#9,001 member · no permissions")
+				dashboard_members_ok = dashboard_members_ok and member_names_ok
+				print("DASHBOARD_MEMBER_NAMES status=%s named=Builder fallback=#9001" % [
+					"ok" if member_names_ok else "failed",
+				])
+
 				# Shift+R: open the overlay through the real input handler,
 				# rename the owned record, and assert the revision bump and
 				# checksum change. Empty, unchanged, and stale names reject
