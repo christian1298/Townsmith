@@ -40,13 +40,15 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 | ✅ Done | Opt-in `--content-registry` startup loading, bridge manifest reader, chat panel badge, dashboard invite/role/remove, lock loopback coverage | #404–#408 |
 | ✅ Done | Non-binding content-registry check, `chat_seq` watermark, resume catch-up smoke, deterministic catch-up merge, read-only D-039 tax preview | #410–#414 |
 | ✅ Done | Dashboard member names, save crash/restart matrix, malformed-frame corpus, blueprint corruption corpus, full placement lock list | #416–#420 |
+| ✅ Done | Optional-store save matrix, content-manifest corpus, connected settlement readout, content-identity corpus, district member names, settlement rejection corpus | #422–#427 |
+| ✅ Done | Settlement list paging, list benchmark, connected-settlement reference, connected-client mutation actions | #428–#431 |
 | ⛔ Blocked | Q-101 human playtest; 1M/RTX 3060 render gate | person / reference hardware |
 
 ## 2. Dependency order
 
 | # | Slice | Depends on | Why this order |
 |---:|---|---|---|
-| 1 | Connected-client settlement membership surface | #343 bridge mutations, #356/#382/#388/#392/#401/#407/#416 | All local dashboard controls are wired, including resolved member names; the server-driven/connected-client surface remains |
+| 1 | Connected-client settlement surface | #343 bridge mutations, #356/#382/#388/#392/#401/#407/#416, #424, #428, #431 | Readout and mutation actions are done; remaining is transfer plus client-side paging |
 | 2 | Settlement tax treasury consumer after D-039 acceptance | D-030/D-031 | The pure helper exists, but the rate is data-only; applying it needs a precedence decision against district weights |
 | 3 | Blueprint lock reconnect-retention UX | #349 v0 locks, #363/#374 UI, #369 leases, #375 retention, #380 CLI, #393 player scope | Lease expiry, retention, CLI, and concurrent-session release are done; decide automatic renewal and client lock list |
 | 4 | Concurrent listener remote-load tuning | #269, #350, #373, #383, #389, #395, #402 | Slow readers, closed queues, shutdown, session cap, fan-out, and sustained load are covered; remote/network-latency tuning remains |
@@ -61,7 +63,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.1 Settlement write controls
 
-**Scope.** Dashboard and a connected client should found, claim, rename, transfer, invite, set role, remove, release (Admin), and set tax through the bridge/server commands that already exist. The dashboard has the `Shift+T` tax cycle (#356), `Shift+C` unowned claim (#382), `Shift+Y` transfer (#388), `Shift+X` release (#392), `Shift+R` rename (#401), and `Shift+I`/`Shift+M`/`Shift+Delete` invite/role/remove (#407); #370 adds full owner/member/permission rows to the read-only district panel; #381 adds local player selection and #387 release to the settlement editor. Remaining: the connected-client/server-driven surface, not the local bridge roster.
+**Scope.** Dashboard and a connected client should found, claim, rename, transfer, invite, set role, remove, release (Admin), and set tax through the bridge/server commands that already exist. The dashboard has the `Shift+T` tax cycle (#356), `Shift+C` unowned claim (#382), `Shift+Y` transfer (#388), `Shift+X` release (#392), `Shift+R` rename (#401), and `Shift+I`/`Shift+M`/`Shift+Delete` invite/role/remove (#407); #370 adds full owner/member/permission rows to the read-only district panel; #381 adds local player selection and #387 release to the settlement editor; #424 adds the connected-client readout, #431 adds connected-client rename/set-tax/release/invite/set-role/remove/claim, and #428 adds server-side list paging. Remaining: connected-client transfer, client paging controls, and a production UI beyond the developer probe.
 
 **Protocol/save.** No new command or save field. Reuse `settlement_*` v1 shapes and `settlement_updated`.
 
