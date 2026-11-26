@@ -39,13 +39,14 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 | ✅ Done | Audited Admin force-unlock, `--content-ids`, local release, dashboard transfer, server chat push over concurrent listen | #385–#389 |
 | ✅ Done | Opt-in `--content-registry` startup loading, bridge manifest reader, chat panel badge, dashboard invite/role/remove, lock loopback coverage | #404–#408 |
 | ✅ Done | Non-binding content-registry check, `chat_seq` watermark, resume catch-up smoke, deterministic catch-up merge, read-only D-039 tax preview | #410–#414 |
+| ✅ Done | Dashboard member names, save crash/restart matrix, malformed-frame corpus, blueprint corruption corpus, full placement lock list | #416–#420 |
 | ⛔ Blocked | Q-101 human playtest; 1M/RTX 3060 render gate | person / reference hardware |
 
 ## 2. Dependency order
 
 | # | Slice | Depends on | Why this order |
 |---:|---|---|---|
-| 1 | Connected-client settlement membership surface | #343 bridge mutations, #356/#382/#388/#392/#401/#407 | All local dashboard controls are wired; the server-driven/connected-client surface remains |
+| 1 | Connected-client settlement membership surface | #343 bridge mutations, #356/#382/#388/#392/#401/#407/#416 | All local dashboard controls are wired, including resolved member names; the server-driven/connected-client surface remains |
 | 2 | Settlement tax treasury consumer after D-039 acceptance | D-030/D-031 | The pure helper exists, but the rate is data-only; applying it needs a precedence decision against district weights |
 | 3 | Blueprint lock reconnect-retention UX | #349 v0 locks, #363/#374 UI, #369 leases, #375 retention, #380 CLI, #393 player scope | Lease expiry, retention, CLI, and concurrent-session release are done; decide automatic renewal and client lock list |
 | 4 | Concurrent listener remote-load tuning | #269, #350, #373, #383, #389, #395, #402 | Slow readers, closed queues, shutdown, session cap, fan-out, and sustained load are covered; remote/network-latency tuning remains |
