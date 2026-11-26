@@ -31,10 +31,13 @@ set -euo pipefail
 # `say:push-me|poll`, so the listener must consume the pushed `chat_sent` while
 # the sender still receives its own response exactly once (12 sent / 13
 # received). The listener must print `MP_CHAT_PUSH` with the deterministic
-# `seq|player|text` checksum, then `MP_CHAT_UNREAD unread=1 total=1`, poll
-# (`chat_since` after the pushed seq), print `MP_CHAT_UNREAD unread=0 total=1`,
-# and disconnect. The sender must never print an unread marker: its own
-# `chat_sent` response is not a push. Both sessions must end cleanly.
+# `seq|player|text` checksum, `MP_CHAT_UNREAD unread=1 total=1`, and
+# `MP_CHAT_BADGE status=ok unread=1 panel=1 text=1 visible=true`; then poll
+# (`chat_since` after the pushed seq), print `MP_CHAT_UNREAD unread=0 total=1`
+# and `MP_CHAT_BADGE status=ok unread=0 panel=0 text=- visible=false`, and
+# disconnect. The sender must never print an unread or badge marker: its own
+# `chat_sent` response is not a push and its active flow stays at 0. Both
+# sessions must end cleanly.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GODOT_BIN="${GODOT:-godot}"
@@ -221,6 +224,10 @@ run_block() {
 		echo "chat smoke ($name) failed: scripted chat reported an unread line" >&2
 		exit 1
 	fi
+	if grep -q '^MP_CHAT_BADGE ' <<<"$output"; then
+		echo "chat smoke ($name) failed: scripted chat reported a badge line" >&2
+		exit 1
+	fi
 
 	if [[ ! "$main_line" =~ ^MP_WORLD_CLIENT\ status=ok\ tick=6\ population=3277\ balance=100000\ roads=6\ buildings=4\ truncated=false\ buildings_truncated=false\ checksum=[0-9a-f]{16}\ road_checksum=48aff8a44b921666\ building_checksum=a98d781faa5c1d5b\ rendered_roads=6\ rendered_buildings=4\ center=0\.0,0\.0\ radius=96\.0\ session=session-[0-9a-f]{16}(-[0-9]+)?$ ]]; then
 		echo "chat smoke ($name) main marker mismatch: $main_line" >&2
@@ -277,6 +284,10 @@ run_push_block() {
 	local unread_count
 	local unread_first
 	local unread_reset
+	local badge_lines
+	local badge_count
+	local badge_first
+	local badge_reset
 	local main_line
 	local chat_line
 	local done_line
@@ -360,6 +371,27 @@ run_push_block() {
 		exit 1
 	fi
 
+	badge_lines="$(grep '^MP_CHAT_BADGE ' <<<"$listener_output" || true)"
+	badge_count="$(grep -c '^MP_CHAT_BADGE ' <<<"$listener_output" || true)"
+	if [[ "$badge_count" != "2" ]]; then
+		echo "chat push smoke failed: listener saw $badge_count badge markers (want 2)" >&2
+		exit 1
+	fi
+	badge_first="$(sed -n '1p' <<<"$badge_lines")"
+	badge_reset="$(sed -n '2p' <<<"$badge_lines")"
+	if [[ "$badge_first" != "MP_CHAT_BADGE status=ok unread=1 panel=1 text=1 visible=true" ]]; then
+		echo "chat push smoke listener badge mismatch: $badge_first" >&2
+		exit 1
+	fi
+	if [[ "$badge_reset" != "MP_CHAT_BADGE status=ok unread=0 panel=0 text=- visible=false" ]]; then
+		echo "chat push smoke listener badge reset mismatch: $badge_reset" >&2
+		exit 1
+	fi
+	if grep -q '^MP_CHAT_BADGE ' <<<"$sender_output"; then
+		echo "chat push smoke failed: sender reported a badge transition" >&2
+		exit 1
+	fi
+
 	main_line="$(grep '^MP_WORLD_CLIENT status=ok ' <<<"$sender_output" | tail -1 || true)"
 	chat_line="$(grep '^MP_CHAT status=ok ' <<<"$sender_output" | tail -1 || true)"
 	done_line="$(grep '^MP_WORLD_CLIENT_DONE status=ok ' <<<"$sender_output" | tail -1 || true)"
@@ -437,3 +469,4 @@ run_push_block "$THIRD_PORT"
 echo "MP_CHAT_SMOKE status=ok runs=2 entries=2 checksum=$(cat "$SMOKE_DIR/first.checksum") world_checksum=$(sed -n 's/.* checksum=\([0-9a-f]\{16\}\).*/\1/p' "$SMOKE_DIR/first.main") frames_sent=13 frames_received=14"
 echo "MP_CHAT_PUSH_SMOKE status=ok sessions=2 listener=$LISTENER_NAME sender=$PUSH_SENDER_NAME seq=1 text=$PUSH_TEXT checksum=$PUSH_MARKER_CHECKSUM sender_chat_checksum=$PUSH_CHAT_CHECKSUM sender_frames_sent=12 sender_frames_received=13"
 echo "MP_CHAT_UNREAD_SMOKE status=ok listener_unread=1 listener_total=1 listener_reset=0 sender_unread=0"
+echo "MP_CHAT_BADGE status=ok transitions=2 unread=1->0 panel=1->0 text=1->- visible=true->false sender_badges=0"

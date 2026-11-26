@@ -1006,6 +1006,17 @@ func _on_goodbye() -> void:
 		_fail("goodbye_in_%s" % _phase_name())
 		return
 	if _chat_enabled and not _chat_listen:
+		# The scripted active flow reads every line it consumes, so the owner
+		# and the panel badge must both still be at 0 when it disconnects.
+		var active_snapshot: Dictionary = _chat_panel.snapshot()
+		if (
+			_chat_unread != 0
+			or int(active_snapshot.get("unread", -1)) != 0
+			or str(_chat_panel.badge_text()) != ""
+			or bool(_chat_panel.badge_visible())
+		):
+			_fail("chat_unread_in_active")
+			return
 		_chat_marker = _chat_marker_text()
 		print(_chat_marker)
 	_finish_ok()
@@ -1020,6 +1031,10 @@ func _chat_unread_text() -> String:
 
 func _set_chat_unread(value: int) -> void:
 	var clamped := clampi(value, 0, CHAT_UNREAD_MAX)
+	# Push every owner decision into the panel (push, reset, send, poll),
+	# including 0; the panel never clears itself and owns only display state.
+	if _chat_panel != null:
+		_chat_panel.set_unread(clamped)
 	if clamped == _chat_unread:
 		return
 	_chat_unread = clamped
@@ -1028,12 +1043,41 @@ func _set_chat_unread(value: int) -> void:
 	# it prints nothing; a passive listener prints 1 and then 0 on catch-up.
 	if _chat_enabled:
 		print(_chat_unread_text())
+		_assert_chat_badge()
 
 func _refresh_chat_unread_hud() -> void:
 	if _chat_unread_label == null:
 		return
 	_chat_unread_label.text = "Chat: %d new" % _chat_unread
 	_chat_unread_label.visible = _chat_unread > 0
+
+## Prove the panel mirror kept up with the owner and print one deterministic
+## line per transition. The standalone panel smoke owns the 0/N/99+ rendering
+## rules; this only checks the pushed count, badge text, and visibility.
+func _assert_chat_badge() -> void:
+	if _chat_panel == null:
+		return
+	var panel_snapshot: Dictionary = _chat_panel.snapshot()
+	var panel_unread := int(panel_snapshot.get("unread", -1))
+	var text := str(_chat_panel.badge_text())
+	var visible := bool(_chat_panel.badge_visible())
+	var expected := ""
+	if _chat_unread > 0:
+		expected = "99+" if _chat_unread > 99 else str(_chat_unread)
+	var ok := (
+		panel_unread == _chat_unread
+		and text == expected
+		and visible == (_chat_unread > 0)
+	)
+	print("MP_CHAT_BADGE status=%s unread=%d panel=%d text=%s visible=%s" % [
+		"ok" if ok else "fail",
+		_chat_unread,
+		panel_unread,
+		text if text != "" else "-",
+		"true" if visible else "false",
+	])
+	if not ok:
+		_fail("chat_badge_mismatch")
 
 ## True when the mounted panel (or a child) owns keyboard focus, i.e. the player
 ## is reading/typing and a pushed line should not be counted. The smoke model is
