@@ -180,7 +180,10 @@ fn found_requires_the_mayor_role() {
 fn list_and_at_are_viewer_reads() {
     let mut world = world_with_role(ClientRole::Viewer);
     assert!(matches!(
-        world.apply(&ClientCommand::SettlementList),
+        world.apply(&ClientCommand::SettlementList {
+            after_id: None,
+            limit: None
+        }),
         ServerMessage::SettlementList { .. }
     ));
     assert!(matches!(

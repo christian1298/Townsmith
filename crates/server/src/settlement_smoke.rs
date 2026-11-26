@@ -457,6 +457,7 @@ impl SettlementTranscript {
                 count,
                 checksum,
                 settlements,
+                ..
             } => (count, checksum, settlements),
             other => {
                 return Err(io::Error::other(format!(
@@ -572,8 +573,20 @@ fn run_settlement_client(address: SocketAddr) -> io::Result<SettlementClientOutc
 
     // 2. Both clients read the list; bravo reads the containing cell and a far
     //    cell. None of these advance the tick or move the checksums.
-    transcript.list(alpha.send(&ClientCommand::SettlementList)?, &expected)?;
-    transcript.list(bravo.send(&ClientCommand::SettlementList)?, &expected)?;
+    transcript.list(
+        alpha.send(&ClientCommand::SettlementList {
+            after_id: None,
+            limit: None,
+        })?,
+        &expected,
+    )?;
+    transcript.list(
+        bravo.send(&ClientCommand::SettlementList {
+            after_id: None,
+            limit: None,
+        })?,
+        &expected,
+    )?;
     transcript.at(
         bravo.send(&ClientCommand::SettlementAt {
             x: CENTER[0],
@@ -836,7 +849,13 @@ fn run_settlement_client(address: SocketAddr) -> io::Result<SettlementClientOutc
     )?;
 
     // The read-only tail after the last mutation pins the checksums.
-    transcript.list(bravo.send(&ClientCommand::SettlementList)?, &expected)?;
+    transcript.list(
+        bravo.send(&ClientCommand::SettlementList {
+            after_id: None,
+            limit: None,
+        })?,
+        &expected,
+    )?;
     transcript.at(
         bravo.send(&ClientCommand::SettlementAt {
             x: CENTER[0],
