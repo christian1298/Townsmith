@@ -323,6 +323,31 @@ const TABLES := {
 		"base.ui.dashboard.settlement_rename.success": "Renamed settlement #{id} · revision {revision} · checksum {checksum}",
 		"base.ui.dashboard.settlement_rename.rejected": "{code}: {message}",
 
+		# Settlement membership block and controls (Shift+I/Shift+M/Shift+Delete).
+		# Role names and permission tokens are localized; ids, codes, and
+		# revisions stay verbatim parameters.
+		"base.ui.dashboard.settlement_members.unowned": "Members — · revision {revision}",
+		"base.ui.dashboard.settlement_members.unowned_action": "Settlement #{id} is unowned; claim it before managing members",
+		"base.ui.dashboard.settlement_members.summary": "Owner #{owner} · {count} members · revision {revision} · tax {tax}%",
+		"base.ui.dashboard.settlement_members.empty": "No members yet.",
+		"base.ui.dashboard.settlement_members.row": "#{id} {role} · {permissions}",
+		"base.ui.dashboard.settlement_members.no_permissions": "no permissions",
+		"base.ui.dashboard.settlement_members.permission.build": "build",
+		"base.ui.dashboard.settlement_members.permission.manage": "manage",
+		"base.ui.dashboard.settlement_members.permission.tax": "tax",
+		"base.ui.dashboard.settlement_members.permission.members": "members",
+		"base.ui.dashboard.settlement_members.hint_invite": "Shift+I: invite the next local player as member",
+		"base.ui.dashboard.settlement_members.hint_role": "Shift+M: cycle the lowest member's role",
+		"base.ui.dashboard.settlement_members.hint_remove": "Shift+Delete twice: remove the lowest member",
+		"base.ui.dashboard.settlement_members.no_eligible": "No unlisted local player is available to invite.",
+		"base.ui.dashboard.settlement_members.no_member": "Settlement #{id} has no non-owner member to change.",
+		"base.ui.dashboard.settlement_members.remove_armed": "Press Shift+Delete again to remove player #{player}",
+		"base.ui.dashboard.settlement_members.invite_success": "Invited player #{player} as {role} · revision {revision}",
+		"base.ui.dashboard.settlement_members.role_success": "Player #{player} is now {role} · revision {revision}",
+		"base.ui.dashboard.settlement_members.remove_success": "Removed player #{player} · revision {revision}",
+		"base.ui.dashboard.settlement_members.failed": "{code}: {message}",
+		"base.ui.dashboard.settlement_members.register_failed": "Player registration failed: {code}: {message}",
+
 		# Compact dashboard policy editing. Bridge error codes, ids, and
 		# policy names stay verbatim parameters.
 		"base.ui.policies.created": "Policy {id} created: {name}",
@@ -732,6 +757,31 @@ const TABLES := {
 		"base.ui.dashboard.settlement_rename.unchanged": "Das ist bereits der Name der Siedlung.",
 		"base.ui.dashboard.settlement_rename.success": "Siedlung #{id} umbenannt · Revision {revision} · Prüfsumme {checksum}",
 		"base.ui.dashboard.settlement_rename.rejected": "{code}: {message}",
+
+		# Mitgliederblock und -steuerung (Umschalt+I/Umschalt+M/Umschalt+Entf).
+		# Rollen und Berechtigungen sind übersetzt; IDs, Codes und Revisionen
+		# bleiben unveränderte Parameter.
+		"base.ui.dashboard.settlement_members.unowned": "Mitglieder — · Revision {revision}",
+		"base.ui.dashboard.settlement_members.unowned_action": "Siedlung #{id} hat keinen Eigentümer; vor der Mitgliederverwaltung beanspruchen",
+		"base.ui.dashboard.settlement_members.summary": "Eigentümer #{owner} · {count} Mitglieder · Revision {revision} · Steuer {tax} %",
+		"base.ui.dashboard.settlement_members.empty": "Noch keine Mitglieder.",
+		"base.ui.dashboard.settlement_members.row": "#{id} {role} · {permissions}",
+		"base.ui.dashboard.settlement_members.no_permissions": "keine Berechtigungen",
+		"base.ui.dashboard.settlement_members.permission.build": "bauen",
+		"base.ui.dashboard.settlement_members.permission.manage": "verwalten",
+		"base.ui.dashboard.settlement_members.permission.tax": "Steuern",
+		"base.ui.dashboard.settlement_members.permission.members": "Mitglieder",
+		"base.ui.dashboard.settlement_members.hint_invite": "Umschalt+I: nächsten lokalen Spieler als Mitglied einladen",
+		"base.ui.dashboard.settlement_members.hint_role": "Umschalt+M: Rolle des niedrigsten Mitglieds wechseln",
+		"base.ui.dashboard.settlement_members.hint_remove": "Umschalt+Entf zweimal: niedrigstes Mitglied entfernen",
+		"base.ui.dashboard.settlement_members.no_eligible": "Kein nicht gelisteter lokaler Spieler zum Einladen verfügbar.",
+		"base.ui.dashboard.settlement_members.no_member": "Siedlung #{id} hat kein Nicht-Eigentümer-Mitglied zum Ändern.",
+		"base.ui.dashboard.settlement_members.remove_armed": "Umschalt+Entf erneut drücken, um Spieler #{player} zu entfernen",
+		"base.ui.dashboard.settlement_members.invite_success": "Spieler #{player} als {role} eingeladen · Revision {revision}",
+		"base.ui.dashboard.settlement_members.role_success": "Spieler #{player} ist jetzt {role} · Revision {revision}",
+		"base.ui.dashboard.settlement_members.remove_success": "Spieler #{player} entfernt · Revision {revision}",
+		"base.ui.dashboard.settlement_members.failed": "{code}: {message}",
+		"base.ui.dashboard.settlement_members.register_failed": "Spielerregistrierung fehlgeschlagen: {code}: {message}",
 
 		# Kompakte Richtlinienbearbeitung im Dashboard. Fehlercodes, IDs und
 		# Richtliniennamen bleiben unveränderte Parameter.

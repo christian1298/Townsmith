@@ -78,6 +78,18 @@ const HEATMAP_METRIC_KEYS := {
 	"jobs": "base.ui.heatmap.metric.jobs",
 	"happiness": "base.ui.heatmap.metric.happiness",
 }
+# D-033 role presets in the order the Shift+M control cycles them. The owner
+# role is intentionally absent: ownership only changes through claim, transfer,
+# or release, and core rejects an owner demotion.
+const SETTLEMENT_ROLE_CYCLE := ["member", "builder", "manager"]
+# Permission bit -> localized token. Mirrors `SettlementPermission` in
+# `core_city::settlement`; only granted bits are rendered, in this stable order.
+const SETTLEMENT_PERMISSION_TOKENS := [
+	[1, "base.ui.dashboard.settlement_members.permission.build"],
+	[2, "base.ui.dashboard.settlement_members.permission.manage"],
+	[4, "base.ui.dashboard.settlement_members.permission.tax"],
+	[8, "base.ui.dashboard.settlement_members.permission.members"],
+]
 # Materialization is a derived, read-only selection around the Mayor focus or
 # selected building. Rebuild on toggle/selection change and at the same 0.5 s
 # cadence as the dashboard so a panning camera follows without per-frame nodes.
@@ -272,6 +284,10 @@ var selected_settlement_id := -1
 ## confirmation; -1 means nothing is armed. A different key, a selection
 ## change, and closing the dashboard all clear it.
 var settlement_release_armed_id := -1
+## Two-press Shift+Delete remove arm. The value is the settlement id waiting
+## for confirmation; -1 means nothing is armed. A different key, a selection
+## change, and closing the dashboard all clear it.
+var settlement_remove_armed_id := -1
 ## Shift+R rename overlay. The target id ties the open overlay to the record
 ## it was opened for; -1 means closed. A selection change, dashboard close,
 ## and Esc all cancel without a bridge call.
@@ -495,12 +511,17 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif event.physical_keycode == KEY_ENTER or event.physical_keycode == KEY_KP_ENTER:
 				_commit_settlement_rename()
 			return
-		# Shift+X is a two-press release; every other key cancels a pending
-		# release arm before its normal action runs.
+		# Shift+X is a two-press release; Shift+Delete is a two-press member
+		# removal. Every other key cancels a pending arm before its normal
+		# action runs.
 		var release_press: bool = event.physical_keycode == KEY_X and event.shift_pressed \
+			and dashboard_visible
+		var remove_press: bool = event.physical_keycode == KEY_DELETE and event.shift_pressed \
 			and dashboard_visible
 		if not release_press:
 			settlement_release_armed_id = -1
+		if not remove_press:
+			settlement_remove_armed_id = -1
 		if event.physical_keycode == KEY_M and mode == "architect":
 			_return_to_mayor()
 			return
@@ -557,7 +578,11 @@ func _unhandled_input(event: InputEvent) -> void:
 					else:
 						_toggle_crew()
 				KEY_I:
-					_cycle_industry()
+					if event.shift_pressed:
+						if dashboard_visible and selected_settlement_id >= 0:
+							_invite_selected_member()
+					else:
+						_cycle_industry()
 				KEY_U:
 					_cycle_utility()
 				KEY_K:
@@ -614,6 +639,10 @@ func _unhandled_input(event: InputEvent) -> void:
 						_cycle_tax_policy()
 				KEY_L:
 					_borrow()
+				KEY_M:
+					if event.shift_pressed:
+						if dashboard_visible and selected_settlement_id >= 0:
+							_cycle_selected_member_role()
 				KEY_Y:
 					if event.shift_pressed and dashboard_visible:
 						if selected_settlement_id >= 0:
@@ -624,7 +653,10 @@ func _unhandled_input(event: InputEvent) -> void:
 					core.construction_add_materials(10000)
 					_update_hud()
 				KEY_DELETE:
-					_clear_placements()
+					if event.shift_pressed and dashboard_visible and selected_settlement_id >= 0:
+						_remove_selected_member()
+					else:
+						_clear_placements()
 				KEY_G:
 					_toggle_road_mode()
 				KEY_H:
@@ -2438,6 +2470,7 @@ func _clear_settlements() -> void:
 	_clear_settlement_nodes()
 	_cancel_settlement_rename()
 	settlement_release_armed_id = -1
+	settlement_remove_armed_id = -1
 	selected_settlement_id = -1
 	if heatmap_visible:
 		_refresh_heatmap()
@@ -2592,6 +2625,7 @@ func _settlement_focus_center() -> Vector2:
 	if not settlement.is_empty() and is_finite(center.x) and is_finite(center.y):
 		return center
 	settlement_release_armed_id = -1
+	settlement_remove_armed_id = -1
 	selected_settlement_id = -1
 	return Vector2(NAN, NAN)
 
@@ -2605,6 +2639,7 @@ func _validate_settlement_selection(state: Dictionary = {}) -> bool:
 		return true
 	_cancel_settlement_rename()
 	settlement_release_armed_id = -1
+	settlement_remove_armed_id = -1
 	selected_settlement_id = -1
 	return false
 
@@ -2618,6 +2653,7 @@ func _apply_settlement_selection(id: int) -> int:
 			next_id = id
 	if next_id != selected_settlement_id:
 		settlement_release_armed_id = -1
+		settlement_remove_armed_id = -1
 		_cancel_settlement_rename()
 	selected_settlement_id = next_id
 	dashboard_refresh_accum = 0.0
@@ -3203,6 +3239,7 @@ func _update_citizen_panel() -> void:
 func _toggle_dashboard() -> bool:
 	dashboard_visible = not dashboard_visible
 	settlement_release_armed_id = -1
+	settlement_remove_armed_id = -1
 	if not dashboard_visible:
 		_cancel_settlement_rename()
 	if dashboard_panel != null:
@@ -3622,11 +3659,388 @@ func _settlement_detail_section(settlement: Dictionary, district: Dictionary, po
 	}) + "\n"
 	return block
 
-## One compact D-033 membership line for the settlement detail block. It reads
-## only the `settlements()` record the list already rendered: `owned`,
-## `owner_id`, `members`, and `membership_revision`. Role counts are sorted by
-## role name so the rebuilt dashboard text stays identical, and numbers use
-## `WorldI18n.format_int`. An unowned record has no member/owner count to show.
+## D-033 membership block for the settlement detail. It reads only the
+## `settlements()` record the list already rendered: `owned`, `owner_id`,
+## `members`, `membership_revision`, and the data-only `tax_rate`. Rows follow
+## the payload's ascending member order and show the player id, role, and the
+## localized permission tokens. An unowned record keeps the compact fallback
+## and never invents an owner. Numbers use `WorldI18n.format_int`.
+func _settlement_membership_line(settlement: Dictionary) -> String:
+	var revision: String = i18n.format_int(int(settlement.get("membership_revision", 0)))
+	if not bool(settlement.get("owned", false)):
+		return i18n.t("base.ui.dashboard.settlement_members.unowned", {"revision": revision})
+	var owner_value = settlement.get("owner_id", null)
+	var owner_id := int(owner_value) if owner_value != null else -1
+	var rows_value = settlement.get("members", [])
+	var rows: Array = rows_value if rows_value is Array else []
+	var lines: Array[String] = []
+	lines.append(i18n.t("base.ui.dashboard.settlement_members.summary", {
+		"count": i18n.format_int(rows.size()),
+		"owner": i18n.format_int(owner_id) if owner_id > 0 else i18n.NOT_AVAILABLE,
+		"revision": revision,
+		"tax": i18n.format_int(int(settlement.get("tax_rate", 0))),
+	}))
+	if rows.is_empty():
+		lines.append(i18n.t("base.ui.dashboard.settlement_members.empty"))
+	else:
+		for member in rows:
+			if member is Dictionary:
+				lines.append(_settlement_member_row(member))
+	lines.append(i18n.t("base.ui.dashboard.settlement_members.hint_invite"))
+	lines.append(i18n.t("base.ui.dashboard.settlement_members.hint_role"))
+	lines.append(i18n.t("base.ui.dashboard.settlement_members.hint_remove"))
+	return "\n".join(lines)
+
+## Localized permission tokens for one D-033 `SettlementPermission` bitmask.
+## Unknown bits are ignored; an empty mask renders the no-permissions token.
+func _settlement_permission_tokens(permissions: int) -> String:
+	var tokens: PackedStringArray = PackedStringArray()
+	for entry in SETTLEMENT_PERMISSION_TOKENS:
+		if permissions & int(entry[0]) != 0:
+			tokens.append(i18n.t(str(entry[1])))
+	if tokens.is_empty():
+		return i18n.t("base.ui.dashboard.settlement_members.no_permissions")
+	return ", ".join(tokens)
+
+## One member row: player id, role token, granted permission tokens. Role
+## tokens are the stable D-033 protocol names, like bridge error codes.
+func _settlement_member_row(member: Dictionary) -> String:
+	return i18n.t("base.ui.dashboard.settlement_members.row", {
+		"id": i18n.format_int(int(member.get("player", 0))),
+		"role": str(member.get("role", "member")),
+		"permissions": _settlement_permission_tokens(int(member.get("permissions", 0))),
+	})
+
+## Next role in the Shift+M cycle. The owner role never enters the cycle, so
+## an unknown/owner value starts at `member`; `manager` wraps to `member`.
+func _next_settlement_role(role: String) -> String:
+	var index := SETTLEMENT_ROLE_CYCLE.find(role)
+	if index < 0:
+		return SETTLEMENT_ROLE_CYCLE[0]
+	return SETTLEMENT_ROLE_CYCLE[(index + 1) % SETTLEMENT_ROLE_CYCLE.size()]
+
+## Every member id in one record, including the owner when present.
+func _settlement_member_ids(settlement: Dictionary) -> Array[int]:
+	var ids: Array[int] = []
+	var rows_value = settlement.get("members", [])
+	var rows: Array = rows_value if rows_value is Array else []
+	for member in rows:
+		if member is Dictionary:
+			var player := int(member.get("player", -1))
+			if player > 0:
+				ids.append(player)
+	return ids
+
+## Role for one member id, or an empty string when the id is not a member.
+func _settlement_member_role(settlement: Dictionary, player_id: int) -> String:
+	var rows_value = settlement.get("members", [])
+	var rows: Array = rows_value if rows_value is Array else []
+	for member in rows:
+		if member is Dictionary and int(member.get("player", -1)) == player_id:
+			return str(member.get("role", ""))
+	return ""
+
+## Lowest member id that is neither the owner id nor an owner-role row. Owner
+## protection is enforced by core; this helper keeps Shift+M and Shift+Delete
+## from ever targeting the owner in the first place.
+func _lowest_non_owner_member_id(settlement: Dictionary) -> int:
+	var owner_value = settlement.get("owner_id", null)
+	var owner_id := int(owner_value) if owner_value != null else -1
+	var rows_value = settlement.get("members", [])
+	var rows: Array = rows_value if rows_value is Array else []
+	var lowest := -1
+	for member in rows:
+		if not (member is Dictionary):
+			continue
+		var player := int(member.get("player", -1))
+		var role := str(member.get("role", ""))
+		if player <= 0 or player == owner_id or role == "owner":
+			continue
+		if lowest < 0 or player < lowest:
+			lowest = player
+	return lowest
+
+## Lowest registered player id not in `members`; -1 when none is eligible.
+func _lowest_unlisted_player(players: Array, members: Array[int]) -> int:
+	var lowest := -1
+	for entry in players:
+		if not (entry is Dictionary):
+			continue
+		var player := int(entry.get("id", -1))
+		if player <= 0 or members.has(player):
+			continue
+		if lowest < 0 or player < lowest:
+			lowest = player
+	return lowest
+
+## Deterministic Shift+I recipient: the lowest registered local player that is
+## not already a member. When the roster holds at most one player (normally just
+## the owner), register "Builder" once and retry, matching the transfer control.
+## Returns `{player}` on success or `{player: -1, error_code, ...}` on failure.
+func _invite_candidate(settlement: Dictionary) -> Dictionary:
+	var listed: Dictionary = core.players_list()
+	if not bool(listed.get("ok", false)):
+		return {
+			"player": -1,
+			"error_code": str(listed.get("error_code", "player.unavailable")),
+			"message": str(listed.get("error", "")),
+		}
+	var players_value = listed.get("players", [])
+	var players: Array = players_value if players_value is Array else []
+	var members := _settlement_member_ids(settlement)
+	var candidate := _lowest_unlisted_player(players, members)
+	if candidate > 0:
+		return {"player": candidate}
+	if players.size() <= 1:
+		var registered: Dictionary = core.players_register("Builder")
+		if not bool(registered.get("ok", false)):
+			return {
+				"player": -1,
+				"register": true,
+				"error_code": str(registered.get("error_code", "player.invalid_name")),
+				"message": str(registered.get("error", "")),
+			}
+		listed = core.players_list()
+		players_value = listed.get("players", [])
+		players = players_value if players_value is Array else []
+		candidate = _lowest_unlisted_player(players, members)
+		if candidate > 0:
+			return {"player": candidate}
+	return {"player": -1, "error_code": "settlement.no_eligible"}
+
+## Shift+I: invite the lowest registered non-member as `member`. Only the
+## dashboard + a selected owned record reach here. The selected payload's
+## `membership_revision` is re-read on every call; `expected_revision` is an
+## optional test seam (-1 reads the payload) for a deterministic stale check.
+## Success refreshes the list/detail in place and prints a stable marker;
+## rejections leave the store and local selection untouched.
+func _invite_selected_member(expected_revision := -1) -> Dictionary:
+	var settlement := _selected_settlement()
+	var id := int(settlement.get("id", -1))
+	if settlement.is_empty() or id < 0:
+		return {"ok": false, "status": "rejected", "error_code": "settlement.unknown"}
+	if not bool(settlement.get("owned", false)):
+		_set_modal(i18n.t("base.ui.dashboard.settlement_members.unowned_action", {
+			"id": i18n.format_int(id),
+		}), true)
+		_update_hud()
+		print("DASHBOARD_INVITE status=rejected code=settlement.unowned")
+		return {"ok": false, "status": "rejected", "error_code": "settlement.unowned", "id": id}
+	var candidate := _invite_candidate(settlement)
+	var player := int(candidate.get("player", -1))
+	if player <= 0:
+		var code := str(candidate.get("error_code", "settlement.no_eligible"))
+		if bool(candidate.get("register", false)):
+			_set_modal(i18n.t("base.ui.dashboard.settlement_members.register_failed", {
+				"code": code,
+				"message": str(candidate.get("message", "")),
+			}), true)
+		else:
+			_set_modal(i18n.t("base.ui.dashboard.settlement_members.no_eligible"), true)
+		_update_hud()
+		print("DASHBOARD_INVITE status=rejected code=%s" % code)
+		return {"ok": false, "status": "rejected", "error_code": code, "id": id}
+	var revision := int(settlement.get("membership_revision", 0))
+	if expected_revision >= 0:
+		revision = expected_revision
+	var result: Dictionary = core.settlement_invite(id, player, "member", revision)
+	if not bool(result.get("ok", false)):
+		var code := str(result.get("error_code", "unknown"))
+		_set_modal(i18n.t("base.ui.dashboard.settlement_members.failed", {
+			"code": code,
+			"message": str(result.get("error", "")),
+		}), true)
+		_update_hud()
+		print("DASHBOARD_INVITE status=rejected code=%s" % code)
+		return {
+			"ok": false,
+			"status": "rejected",
+			"error_code": code,
+			"error": str(result.get("error", "")),
+			"id": id,
+			"player": player,
+		}
+	var updated: Dictionary = result.get("settlement", {})
+	var revision_after := int(updated.get("membership_revision", revision + 1))
+	_set_modal(i18n.t("base.ui.dashboard.settlement_members.invite_success", {
+		"player": i18n.format_int(player),
+		"role": "member",
+		"revision": i18n.format_int(revision_after),
+	}), false)
+	dashboard_refresh_accum = 0.0
+	_update_dashboard()
+	_update_hud()
+	print("DASHBOARD_INVITE status=ok id=%d player=%d role=member revision=%d->%d" % [
+		id,
+		player,
+		revision,
+		revision_after,
+	])
+	return {
+		"ok": true,
+		"status": "ok",
+		"id": id,
+		"player": player,
+		"role": "member",
+		"revision_before": revision,
+		"revision_after": revision_after,
+	}
+
+## Shift+M: cycle the lowest-id non-owner member through
+## `member -> builder -> manager -> member` with `settlement_set_role`.
+## Owner protection keeps the owner out of the candidate set, and core rejects
+## a stale revision or an owner target as a second line of defence.
+func _cycle_selected_member_role(expected_revision := -1) -> Dictionary:
+	var settlement := _selected_settlement()
+	var id := int(settlement.get("id", -1))
+	if settlement.is_empty() or id < 0:
+		return {"ok": false, "status": "rejected", "error_code": "settlement.unknown"}
+	if not bool(settlement.get("owned", false)):
+		_set_modal(i18n.t("base.ui.dashboard.settlement_members.unowned_action", {
+			"id": i18n.format_int(id),
+		}), true)
+		_update_hud()
+		print("DASHBOARD_ROLE status=rejected code=settlement.unowned")
+		return {"ok": false, "status": "rejected", "error_code": "settlement.unowned", "id": id}
+	var player := _lowest_non_owner_member_id(settlement)
+	if player <= 0:
+		_set_modal(i18n.t("base.ui.dashboard.settlement_members.no_member", {
+			"id": i18n.format_int(id),
+		}), true)
+		_update_hud()
+		print("DASHBOARD_ROLE status=rejected code=settlement.no_member")
+		return {"ok": false, "status": "rejected", "error_code": "settlement.no_member", "id": id}
+	var role := _next_settlement_role(_settlement_member_role(settlement, player))
+	var revision := int(settlement.get("membership_revision", 0))
+	if expected_revision >= 0:
+		revision = expected_revision
+	var result: Dictionary = core.settlement_set_role(id, player, role, revision)
+	if not bool(result.get("ok", false)):
+		var code := str(result.get("error_code", "unknown"))
+		_set_modal(i18n.t("base.ui.dashboard.settlement_members.failed", {
+			"code": code,
+			"message": str(result.get("error", "")),
+		}), true)
+		_update_hud()
+		print("DASHBOARD_ROLE status=rejected code=%s" % code)
+		return {
+			"ok": false,
+			"status": "rejected",
+			"error_code": code,
+			"error": str(result.get("error", "")),
+			"id": id,
+			"player": player,
+		}
+	var updated: Dictionary = result.get("settlement", {})
+	var revision_after := int(updated.get("membership_revision", revision + 1))
+	_set_modal(i18n.t("base.ui.dashboard.settlement_members.role_success", {
+		"player": i18n.format_int(player),
+		"role": role,
+		"revision": i18n.format_int(revision_after),
+	}), false)
+	dashboard_refresh_accum = 0.0
+	_update_dashboard()
+	_update_hud()
+	print("DASHBOARD_ROLE status=ok id=%d player=%d role=%s revision=%d->%d" % [
+		id,
+		player,
+		role,
+		revision,
+		revision_after,
+	])
+	return {
+		"ok": true,
+		"status": "ok",
+		"id": id,
+		"player": player,
+		"role": role,
+		"revision_before": revision,
+		"revision_after": revision_after,
+	}
+
+## Shift+Delete: two-press removal of the lowest-id non-owner member. The first
+## press only arms the settlement id; any other key, a selection change, or a
+## dashboard toggle clears it. `expected_revision` is an optional test seam
+## (-1 reads the payload) for a deterministic stale-revision rejection.
+func _remove_selected_member(expected_revision := -1) -> Dictionary:
+	var settlement := _selected_settlement()
+	var id := int(settlement.get("id", -1))
+	if settlement.is_empty() or id < 0:
+		_settlement_remove_disarm()
+		return {"ok": false, "status": "rejected", "error_code": "settlement.unknown"}
+	if not bool(settlement.get("owned", false)):
+		_settlement_remove_disarm()
+		_set_modal(i18n.t("base.ui.dashboard.settlement_members.unowned_action", {
+			"id": i18n.format_int(id),
+		}), true)
+		_update_hud()
+		print("DASHBOARD_REMOVE status=rejected code=settlement.unowned")
+		return {"ok": false, "status": "rejected", "error_code": "settlement.unowned", "id": id}
+	var player := _lowest_non_owner_member_id(settlement)
+	if player <= 0:
+		_settlement_remove_disarm()
+		_set_modal(i18n.t("base.ui.dashboard.settlement_members.no_member", {
+			"id": i18n.format_int(id),
+		}), true)
+		_update_hud()
+		print("DASHBOARD_REMOVE status=rejected code=settlement.no_member")
+		return {"ok": false, "status": "rejected", "error_code": "settlement.no_member", "id": id}
+	if settlement_remove_armed_id != id:
+		settlement_remove_armed_id = id
+		_set_modal(i18n.t("base.ui.dashboard.settlement_members.remove_armed", {
+			"player": i18n.format_int(player),
+		}), false)
+		_update_hud()
+		return {"ok": false, "armed": true, "id": id, "player": player}
+	settlement_remove_armed_id = -1
+	var revision := int(settlement.get("membership_revision", 0))
+	if expected_revision >= 0:
+		revision = expected_revision
+	var result: Dictionary = core.settlement_remove_member(id, player, revision)
+	if not bool(result.get("ok", false)):
+		var code := str(result.get("error_code", "unknown"))
+		_set_modal(i18n.t("base.ui.dashboard.settlement_members.failed", {
+			"code": code,
+			"message": str(result.get("error", "")),
+		}), true)
+		_update_hud()
+		print("DASHBOARD_REMOVE status=rejected code=%s" % code)
+		return {
+			"ok": false,
+			"status": "rejected",
+			"error_code": code,
+			"error": str(result.get("error", "")),
+			"id": id,
+			"player": player,
+		}
+	var updated: Dictionary = result.get("settlement", {})
+	var revision_after := int(updated.get("membership_revision", revision + 1))
+	_set_modal(i18n.t("base.ui.dashboard.settlement_members.remove_success", {
+		"player": i18n.format_int(player),
+		"revision": i18n.format_int(revision_after),
+	}), false)
+	dashboard_refresh_accum = 0.0
+	_update_dashboard()
+	_update_hud()
+	print("DASHBOARD_REMOVE status=ok id=%d player=%d revision=%d->%d" % [
+		id,
+		player,
+		revision,
+		revision_after,
+	])
+	return {
+		"ok": true,
+		"status": "ok",
+		"id": id,
+		"player": player,
+		"revision_before": revision,
+		"revision_after": revision_after,
+	}
+
+## Drop a pending Shift+Delete arm without a bridge call.
+func _settlement_remove_disarm() -> void:
+	settlement_remove_armed_id = -1
+
 ## Next settlement tax step. The store accepts 0..=100; out-of-range input is
 ## clamped into that window first, and 100 wraps to 0 so the control never
 ## sends an invalid rate. Pure so the smoke can pin the whole cycle.
@@ -4024,32 +4438,6 @@ func _mayor_player_id() -> int:
 		return -1
 	mayor_player_id = id
 	return id
-
-func _settlement_membership_line(settlement: Dictionary) -> String:
-	var revision: String = i18n.format_int(int(settlement.get("membership_revision", 0)))
-	if not bool(settlement.get("owned", false)):
-		return "Members %s · revision %s" % [i18n.NOT_AVAILABLE, revision]
-	var owner_value = settlement.get("owner_id", 0)
-	var owner_id := int(owner_value) if owner_value != null else 0
-	var rows_value = settlement.get("members", [])
-	var rows: Array = rows_value if rows_value is Array else []
-	var counts := {}
-	for member in rows:
-		if member is Dictionary:
-			var role := str(member.get("role", "member"))
-			counts[role] = int(counts.get(role, 0)) + 1
-	var roles: Array = counts.keys()
-	roles.sort()
-	var suffix := ""
-	for role in roles:
-		suffix += " · %s %s" % [str(role), i18n.format_int(int(counts[role]))]
-	return "Owner #%s · %s members · revision %s%s · tax %s%%" % [
-		i18n.format_int(owner_id),
-		i18n.format_int(rows.size()),
-		revision,
-		suffix,
-		i18n.format_int(int(settlement.get("tax_rate", 0))),
-	]
 
 ## Read an `[x, z]` pair from a plain or packed array; NAN when malformed.
 ## A detail-only helper: it never converts missing values into a fake zero.
@@ -5142,6 +5530,7 @@ func _run_scene_smoke() -> void:
 	var dashboard_transfer_ok := false
 	var dashboard_release_ok := false
 	var dashboard_rename_ok := false
+	var dashboard_members_ok := false
 	var heatmap_ui_ok := false
 	var heatmap_modes_ok := false
 	var advisor_i18n_ok := false
@@ -6315,22 +6704,26 @@ func _run_scene_smoke() -> void:
 				# `settlement_found` creates an unowned v1 record: revision 0,
 				# no members. The fixture therefore exercises the unowned
 				# membership line; the helper check covers the owned format.
-				var unowned_membership_line := "Members %s · revision %s" % [
-					i18n.NOT_AVAILABLE,
-					i18n.format_int(0),
-				]
-				settlement_detail_ok = settlement_detail_ok and _settlement_membership_line({
+				var unowned_membership_line: String = i18n.t("base.ui.dashboard.settlement_members.unowned", {
+					"revision": i18n.format_int(0),
+				})
+				var owned_membership_line: String = _settlement_membership_line({
 					"owned": true,
 					"owner_id": 42,
 					"membership_revision": 7,
 					"tax_rate": 25,
 					"members": [
-						{"player": 3, "role": "member"},
-						{"player": 4, "role": "builder"},
-						{"player": 5, "role": "manager"},
-						{"player": 6, "role": "builder"},
+						{"player": 3, "role": "member", "permissions": 0},
+						{"player": 4, "role": "builder", "permissions": 1},
+						{"player": 5, "role": "manager", "permissions": 9},
+						{"player": 6, "role": "builder", "permissions": 1},
 					],
-				}) == "Owner #42 · 4 members · revision 7 · builder 2 · manager 1 · member 1 · tax 25%"
+				})
+				settlement_detail_ok = settlement_detail_ok and owned_membership_line.contains("Owner #42 · 4 members · revision 7 · tax 25%")
+				settlement_detail_ok = settlement_detail_ok and owned_membership_line.contains("#3 member · no permissions")
+				settlement_detail_ok = settlement_detail_ok and owned_membership_line.contains("#4 builder · build")
+				settlement_detail_ok = settlement_detail_ok and owned_membership_line.contains("#5 manager · build, members")
+				settlement_detail_ok = settlement_detail_ok and owned_membership_line.contains(i18n.t("base.ui.dashboard.settlement_members.hint_invite"))
 				settlement_detail_ok = settlement_detail_ok and _settlement_membership_line({}) == unowned_membership_line
 				settlement_detail_ok = settlement_detail_ok and _select_settlement(first_settlement_id)
 				_update_dashboard()
@@ -6685,6 +7078,61 @@ func _run_scene_smoke() -> void:
 					int(_selected_settlement().get("membership_revision", -1)),
 					int(_selected_settlement().get("owner_id", -1)),
 					claim_checksum_after,
+				])
+
+				# Shift+I / Shift+M / Shift+Delete: invite the next local
+				# player, cycle the lowest non-owner role, cancel and stale-check
+				# removal, then remove. No bridge mutation on rejects.
+				dashboard_members_ok = _select_settlement(claim_id)
+				var members_revision := int(_selected_settlement().get("membership_revision", -1))
+				var invite_result: Dictionary = _invite_selected_member()
+				var invited_id := int(invite_result.get("player", -1))
+				dashboard_members_ok = dashboard_members_ok and bool(invite_result.get("ok", false))
+				dashboard_members_ok = dashboard_members_ok and invited_id > 0
+				dashboard_members_ok = dashboard_members_ok and int(invite_result.get("revision_before", -1)) == members_revision
+				dashboard_members_ok = dashboard_members_ok and int(invite_result.get("revision_after", -1)) == members_revision + 1
+				dashboard_members_ok = dashboard_members_ok and _settlement_member_ids(_selected_settlement()).has(invited_id)
+				var role_one: Dictionary = _cycle_selected_member_role()
+				dashboard_members_ok = dashboard_members_ok and bool(role_one.get("ok", false))
+				dashboard_members_ok = dashboard_members_ok and str(role_one.get("role", "")) == "builder"
+				var role_two: Dictionary = _cycle_selected_member_role()
+				dashboard_members_ok = dashboard_members_ok and bool(role_two.get("ok", false))
+				dashboard_members_ok = dashboard_members_ok and str(role_two.get("role", "")) == "manager"
+				var members_after_roles := int(_selected_settlement().get("membership_revision", -1))
+				var members_checksum := str(core.settlement_checksum())
+				_set_modal("", false)
+				var remove_arm: Dictionary = _remove_selected_member()
+				dashboard_members_ok = dashboard_members_ok and bool(remove_arm.get("armed", false))
+				dashboard_members_ok = dashboard_members_ok and settlement_remove_armed_id == claim_id
+				_settlement_remove_disarm()
+				dashboard_members_ok = dashboard_members_ok and settlement_remove_armed_id == -1
+				dashboard_members_ok = dashboard_members_ok and str(core.settlement_checksum()) == members_checksum
+				# Two-press stale removal: the first press arms, the second
+				# uses the old revision and must reject without mutation.
+				_remove_selected_member(members_after_roles - 1)
+				var stale_remove: Dictionary = _remove_selected_member(members_after_roles - 1)
+				dashboard_members_ok = dashboard_members_ok and not bool(stale_remove.get("ok", true))
+				dashboard_members_ok = dashboard_members_ok and str(stale_remove.get("error_code", "")) == "settlement.revision_conflict"
+				dashboard_members_ok = dashboard_members_ok and str(core.settlement_checksum()) == members_checksum
+				_settlement_remove_disarm()
+				_set_modal("", false)
+				_remove_selected_member()
+				var remove_result: Dictionary = _remove_selected_member()
+				dashboard_members_ok = dashboard_members_ok and bool(remove_result.get("ok", false))
+				dashboard_members_ok = dashboard_members_ok and int(remove_result.get("player", -1)) == invited_id
+				dashboard_members_ok = dashboard_members_ok and int(_selected_settlement().get("membership_revision", -1)) == members_after_roles + 1
+				dashboard_members_ok = dashboard_members_ok and _lowest_non_owner_member_id(_selected_settlement()) <= 0
+				dashboard_members_ok = dashboard_members_ok and int(_selected_settlement().get("owner_id", -1)) == claim_player_id
+				var members_checksum_after := str(core.settlement_checksum())
+				dashboard_members_ok = dashboard_members_ok and members_checksum_after != members_checksum
+				print("DASHBOARD_MEMBERS status=%s id=%d player=%d role=manager remove=%d revision=%d->%d checksum=%s" % [
+					"ok" if dashboard_members_ok else "failed",
+					claim_id,
+					invited_id,
+					invited_id,
+					members_revision,
+					int(_selected_settlement().get("membership_revision", -1)),
+					members_checksum_after,
 				])
 
 				# Shift+Y: transfer the claimed record to a deterministic local
@@ -7551,11 +7999,13 @@ func _run_scene_smoke() -> void:
 
 	if status == "ok" and not dashboard_rename_ok:
 		status = "dashboard_rename_failed"
+	if status == "ok" and not dashboard_members_ok:
+		status = "dashboard_members_failed"
 
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s policy_edit=%s district_select=%s settlement_select=%s settlement_detail=%s dashboard_tax=%s dashboard_claim=%s dashboard_transfer=%s dashboard_release=%s dashboard_rename=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s policy_edit=%s district_select=%s settlement_select=%s settlement_detail=%s dashboard_tax=%s dashboard_claim=%s dashboard_transfer=%s dashboard_release=%s dashboard_rename=%s dashboard_members=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -7606,6 +8056,7 @@ func _run_scene_smoke() -> void:
 		"ok" if dashboard_transfer_ok else "failed",
 		"ok" if dashboard_release_ok else "failed",
 		"ok" if dashboard_rename_ok else "failed",
+		"ok" if dashboard_members_ok else "failed",
 		"ok" if heatmap_ui_ok else "failed",
 		"ok" if heatmap_modes_ok else "failed",
 		"ok" if hud_i18n_ok else "failed",
