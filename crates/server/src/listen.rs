@@ -876,6 +876,9 @@ mod network_faults;
 mod stress;
 
 #[cfg(test)]
+mod lock_smoke;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
