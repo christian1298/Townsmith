@@ -157,6 +157,18 @@ This keeps one backup generation and leaves store schemas and checksums unchange
 
 No error `code()` embeds a path. Absolute paths appear only in `Display` for `save.not_found` and `save.corrupt`, as before. The matrix is test-only and changes no production save behavior.
 
+### 7.1 Optional-store presence matrix
+
+`crates/server/src/save_store_matrix.rs` covers all 16 present/absent combinations of `players`, `settlements`, `placements`, and `construction` over the fixed `LOOPBACK_SEED`:
+
+- each mask validates, writes pretty JSON, loads, re-saves byte-identically, and preserves `world.checksum()`;
+- three file save/load cycles per mask do not accumulate fields or leave `.tmp`/`.bak` debris;
+- present-but-empty semantics are explicit: an empty player registry is omitted, while `Some(empty)` settlements/placements/construction are retained;
+- a foreign seed in any seeded store rejects with `save.seed_mismatch` and the correct field;
+- malformed stores reject with `save.invalid_players`/`settlements`/`placements`/`construction`; wrong shapes reject `save.invalid_json`;
+- unknown top-level/store/record fields are ignored and stripped on re-save;
+- outer `format_version: 2` is rejected even with a `content` object, v1 never emits `content`, and a legacy v1 baseline without optional stores stays byte-identical after load/re-save and a no-op file save.
+
 ## 8. Limits
 
 - Core stores only; it does not exercise the Godot `world_save`/`world_load` wrapper or `VarDictionary` payloads. Bridge atomic-write/`.bak` recovery is covered by `godot_ext` unit tests.

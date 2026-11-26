@@ -12,6 +12,8 @@ pub mod protocol;
 pub mod save;
 #[cfg(test)]
 mod save_crash;
+#[cfg(test)]
+mod save_store_matrix;
 pub mod settlement_smoke;
 pub mod vote;
 pub mod world;
