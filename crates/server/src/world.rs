@@ -1659,6 +1659,16 @@ impl ServerWorld {
         format!("{hash:016x}")
     }
 
+    /// Authoritative chat sequence watermark.
+    ///
+    /// Advances only when a `chat` line is accepted; it is deliberately
+    /// excluded from [`Self::checksum`] and does not advance the tick. Clients
+    /// use it to plan catch-up, then call `chat_since { after }` for lines.
+    #[must_use]
+    pub fn chat_seq(&self) -> u64 {
+        self.chat_seq
+    }
+
     /// Current authoritative snapshot.
     ///
     /// Interest fields describe this session's viewport; they are not part of
@@ -1673,6 +1683,7 @@ impl ServerWorld {
             interest_center: self.interest_center,
             interest_radius_m: self.interest_radius_m,
             visible_roads: self.visible_roads(),
+            chat_seq: self.chat_seq,
         }
     }
 
@@ -3492,6 +3503,7 @@ fn welcome(world: &ServerWorld, resumed: bool) -> ServerMessage {
         tick: world.tick,
         protocol_version: PROTOCOL_VERSION,
         resumed,
+        chat_seq: world.chat_seq(),
     }
 }
 
@@ -5724,6 +5736,7 @@ mod tests {
                 interest_center: [0.0, 0.0],
                 interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
                 visible_roads: 0,
+                chat_seq: 0,
             }
         );
     }
@@ -7976,6 +7989,64 @@ mod tests {
             z,
             radius_m,
         }
+    }
+
+    #[test]
+    fn chat_seq_watermark_tracks_chat_and_appears_in_welcome_and_snapshots() {
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Admin);
+        let checksum = world.checksum();
+        let welcome_message = world.apply(&hello());
+        assert!(
+            matches!(welcome_message, ServerMessage::Welcome { chat_seq: 0, .. }),
+            "fresh welcome should report watermark 0, got {welcome_message:?}"
+        );
+        assert!(matches!(
+            world.snapshot(),
+            ServerMessage::Snapshot { chat_seq: 0, .. }
+        ));
+
+        world.apply(&ClientCommand::Chat {
+            text: "one".to_string(),
+        });
+        assert_eq!(world.chat_seq(), 1);
+        assert!(matches!(
+            world.snapshot(),
+            ServerMessage::Snapshot { chat_seq: 1, .. }
+        ));
+
+        world.apply(&ClientCommand::Chat {
+            text: "two".to_string(),
+        });
+        assert_eq!(world.chat_seq(), 2);
+        assert!(matches!(
+            welcome(&world, true),
+            ServerMessage::Welcome {
+                chat_seq: 2,
+                resumed: true,
+                ..
+            }
+        ));
+
+        world.apply(&ClientCommand::Ping { nonce: 7 });
+        let interest = world.apply_all(&ClientCommand::SetInterest {
+            center_x: 16.0,
+            center_z: 32.0,
+            radius_m: 48.0,
+        });
+        assert!(
+            matches!(
+                interest.first(),
+                Some(ServerMessage::Snapshot { chat_seq: 2, .. })
+            ),
+            "interest snapshot should keep the watermark, got {interest:?}"
+        );
+        assert!(
+            interest
+                .iter()
+                .any(|message| matches!(message, ServerMessage::InterestView { .. })),
+            "set_interest should still return the interest view, got {interest:?}"
+        );
+        assert_eq!(world.checksum(), checksum, "watermark is not world state");
     }
 
     #[test]
