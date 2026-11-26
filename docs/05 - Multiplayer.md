@@ -220,6 +220,9 @@ Accepted commands produce **events** (construction site created, phase changed, 
 > [!info] Settlement loopback golden
 > `cargo run --release -p townsmith-server -- --settlement-smoke` runs three real TCP connections (Mayor, Mayor, Admin) through the shared world: found, list/at, invite/set-role/remove/re-invite, rename, transfer, claim rejection, tax, Admin release, re-claim, unknown/stale/role/recipient rejections, and a final read-only list/at. Every mutation must return the full `SettlementView` plus 16-hex settlement and world checksums; the read-only tail must leave both unchanged; the final record must survive a JSON save/load round-trip. The deterministic line is `SERVER_SETTLEMENT status=ok messages=36 settlements=1 members=1 checksum=2978a05623398f13 world_checksum=f3ff6835d712845c`; the `settlement_smoke` unit test runs it twice and pins the shape.
 
+> [!info] Connected-client probe
+> [[85 - Connected Settlement Surface]] documents the opt-in `mp_world_client` readout (`--settlement-ui` / `--settlement-script`) and the planned mutation actions. It uses the commands above unchanged: there are no new protocol or save fields, and the server remains authoritative.
+
 ### Protocol v1 (Phase 6 foundation)
 
 The first runnable protocol lives in `crates/server/src/protocol.rs`. Protocol v1 freezes framing, validation codes, and the handshake, and adds the first authoritative placement command; the stateful simulation commands live in `world.rs`. It does not replace the city simulation.
