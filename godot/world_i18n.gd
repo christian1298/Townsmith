@@ -103,7 +103,9 @@ const TABLES := {
 		# District overview (developer panel) settlement member block.
 		"base.ui.district.members.unowned": "Unowned",
 		"base.ui.district.members.owner": "Owner #{id} · {role}",
+		"base.ui.district.members.owner_named": "Owner {name} (#{id}) · {role}",
 		"base.ui.district.members.row": "#{id} {role} · {permissions}",
+		"base.ui.district.members.row_named": "{name} (#{id}) {role} · {permissions}",
 		"base.ui.district.members.no_permissions": "no permissions",
 		"base.ui.district.members.permission.build": "build",
 		"base.ui.district.members.permission.manage": "manage",
@@ -546,7 +548,9 @@ const TABLES := {
 		# District overview (developer panel) settlement member block.
 		"base.ui.district.members.unowned": "Ohne Eigentümer",
 		"base.ui.district.members.owner": "Eigentümer #{id} · {role}",
+		"base.ui.district.members.owner_named": "Eigentümer {name} (#{id}) · {role}",
 		"base.ui.district.members.row": "#{id} {role} · {permissions}",
+		"base.ui.district.members.row_named": "{name} (#{id}) {role} · {permissions}",
 		"base.ui.district.members.no_permissions": "keine Berechtigungen",
 		"base.ui.district.members.permission.build": "bauen",
 		"base.ui.district.members.permission.manage": "verwalten",

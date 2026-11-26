@@ -4,9 +4,10 @@
 # Builds the debug GDExtension, imports once (with the usual single retry for a
 # clean worktree), runs `godot/district_panel.tscn --smoke` twice headless, and
 # requires the two-settlement fixture contract: the 256 m district summary, the
-# smallest-id containing policy, and identical panel checksums/markers. It then
-# runs `--empty` and requires the empty-session marker. No display or human
-# input is required.
+# smallest-id containing policy, named owner/member rows from the local player
+# registry, the plain `#id` fallback for an unregistered member, and identical
+# panel checksums/markers. It then runs `--empty` and requires the
+# empty-session marker. No display or human input is required.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -87,25 +88,38 @@ run_panel() {
 		fi
 		local needle
 		for needle in \
-			"en=Owner #7 · owner" \
-			"#11 manager · build/manage/tax/members" \
-			"#12 member · no permissions" \
-			"#13 builder · build" \
-			"de=Eigentümer #7 · owner" \
-			"#12 member · keine Berechtigungen" \
+			"en=Owner Mayor (#7) · owner" \
+			"Manager (#11) manager · build/manage/tax/members" \
+			"Member (#12) member · no permissions" \
+			"Builder (#13) builder · build" \
+			"Mayor (#7) owner · build/manage/tax/members" \
+			"de=Eigentümer Mayor (#7) · owner" \
+			"Manager (#11) manager · bauen/verwalten/Steuern/Mitglieder" \
+			"Member (#12) member · keine Berechtigungen" \
 			"unowned=Unowned"; do
 			if ! grep -Fq "$needle" <<<"$member_marker"; then
 				echo "District panel smoke member contract mismatch ($mode): missing '$needle'" >&2
 				exit 1
 			fi
 		done
+
+		local names_marker
+		names_marker="$(grep '^DISTRICT_NAMES ' <<<"$output" | tail -1 || true)"
+		if [[ -z "$names_marker" ]]; then
+			echo "District panel smoke failed ($mode): no DISTRICT_NAMES marker" >&2
+			exit 1
+		fi
+		if ! grep -Fq "#9001 member · no permissions" <<<"$names_marker"; then
+			echo "District panel smoke fallback contract mismatch ($mode): $names_marker" >&2
+			exit 1
+		fi
 		if grep -Fq '!base.ui.' <<<"$output"; then
 			echo "District panel smoke failed ($mode): missing translation key" >&2
 			exit 1
 		fi
 	fi
 
-	grep -E '^DISTRICT_PANEL|^DISTRICT_TAX|^DISTRICT_MEMBERS' <<<"$output" | grep -v '^DISTRICT_PANEL status=' >"$log" || true
+	grep -E '^DISTRICT_PANEL|^DISTRICT_TAX|^DISTRICT_MEMBERS|^DISTRICT_NAMES' <<<"$output" | grep -v '^DISTRICT_PANEL status=' >"$log" || true
 	printf '%s\n' "$marker" >"$marker_file"
 }
 
