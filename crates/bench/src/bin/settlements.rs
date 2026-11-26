@@ -24,8 +24,8 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use core_city::{
-    PlayerId, PlayerRegistry, SettlementRequest, SettlementRole, SettlementStore, MAX_PLAYERS,
-    MAX_SETTLEMENTS, MAX_SETTLEMENTS_OWNED_PER_PLAYER, MAX_SETTLEMENT_MEMBERS,
+    PlayerId, PlayerRegistry, Settlement, SettlementRequest, SettlementRole, SettlementStore,
+    MAX_PLAYERS, MAX_SETTLEMENTS, MAX_SETTLEMENTS_OWNED_PER_PLAYER, MAX_SETTLEMENT_MEMBERS,
 };
 
 const SEED: u64 = 2026;
@@ -48,6 +48,22 @@ const MAX_RUNS: usize = 9;
 /// format change, or a regression; update both pins together when intentional.
 const SMOKE_PLAYERS_CHECKSUM: u64 = 0xb3d8_8928_9837_0243;
 const SMOKE_SETTLEMENTS_CHECKSUM: u64 = 0x3fb7_fc64_a225_def9;
+
+/// Fixed read-side scenario: the D-033 per-store cap, one member mix.
+const LIST_COUNT: usize = MAX_SETTLEMENTS;
+const LIST_MEMBERS_PER_OWNED: usize = MAX_SETTLEMENT_MEMBERS;
+/// Player slots used to spread ownership and membership; the owned-record cap
+/// stays far below [`MAX_SETTLEMENTS_OWNED_PER_PLAYER`] at this spread.
+const LIST_PLAYER_SLOTS: usize = MAX_PLAYERS;
+/// Every fifth settlement is unowned, so the mix is 800 owned / 200 unowned.
+const LIST_OWNED_STRIDE: usize = 5;
+const LIST_PAGE_LIMIT: usize = 256;
+
+/// Pinned smoke values for the fixed settlement-list fixture. Update all three
+/// together when the fixture or settlement save format changes intentionally.
+const LIST_SMOKE_CHECKSUM: u64 = 0x34d0_aa17_5625_6e95;
+const LIST_SMOKE_JSON_BYTES: usize = 1_733_035;
+const LIST_SMOKE_JSON_CHECKSUM: u64 = 0x34d0_aa17_5625_6e95;
 
 fn main() -> ExitCode {
     match run() {
@@ -227,6 +243,13 @@ fn run() -> Result<(), String> {
         "status": "ok",
     });
     println!("SETTLEMENTS_BENCH {json}");
+
+    // Second phase: the fixed settlement-list read/serialization scene. It is
+    // built and measured after the cap/construction benchmark above so the
+    // existing output stays first and unchanged.
+    let list = run_list_phase(&config)?;
+    print_list_summary(&list);
+    println!("SETTLEMENT_LIST_BENCH {}", list.output);
     Ok(())
 }
 
@@ -828,6 +851,471 @@ fn settlement_name(index: usize) -> String {
 
 fn renamed_name(index: usize) -> String {
     format!("Town {index:05}")
+}
+
+/// One measured read pass over the fixed 1,000-settlement fixture.
+struct ListSample {
+    list_copy_ms: f64,
+    json_ms: f64,
+    checksum_ms: f64,
+    paged_ms: f64,
+    count: usize,
+    owned: usize,
+    unowned: usize,
+    members: usize,
+    pages: usize,
+    paged_records: usize,
+    checksum: u64,
+    json_bytes: usize,
+    json_checksum: u64,
+    json: Vec<u8>,
+}
+
+/// Median read timings and verified fixture identity for the fixed scene.
+struct ListResult {
+    count: usize,
+    owned: usize,
+    unowned: usize,
+    members: usize,
+    runs: usize,
+    list_copy_ms: f64,
+    json_ms: f64,
+    checksum_ms: f64,
+    paged_ms: f64,
+    page_limit: usize,
+    pages: usize,
+    paged_records: usize,
+    checksum: u64,
+    json_bytes: usize,
+    json_checksum: u64,
+    output: String,
+}
+
+/// Build and measure the fixed 1,000-settlement list scene.
+///
+/// The fixture is rebuilt for every timed pass so each sample starts from the
+/// same owned/unowned and membership shape. Only the read-side operations are
+/// timed; construction is setup and is not part of this scenario.
+fn run_list_phase(config: &Config) -> Result<ListResult, String> {
+    let mut runs = Vec::with_capacity(config.runs);
+    for _ in 0..config.runs {
+        let store = build_list_fixture()?;
+        runs.push(measure_list(&store)?);
+    }
+
+    let first = runs
+        .first()
+        .ok_or("no settlement-list runs were executed")?;
+    for (index, run) in runs.iter().enumerate().skip(1) {
+        check(run.checksum == first.checksum, || {
+            format!(
+                "list run {index} checksum 0x{:016x} differs from 0x{:016x}",
+                run.checksum, first.checksum
+            )
+        })?;
+        check(run.json_bytes == first.json_bytes, || {
+            format!(
+                "list run {index} JSON size {} differs from {}",
+                run.json_bytes, first.json_bytes
+            )
+        })?;
+        check(run.json_checksum == first.json_checksum, || {
+            format!(
+                "list run {index} JSON checksum 0x{:016x} differs from 0x{:016x}",
+                run.json_checksum, first.json_checksum
+            )
+        })?;
+        check(run.json == first.json, || {
+            format!("list run {index} JSON bytes differ from run 0")
+        })?;
+        check(
+            run.members == first.members
+                && run.owned == first.owned
+                && run.unowned == first.unowned,
+            || format!("list run {index} fixture shape differs from run 0"),
+        )?;
+        check(
+            run.pages == first.pages && run.paged_records == first.paged_records,
+            || format!("list run {index} paged shape differs from run 0"),
+        )?;
+    }
+
+    if config.smoke {
+        let store = build_list_fixture()?;
+        let repeat = measure_list(&store)?;
+        check(
+            repeat.checksum == first.checksum
+                && repeat.json_bytes == first.json_bytes
+                && repeat.json_checksum == first.json_checksum
+                && repeat.json == first.json,
+            || "smoke settlement-list fixture is not deterministic across two builds".to_string(),
+        )?;
+        check(first.checksum == LIST_SMOKE_CHECKSUM, || {
+            format!(
+                "smoke list checksum 0x{:016x} drifted from pinned 0x{LIST_SMOKE_CHECKSUM:016x}",
+                first.checksum
+            )
+        })?;
+        check(first.json_bytes == LIST_SMOKE_JSON_BYTES, || {
+            format!(
+                "smoke list JSON size {} drifted from pinned {LIST_SMOKE_JSON_BYTES}",
+                first.json_bytes
+            )
+        })?;
+        check(first.json_checksum == LIST_SMOKE_JSON_CHECKSUM, || {
+            format!(
+                "smoke list JSON checksum 0x{:016x} drifted from pinned 0x{LIST_SMOKE_JSON_CHECKSUM:016x}",
+                first.json_checksum
+            )
+        })?;
+    }
+
+    let mut result = ListResult {
+        count: first.count,
+        owned: first.owned,
+        unowned: first.unowned,
+        members: first.members,
+        runs: config.runs,
+        list_copy_ms: median(&runs.iter().map(|run| run.list_copy_ms).collect::<Vec<_>>()),
+        json_ms: median(&runs.iter().map(|run| run.json_ms).collect::<Vec<_>>()),
+        checksum_ms: median(&runs.iter().map(|run| run.checksum_ms).collect::<Vec<_>>()),
+        paged_ms: median(&runs.iter().map(|run| run.paged_ms).collect::<Vec<_>>()),
+        page_limit: LIST_PAGE_LIMIT,
+        pages: first.pages,
+        paged_records: first.paged_records,
+        checksum: first.checksum,
+        json_bytes: first.json_bytes,
+        json_checksum: first.json_checksum,
+        output: String::new(),
+    };
+
+    let output = serde_json::json!({
+        "scenario": "settlement_list_1000",
+        "count": result.count,
+        "owned": result.owned,
+        "unowned": result.unowned,
+        "members": result.members,
+        "members_per_owned": LIST_MEMBERS_PER_OWNED,
+        "runs": result.runs,
+        "median_ms": {
+            "list_copy": round4(result.list_copy_ms),
+            "json": round4(result.json_ms),
+            "checksum": round4(result.checksum_ms),
+            "paged": round4(result.paged_ms),
+        },
+        "json_bytes": result.json_bytes,
+        "json_checksum": format!("0x{:016x}", result.json_checksum),
+        "checksum": format!("0x{:016x}", result.checksum),
+        "page_limit": result.page_limit,
+        "pages": result.pages,
+        "paged_records": result.paged_records,
+        "paging": "client_slice_over_settlements",
+        "status": "ok",
+    });
+    result.output = output.to_string();
+    Ok(result)
+}
+
+fn print_list_summary(result: &ListResult) {
+    println!(
+        "settlement_list_bench: scenario=settlement_list_1000 count={} owned={} unowned={} \
+         members={} runs={} page_limit={} pages={}",
+        result.count,
+        result.owned,
+        result.unowned,
+        result.members,
+        result.runs,
+        result.page_limit,
+        result.pages
+    );
+    println!("  list_copy {:>10.4} ms", result.list_copy_ms);
+    println!(
+        "  json      {:>10.4} ms ({} bytes, json_checksum=0x{:016x})",
+        result.json_ms, result.json_bytes, result.json_checksum
+    );
+    println!(
+        "  checksum  {:>10.4} ms (0x{:016x})",
+        result.checksum_ms, result.checksum
+    );
+    println!(
+        "  paged     {:>10.4} ms ({} records in {} pages)",
+        result.paged_ms, result.paged_records, result.pages
+    );
+}
+
+/// Build the fixed list fixture: 1,000 settlements, 200 unowned, 800 owned with
+/// 64 members each (51,200 member records), fixed seed, ids, and names.
+fn build_list_fixture() -> Result<SettlementStore, String> {
+    let mut registry = PlayerRegistry::new(SEED);
+    let mut ids = Vec::with_capacity(LIST_PLAYER_SLOTS);
+    for index in 0..LIST_PLAYER_SLOTS {
+        let player = registry
+            .register(&format!("Player {index:03}"))
+            .map_err(|error| format!("register list player {index}: {error}"))?;
+        ids.push(player.id);
+    }
+
+    let mut store = SettlementStore::new(SEED);
+    for index in 0..LIST_COUNT {
+        let owned = index % LIST_OWNED_STRIDE != 0;
+        let owner = ids[index % LIST_PLAYER_SLOTS];
+        let request = SettlementRequest {
+            name: settlement_name(index),
+            owner: registry
+                .get(owner)
+                .ok_or_else(|| format!("list owner {owner} is missing"))?
+                .display_name
+                .clone(),
+            center: [(index % 64) as i32 * 128, (index / 64) as i32 * 128],
+            radius_m: 64 + (index % 29) as u32 * 64,
+        };
+        if owned {
+            let founded = store
+                .found_for_player(&request, owner)
+                .map_err(|error| format!("found owned list settlement {index}: {error}"))?;
+            check(founded.id == index as u64 + 1, || {
+                format!("owned list settlement {index} id is {}", founded.id)
+            })?;
+            let mut revision = founded.membership_revision;
+            let mut members: HashSet<PlayerId> = HashSet::with_capacity(LIST_MEMBERS_PER_OWNED);
+            members.insert(owner);
+            let mut slot = 1usize;
+            let mut attempts = 0usize;
+            while members.len() < LIST_MEMBERS_PER_OWNED {
+                attempts += 1;
+                check(attempts <= LIST_PLAYER_SLOTS, || {
+                    format!(
+                        "list settlement {index}: could not fill \
+                         {LIST_MEMBERS_PER_OWNED} distinct members"
+                    )
+                })?;
+                let candidate = ids[(index * 7 + 3 + attempts) % LIST_PLAYER_SLOTS];
+                if !members.insert(candidate) {
+                    continue;
+                }
+                let updated = store
+                    .invite(owner, founded.id, candidate, role_for(slot), revision)
+                    .map_err(|error| {
+                        format!("invite player {candidate} to list settlement {index}: {error}")
+                    })?;
+                revision = updated.membership_revision;
+                slot += 1;
+            }
+            check(revision == LIST_MEMBERS_PER_OWNED as u32, || {
+                format!(
+                    "list settlement {index} revision {revision} is not \
+                     {LIST_MEMBERS_PER_OWNED}"
+                )
+            })?;
+        } else {
+            let founded = store
+                .found(&request)
+                .map_err(|error| format!("found unowned list settlement {index}: {error}"))?;
+            check(
+                founded.id == index as u64 + 1 && founded.members.is_empty(),
+                || {
+                    format!(
+                        "unowned list settlement {index} has id {} or members",
+                        founded.id
+                    )
+                },
+            )?;
+        }
+    }
+
+    store
+        .validate_loaded()
+        .map_err(|error| format!("validate list fixture: {error}"))?;
+
+    let mut owned_count = 0usize;
+    let mut member_count = 0usize;
+    let mut previous_id = 0u64;
+    for settlement in store.settlements() {
+        check(settlement.id > previous_id, || {
+            format!(
+                "list settlement ids are not strictly ascending at {}",
+                settlement.id
+            )
+        })?;
+        previous_id = settlement.id;
+        if settlement.is_owned() {
+            owned_count += 1;
+            check(
+                settlement.members.len() == LIST_MEMBERS_PER_OWNED
+                    && settlement.membership_revision == LIST_MEMBERS_PER_OWNED as u32,
+                || {
+                    format!(
+                        "list settlement {} has {} members and revision {}, expected {}",
+                        settlement.id,
+                        settlement.members.len(),
+                        settlement.membership_revision,
+                        LIST_MEMBERS_PER_OWNED
+                    )
+                },
+            )?;
+            check(
+                settlement
+                    .owner_id
+                    .is_some_and(|owner| settlement.role_of(owner) == Some(SettlementRole::Owner)),
+                || format!("list settlement {} owner role is missing", settlement.id),
+            )?;
+        } else {
+            check(settlement.members.is_empty(), || {
+                format!("unowned list settlement {} carries members", settlement.id)
+            })?;
+        }
+        member_count += settlement.members.len();
+    }
+
+    let expected_owned = LIST_COUNT - LIST_COUNT.div_ceil(LIST_OWNED_STRIDE);
+    let expected_unowned = LIST_COUNT.div_ceil(LIST_OWNED_STRIDE);
+    check(store.count() == LIST_COUNT, || {
+        format!(
+            "list fixture has {} settlements, expected {LIST_COUNT}",
+            store.count()
+        )
+    })?;
+    check(owned_count == expected_owned, || {
+        format!("list fixture has {owned_count} owned, expected {expected_owned}")
+    })?;
+    check(store.count() - owned_count == expected_unowned, || {
+        format!(
+            "list fixture has {} unowned, expected {expected_unowned}",
+            store.count() - owned_count
+        )
+    })?;
+    check(
+        member_count == expected_owned * LIST_MEMBERS_PER_OWNED,
+        || {
+            format!(
+                "list fixture has {member_count} member records, expected {}",
+                expected_owned * LIST_MEMBERS_PER_OWNED
+            )
+        },
+    )?;
+
+    Ok(store)
+}
+
+/// Time the four read-side operations once over an already-built fixture.
+fn measure_list(store: &SettlementStore) -> Result<ListSample, String> {
+    let start = Instant::now();
+    let copy = store.settlements().to_vec();
+    let list_copy_ms = elapsed_ms(start);
+    check(copy.len() == store.count(), || {
+        "list copy length differs from the store count".to_string()
+    })?;
+    check(copy == store.settlements(), || {
+        "list copy differs from the store slice".to_string()
+    })?;
+    black_box(&copy);
+    drop(copy);
+
+    let start = Instant::now();
+    let json =
+        serde_json::to_vec(store).map_err(|error| format!("serialize settlement list: {error}"))?;
+    let json_ms = elapsed_ms(start);
+    check(!json.is_empty(), || {
+        "settlement-list serialization produced an empty payload".to_string()
+    })?;
+
+    let start = Instant::now();
+    let checksum = store.checksum();
+    let checksum_ms = elapsed_ms(start);
+
+    let mut page = Vec::with_capacity(LIST_PAGE_LIMIT);
+    let start = Instant::now();
+    let (paged_records, pages) = paged_read(store.settlements(), LIST_PAGE_LIMIT, &mut page)?;
+    let paged_ms = elapsed_ms(start);
+    check(paged_records == store.count(), || {
+        format!(
+            "paged read returned {paged_records} records, expected {}",
+            store.count()
+        )
+    })?;
+    check(pages == store.count().div_ceil(LIST_PAGE_LIMIT), || {
+        format!(
+            "paged read used {pages} pages, expected {}",
+            store.count().div_ceil(LIST_PAGE_LIMIT)
+        )
+    })?;
+    black_box(&page);
+    drop(page);
+
+    let owned = store
+        .settlements()
+        .iter()
+        .filter(|settlement| settlement.is_owned())
+        .count();
+    let members: usize = store
+        .settlements()
+        .iter()
+        .map(|settlement| settlement.members.len())
+        .sum();
+
+    Ok(ListSample {
+        list_copy_ms,
+        json_ms,
+        checksum_ms,
+        paged_ms,
+        count: store.count(),
+        owned,
+        unowned: store.count() - owned,
+        members,
+        pages,
+        paged_records,
+        checksum,
+        json_bytes: json.len(),
+        json_checksum: fnv1a64(&json),
+        json,
+    })
+}
+
+/// Client-side `after_id`/`limit` walk over the id-sorted full slice.
+///
+/// Core exposes no cursor query, so this projects pages from
+/// [`SettlementStore::settlements`] without a production API change. It
+/// measures page slicing/copy cost, not a server-side query.
+fn paged_read(
+    all: &[Settlement],
+    limit: usize,
+    page: &mut Vec<Settlement>,
+) -> Result<(usize, usize), String> {
+    check(limit > 0, || "page limit must be positive".to_string())?;
+    let mut after = 0u64;
+    let mut records = 0usize;
+    let mut pages = 0usize;
+    loop {
+        let start = all.partition_point(|settlement| settlement.id <= after);
+        if start >= all.len() {
+            break;
+        }
+        let end = (start + limit).min(all.len());
+        page.clear();
+        page.extend_from_slice(&all[start..end]);
+        check(page[0].id > after, || {
+            "paged read did not advance past after_id".to_string()
+        })?;
+        check(page.windows(2).all(|pair| pair[0].id < pair[1].id), || {
+            "paged read returned records out of id order".to_string()
+        })?;
+        records += page.len();
+        pages += 1;
+        after = page[page.len() - 1].id;
+        if end >= all.len() {
+            break;
+        }
+    }
+    Ok((records, pages))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325u64, |mut hash, &byte| {
+            hash ^= u64::from(byte);
+            hash.wrapping_mul(0x100_0000_01b3)
+        })
 }
 
 fn tax_rate_for(index: usize) -> u16 {

@@ -2,7 +2,7 @@
 title: Benchmarks
 project: Townsmith
 status: proposed
-updated: 2026-11-25
+updated: 2026-11-26
 tags:
   - townsmith
   - performance
@@ -61,6 +61,8 @@ A benchmark run is not a synthetic fly-through of an empty map. It is a represen
 
 > [!info] Settlement store scale harness (`settlements`)
 > `cargo run --release -p townsmith-bench --bin settlements -- --smoke` runs a deterministic 200-player / 50-settlement / 8-member fixture twice and pins the player checksum `0xb3d8892898370243`, store checksum `0x3fb7fc64a225def9`, and `save_bytes=28093`. The default run requests 10,000/10,000/64 but the D-033 caps are **256 players**, **1,000 settlements**, and **64 members**, so it reports the effective 256/1,000/64 sizes with `capped: true` rather than pretending the larger shape exists. On a Ryzen 9 7950X the capped 3-run median (64,000 members) was: register 0.73 ms, found 5.78 ms, invite 17.06 ms, tax 0.28 ms, rename 3.70 ms, transfer 1.05 ms, checksum 7.13 ms, serialize 1.34 ms, parse+validate 5.59 ms; save 2,162,454 bytes. It exercises registration, founding, inventory, tax, rename, transfer, checksum, and in-memory JSON round-trip with byte-identical re-save; no temp files or wall-clock data. This is data-scale evidence for D-033, not a render, network, or 1M gate.
+>
+> The same binary adds a read-side `settlement_list_1000` phase: 1,000 settlements, 800 owned with 64 members each (51,200 member records), full list copy, JSON, checksum, and a client-side 4×256 page walk. `--smoke` pins the list/store checksum `0x34d0aa1756256e95`, JSON bytes `1_733_035`, and JSON checksum `0x34d0aa1756256e95`. On the same machine a 1-run release sample was list copy 0.38 ms, JSON 1.47 ms, checksum 3.55 ms, paged 0.14 ms. Core has no cursor API yet, so the page walk is a bench-side projection over the full slice and does not measure a server query; this is a data-scale microbenchmark, not the 1M gate.
 
 > [!info] Metropolis gate result assembler
 > `./scripts/assemble_gate_result.sh --cohort ... --save ... --streaming ... --out benchmarks/results/gate/late_metropolis_v1.json` composes recorded 1M harness JSON into the `late_metropolis_v1` schema and prints `GATE_RESULT_ASSEMBLE ... status=insufficient|complete`. Render fields (FPS, frame times, VRAM, draw calls, triangles) come only from `--render`; without one they stay `null` and the status is `insufficient`. `provenance.fields` records the source path for every value, `thresholds` copies docs/68 unchanged, and the JSON/checksum are deterministic. `status=complete` additionally requires the docs/68 §5.5 run shape (`duration_s`, `warmup_s`, `runs`, `headless` on the selected route) and the evaluator scene `late_metropolis_v1` on the documented gate route `late_flyover_v1`. A multi-route summary contributes only that route; wrapper-level metric/result/route/shape keys are discarded, and a dev `late_*` route or a wrapper with no gate route stays `insufficient` with `render.route` in `missing`. Writing a non-complete artifact under `benchmarks/results/gate/` warns because the shell evaluator picks the newest file. Hardware is copied as recorded, never relabelled as the reference rig. `--self-test` covers 18 cases (all-present, missing/partial/multi-route render, bad JSON/schema, wrong scene, no inputs, provenance, round-trip, CLI marker, missing shape fields, no gate route, malformed routes, non-gate late route, and evaluator pass). This is evidence assembly, not a pass; see [[68 - Metropolis Gate]] §8.4.
