@@ -63,6 +63,19 @@ extends Node3D
 ## `--place-ui`. With `--chat`, incoming pushed lines are always applied to the
 ## panel and never advance the script; `chat_since` remains the catch-up path.
 ##
+## `--chat-reconnect` (used with `--chat`) proves chat catch-up across a real
+## session resume. The first connection sends one chat line (default
+## `before-resume`, override with `--chat-text`), records its entry seq and the
+## session token, then disconnects. The second connection sends
+## `resume {session_id, last_tick}`; after the resumed welcome and snapshot it
+## drops its in-memory transcript and sends `chat_since {after: 0}` so the
+## server's retained log is the only catch-up source. It must return exactly the
+## one pre-resume entry, which is merged and printed as
+## `MP_CHAT_RECONNECT status=ok entries=1 last_seq=1 token_reused=true
+## checksum=...` instead of `MP_CHAT`; the normal done marker still follows.
+## The first message is never re-sent. It cannot be combined with
+## `--chat-listen` (`chat_mode_conflict`) or `--chat-script`.
+##
 ## `godot/mp_interest_render.gd` is reused for road parsing, the 64-road wire
 ## cap, and the deterministic 16-hex road checksum. Buildings are parsed
 ## defensively here (cap 64, ascending id, malformed entries skipped) with a
@@ -70,9 +83,11 @@ extends Node3D
 ## `MultiMesh`, so the smoke asserts CPU-side transform mirrors, never the
 ## GPU-side copies.
 ##
-## Reconnect/resume is deliberately out of scope: `godot/mp_client.gd`
-## (`--reconnect`) already covers the resume wire path, and this scene is a
-## one-shot render probe. It does not fake or replay authoritative state.
+## Generic reconnect/resume stays out of scope: `godot/mp_client.gd`
+## (`--reconnect`) covers the resume wire path, and this scene is a one-shot
+## render probe. `--chat-reconnect` only resumes so it can prove that a chat
+## line sent before the disconnect is recovered from the server log; it does
+## not fake or replay authoritative world state.
 ##
 ## Run:
 ##   godot --path godot res://mp_world_client.tscn -- --port 47015
@@ -112,6 +127,12 @@ enum Phase {
 	PLACE_SENT,
 	CHAT_ACTIVE,
 	CHAT_LISTEN,
+	CHAT_RECONNECT_WAIT_SENT,
+	CHAT_RECONNECT_WAIT_DISCONNECT,
+	CHAT_RECONNECT_CONNECTING,
+	CHAT_RESUME_WELCOME_WAIT,
+	CHAT_RESUME_SNAPSHOT_WAIT,
+	CHAT_RECONNECT_CATCHUP_WAIT,
 	DISCONNECT_SENT,
 }
 
@@ -190,6 +211,9 @@ const UI_MAX_ACTIONS := 256
 # Opt-in chat (`--chat`). Pipe-separated actions: `say:<text>` or `poll`.
 # Text is validated through the chat panel's server-mirrored rules.
 const DEFAULT_CHAT_SCRIPT := "say:hello|poll|say:world"
+# `--chat-reconnect` sends exactly one line before the resume. The value is
+# validated through the same panel `draft` rules as a scripted `say`.
+const DEFAULT_CHAT_RECONNECT_TEXT := "before-resume"
 const CHAT_MAX_ACTIONS := 64
 const CHAT_LAYER := 2
 const CHAT_MARGIN := 12.0
@@ -313,9 +337,13 @@ var _ui_reject_markers: Array = []
 # Inert without either flag.
 var _chat_enabled := false
 var _chat_listen := false
+var _chat_reconnect := false
 var _chat_expect := ""
 var _chat_script_given := false
 var _chat_script := DEFAULT_CHAT_SCRIPT
+var _chat_reconnect_text := DEFAULT_CHAT_RECONNECT_TEXT
+var _chat_reconnect_first_seq := 0
+var _chat_reconnect_token_reused := false
 var _chat_actions: Array = []
 var _chat_action_index := 0
 var _chat_awaiting := ""
@@ -349,10 +377,12 @@ func _ready() -> void:
 	_place_ui_script = _arg(args, "--place-ui-script", "")
 
 	_chat_listen = args.has("--chat-listen")
+	_chat_reconnect = args.has("--chat-reconnect")
 	_chat_expect = _arg(args, "--chat-expect", "")
 	_chat_script_given = args.has("--chat-script")
-	_chat_enabled = args.has("--chat") or _chat_listen
+	_chat_enabled = args.has("--chat") or _chat_listen or _chat_reconnect
 	_chat_script = _arg(args, "--chat-script", DEFAULT_CHAT_SCRIPT)
+	_chat_reconnect_text = _arg(args, "--chat-text", DEFAULT_CHAT_RECONNECT_TEXT)
 
 	_container = Node3D.new()
 	_container.name = "WorldClientRoot"
@@ -472,6 +502,28 @@ func _parse_place_ui_script(text: String) -> Dictionary:
 ## zero-view step those flows depend on. Listener mode requires an expected
 ## text and rejects the scripted/placement combinations it cannot run.
 func _prepare_chat() -> bool:
+	if _chat_reconnect and _chat_listen:
+		_fail("chat_mode_conflict")
+		return false
+	if _chat_reconnect:
+		if _place_ui or not _place_hash.is_empty():
+			_fail("chat_conflict")
+			return false
+		if _chat_script_given:
+			_fail("chat_reconnect_script")
+			return false
+		_chat_panel = ChatScene.instantiate()
+		var reconnect_result: Dictionary = _chat_panel.draft(_chat_reconnect_text)
+		if not bool(reconnect_result.get("ok", false)):
+			_fail("chat_reconnect_text_invalid")
+			return false
+		_chat_reconnect_text = str(
+			reconnect_result.get("command", {}).get("text", "")
+		)
+		_chat_panel.command_issued.connect(_on_chat_command)
+		if not _smoke and DisplayServer.get_name() != "headless":
+			_mount_chat_panel()
+		return true
 	if _chat_listen:
 		if _place_ui or not _place_hash.is_empty() or _chat_script_given:
 			_fail("chat_listen_conflict")
@@ -566,18 +618,21 @@ func _process(_delta: float) -> void:
 		return
 
 	_peer.poll()
-	if _phase == Phase.CONNECTING:
+	if _phase == Phase.CONNECTING or _phase == Phase.CHAT_RECONNECT_CONNECTING:
+		var first := _phase == Phase.CONNECTING
 		match _peer.get_status():
 			StreamPeerTCP.STATUS_CONNECTED:
 				_on_connected()
 			StreamPeerTCP.STATUS_ERROR:
-				_fail("connect_failed")
+				_fail("connect_failed" if first else "chat_reconnect_failed")
 			StreamPeerTCP.STATUS_NONE:
-				_fail("connect_lost")
+				_fail("connect_lost" if first else "chat_reconnect_lost")
 		return
 
 	_drain()
-	if _finished:
+	if _finished or _phase == Phase.CHAT_RECONNECT_CONNECTING:
+		# The first-session goodbye already replaced the peer; the next poll
+		# connects the resume socket.
 		return
 	if _peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:
 		# Read the goodbye or final reject before treating FIN as a failure.
@@ -589,6 +644,17 @@ func _process(_delta: float) -> void:
 				_fail("connection_lost_%s" % _phase_name())
 
 func _on_connected() -> void:
+	if _phase == Phase.CHAT_RECONNECT_CONNECTING:
+		_set_status("Reconnected; resuming for tick %d." % _last_tick)
+		if not _send({
+			"type": "resume",
+			"session_id": _session_token,
+			"last_tick": _last_tick,
+		}):
+			return
+		_phase = Phase.CHAT_RESUME_WELCOME_WAIT
+		_arm_deadline(_timeout_ms)
+		return
 	_set_status("Connected; sending hello.")
 	if not _send({
 		"type": "hello",
@@ -657,6 +723,9 @@ func _handle_message(message: Dictionary) -> void:
 			_fail("unexpected_message_%s" % (tag if tag != "" else "missing_type"))
 
 func _on_welcome(message: Dictionary) -> void:
+	if _phase == Phase.CHAT_RESUME_WELCOME_WAIT:
+		_on_chat_resume_welcome(message)
+		return
 	if _phase != Phase.HELLO_SENT:
 		_fail("welcome_in_%s" % _phase_name())
 		return
@@ -725,6 +794,23 @@ func _on_snapshot(message: Dictionary) -> void:
 	var checksum := str(message.get("checksum", ""))
 	if tick < 0 or population < 1 or not _is_hex16(checksum):
 		_fail("snapshot_fields")
+		return
+
+	if _phase == Phase.CHAT_RESUME_SNAPSHOT_WAIT:
+		if tick < _last_tick:
+			_fail("chat_resume_snapshot_tick_%d" % tick)
+			return
+		_store_snapshot(tick, population, balance, checksum)
+		# `after: 0` is deliberate: the chat seq is fresh and starts at 1, so
+		# asking for everything avoids guessing whether the pre-resume line is
+		# above or below a resume checkpoint. The handler asserts the returned
+		# set holds exactly the one recorded pre-resume entry.
+		if not _send({"type": "chat_since", "after": 0}):
+			return
+		_chat_awaiting = "log"
+		_phase = Phase.CHAT_RECONNECT_CATCHUP_WAIT
+		_set_status("Resumed at tick %d; catching up chat." % tick)
+		_arm_deadline(_timeout_ms)
 		return
 
 	if _phase == Phase.ROAD_SENT:
@@ -876,7 +962,10 @@ func _on_interest_view(message: Dictionary) -> void:
 			_ui_begin()
 			return
 		if _chat_enabled:
-			_chat_begin()
+			if _chat_reconnect:
+				_chat_reconnect_begin()
+			else:
+				_chat_begin()
 			return
 		if _smoke:
 			_set_status("Main view rendered; probing the zero-viewport case.")
@@ -1002,6 +1091,9 @@ func _on_reject(message: Dictionary) -> void:
 	_fail("reject_%s_code=%s" % [_phase_name(), str(message.get("code", "missing"))])
 
 func _on_goodbye() -> void:
+	if _phase == Phase.CHAT_RECONNECT_WAIT_DISCONNECT:
+		_start_chat_resume()
+		return
 	if _phase != Phase.DISCONNECT_SENT:
 		_fail("goodbye_in_%s" % _phase_name())
 		return
@@ -1017,7 +1109,18 @@ func _on_goodbye() -> void:
 		):
 			_fail("chat_unread_in_active")
 			return
-		_chat_marker = _chat_marker_text()
+		if _chat_reconnect:
+			if (
+				int(active_snapshot.get("line_count", 0)) != 1
+				or int(active_snapshot.get("last_seq", 0))
+				!= _chat_reconnect_first_seq
+				or not _chat_reconnect_token_reused
+			):
+				_fail("chat_reconnect_incomplete")
+				return
+			_chat_marker = _chat_reconnect_marker_text()
+		else:
+			_chat_marker = _chat_marker_text()
 		print(_chat_marker)
 	_finish_ok()
 
@@ -1117,6 +1220,123 @@ func _chat_begin() -> void:
 	_arm_deadline(_timeout_ms)
 	_set_status("Chat connected; polling the transcript.")
 
+## First connection of `--chat-reconnect`: send the one line that must survive
+## the disconnect, then wait for its authoritative `chat_sent`.
+func _chat_reconnect_begin() -> void:
+	if not _send({"type": "chat", "text": _chat_reconnect_text}):
+		return
+	_chat_awaiting = "sent"
+	_phase = Phase.CHAT_RECONNECT_WAIT_SENT
+	_set_chat_unread(0)
+	_arm_deadline(_timeout_ms)
+	_set_status("Chat reconnect: sending the pre-resume line.")
+
+## Open the resume socket after the first session closed cleanly. The local
+## transcript is dropped on purpose: a resumed client cannot assume it still
+## has the lines it missed, so `chat_since` must refill them from the server.
+func _start_chat_resume() -> void:
+	if (
+		_session_token.is_empty()
+		or _last_tick < 0
+		or _chat_reconnect_first_seq < 1
+	):
+		_fail("chat_reconnect_state")
+		return
+	_chat_panel.set_log([])
+	_set_chat_unread(0)
+	if _peer != null:
+		_peer.disconnect_from_host()
+	_peer = StreamPeerTCP.new()
+	_rx = PackedByteArray()
+	var error := _peer.connect_to_host(_host, _port)
+	if error != OK:
+		_fail("chat_reconnect_start_%s" % error_string(error))
+		return
+	_phase = Phase.CHAT_RECONNECT_CONNECTING
+	_arm_deadline(CONNECT_TIMEOUT_MS)
+	_set_status("Reconnecting to resume session %s." % _session_id)
+
+## The resumed welcome must carry the same session and token, so the marker's
+## `token_reused=true` is checked against the token recorded before disconnect.
+func _on_chat_resume_welcome(message: Dictionary) -> void:
+	if not bool(message.get("resumed", false)):
+		_fail("chat_resume_not_resumed")
+		return
+	var protocol_version := int(message.get("protocol_version", -1))
+	if protocol_version != PROTOCOL_VERSION:
+		_fail("chat_resume_protocol_version_%d" % protocol_version)
+		return
+	if str(message.get("session_id", "")) != _session_id:
+		_fail("chat_resume_session_id")
+		return
+	if str(message.get("session_token", "")) != _session_token:
+		_fail("chat_resume_session_token")
+		return
+	var tick := int(message.get("tick", -1))
+	if tick < _last_tick:
+		_fail("chat_resume_welcome_tick_%d" % tick)
+		return
+	_chat_reconnect_token_reused = true
+	_phase = Phase.CHAT_RESUME_SNAPSHOT_WAIT
+	_set_status("Session resumed at tick %d; awaiting the snapshot." % tick)
+	_arm_deadline(_timeout_ms)
+
+## The resumed session asks for the whole retained log (`after: 0`). On a fresh
+## server the log holds exactly the one pre-resume line, so both the count and
+## the seq are asserted here; a missing or repeated line fails before the marker.
+func _on_chat_reconnect_log(message: Dictionary) -> void:
+	if _chat_awaiting != "log":
+		_fail("chat_log_in_%s" % _phase_name())
+		return
+	var entries_raw: Variant = message.get("entries", null)
+	if typeof(entries_raw) != TYPE_ARRAY:
+		_fail("chat_log_entries")
+		return
+	var entries: Array = entries_raw
+	if entries.size() != 1:
+		_fail("chat_reconnect_entries_%d" % entries.size())
+		return
+	var entry_raw: Variant = entries[0]
+	if typeof(entry_raw) != TYPE_DICTIONARY:
+		_fail("chat_reconnect_entry")
+		return
+	var entry: Dictionary = entry_raw
+	if int(entry.get("seq", 0)) != _chat_reconnect_first_seq:
+		_fail("chat_reconnect_seq_%d" % int(entry.get("seq", 0)))
+		return
+	if (
+		str(entry.get("player", "")) != _player_name
+		or str(entry.get("text", "")) != _chat_reconnect_text
+	):
+		_fail("chat_reconnect_entry_fields")
+		return
+	_chat_panel.apply_chat_log(message)
+	if str(_chat_panel.snapshot().get("error_code", "")) != "":
+		_fail("chat_reconnect_log_invalid")
+		return
+	_chat_awaiting = ""
+	_set_chat_unread(0)
+	_refresh_hud()
+	_set_status("Chat catch-up merged; disconnecting.")
+	if not _send({"type": "disconnect"}):
+		return
+	_phase = Phase.DISCONNECT_SENT
+	_arm_deadline(_timeout_ms)
+
+## Deterministic 16-hex digest over the caught-up transcript, same line format
+## as `MP_CHAT`. `token_reused` is only true after the resumed welcome matched
+## both the recorded session id and token.
+func _chat_reconnect_marker_text() -> String:
+	var snapshot: Dictionary = _chat_panel.snapshot()
+	var lines: Array = snapshot.get("lines", [])
+	var digest := "\n".join(lines).sha256_text().substr(0, 16)
+	return "MP_CHAT_RECONNECT status=ok entries=%d last_seq=%d token_reused=%s checksum=%s" % [
+		int(snapshot.get("line_count", 0)),
+		int(snapshot.get("last_seq", 0)),
+		"true" if _chat_reconnect_token_reused else "false",
+		digest,
+	]
+
 ## Run the next scripted action, or disconnect once the script is exhausted.
 func _chat_advance() -> void:
 	if _chat_action_index >= _chat_actions.size():
@@ -1146,6 +1366,27 @@ func _chat_advance() -> void:
 func _on_chat_sent(message: Dictionary) -> void:
 	if not _chat_enabled:
 		_fail("unexpected_message_chat_sent")
+		return
+	if _chat_reconnect and _phase == Phase.CHAT_RECONNECT_WAIT_SENT:
+		if _chat_awaiting != "sent":
+			_fail("chat_sent_in_%s" % _phase_name())
+			return
+		if not _chat_panel.apply_chat_sent(message):
+			_fail("chat_reconnect_sent")
+			return
+		var first_entry: Dictionary = message.get("entry", {})
+		var first_seq := int(first_entry.get("seq", 0))
+		if first_seq < 1:
+			_fail("chat_reconnect_sent_seq_%d" % first_seq)
+			return
+		_chat_reconnect_first_seq = first_seq
+		_chat_awaiting = ""
+		_refresh_hud()
+		_set_status("Pre-resume line #%d stored; disconnecting." % first_seq)
+		if not _send({"type": "disconnect"}):
+			return
+		_phase = Phase.CHAT_RECONNECT_WAIT_DISCONNECT
+		_arm_deadline(_timeout_ms)
 		return
 	var scripted := _phase == Phase.CHAT_ACTIVE and _chat_awaiting == "sent"
 	var added: bool = _chat_panel.apply_chat_sent(message)
@@ -1204,6 +1445,9 @@ func _chat_push_match(message: Dictionary) -> void:
 func _on_chat_log(message: Dictionary) -> void:
 	if not _chat_enabled:
 		_fail("unexpected_message_chat_log")
+		return
+	if _chat_reconnect and _phase == Phase.CHAT_RECONNECT_CATCHUP_WAIT:
+		_on_chat_reconnect_log(message)
 		return
 	var listening := _chat_listen and _phase == Phase.CHAT_LISTEN and _chat_awaiting == "log"
 	if not listening and (_phase != Phase.CHAT_ACTIVE or _chat_awaiting != "log"):
@@ -2833,6 +3077,18 @@ func _phase_name() -> String:
 			return "chat_active"
 		Phase.CHAT_LISTEN:
 			return "chat_listen"
+		Phase.CHAT_RECONNECT_WAIT_SENT:
+			return "chat_reconnect_wait_sent"
+		Phase.CHAT_RECONNECT_WAIT_DISCONNECT:
+			return "chat_reconnect_wait_disconnect"
+		Phase.CHAT_RECONNECT_CONNECTING:
+			return "chat_reconnect_connecting"
+		Phase.CHAT_RESUME_WELCOME_WAIT:
+			return "chat_resume_welcome_wait"
+		Phase.CHAT_RESUME_SNAPSHOT_WAIT:
+			return "chat_resume_snapshot_wait"
+		Phase.CHAT_RECONNECT_CATCHUP_WAIT:
+			return "chat_reconnect_catchup_wait"
 		Phase.DISCONNECT_SENT:
 			return "disconnect_sent"
 		_:
