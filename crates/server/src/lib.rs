@@ -10,6 +10,8 @@ pub mod listen;
 pub mod placement;
 pub mod protocol;
 pub mod save;
+#[cfg(test)]
+mod save_crash;
 pub mod settlement_smoke;
 pub mod vote;
 pub mod world;

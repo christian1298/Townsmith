@@ -2,7 +2,7 @@
 title: Save Load Stress
 project: Townsmith
 status: active
-updated: 2026-11-23
+updated: 2026-11-26
 tags:
   - townsmith
   - testing
@@ -134,9 +134,30 @@ panicking. This is a bounded envelope fuzz, not a schema-aware generator.
 
 `crates/godot_ext/src/lib.rs` covers the path with `atomic_save_writes_and_reads_back`, `atomic_save_rotates_a_valid_previous_file`, `atomic_save_recovers_a_corrupt_primary_from_backup`, `atomic_save_rejects_two_corrupt_files`, and `atomic_save_rejects_a_missing_directory`.
 
-This keeps one backup generation and leaves store schemas and checksums unchanged. It does not add a journal, compression, multi-generation backups, or 1M bridge timing; those remain in [[68 - Metropolis Gate]] and §7 limits.
+This keeps one backup generation and leaves store schemas and checksums unchanged. It does not add a journal, compression, multi-generation backups, or 1M bridge timing; those remain in [[68 - Metropolis Gate]] and §8 limits.
 
-## 7. Limits
+## 7. Crash/restart matrix
+
+`crates/server/src/save_crash.rs` is a test-only module that drives the single-file server save through interrupted writes, corrupt primaries, backups, and repeated restarts. Every case uses a unique temporary directory, the fixed `LOOPBACK_SEED`, and no wall-clock reads.
+
+| Case | Result |
+|---|---|
+| Valid primary | Loads without the backup and reports `recovered_from_backup = false`. |
+| Corrupt primary plus a valid `.bak` | Loads `.bak` and reports `recovered_from_backup = true`. |
+| Both files unusable, or an unusable primary with no backup | `save.corrupt`; `code()` stays a static string, while `Display` carries the primary path and both failure reasons. |
+| Interrupted `.tmp` holding a valid, newer document | Ignored by both primary load and backup recovery; the previous primary and `.bak` still load. |
+| Save over an existing primary | New bytes replace the primary and the previous valid primary rotates to `.bak`; repeated saves keep exactly one backup generation. |
+| Three restarts with players, one owned settlement (member plus tax), placements, and construction | Stores, checksum, player/placement `next_id`, and settlement `membership_revision` are preserved, and re-save bytes match the first normalized save. |
+| Foreign-seed players, settlements, or placements | `save.seed_mismatch` before a world is built; the caller's document remains untouched. |
+| Unknown top-level or optional-store fields | Ignored on load and stripped on re-save. |
+| Legacy v1 JSON without the optional stores | Loads, and a no-op file save is byte-identical with no `.bak`. |
+| Malformed, truncated, or non-UTF-8 primary with no backup | The file loader reports `save.corrupt`; direct parsing reports `save.invalid_json`; the file is left untouched. |
+| Directory at the save path | Load reports `save.corrupt`; save reports `save.io`; no temp file remains. |
+| Missing primary and backup | `save.not_found`. |
+
+No error `code()` embeds a path. Absolute paths appear only in `Display` for `save.not_found` and `save.corrupt`, as before. The matrix is test-only and changes no production save behavior.
+
+## 8. Limits
 
 - Core stores only; it does not exercise the Godot `world_save`/`world_load` wrapper or `VarDictionary` payloads. Bridge atomic-write/`.bak` recovery is covered by `godot_ext` unit tests.
 - Terrain deltas are covered as a core encoded blob. The Godot bridge enforces `MAX_WORLD_SAVE_BYTES` (64 MiB); the core harness does not exercise that envelope.
@@ -147,7 +168,7 @@ This keeps one backup generation and leaves store schemas and checksums unchange
 - Named identities cap at 4,096, so above 409 residents `named < population` is expected.
 - Timing is a single-machine measurement, not a gate.
 
-## 8. Next
+## 9. Next
 
 The full-world 1M save/load harness is `cargo run --release -p townsmith-bench --bin save_1m`; see [[68 - Metropolis Gate]] §7.4 for the measured 182.8 MB / 232.5 ms save / 694.7 ms load envelope. It includes all 13 core stores and terrain deltas; Godot envelope and compression overhead remain out; bridge atomic-write/`.bak` recovery is covered by unit tests.
 
