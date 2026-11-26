@@ -203,6 +203,27 @@ fn select_content_registry_ids(
     }
 }
 
+/// Resolve a manifest and its selected ids without touching a world.
+///
+/// This is the shared parsing/selection path for `--listen` and
+/// `--check-content-registry`, so both modes print the same summary for the
+/// same inputs. The returned ids are already normalized by
+/// [`ContentRegistryManifest::select`] / [`ContentRegistryManifest::implicit_ids`].
+fn plan_content_registry(
+    path: &Path,
+    requested: Option<&str>,
+) -> Result<(Vec<String>, ContentRegistryReport), ContentRegistryStartupError> {
+    let manifest = read_content_registry_manifest(path)?;
+    let selected = select_content_registry_ids(&manifest, requested)?;
+    let checksum = content_registry_checksum(&manifest, &selected);
+    let report = ContentRegistryReport {
+        manifest_ids: manifest.ids.len(),
+        selected: selected.len(),
+        checksum,
+    };
+    Ok((selected, report))
+}
+
 /// Apply an opt-in D-042 manifest to a served world.
 ///
 /// This is process configuration: it reads one operator-supplied file, selects
@@ -213,18 +234,46 @@ fn apply_content_registry(
     path: &Path,
     requested: Option<&str>,
 ) -> Result<ContentRegistryReport, ContentRegistryStartupError> {
-    let manifest = read_content_registry_manifest(path)?;
-    let selected = select_content_registry_ids(&manifest, requested)?;
+    let (selected, report) = plan_content_registry(path, requested)?;
     let ids: Vec<&str> = selected.iter().map(String::as_str).collect();
     world
         .set_active_content_ids(&ids)
         .map_err(|rejection| ContentRegistryStartupError::new(rejection.code, rejection.message))?;
-    let checksum = content_registry_checksum(&manifest, &selected);
-    Ok(ContentRegistryReport {
-        manifest_ids: manifest.ids.len(),
-        selected: selected.len(),
-        checksum,
-    })
+    Ok(report)
+}
+
+/// Validate a manifest/selection without starting the server.
+///
+/// Parses the same `--content-registry` / `--content-ids` arguments as the
+/// listen path, prints the same `SERVER_CONTENT_REGISTRY` and `SERVER_CONTENT`
+/// lines, and exits 0. This mode never binds a socket, loads a save, or creates
+/// a world; `--listen`, `--once`, and `--save` are deliberately ignored so one
+/// argument set can be checked in CI and then reused to start the server.
+fn run_content_registry_check(args: &[String]) -> ! {
+    let Some(raw_path) = content_registry_arg(args) else {
+        eprintln!(
+            "SERVER_CONTENT_REGISTRY status=error code=content.registry_required \
+             error=--check-content-registry requires --content-registry PATH"
+        );
+        std::process::exit(2);
+    };
+    match plan_content_registry(Path::new(&raw_path), content_ids_arg(args).as_deref()) {
+        Ok((selected, report)) => {
+            println!(
+                "SERVER_CONTENT_REGISTRY status=ok path={} ids={} selected={} checksum={}",
+                raw_path, report.manifest_ids, report.selected, report.checksum
+            );
+            println!("SERVER_CONTENT status=ok ids={}", selected.join(","));
+        }
+        Err(error) => {
+            eprintln!(
+                "SERVER_CONTENT_REGISTRY status=error code={} error={}",
+                error.code, error.message
+            );
+            std::process::exit(2);
+        }
+    }
+    std::process::exit(0)
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -279,7 +328,14 @@ fn print_usage() {
             "\n",
             "Usage:\n",
             "  townsmith-server --listen PORT [options]\n",
+            "  townsmith-server --check-content-registry --content-registry PATH [--content-ids IDS]\n",
             "  townsmith-server --loopback-smoke | --placement-smoke | --resume-smoke\n",
+            "\n",
+            "Content check mode:\n",
+            "  --check-content-registry   Validate the manifest/selection, print\n",
+            "                             SERVER_CONTENT_REGISTRY and SERVER_CONTENT, exit 0\n",
+            "                             Never binds, loads a save, or creates a world;\n",
+            "                             ignores --listen, --once, and --save\n",
             "\n",
             "Listen options:\n",
             "  --bind ADDRESS             Bind address (default 127.0.0.1)\n",
@@ -502,6 +558,11 @@ fn main() {
             }
         }
         return;
+    }
+
+    if has_flag("--check-content-registry") {
+        let args: Vec<String> = std::env::args().collect();
+        run_content_registry_check(&args);
     }
 
     if let Some(port) = arg_value("--listen") {
