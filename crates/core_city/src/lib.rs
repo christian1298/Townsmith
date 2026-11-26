@@ -865,6 +865,9 @@ impl Fnv1a {
 }
 
 #[cfg(test)]
+mod content_registry_faults;
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 

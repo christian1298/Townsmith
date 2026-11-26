@@ -236,6 +236,9 @@ Deterministic:
 - Fixed manifest and package fixture; two runs produce the same registry checksum and the same rejection payload.
 - Loopback hello with `--content-hash` still matches or rejects exactly as before.
 
+> [!note] Malformed-manifest corpus
+> `crates/core_city/src/content_registry_faults.rs` is a test-only module (registered in `lib.rs`) holding a deterministic corpus of 41 tests over 180+ input documents. It covers empty/whitespace/truncated/trailing JSON, duplicate object keys, unknown fields at depth, wrong top-level types and nulls, BOM/lone-surrogate/raw-control strings, every `format_version`/ID/namespace/kind/checksum fault, duplicate and cross-kind claims, the 256-entry and 1 MiB boundaries, and `select`/`provides` ordering and ambiguity. Every rejection asserts the stable code and fails on a panic; valid cases pin base-first sorted IDs and reproducible checksum/serialization output. Run with `cargo test -p core_city content_registry_faults`.
+
 ## 11. Open questions
 
 | ID | Question | Recommendation |
