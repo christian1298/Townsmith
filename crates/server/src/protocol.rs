@@ -196,6 +196,11 @@ pub mod codes {
     /// A `tag` or `role` filter is empty, too long, or not lowercase ASCII.
     pub const AUDIT_FILTER_INVALID: &str = "audit.filter_invalid";
 
+    // Server status read. `unavailable` is specific to the transport-only
+    // session, which keeps no authoritative world to report on.
+    /// Server status requires the authoritative executor.
+    pub const STATUS_UNAVAILABLE: &str = "status.unavailable";
+
     // Advisory blueprint edit locks (v0). `unavailable` is specific to the
     // transport-only session, which keeps no lock table or player identity.
     /// Blueprint locks require the authoritative executor.
@@ -403,6 +408,13 @@ pub enum ClientCommand {
         #[serde(default)]
         limit: Option<u32>,
     },
+    /// Read-only authoritative status summary (Viewer and above).
+    ///
+    /// Reports the current tick, treasury, store and roster counts, and the
+    /// world checksum. It never advances the tick, mutates a store, or changes
+    /// the world checksum. Advisory blueprint locks are lazily expired before
+    /// counting, so `locks` matches `blueprint_locks` without being saved.
+    ServerStatus,
     /// Invite a player to a settlement (D-033).
     ///
     /// The actor needs the `members` permission via the owner or manager role.
@@ -568,6 +580,7 @@ impl ClientCommand {
             ClientCommand::BlueprintUnlock { .. } => "blueprint_unlock",
             ClientCommand::BlueprintLocks => "blueprint_locks",
             ClientCommand::AuditLog { .. } => "audit_log",
+            ClientCommand::ServerStatus => "server_status",
             ClientCommand::Disconnect => "disconnect",
         }
     }
@@ -837,6 +850,38 @@ pub enum ServerMessage {
         /// Excluded from `checksum`; fetch retained lines with `chat_since`.
         #[serde(default)]
         chat_seq: u64,
+    },
+    /// Read-only authoritative server status for connected clients.
+    ///
+    /// Sent in answer to `server_status`. `checksum` is the world checksum at
+    /// `tick`; the read does not advance the tick, mutate a simulation store,
+    /// or change that checksum. Advisory blueprint locks are lazily expired
+    /// before counting (they are excluded from the world checksum and are not
+    /// saved), so `locks` matches `blueprint_locks`. Counts are authoritative
+    /// store/roster sizes, not interest-viewport figures.
+    ServerStatus {
+        /// Authoritative tick the status was read at (never advanced).
+        tick: u64,
+        /// Population used by the economy tick.
+        population: u32,
+        /// Treasury in the same units as `snapshot.balance`.
+        balance: i64,
+        /// Authoritative road segments.
+        roads: u32,
+        /// Completed buildings.
+        buildings: u32,
+        /// Stored settlements; 0 when the world has no settlement layer.
+        settlements: u32,
+        /// Stored blueprint placements; 0 when the world has no placement store.
+        placements: u32,
+        /// Players currently online in this process.
+        online: u32,
+        /// Authoritative chat sequence watermark.
+        chat_seq: u64,
+        /// Live advisory blueprint locks after lazy expiry.
+        locks: u32,
+        /// World checksum at `tick`.
+        checksum: String,
     },
     /// Bounded road and building details for the current interest viewport.
     ///
@@ -1169,6 +1214,7 @@ pub fn decode_client_command(payload: &[u8]) -> Result<ClientCommand, Rejection>
         "blueprint_unlock",
         "blueprint_locks",
         "audit_log",
+        "server_status",
         "disconnect",
     ];
     if !KNOWN_TAGS.contains(&tag) {
@@ -1601,6 +1647,10 @@ impl Session {
             ClientCommand::AuditLog { .. } => reject(
                 codes::AUDIT_UNAVAILABLE,
                 "audit queries require the authoritative executor, not the transport-only session",
+            ),
+            ClientCommand::ServerStatus => reject(
+                codes::STATUS_UNAVAILABLE,
+                "server status requires the authoritative executor, not the transport-only session",
             ),
             ClientCommand::BlueprintLock { .. }
             | ClientCommand::BlueprintUnlock { .. }
@@ -2479,6 +2529,32 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ServerMessage>(&json).expect("decode"),
             message
+        );
+    }
+
+    #[test]
+    fn server_status_decodes_and_requires_only_viewer() {
+        let decoded =
+            decode_client_command(br#"{"type":"server_status"}"#).expect("server_status decodes");
+        assert_eq!(decoded, ClientCommand::ServerStatus);
+        assert_eq!(decoded.tag(), "server_status");
+        assert_eq!(
+            crate::world::ClientRole::required_role_for(&decoded),
+            crate::world::ClientRole::Viewer,
+            "status is a Viewer read, not a Mayor/Admin command"
+        );
+    }
+
+    #[test]
+    fn transport_session_rejects_server_status_as_unavailable() {
+        let mut session = Session::new(LOOPBACK_SEED);
+        assert!(matches!(
+            session.handle(hello()).as_slice(),
+            [ServerMessage::Welcome { .. }]
+        ));
+        expect_reject(
+            &session.handle(ClientCommand::ServerStatus),
+            codes::STATUS_UNAVAILABLE,
         );
     }
 

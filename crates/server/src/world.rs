@@ -324,9 +324,8 @@ impl ClientRole {
     pub fn required_role(tag: &str) -> Self {
         match tag {
             "hello" | "resume" | "ping" | "chat" | "chat_since" | "disconnect" | "time_vote"
-            | "set_interest" | "settlement_list" | "settlement_at" | "blueprint_locks" => {
-                Self::Viewer
-            }
+            | "set_interest" | "settlement_list" | "settlement_at" | "blueprint_locks"
+            | "server_status" => Self::Viewer,
             "set_tax"
             | "place_road"
             | "place_blueprint"
@@ -1954,6 +1953,7 @@ impl ServerWorld {
                 accepted,
                 role,
             } => self.apply_audit_log(*limit, tag.as_deref(), *accepted, role.as_deref()),
+            ClientCommand::ServerStatus => self.apply_server_status(),
             ClientCommand::SetInterest {
                 center_x,
                 center_z,
@@ -2769,6 +2769,32 @@ impl ServerWorld {
         self.blueprint_locks
             .retain(|_, lock| now < lock.expires_tick);
         before - self.blueprint_locks.len()
+    }
+
+    fn apply_server_status(&mut self) -> (Vec<ServerMessage>, &'static str) {
+        // Lazy lock expiry is the only mutation. Locks are in-memory advisory
+        // state, excluded from the world checksum and never saved, so dropping
+        // expired entries keeps the reported count honest without advancing
+        // the tick or moving any simulation store.
+        self.expire_blueprint_locks();
+        let count = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
+        accepted(ServerMessage::ServerStatus {
+            tick: self.tick,
+            population: self.population,
+            balance: self.balance_units(),
+            roads: count(self.roads.roads.len()),
+            buildings: self.buildings,
+            settlements: count(self.settlements.as_ref().map_or(0, SettlementStore::count)),
+            placements: count(
+                self.placements
+                    .as_ref()
+                    .map_or(0, |store| store.placements.len()),
+            ),
+            online: count(self.online.len()),
+            chat_seq: self.chat_seq,
+            locks: count(self.blueprint_locks.len()),
+            checksum: self.checksum(),
+        })
     }
 
     fn apply_blueprint_lock(&mut self, hash: &str) -> (Vec<ServerMessage>, &'static str) {
@@ -6865,6 +6891,159 @@ mod tests {
         match message {
             ServerMessage::Reject { code, .. } => code,
             other => panic!("expected a rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_status_reports_empty_stores_and_is_repeatable() {
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Viewer);
+        assert!(matches!(
+            world.apply(&hello()),
+            ServerMessage::Welcome { .. }
+        ));
+        let expected_population = world.population;
+        let expected_buildings = world.buildings;
+        let expected_balance = world.balance_units();
+        let expected_checksum = world.checksum();
+
+        let first = world.apply(&ClientCommand::ServerStatus);
+        let second = world.apply(&ClientCommand::ServerStatus);
+        assert_eq!(first, second, "a status read is repeatable");
+
+        match first {
+            ServerMessage::ServerStatus {
+                tick,
+                population,
+                balance,
+                roads,
+                buildings,
+                settlements,
+                placements,
+                online,
+                chat_seq,
+                locks,
+                checksum,
+            } => {
+                assert_eq!(tick, 0, "status does not advance the tick");
+                assert_eq!(population, expected_population);
+                assert_eq!(balance, expected_balance);
+                assert_eq!(roads, 0);
+                assert_eq!(buildings, expected_buildings);
+                assert_eq!(settlements, 0);
+                assert_eq!(placements, 0);
+                assert_eq!(online, 1, "the sender is online");
+                assert_eq!(chat_seq, 0);
+                assert_eq!(locks, 0);
+                assert_eq!(checksum, expected_checksum);
+            }
+            other => panic!("expected server status, got {other:?}"),
+        }
+        assert_eq!(world.tick, 0);
+        assert_eq!(world.checksum(), expected_checksum);
+    }
+
+    #[test]
+    fn server_status_counts_populated_world() {
+        let mut world = world_with_placements(vec![
+            interest_placement(1, 0.0, 0.0, [4.0, 4.0]),
+            interest_placement(2, 20.0, 0.0, [4.0, 4.0]),
+        ]);
+        for (start, end) in [([0, 0], [16, 0]), ([0, 4], [16, 4])] {
+            assert!(matches!(
+                world.apply(&ClientCommand::PlaceRoad { start, end }),
+                ServerMessage::Snapshot { .. }
+            ));
+        }
+        let player = world.player_id().expect("hello assigns a player id");
+        seed_settlement(&mut world, Some(player), "Harbour", [0, 0], 64);
+        assert!(matches!(
+            world.apply(&ClientCommand::Chat {
+                text: "status".to_string(),
+            }),
+            ServerMessage::ChatSent { .. }
+        ));
+        assert!(matches!(
+            world.apply(&lock_command(&"ab".repeat(32))),
+            ServerMessage::BlueprintLockResult { .. }
+        ));
+
+        match world.apply(&ClientCommand::ServerStatus) {
+            ServerMessage::ServerStatus {
+                roads,
+                buildings,
+                settlements,
+                placements,
+                online,
+                chat_seq,
+                locks,
+                ..
+            } => {
+                assert_eq!(roads, 2);
+                assert_eq!(buildings, world.buildings);
+                assert_eq!(settlements, 1);
+                assert_eq!(placements, 2);
+                assert_eq!(online, 1);
+                assert_eq!(chat_seq, 1);
+                assert_eq!(locks, 1);
+            }
+            other => panic!("expected server status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_status_expires_locks_without_moving_tick_or_checksum() {
+        let mut world = world_with_hello();
+        assert!(matches!(
+            world.apply(&lock_command(&"cd".repeat(32))),
+            ServerMessage::BlueprintLockResult { locks_count: 1, .. }
+        ));
+        let expires_tick = world
+            .blueprint_locks
+            .values()
+            .next()
+            .expect("lock exists")
+            .expires_tick;
+        world.tick = expires_tick;
+        let checksum_at_expiry = world.checksum();
+
+        match world.apply(&ClientCommand::ServerStatus) {
+            ServerMessage::ServerStatus {
+                tick,
+                locks,
+                checksum,
+                ..
+            } => {
+                assert_eq!(tick, expires_tick, "status reports the expiry tick");
+                assert_eq!(locks, 0, "the expired lock is dropped before counting");
+                assert_eq!(checksum, checksum_at_expiry);
+            }
+            other => panic!("expected server status, got {other:?}"),
+        }
+        assert_eq!(world.tick, expires_tick);
+        assert_eq!(world.checksum(), checksum_at_expiry);
+        assert!(world.blueprint_locks.is_empty());
+    }
+
+    #[test]
+    fn server_status_counts_two_online_sessions() {
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Viewer);
+        let alice = world.open_connection();
+        first_response(world.apply_session(alice, &hello_named("alice")));
+        let bob = world.open_connection();
+        first_response(world.apply_session(bob, &hello_named("bob")));
+
+        match first_response(world.apply_session(alice, &ClientCommand::ServerStatus)) {
+            ServerMessage::ServerStatus {
+                online,
+                tick,
+                roads,
+                ..
+            } => {
+                assert_eq!(online, 2);
+                assert_eq!(tick, 0);
+                assert_eq!(roads, 0);
+            }
+            other => panic!("expected server status, got {other:?}"),
         }
     }
 
