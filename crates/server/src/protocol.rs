@@ -3024,6 +3024,461 @@ mod tests {
         assert_eq!(first, second);
     }
 
+    // --- Malformed-frame corpus -------------------------------------------
+    //
+    // Deterministic, in-memory cases only: no sockets, no randomness, no
+    // proptest. The corpus covers every truncation of a valid frame, every
+    // one-byte mutation of that frame, the length-prefix boundaries, and the
+    // decode-time payload classes. If a production change makes the frame
+    // layout or an error code drift, these tests fail with the exact case.
+
+    /// Read one JSON frame as a command, keeping the reader position explicit.
+    fn read_command(bytes: &[u8]) -> Result<ClientCommand, FrameError> {
+        let mut reader = bytes;
+        read_json_frame(&mut reader)
+    }
+
+    /// Write a raw payload as one frame; the caller guarantees it fits.
+    fn framed_payload(payload: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::new();
+        write_frame(&mut frame, payload).expect("payload fits in one frame");
+        frame
+    }
+
+    /// Reader that serves one four-byte header and then reports EOF, counting
+    /// any read that would consume the claimed body.
+    #[derive(Default)]
+    struct HeaderOnlyReader {
+        header: [u8; 4],
+        offset: usize,
+        body_reads: usize,
+    }
+
+    impl HeaderOnlyReader {
+        fn new(length: u32) -> Self {
+            Self {
+                header: length.to_be_bytes(),
+                offset: 0,
+                body_reads: 0,
+            }
+        }
+    }
+
+    impl Read for HeaderOnlyReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.offset < self.header.len() {
+                let count = (self.header.len() - self.offset).min(buffer.len());
+                buffer[..count].copy_from_slice(&self.header[self.offset..self.offset + count]);
+                self.offset += count;
+                return Ok(count);
+            }
+            self.body_reads += 1;
+            Ok(0)
+        }
+    }
+
+    fn assert_bounded_frame_message(error: &FrameError) {
+        // serde's unknown-variant error lists every supported tag and is the
+        // largest fixed message in the corpus; client input is never echoed.
+        assert!(
+            error.message().len() <= 1024,
+            "frame error is unexpectedly large ({} bytes): {}",
+            error.message().len(),
+            error.message()
+        );
+    }
+
+    fn assert_bounded_rejection(rejection: &Rejection) {
+        assert!(
+            rejection.message.len() <= 1024,
+            "rejection is unexpectedly large ({} bytes)",
+            rejection.message.len()
+        );
+    }
+
+    #[test]
+    fn malformed_corpus_truncated_hello_never_decodes() {
+        let mut frame = Vec::new();
+        write_json_frame(&mut frame, &hello()).expect("hello frames");
+        let payload_len = frame.len() - 4;
+        assert!(payload_len > 8);
+
+        let mut cases = 0usize;
+        for len in 0..frame.len() {
+            let error = read_command(&frame[..len])
+                .expect_err("a truncated frame must never produce a command");
+            cases += 1;
+            assert_eq!(error.code(), codes::FRAME_TRUNCATED);
+            match (&error, len) {
+                (FrameError::Truncated { expected, actual }, 0..=3) => {
+                    assert_eq!((*expected, *actual), (4, len), "header prefix {len}");
+                }
+                (FrameError::Truncated { expected, actual }, _) => {
+                    assert_eq!(
+                        (*expected, *actual),
+                        (payload_len, len - 4),
+                        "payload prefix {len}"
+                    );
+                }
+                (other, _) => panic!("truncation {len}: expected truncation, got {other:?}"),
+            }
+            assert_bounded_frame_message(&error);
+        }
+
+        assert_eq!(cases, frame.len(), "every strict prefix is covered");
+        let decoded = read_command(&frame).expect("the complete frame decodes");
+        assert_eq!(decoded, hello());
+    }
+
+    #[test]
+    fn malformed_corpus_byte_mutations_are_typed_and_lossless() {
+        let mut original = Vec::new();
+        write_json_frame(&mut original, &hello()).expect("hello frames");
+        let payload_len = original.len() - 4;
+        assert!(payload_len > 8);
+
+        let mut framing_errors = 0usize;
+        let mut decode_errors = 0usize;
+        let mut accepted = 0usize;
+        let mut accepted_header_mutations = 0usize;
+
+        for offset in 0..original.len() {
+            for mask in [0xff_u8, 0x01_u8] {
+                let mut mutated = original.clone();
+                mutated[offset] ^= mask;
+
+                let mut reader = mutated.as_slice();
+                match read_frame(&mut reader) {
+                    Err(error) => {
+                        framing_errors += 1;
+                        assert!(
+                            matches!(
+                                error,
+                                FrameError::ZeroLength
+                                    | FrameError::Oversized { .. }
+                                    | FrameError::Truncated { .. }
+                            ),
+                            "mutation at {offset} mask {mask:#04x}: unexpected {error:?}"
+                        );
+                        assert_bounded_frame_message(&error);
+                    }
+                    Ok(payload) => match decode_json::<ClientCommand>(&payload) {
+                        Ok(command) => {
+                            accepted += 1;
+                            if offset < 4 {
+                                accepted_header_mutations += 1;
+                            }
+                            // Accepted bytes are lossless: re-encoding the
+                            // decoded command reproduces the exact payload,
+                            // and the command layer agrees.
+                            assert_eq!(
+                                encode_json(&command).expect("accepted command encodes"),
+                                payload,
+                                "mutation at {offset} mask {mask:#04x} is not lossless"
+                            );
+                            assert_eq!(
+                                decode_client_command(&payload),
+                                Ok(command),
+                                "mutation at {offset} mask {mask:#04x} decoders disagree"
+                            );
+                        }
+                        Err(error) => {
+                            decode_errors += 1;
+                            let expected = if std::str::from_utf8(&payload).is_ok() {
+                                codes::FRAME_INVALID_JSON
+                            } else {
+                                codes::FRAME_INVALID_UTF8
+                            };
+                            assert_eq!(
+                                error.code(),
+                                expected,
+                                "mutation at {offset} mask {mask:#04x}"
+                            );
+                            assert_bounded_frame_message(&error);
+
+                            // A payload that reaches the command layer must be
+                            // rejected with a typed rejection, never a panic.
+                            let rejection = decode_client_command(&payload)
+                                .expect_err("the command layer rejects a frame decode error");
+                            assert!(
+                                matches!(
+                                    rejection.code,
+                                    codes::COMMAND_INVALID_JSON
+                                        | codes::COMMAND_INVALID_FIELDS
+                                        | codes::COMMAND_UNKNOWN_TAG
+                                ),
+                                "mutation at {offset} mask {mask:#04x}: {rejection:?}"
+                            );
+                            assert_bounded_rejection(&rejection);
+                        }
+                    },
+                }
+            }
+        }
+
+        // One mask per byte, both masks for every offset.
+        assert_eq!(
+            framing_errors + decode_errors + accepted,
+            original.len() * 2
+        );
+        // A shorter claimed length can still frame, but the shortened Hello
+        // is never valid JSON; no header mutation yields a command.
+        assert_eq!(accepted_header_mutations, 0);
+        assert!(decode_errors > 0, "the corpus must include typed failures");
+        assert!(accepted > 0, "some 0x01 value mutations remain valid JSON");
+    }
+
+    #[test]
+    fn malformed_corpus_length_prefixes_reject_before_body_read() {
+        let cap = u32::try_from(MAX_FRAME_LEN).expect("cap fits u32");
+        let cases: [(u32, &str, bool); 5] = [
+            (0, codes::FRAME_ZERO_LENGTH, false),
+            (1, codes::FRAME_TRUNCATED, true),
+            (cap, codes::FRAME_TRUNCATED, true),
+            (cap + 1, codes::FRAME_OVERSIZED, false),
+            (u32::MAX, codes::FRAME_OVERSIZED, false),
+        ];
+
+        for (claimed, expected_code, reads_body) in cases {
+            let mut reader = HeaderOnlyReader::new(claimed);
+            let error = read_frame(&mut reader).expect_err("header alone cannot make a frame");
+            assert_eq!(error.code(), expected_code, "length {claimed}");
+            assert_eq!(
+                reader.body_reads > 0,
+                reads_body,
+                "length {claimed} body-read classification"
+            );
+            let len = usize::try_from(claimed).expect("usize fits the target");
+            match error {
+                FrameError::ZeroLength => {
+                    assert_eq!(error.message(), "frame payload must not be empty");
+                }
+                FrameError::Oversized { len: reported } => {
+                    assert_eq!(reported, len);
+                    assert_eq!(
+                        error.message(),
+                        format!("frame payload is {reported} bytes; maximum is {MAX_FRAME_LEN}")
+                    );
+                }
+                FrameError::Truncated { expected, actual } => {
+                    assert_eq!(expected, len);
+                    assert_eq!(actual, 0);
+                    assert_eq!(
+                        error.message(),
+                        format!("frame is truncated: expected {expected} bytes, received 0")
+                    );
+                }
+                other => panic!("length {claimed}: unexpected {other:?}"),
+            }
+        }
+
+        // The cap itself is a legal claim: the reader allocates at most
+        // MAX_FRAME_LEN and immediately observes EOF. Anything above it is
+        // rejected before a body buffer is even considered.
+        assert!(cap as usize == MAX_FRAME_LEN);
+    }
+
+    #[test]
+    fn malformed_corpus_invalid_utf8_and_deep_nesting_are_typed() {
+        let prefix = br#"{"type":"ping","nonce":1}"#;
+        let mut invalid_utf8 = prefix.to_vec();
+        invalid_utf8.push(0xff);
+        let error = read_command(&framed_payload(&invalid_utf8))
+            .expect_err("invalid UTF-8 must not decode");
+        assert_eq!(error.code(), codes::FRAME_INVALID_UTF8);
+        assert_eq!(
+            error.message(),
+            format!("frame payload is not valid UTF-8 at byte {}", prefix.len())
+        );
+        assert_bounded_frame_message(&error);
+
+        // Nesting beyond serde_json's recursion budget fails closed as a typed
+        // JSON error; it must not overflow the stack or exhaust memory.
+        let deep = format!(
+            r#"{{"type":"ping","nonce":{}{}}}"#,
+            "[".repeat(512),
+            "]".repeat(512)
+        );
+        assert!(deep.len() < MAX_FRAME_LEN);
+        let error = read_command(&framed_payload(deep.as_bytes()))
+            .expect_err("unbounded nesting must not decode");
+        assert_eq!(error.code(), codes::FRAME_INVALID_JSON);
+        assert!(
+            error.message().contains("recursion limit"),
+            "unexpected nesting error: {}",
+            error.message()
+        );
+        assert_bounded_frame_message(&error);
+        let rejection = decode_client_command(deep.as_bytes())
+            .expect_err("the command layer also bounds nesting");
+        assert_eq!(rejection.code, codes::COMMAND_INVALID_JSON);
+        assert_bounded_rejection(&rejection);
+
+        // Nesting inside the budget is accepted as JSON, then rejected by the
+        // command's field type, so the bound is not an accidental parse loss.
+        let shallow = format!(
+            r#"{{"type":"ping","nonce":{}{}}}"#,
+            "[".repeat(64),
+            "]".repeat(64)
+        );
+        let rejection =
+            decode_client_command(shallow.as_bytes()).expect_err("an array is not a u64 nonce");
+        assert_eq!(rejection.code, codes::COMMAND_INVALID_FIELDS);
+        assert_bounded_rejection(&rejection);
+    }
+
+    #[test]
+    fn malformed_corpus_one_mib_strings_are_bounded_by_the_cap() {
+        // A 1 MiB string cannot fit inside a 1 MiB JSON payload. Encoding is
+        // bounded by the message, but framing refuses it and writes nothing.
+        let huge = ClientCommand::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            content_hash: valid_hash(),
+            player_name: "x".repeat(MAX_FRAME_LEN),
+        };
+        let mut frame = Vec::new();
+        let error = write_json_frame(&mut frame, &huge).expect_err("1 MiB string cannot frame");
+        assert_eq!(error.code(), codes::FRAME_OVERSIZED);
+        match &error {
+            FrameError::Oversized { len } => assert!(*len > MAX_FRAME_LEN),
+            other => panic!("expected oversized, got {other:?}"),
+        }
+        assert_bounded_frame_message(&error);
+        assert!(
+            frame.is_empty(),
+            "write_frame must not emit a partial frame"
+        );
+
+        // The largest string that still fits the cap round-trips exactly; the
+        // reader never grows past one payload buffer.
+        let text = "x".repeat(MAX_FRAME_LEN - 64);
+        let chat = ClientCommand::Chat { text: text.clone() };
+        let mut frame = Vec::new();
+        write_json_frame(&mut frame, &chat).expect("the chat fits under the cap");
+        assert!(frame.len() <= MAX_FRAME_LEN + 4);
+        let decoded = read_command(&frame).expect("the capped frame decodes");
+        match decoded {
+            ClientCommand::Chat { text: decoded_text } => {
+                assert_eq!(decoded_text.len(), text.len());
+                assert_eq!(decoded_text, text);
+            }
+            other => panic!("expected chat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_corpus_command_fields_are_typed() {
+        // Duplicate non-tag fields are collapsed by the JSON value pass; the
+        // last occurrence wins deterministically. Pinned here so a parser or
+        // serde upgrade that changes this is a visible test failure.
+        let duplicate_nonce = decode_client_command(br#"{"type":"ping","nonce":1,"nonce":2}"#)
+            .expect("duplicate non-tag fields resolve deterministically");
+        assert_eq!(duplicate_nonce, ClientCommand::Ping { nonce: 2 });
+
+        // A duplicate tag also resolves last-wins, then normal field
+        // validation applies.
+        let duplicate_tag =
+            decode_client_command(br#"{"type":"ping","type":"hello"}"#).unwrap_err();
+        assert_eq!(duplicate_tag.code, codes::COMMAND_INVALID_FIELDS);
+        assert_bounded_rejection(&duplicate_tag);
+
+        let unknown = decode_client_command(br#"{"type":"launch_missiles"}"#).unwrap_err();
+        assert_eq!(unknown.code, codes::COMMAND_UNKNOWN_TAG);
+        assert_eq!(unknown.message, "unknown command tag `launch_missiles`");
+        assert_bounded_rejection(&unknown);
+
+        let missing = decode_client_command(br#"{"type":"ping"}"#).expect_err("nonce is required");
+        assert_eq!(missing.code, codes::COMMAND_INVALID_FIELDS);
+        assert!(
+            missing.message.contains("missing field `nonce`"),
+            "unexpected missing-field message: {}",
+            missing.message
+        );
+        assert_bounded_rejection(&missing);
+
+        let wrong_type = decode_client_command(br#"{"type":"ping","nonce":"1"}"#)
+            .expect_err("nonce must be a number");
+        assert_eq!(wrong_type.code, codes::COMMAND_INVALID_FIELDS);
+        assert!(
+            wrong_type.message.contains("invalid type"),
+            "unexpected wrong-type message: {}",
+            wrong_type.message
+        );
+        assert_bounded_rejection(&wrong_type);
+
+        // A non-object root has no string `type` field.
+        let not_an_object = decode_client_command(b"[]").expect_err("array root");
+        assert_eq!(not_an_object.code, codes::COMMAND_INVALID_FIELDS);
+        assert_bounded_rejection(&not_an_object);
+
+        // Trailing bytes survive framing (the prefix length is honest) and are
+        // rejected by the JSON decoder.
+        let trailing = framed_payload(br#"{"type":"ping","nonce":1} trailing"#);
+        let error = read_command(&trailing).expect_err("trailing bytes must not decode");
+        assert_eq!(error.code(), codes::FRAME_INVALID_JSON);
+        assert!(
+            error.message().contains("trailing characters"),
+            "unexpected trailing-bytes message: {}",
+            error.message()
+        );
+        assert_bounded_frame_message(&error);
+
+        // JSON whitespace around one value is accepted; whitespace alone is
+        // not a command.
+        let whitespace = framed_payload(b"\r\n\t {\"type\":\"ping\",\"nonce\":7}\r\n\t");
+        let decoded = read_command(&whitespace).expect("JSON whitespace is accepted");
+        assert_eq!(decoded, ClientCommand::Ping { nonce: 7 });
+        let blank = read_command(&framed_payload(b" \r\n\t ")).expect_err("blank payload");
+        assert_eq!(blank.code(), codes::FRAME_INVALID_JSON);
+        assert_bounded_frame_message(&blank);
+    }
+
+    #[test]
+    fn malformed_corpus_two_frame_stream_keeps_position() {
+        let mut first = Vec::new();
+        write_json_frame(&mut first, &hello()).expect("hello frames");
+        let second_message = ClientCommand::Ping { nonce: 0xfeed };
+        let mut second = Vec::new();
+        write_json_frame(&mut second, &second_message).expect("ping frames");
+        let second_payload_len = second.len() - 4;
+
+        let mut stream = first.clone();
+        stream.extend_from_slice(&second[..second.len() - 3]);
+        let mut reader = stream.as_slice();
+
+        let decoded: ClientCommand = read_json_frame(&mut reader).expect("first frame decodes");
+        assert_eq!(decoded, hello());
+        assert_eq!(
+            reader.len(),
+            stream.len() - first.len(),
+            "the reader stops exactly at the frame boundary"
+        );
+
+        let error = read_json_frame::<_, ClientCommand>(&mut reader)
+            .expect_err("the truncated second frame must fail");
+        match &error {
+            FrameError::Truncated { expected, actual } => {
+                assert_eq!(*expected, second_payload_len);
+                assert_eq!(*actual, second_payload_len - 3);
+            }
+            other => panic!("expected truncation, got {other:?}"),
+        }
+        assert!(reader.is_empty(), "a truncated body is consumed to EOF");
+        assert_bounded_frame_message(&error);
+
+        // The complete stream yields both commands in order.
+        let mut complete = first.clone();
+        complete.extend_from_slice(&second);
+        let mut complete_reader = complete.as_slice();
+        let first_decoded: ClientCommand =
+            read_json_frame(&mut complete_reader).expect("first decodes");
+        let second_decoded: ClientCommand =
+            read_json_frame(&mut complete_reader).expect("second decodes");
+        assert_eq!(first_decoded, hello());
+        assert_eq!(second_decoded, second_message);
+        assert!(complete_reader.is_empty());
+    }
+
     #[test]
     fn serve_connection_treats_an_empty_peer_close_as_clean() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();

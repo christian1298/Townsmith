@@ -2,7 +2,7 @@
 title: Multiplayer
 project: Townsmith
 status: proposed
-updated: 2026-11-25
+updated: 2026-11-26
 tags:
   - townsmith
   - multiplayer
@@ -624,6 +624,18 @@ Multiplayer + modding is a trust problem. The server is the authority.
 - **Outbound queue:** acceptance writes frames into a bounded 256-entry queue drained by a per-connection writer thread in FIFO order. A slow reader that fills the queue stops command reading and closes the session (`outbound.backpressure`); a closed queue closes it as `outbound.closed`; reader EOF shuts the writer down and is joined. Queued bytes are byte-identical to the inline path, accepted commands keep their order, and unread commands are never executed after backpressure.
 
 `cargo test -p townsmith-server` runs the module. Production framing, wire format, server CLI, and checksum goldens are unchanged.
+
+### Malformed-frame corpus (2026-11-26)
+
+`crates/server/src/protocol.rs` (`#[cfg(test)]`) adds a deterministic malformed-frame corpus beside the codec. Every case is in-memory: no sockets, sleeps, randomness, proptest, or new dependencies; the module runs in well under a second.
+
+- **Truncation:** all 145 strict prefixes of a framed `hello`. Header prefixes report `frame.truncated { expected: 4 }`, payload prefixes report the exact payload length, and no prefix yields a command.
+- **Byte mutations:** all 145 offsets × two masks (`0xFF`, `0x01`) = 290 cases. Framing failures are limited to the stable `frame.*` codes; payloads that still frame either decode losslessly (re-encoding reproduces the exact bytes and both decoders agree) or fail with a typed `frame.invalid_utf8`/`frame.invalid_json` plus a typed `command.*` rejection. No header mutation produces a command.
+- **Length prefixes:** `0`, `1`, `MAX_FRAME_LEN`, `MAX_FRAME_LEN + 1`, and `u32::MAX`. Zero and oversized claims are rejected before any body read; `1` and the cap are truncated after a single EOF read. Error messages are pinned and bounded.
+- **Payloads:** invalid UTF-8 (exact offset), 512-deep nesting (serde recursion limit, no stack overflow), a 1 MiB string (refused by the frame cap without a partial write), the largest string that fits, duplicate fields, unknown tag, missing field, wrong type, trailing bytes, and CRLF/tab whitespace. Rejection messages never echo more than the `MAX_ECHO_CHARS` budget for client text.
+- **Two-frame stream:** a valid frame followed by a truncated frame decodes once, fails with the exact truncated length, and leaves the reader at a deterministic position.
+
+No production change was required. Duplicate non-tag fields are currently collapsed last-wins by the `serde_json::Value` tag pass; the corpus pins that resolution (and conflicting duplicate tags still fail field validation) so a parser or serde upgrade cannot change it silently.
 
 ## 13. Open questions
 
