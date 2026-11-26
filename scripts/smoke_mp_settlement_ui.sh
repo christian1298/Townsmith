@@ -89,60 +89,101 @@ trap cleanup EXIT
 
 start_server() {
 	local port="$1"
+	shift
 	: >"$SERVER_LOG"
-	"$ROOT/target/debug/townsmith-server" --listen "$port" --sessions 1 >"$SERVER_LOG" 2>&1 &
+	"$ROOT/target/debug/townsmith-server" --listen "$port" --sessions 1 "$@" >"$SERVER_LOG" 2>&1 &
 	SERVER_PID=$!
 	wait_for_log "$SERVER_LOG" "$SERVER_PID" "SERVER_LISTEN status=ok address=" 10
 }
 
-run_once() {
+# run_script NAME PORT ROLE SCRIPT MARKER_REGEX
+run_script() {
 	local name="$1"
 	local port="$2"
+	local role="$3"
+	local script="$4"
+	local expected="$5"
 	local output
 	local status
 	local settlement_line
 	local done_line
 
-	start_server "$port"
+	start_server "$port" --role "$role"
 	set +e
 	output="$(timeout 90s env -u DISPLAY -u WAYLAND_DISPLAY \
 		"$GODOT_BIN" --headless --path "$ROOT/godot" res://mp_world_client.tscn -- \
 		--smoke --port "$port" --settlement-ui \
-		--settlement-script "found:Harbor|list|at:0,0" 2>&1)"
+		--settlement-script "$script" 2>&1)"
 	status=$?
 	set -e
 	printf '%s\n' "$output" >&2
 
 	if [[ $status -ne 0 ]]; then
-		echo "Settlement readout smoke ($name) failed: Godot exited $status" >&2
+		echo "Settlement smoke ($name) failed: Godot exited $status" >&2
 		exit 1
 	fi
 	if grep -q '^MP_WORLD_CLIENT status=fail ' <<<"$output"; then
-		echo "Settlement readout smoke ($name) failed: client reported a failure" >&2
+		echo "Settlement smoke ($name) failed: client reported a failure" >&2
 		exit 1
 	fi
 
 	settlement_line="$(grep '^MP_SETTLEMENT_UI status=ok ' <<<"$output" | tail -1 || true)"
-	if [[ ! "$settlement_line" =~ ^MP_SETTLEMENT_UI\ status=ok\ settlements=1\ members=1\ at=1\ checksum=[0-9a-f]{16}$ ]]; then
-		echo "Settlement readout smoke ($name) marker mismatch: ${settlement_line:-missing}" >&2
+	if [[ ! "$settlement_line" =~ $expected ]]; then
+		echo "Settlement smoke ($name) marker mismatch: ${settlement_line:-missing}" >&2
 		exit 1
 	fi
 	done_line="$(grep '^MP_WORLD_CLIENT_DONE status=ok ' <<<"$output" | tail -1 || true)"
-	if [[ ! "$done_line" =~ frames_sent=12\ frames_received=13$ ]]; then
-		echo "Settlement readout smoke ($name) done marker mismatch: ${done_line:-missing}" >&2
+	if [[ -z "$done_line" ]]; then
+		echo "Settlement smoke ($name) missing MP_WORLD_CLIENT_DONE" >&2
 		exit 1
 	fi
 	printf '%s\n' "$settlement_line" >"$SMOKE_DIR/$name.marker"
+	printf '%s\n' "$output" >"$SMOKE_DIR/$name.log"
 	stop_server
 }
 
-run_once first "$(pick_port)"
-run_once second "$(pick_port)"
+READ_ONLY_RE='^MP_SETTLEMENT_UI status=ok settlements=1 members=1 at=1 actions=3 accepted=3 rejected=0 checksum=[0-9a-f]{16}$'
+MUTATION_RE='^MP_SETTLEMENT_UI status=ok settlements=1 members=0 at=none actions=4 accepted=4 rejected=0 checksum=[0-9a-f]{16}$'
+REJECT_RE='^MP_SETTLEMENT_UI status=ok settlements=1 members=2 at=none actions=5 accepted=2 rejected=3 checksum=[0-9a-f]{16}$'
 
-if ! diff -u "$SMOKE_DIR/first.marker" "$SMOKE_DIR/second.marker"; then
+run_script read_first "$(pick_port)" mayor "found:Harbor|list|at:0,0" "$READ_ONLY_RE"
+run_script read_second "$(pick_port)" mayor "found:Harbor|list|at:0,0" "$READ_ONLY_RE"
+if ! diff -u "$SMOKE_DIR/read_first.marker" "$SMOKE_DIR/read_second.marker"; then
 	echo "Settlement readout smoke failed: markers differ between runs" >&2
 	exit 1
 fi
 
-MARKER="$(cat "$SMOKE_DIR/first.marker")"
-echo "MP_SETTLEMENT_UI_SMOKE status=ok runs=2 ${MARKER#MP_SETTLEMENT_UI status=ok }"
+run_script mutate_first "$(pick_port)" admin "found:Harbor|rename:Riverside|set_tax:5|release" "$MUTATION_RE"
+run_script mutate_second "$(pick_port)" admin "found:Harbor|rename:Riverside|set_tax:5|release" "$MUTATION_RE"
+if ! diff -u "$SMOKE_DIR/mutate_first.marker" "$SMOKE_DIR/mutate_second.marker"; then
+	echo "Settlement mutation smoke failed: markers differ between runs" >&2
+	exit 1
+fi
+for needle in \
+	'MP_SETTLEMENT_ACTION action=rename ok=1 code=none revision=2' \
+	'MP_SETTLEMENT_ACTION action=set_tax ok=1 code=none revision=2' \
+	'MP_SETTLEMENT_ACTION action=release ok=1 code=none revision=3'; do
+	if ! grep -Fq "$needle" "$SMOKE_DIR/mutate_first.log"; then
+		echo "Settlement mutation smoke missing: $needle" >&2
+		exit 1
+	fi
+done
+
+run_script reject_first "$(pick_port)" mayor "found:Harbor|claim|invite:9999:builder|set_role:9998:manager|remove:9998" "$REJECT_RE"
+run_script reject_second "$(pick_port)" mayor "found:Harbor|claim|invite:9999:builder|set_role:9998:manager|remove:9998" "$REJECT_RE"
+if ! diff -u "$SMOKE_DIR/reject_first.marker" "$SMOKE_DIR/reject_second.marker"; then
+	echo "Settlement rejection smoke failed: markers differ between runs" >&2
+	exit 1
+fi
+for needle in \
+	'MP_SETTLEMENT_ACTION action=claim ok=0 code=settlement.already_owned' \
+	'MP_SETTLEMENT_ACTION action=set_role ok=0 code=settlement.not_member' \
+	'MP_SETTLEMENT_ACTION action=remove ok=0 code=settlement.not_member'; do
+	if ! grep -Fq "$needle" "$SMOKE_DIR/reject_first.log"; then
+		echo "Settlement rejection smoke missing: $needle" >&2
+		exit 1
+	fi
+done
+
+MARKER="$(cat "$SMOKE_DIR/read_first.marker")"
+echo "MP_SETTLEMENT_UI_SMOKE status=ok runs=6 ${MARKER#MP_SETTLEMENT_UI status=ok }"

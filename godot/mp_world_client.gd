@@ -147,6 +147,7 @@ enum Phase {
 	SETTLEMENT_FOUND_WAIT,
 	SETTLEMENT_LIST_WAIT,
 	SETTLEMENT_AT_WAIT,
+	SETTLEMENT_UPDATE_WAIT,
 	DISCONNECT_SENT,
 }
 
@@ -397,6 +398,11 @@ var _settlement_at_x := 0
 var _settlement_at_z := 0
 var _settlement_at_id := 0
 var _settlement_at_name := ""
+var _settlement_target_id := 0
+var _settlement_actions_total := 0
+var _settlement_accepted := 0
+var _settlement_rejected := 0
+var _settlement_last_action := ""
 var _settlement_marker := ""
 var _settlement_panel: PanelContainer
 var _settlement_title: Label
@@ -709,6 +715,55 @@ func _parse_settlement_script(text: String) -> Dictionary:
 				return {"ok": false, "actions": actions}
 			actions.append({"type": "found", "name": name, "x": x, "z": z})
 			continue
+		if token == "release" or token == "claim":
+			actions.append({"type": token})
+			continue
+		if token.begins_with("rename:"):
+			var rename := token.substr(7).strip_edges()
+			if not _settlement_name_valid(rename):
+				return {"ok": false, "actions": actions}
+			actions.append({"type": "rename", "name": rename})
+			continue
+		if token.begins_with("set_tax:"):
+			var tax_text := token.substr(8).strip_edges()
+			if not tax_text.is_valid_int():
+				return {"ok": false, "actions": actions}
+			var tax := tax_text.to_int()
+			if tax < 0 or tax > 100:
+				return {"ok": false, "actions": actions}
+			actions.append({"type": "set_tax", "rate": tax})
+			continue
+		if token.begins_with("invite:"):
+			var invite_rest := token.substr(7)
+			var invite_parts := invite_rest.split(":", true)
+			if invite_parts.size() < 1 or invite_parts.size() > 2:
+				return {"ok": false, "actions": actions}
+			var invite_player := _parse_settlement_player(str(invite_parts[0]))
+			if invite_player < 1:
+				return {"ok": false, "actions": actions}
+			var invite_role := "member"
+			if invite_parts.size() == 2:
+				invite_role = _parse_settlement_role(str(invite_parts[1]))
+				if invite_role.is_empty():
+					return {"ok": false, "actions": actions}
+			actions.append({"type": "invite", "player": invite_player, "role": invite_role})
+			continue
+		if token.begins_with("set_role:"):
+			var role_parts := token.substr(9).split(":", true)
+			if role_parts.size() != 2:
+				return {"ok": false, "actions": actions}
+			var role_player := _parse_settlement_player(str(role_parts[0]))
+			var role := _parse_settlement_role(str(role_parts[1]))
+			if role_player < 1 or role.is_empty():
+				return {"ok": false, "actions": actions}
+			actions.append({"type": "set_role", "player": role_player, "role": role})
+			continue
+		if token.begins_with("remove:"):
+			var remove_player := _parse_settlement_player(token.substr(7))
+			if remove_player < 1:
+				return {"ok": false, "actions": actions}
+			actions.append({"type": "remove", "player": remove_player})
+			continue
 		return {"ok": false, "actions": actions}
 	if actions.is_empty() or actions.size() > SETTLEMENT_MAX_ACTIONS:
 		return {"ok": false, "actions": actions}
@@ -739,6 +794,19 @@ func _settlement_name_valid(name: String) -> bool:
 		if codepoint < 32 or codepoint == 127:
 			return false
 	return true
+
+func _parse_settlement_player(text: String) -> int:
+	var trimmed := text.strip_edges()
+	if not trimmed.is_valid_int():
+		return 0
+	var player := trimmed.to_int()
+	return player if player > 0 else 0
+
+func _parse_settlement_role(text: String) -> String:
+	var role := text.strip_edges().to_lower()
+	if role == "manager" or role == "builder" or role == "member":
+		return role
+	return ""
 
 func _process(_delta: float) -> void:
 	if _finished:
@@ -863,6 +931,8 @@ func _handle_message(message: Dictionary) -> void:
 			_on_settlement_list(message)
 		"settlement_at":
 			_on_settlement_at(message)
+		"settlement_updated":
+			_on_settlement_updated(message)
 		"reject":
 			_on_reject(message)
 		"goodbye":
@@ -1232,6 +1302,14 @@ func _on_place_blueprint_result(message: Dictionary) -> void:
 	_arm_deadline(_timeout_ms)
 
 func _on_reject(message: Dictionary) -> void:
+	if _phase == Phase.SETTLEMENT_UPDATE_WAIT:
+		var code := str(message.get("code", "missing"))
+		_settlement_rejected += 1
+		print("MP_SETTLEMENT_ACTION action=%s ok=0 code=%s revision=0" % [
+			_settlement_last_action, code
+		])
+		_settlement_action_done("Settlement action rejected: %s." % code, false)
+		return
 	if _place_ui and (
 		_phase == Phase.UI_PLACE_WAIT
 		or _phase == Phase.UI_LOCK_WAIT
@@ -2329,6 +2407,11 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _settlement_begin() -> void:
 	_settlement_action_index = 0
+	_settlement_actions_total = _settlement_actions.size()
+	_settlement_accepted = 0
+	_settlement_rejected = 0
+	_settlement_target_id = 0
+	_settlement_last_action = ""
 	_set_status("Settlement readout ready; running the script.")
 	_settlement_advance()
 
@@ -2371,6 +2454,50 @@ func _settlement_advance() -> void:
 		_set_status("Requesting the settlement at (%d, %d)." % [
 			_settlement_at_x, _settlement_at_z
 		])
+	elif kind in [
+		"rename", "set_tax", "release", "invite", "set_role", "remove", "claim"
+	]:
+		if _settlement_target_id < 1:
+			_settlement_reject_local("settlement_target_missing")
+			return
+		var target: Dictionary = _settlement_records.get(_settlement_target_id, {})
+		if target.is_empty():
+			_settlement_reject_local("settlement_target_missing")
+			return
+		var revision := int(target.get("revision", -1))
+		var command_type := "settlement_" + kind
+		if kind == "remove":
+			command_type = "settlement_remove_member"
+		var command: Dictionary = {
+			"type": command_type,
+			"settlement_id": _settlement_target_id,
+		}
+		if kind == "rename":
+			command["name"] = str(action.get("name", ""))
+			command["expected_revision"] = revision
+		elif kind == "set_tax":
+			command["rate"] = int(action.get("rate", 0))
+		elif kind == "release" or kind == "claim":
+			command["expected_revision"] = revision
+		elif kind == "invite":
+			command["player_id"] = int(action.get("player", 0))
+			command["role"] = str(action.get("role", "member"))
+			command["expected_revision"] = revision
+		elif kind == "set_role":
+			command["player_id"] = int(action.get("player", 0))
+			command["role"] = str(action.get("role", ""))
+			command["expected_revision"] = revision
+		elif kind == "remove":
+			command["player_id"] = int(action.get("player", 0))
+			command["expected_revision"] = revision
+		if revision < 0:
+			_settlement_reject_local("settlement_target_missing")
+			return
+		if not _send(command):
+			return
+		_settlement_last_action = kind
+		_phase = Phase.SETTLEMENT_UPDATE_WAIT
+		_set_status("Settlement action: %s." % kind)
 	else:
 		_fail("settlement_script_invalid")
 		return
@@ -2391,6 +2518,7 @@ func _on_settlement_found(message: Dictionary) -> void:
 		_fail("settlement_found_record")
 		return
 	_settlement_records[int(record.get("id", 0))] = record
+	_settlement_target_id = int(record.get("id", 0))
 	_settlement_action_done("Founded settlement #%d." % int(record.get("id", 0)))
 
 func _on_settlement_list(message: Dictionary) -> void:
@@ -2420,6 +2548,10 @@ func _on_settlement_list(message: Dictionary) -> void:
 			return
 		records[id] = record
 	_settlement_records = records
+	if not records.is_empty():
+		var ids: Array = records.keys()
+		ids.sort()
+		_settlement_target_id = int(ids[ids.size() - 1])
 	_settlement_action_done("Settlement list received: %d record(s)." % records.size())
 
 func _on_settlement_at(message: Dictionary) -> void:
@@ -2436,6 +2568,7 @@ func _on_settlement_at(message: Dictionary) -> void:
 		_settlement_at_found = true
 		_settlement_at_id = int(record.get("id", 0))
 		_settlement_at_name = str(record.get("name", ""))
+		_settlement_target_id = _settlement_at_id
 		_settlement_action_done("At point is settlement #%d." % _settlement_at_id)
 		return
 	if message.get("settlement", null) != null:
@@ -2515,11 +2648,46 @@ func _parse_settlement_record(raw: Variant) -> Dictionary:
 		"tax": tax,
 	}
 
-func _settlement_action_done(status: String) -> void:
+func _settlement_action_done(status: String, accepted: bool = true) -> void:
+	if accepted:
+		_settlement_accepted += 1
 	_settlement_action_index += 1
 	_refresh_settlement_panel()
 	_set_status(status)
 	_settlement_advance()
+
+func _settlement_reject_local(code: String) -> void:
+	_settlement_rejected += 1
+	print("MP_SETTLEMENT_ACTION action=%s ok=0 code=%s revision=0" % [
+		_settlement_action_name(), code
+	])
+	_settlement_action_done("Settlement action rejected: %s." % code, false)
+
+func _settlement_action_name() -> String:
+	if _settlement_action_index < _settlement_actions.size():
+		return str((_settlement_actions[_settlement_action_index] as Dictionary).get("type", "?"))
+	return "?"
+
+func _on_settlement_updated(message: Dictionary) -> void:
+	if _phase != Phase.SETTLEMENT_UPDATE_WAIT:
+		_fail("settlement_updated_in_%s" % _phase_name())
+		return
+	if not _is_hex16(str(message.get("settlement_checksum", ""))):
+		_fail("settlement_updated_checksum")
+		return
+	if not _is_hex16(str(message.get("world_checksum", ""))):
+		_fail("settlement_updated_world_checksum")
+		return
+	var record := _parse_settlement_record(message.get("settlement", null))
+	if record.is_empty():
+		_fail("settlement_updated_record")
+		return
+	_settlement_records[int(record.get("id", 0))] = record
+	_settlement_target_id = int(record.get("id", 0))
+	print("MP_SETTLEMENT_ACTION action=%s ok=1 code=none revision=%d" % [
+		_settlement_last_action, int(record.get("revision", 0))
+	])
+	_settlement_action_done("Settlement action applied: %s." % _settlement_last_action)
 
 ## Print the additive marker, then run the normal disconnect/goodbye path so
 ## `MP_WORLD_CLIENT_DONE` keeps its existing shape.
@@ -2556,10 +2724,13 @@ func _settlement_marker_text() -> String:
 			",".join(member_text),
 		])
 	var digest := "\n".join(lines).sha256_text().substr(0, 16)
-	return "MP_SETTLEMENT_UI status=ok settlements=%d members=%d at=%s checksum=%s" % [
+	return "MP_SETTLEMENT_UI status=ok settlements=%d members=%d at=%s actions=%d accepted=%d rejected=%d checksum=%s" % [
 		ids.size(),
 		members,
 		str(_settlement_at_id) if _settlement_at_set and _settlement_at_found else "none",
+		_settlement_actions_total,
+		_settlement_accepted,
+		_settlement_rejected,
 		digest,
 	]
 
@@ -3640,6 +3811,8 @@ func _phase_name() -> String:
 			return "settlement_list_wait"
 		Phase.SETTLEMENT_AT_WAIT:
 			return "settlement_at_wait"
+		Phase.SETTLEMENT_UPDATE_WAIT:
+			return "settlement_update_wait"
 		Phase.DISCONNECT_SENT:
 			return "disconnect_sent"
 		_:
