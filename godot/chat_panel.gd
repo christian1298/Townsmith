@@ -28,6 +28,8 @@ const WorldI18n = preload("res://world_i18n.gd")
 const MAX_CHAT_CHARS := 280
 ## Mirrors `CHAT_LOG_CAPACITY`; also the local transcript display cap.
 const MAX_LINES := 64
+## Unread counts above this render as "99+" in the header badge.
+const UNREAD_DISPLAY_MAX := 99
 const DEFAULT_LOCALE := "en"
 const SUPPORTED_LOCALES := ["en", "de"]
 
@@ -57,9 +59,13 @@ var _status_text := ""
 var _error_code := ""
 var _error_detail := ""
 var _smoke_mode := false
+## Owner-supplied unread count. Negative values clamp to 0; this is display
+## state only and never moves the transcript or `last_seq`.
+var _unread := 0
 
 var _box: VBoxContainer
 var _title: Label
+var _badge: Label
 var _transcript: RichTextLabel
 var _status_label: Label
 var _draft_edit: LineEdit
@@ -131,6 +137,29 @@ func append_entry(entry: Dictionary) -> bool:
 func set_status(text: String) -> void:
 	_status_text = text
 	_refresh()
+
+
+## Set the header unread badge. Negative values clamp to 0 (hidden), 1-99 show
+## the number, and anything above shows "99+". Only the badge changes: the
+## transcript, `last_seq`, status, error, and existing snapshot fields are
+## untouched. The owning client owns resets; this panel never clears itself.
+func set_unread(count: int) -> void:
+	_unread = maxi(count, 0)
+	_refresh_unread()
+
+
+## Compact badge text: "" while hidden, `N` for 1-99, and "99+" above.
+func badge_text() -> String:
+	if _badge != null:
+		return _badge.text
+	return _unread_text(_unread)
+
+
+## Whether the unread badge is visible. The mounted label mirrors the count.
+func badge_visible() -> bool:
+	if _badge != null:
+		return _badge.visible
+	return _unread > 0
 
 
 ## Show a stable, code-keyed error line. The server message is only a fallback
@@ -236,6 +265,7 @@ func snapshot() -> Dictionary:
 		"player_id": player_id,
 		"player": player_name,
 		"last_seq": last_seq,
+		"unread": _unread,
 		"line_count": lines.size(),
 		"lines": lines,
 		"transcript": "\n".join(lines),
@@ -323,7 +353,37 @@ func _build_ui() -> void:
 	_help_label.add_theme_color_override("font_color", Color(0.62, 0.67, 0.74))
 	_box.add_child(_help_label)
 
+	# Anchored overlay outside the VBox flow so the badge sits at the top-right
+	# of the header without moving the title or the transcript.
+	var overlay := Control.new()
+	overlay.name = "HeaderOverlay"
+	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(overlay)
+
+	_badge = Label.new()
+	_badge.name = "UnreadBadge"
+	_badge.visible = false
+	_badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_badge.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_badge.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_badge.anchor_left = 1.0
+	_badge.anchor_right = 1.0
+	_badge.offset_left = -64.0
+	_badge.offset_top = 10.0
+	_badge.offset_right = -12.0
+	_badge.offset_bottom = 32.0
+	_badge.add_theme_font_size_override("font_size", 13)
+	_badge.add_theme_color_override("font_color", Color(1.0, 0.86, 0.45))
+	var pill := StyleBoxFlat.new()
+	pill.bg_color = Color(0.20, 0.14, 0.06, 0.92)
+	pill.set_corner_radius_all(6)
+	pill.content_margin_left = 6.0
+	pill.content_margin_right = 6.0
+	_badge.add_theme_stylebox_override("normal", pill)
+	overlay.add_child(_badge)
+
 	_refresh_labels()
+	_refresh_unread()
 
 
 func _refresh_labels() -> void:
@@ -348,6 +408,21 @@ func _refresh_counter() -> void:
 		"base.ui.chat.char_counter",
 		{"count": _draft_edit.text.length(), "max": MAX_CHAT_CHARS}
 	)
+
+
+func _refresh_unread() -> void:
+	if _badge == null:
+		return
+	_badge.text = _unread_text(_unread)
+	_badge.visible = _unread > 0
+
+
+func _unread_text(count: int) -> String:
+	if count <= 0:
+		return ""
+	if count > UNREAD_DISPLAY_MAX:
+		return "99+"
+	return str(count)
 
 
 func _refresh() -> void:
@@ -708,6 +783,45 @@ func _run_smoke() -> void:
 	_check(int(snapshot()["line_count"]) == lines_before_locale, "locale.transcript_unchanged")
 	_case("locale")
 	print("CHAT_PANEL_LOCALE de=ok fr=en en=ok lines=%d" % lines_before_locale)
+
+	var unread_before := snapshot()
+	set_unread(0)
+	snap = _case("unread_zero")
+	_check(int(snap["unread"]) == 0, "unread.zero", str(snap["unread"]))
+	_check(not badge_visible(), "unread.zero_hidden")
+	_check(badge_text() == "", "unread.zero_text", badge_text())
+	_check(_badge != null and not _badge.visible, "unread.zero_label", badge_text())
+	_check(str(snap["transcript"]) == str(unread_before["transcript"]), "unread.transcript")
+	_check(str(snap["status_line"]) == str(unread_before["status_line"]), "unread.status")
+	_check(str(snap["render_checksum"]) == str(unread_before["render_checksum"]), "unread.render")
+
+	set_unread(1)
+	snap = _case("unread_one")
+	_check(int(snap["unread"]) == 1, "unread.one", str(snap["unread"]))
+	_check(badge_visible(), "unread.one_visible")
+	_check(badge_text() == "1", "unread.one_text", badge_text())
+	_check(_badge != null and _badge.visible and _badge.text == "1", "unread.one_label", badge_text())
+
+	set_unread(42)
+	snap = _case("unread_42")
+	_check(int(snap["unread"]) == 42, "unread.42", str(snap["unread"]))
+	_check(badge_visible(), "unread.42_visible")
+	_check(badge_text() == "42", "unread.42_text", badge_text())
+	_check(_badge != null and _badge.text == "42", "unread.42_label", badge_text())
+
+	set_unread(1000)
+	snap = _case("unread_1000")
+	_check(int(snap["unread"]) == 1000, "unread.1000", str(snap["unread"]))
+	_check(badge_visible(), "unread.1000_visible")
+	_check(badge_text() == "99+", "unread.1000_text", badge_text())
+	_check(_badge != null and _badge.text == "99+", "unread.1000_label", badge_text())
+	_check(str(snap["transcript"]) == str(unread_before["transcript"]), "unread.1000_transcript")
+
+	set_unread(-7)
+	_check(int(snapshot()["unread"]) == 0, "unread.negative", str(snapshot()["unread"]))
+	_check(not badge_visible(), "unread.negative_hidden")
+	_check(badge_text() == "", "unread.negative_text", badge_text())
+	set_unread(0)
 
 	set_error("chat.future", "new server detail")
 	_check(str(snapshot()["error_line"]).contains("new server detail"), "error.fallback")
