@@ -76,15 +76,19 @@ extends Node3D
 ## The first message is never re-sent. It cannot be combined with
 ## `--chat-listen` (`chat_mode_conflict`) or `--chat-script`.
 ##
-## Settlement readout is a fourth opt-in path: `--settlement-ui
+## Settlement surface is a fourth opt-in path: `--settlement-ui
 ## [--settlement-script "..."]`. After the main `MP_WORLD_CLIENT` marker it
-## skips the zero-view probe, runs `found:<name>[:x,z]`, `list`, and `at:<x,z>`
-## actions in order, and renders a right-side read-only panel (at most eight
-## records). It sends only `found_settlement`, `settlement_list`, and
-## `settlement_at`; there are no mutation controls. The extra
+## skips the zero-view probe and runs ordered `found:<name>[:x,z]`,
+## `list[:<after_id>:<limit>]`, `at:<x,z>`, `rename:<name>`, `set_tax:<rate>`,
+## `release`, `invite:<player_id>[:<role>]`, `set_role:<player_id>:<role>`,
+## `remove:<player_id>`, `claim`, and `transfer:<player_id>` actions. A paged
+## list replaces the panel/cache with the returned page and tracks
+## `next_after`/`has_more`; `transfer` needs a recipient already registered in
+## the server player registry. `--settlement-preseed` additionally prints the
+## founded record's owner id so the smoke can set up a second player. The extra
 ## `MP_SETTLEMENT_UI status=ok settlements=N members=M at=<id|none>
 ## checksum=<16 hex>` marker is printed before the unchanged done marker.
-## Without `--settlement-ui` no settlement code runs.
+## Without `--settlement-ui`/`--settlement-preseed` no settlement code runs.
 ##
 ## `godot/mp_interest_render.gd` is reused for road parsing, the 64-road wire
 ## cap, and the deterministic 16-hex road checksum. Buildings are parsed
@@ -239,14 +243,19 @@ const CHAT_PANEL_WIDTH := 540.0
 const CHAT_PANEL_HEIGHT := 430.0
 const CHAT_UNREAD_MAX := 999
 
-# Opt-in settlement readout (`--settlement-ui`). Pipe-separated actions:
-# `found:<name>[:x,z]`, `list`, or `at:<x,z>`. Read-only: `found` is the only
-# write, and it is the normal D-033 founding command, not a dashboard control.
+# Opt-in settlement surface (`--settlement-ui`). Pipe-separated actions:
+# `found:<name>[:x,z]`, `list[:<after_id>:<limit>]`, `at:<x,z>`,
+# `rename:<name>`, `set_tax:<rate>`, `release`, `invite:<player_id>[:<role>]`,
+# `set_role:<player_id>:<role>`, `remove:<player_id>`, `claim`, or
+# `transfer:<player_id>`. Every write is an existing D-033 command; the server
+# remains authoritative. Bare `list` keeps the pre-paging all-records behavior.
 const DEFAULT_SETTLEMENT_SCRIPT := "found:Harbor|list"
 const SETTLEMENT_FOUND_RADIUS_M := 64
 const SETTLEMENT_MAX_ACTIONS := 64
 const SETTLEMENT_MAX_NAME_CHARS := 48
 const SETTLEMENT_MAX_COORD := 1000000
+# Mirrors `SETTLEMENT_LIST_PAGE_CAP` in crates/server/src/protocol.rs.
+const SETTLEMENT_LIST_PAGE_MAX := 256
 const SETTLEMENT_PANEL_ROWS := 8
 const SETTLEMENT_LAYER := 1
 const SETTLEMENT_MARGIN := 12.0
@@ -386,8 +395,10 @@ var _chat_unread := 0
 var _chat_pushes := 0
 var _chat_unread_label: Label
 
-# Opt-in settlement readout (`--settlement-ui`). Inert without the flag.
+# Opt-in settlement surface (`--settlement-ui`). Inert without the flag.
 var _settlement_ui := false
+var _settlement_preseed := false
+var _skip_roads := false
 var _settlement_script := DEFAULT_SETTLEMENT_SCRIPT
 var _settlement_actions: Array = []
 var _settlement_action_index := 0
@@ -408,6 +419,21 @@ var _settlement_panel: PanelContainer
 var _settlement_title: Label
 var _settlement_body: RichTextLabel
 var _settlement_at_label: Label
+var _settlement_page_label: Label
+# Last `settlement_list` request/response page, used by the panel and the
+# additive `MP_SETTLEMENT_PAGE` marker. A paged list replaces `_settlement_records`.
+var _settlement_page_seen := false
+var _settlement_page_index := 0
+var _settlement_page_after := 0
+var _settlement_page_next := 0
+var _settlement_page_matched := 0
+var _settlement_page_count := 0
+var _settlement_page_more := false
+var _settlement_page_limited := false
+var _settlement_list_after := 0
+var _settlement_list_limit := 0
+var _settlement_list_limited := false
+var _settlement_transfer_from := 0
 
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
@@ -438,7 +464,9 @@ func _ready() -> void:
 	_chat_script = _arg(args, "--chat-script", DEFAULT_CHAT_SCRIPT)
 	_chat_reconnect_text = _arg(args, "--chat-text", DEFAULT_CHAT_RECONNECT_TEXT)
 
-	_settlement_ui = args.has("--settlement-ui")
+	_settlement_ui = args.has("--settlement-ui") or args.has("--settlement-preseed")
+	_settlement_preseed = args.has("--settlement-preseed")
+	_skip_roads = args.has("--skip-roads")
 	_settlement_script = _arg(args, "--settlement-script", DEFAULT_SETTLEMENT_SCRIPT)
 
 	_container = Node3D.new()
@@ -691,6 +719,20 @@ func _parse_settlement_script(text: String) -> Dictionary:
 		if token == "list":
 			actions.append({"type": "list"})
 			continue
+		if token.begins_with("list:"):
+			var list_parts := token.substr(5).split(":", true)
+			if list_parts.size() != 2:
+				return {"ok": false, "actions": actions}
+			var list_after_text := str(list_parts[0]).strip_edges()
+			var list_limit_text := str(list_parts[1]).strip_edges()
+			if not list_after_text.is_valid_int() or not list_limit_text.is_valid_int():
+				return {"ok": false, "actions": actions}
+			var list_after := list_after_text.to_int()
+			var list_limit := list_limit_text.to_int()
+			if list_after < 0 or list_limit < 1 or list_limit > SETTLEMENT_LIST_PAGE_MAX:
+				return {"ok": false, "actions": actions}
+			actions.append({"type": "list", "after": list_after, "limit": list_limit})
+			continue
 		if token.begins_with("at:"):
 			var at_coords := _parse_settlement_coords(token.substr(3))
 			if at_coords.is_empty():
@@ -763,6 +805,12 @@ func _parse_settlement_script(text: String) -> Dictionary:
 			if remove_player < 1:
 				return {"ok": false, "actions": actions}
 			actions.append({"type": "remove", "player": remove_player})
+			continue
+		if token.begins_with("transfer:"):
+			var transfer_player := _parse_settlement_player(token.substr(9))
+			if transfer_player < 1:
+				return {"ok": false, "actions": actions}
+			actions.append({"type": "transfer", "player": transfer_player})
 			continue
 		return {"ok": false, "actions": actions}
 	if actions.is_empty() or actions.size() > SETTLEMENT_MAX_ACTIONS:
@@ -973,6 +1021,16 @@ func _on_welcome(message: Dictionary) -> void:
 		_set_status("Chat push listener ready; waiting for a pushed line.")
 		return
 	if _place_ui and not _ui_request_locks():
+		return
+	if _skip_roads:
+		# A resumed world already has the deterministic roads; jump straight to
+		# the settlement script instead of replaying setup or re-checking a view.
+		if not _settlement_ui:
+			_fail("skip_roads_requires_settlement")
+			return
+		_set_status("Welcome %s; starting the settlement surface." % _session_id)
+		_refresh_hud()
+		_settlement_begin()
 		return
 	_set_status("Welcome %s; placing deterministic roads." % _session_id)
 	_refresh_hud()
@@ -1305,6 +1363,10 @@ func _on_reject(message: Dictionary) -> void:
 	if _phase == Phase.SETTLEMENT_UPDATE_WAIT:
 		var code := str(message.get("code", "missing"))
 		_settlement_rejected += 1
+		if _settlement_last_action == "transfer":
+			print("MP_SETTLEMENT_TRANSFER ok=0 from=%d to=0 settlement=%d revision=0 code=%s" % [
+				_settlement_transfer_from, _settlement_target_id, code
+			])
 		print("MP_SETTLEMENT_ACTION action=%s ok=0 code=%s revision=0" % [
 			_settlement_last_action, code
 		])
@@ -2436,7 +2498,14 @@ func _settlement_advance() -> void:
 		_phase = Phase.SETTLEMENT_FOUND_WAIT
 		_set_status("Founding settlement %s." % name)
 	elif kind == "list":
-		if not _send({"type": "settlement_list"}):
+		var list_command: Dictionary = {"type": "settlement_list"}
+		_settlement_list_limited = action.has("limit")
+		_settlement_list_after = int(action.get("after", 0))
+		_settlement_list_limit = int(action.get("limit", 0))
+		if _settlement_list_limited:
+			list_command["after_id"] = _settlement_list_after
+			list_command["limit"] = _settlement_list_limit
+		if not _send(list_command):
 			return
 		_phase = Phase.SETTLEMENT_LIST_WAIT
 		_set_status("Requesting the settlement list.")
@@ -2455,7 +2524,8 @@ func _settlement_advance() -> void:
 			_settlement_at_x, _settlement_at_z
 		])
 	elif kind in [
-		"rename", "set_tax", "release", "invite", "set_role", "remove", "claim"
+		"rename", "set_tax", "release", "invite", "set_role", "remove", "claim",
+		"transfer"
 	]:
 		if _settlement_target_id < 1:
 			_settlement_reject_local("settlement_target_missing")
@@ -2490,6 +2560,10 @@ func _settlement_advance() -> void:
 		elif kind == "remove":
 			command["player_id"] = int(action.get("player", 0))
 			command["expected_revision"] = revision
+		elif kind == "transfer":
+			command["player_id"] = int(action.get("player", 0))
+			command["expected_revision"] = revision
+			_settlement_transfer_from = int(target.get("owner_id", 0))
 		if revision < 0:
 			_settlement_reject_local("settlement_target_missing")
 			return
@@ -2519,6 +2593,11 @@ func _on_settlement_found(message: Dictionary) -> void:
 		return
 	_settlement_records[int(record.get("id", 0))] = record
 	_settlement_target_id = int(record.get("id", 0))
+	if _settlement_preseed:
+		print("MP_SETTLEMENT_PRESEED player=%d settlement=%d" % [
+			int(record.get("owner_id", 0)),
+			int(record.get("id", 0)),
+		])
 	_settlement_action_done("Founded settlement #%d." % int(record.get("id", 0)))
 
 func _on_settlement_list(message: Dictionary) -> void:
@@ -2547,6 +2626,35 @@ func _on_settlement_list(message: Dictionary) -> void:
 			_fail("settlement_list_duplicate_%d" % id)
 			return
 		records[id] = record
+	_settlement_page_seen = message.has("matched") or message.has("next_after") or message.has("has_more")
+	if _settlement_page_seen:
+		var matched := int(message.get("matched", -1))
+		var next_after := int(message.get("next_after", -1))
+		var has_more := bool(message.get("has_more", false))
+		if matched < settlements.size() or next_after < 0:
+			_fail("settlement_list_page_fields")
+			return
+		if has_more and next_after < 1:
+			_fail("settlement_list_page_cursor")
+			return
+		if not has_more and next_after < 0:
+			_fail("settlement_list_page_cursor")
+			return
+		_settlement_page_after = _settlement_list_after
+		_settlement_page_next = next_after
+		_settlement_page_matched = matched
+		_settlement_page_count = settlements.size()
+		_settlement_page_more = has_more
+		_settlement_page_limited = _settlement_list_limited
+		_settlement_page_index += 1
+		print("MP_SETTLEMENT_PAGE after=%d limit=%d count=%d matched=%d next=%d more=%d" % [
+			_settlement_page_after,
+			_settlement_list_limit,
+			_settlement_page_count,
+			matched,
+			next_after,
+			1 if has_more else 0,
+		])
 	_settlement_records = records
 	if not records.is_empty():
 		var ids: Array = records.keys()
@@ -2610,6 +2718,7 @@ func _parse_settlement_record(raw: Variant) -> Dictionary:
 	if typeof(members_raw) != TYPE_ARRAY:
 		return {}
 	var members: Array = []
+	var member_roles: Dictionary = {}
 	var seen: Dictionary = {}
 	for member_raw in members_raw:
 		if typeof(member_raw) != TYPE_DICTIONARY:
@@ -2623,6 +2732,7 @@ func _parse_settlement_record(raw: Variant) -> Dictionary:
 			return {}
 		seen[player] = true
 		members.append(player)
+		member_roles[player] = str(member.get("role", ""))
 	members.sort()
 	var owner_id := 0
 	var owner_raw: Variant = record.get("owner_id", null)
@@ -2644,6 +2754,7 @@ func _parse_settlement_record(raw: Variant) -> Dictionary:
 		"center": Vector2i(int(center[0]), int(center[1])),
 		"radius_m": radius_m,
 		"members": members,
+		"member_roles": member_roles,
 		"revision": revision,
 		"tax": tax,
 	}
@@ -2684,6 +2795,13 @@ func _on_settlement_updated(message: Dictionary) -> void:
 		return
 	_settlement_records[int(record.get("id", 0))] = record
 	_settlement_target_id = int(record.get("id", 0))
+	if _settlement_last_action == "transfer":
+		print("MP_SETTLEMENT_TRANSFER ok=1 from=%d to=%d settlement=%d revision=%d" % [
+			_settlement_transfer_from,
+			int(record.get("owner_id", 0)),
+			int(record.get("id", 0)),
+			int(record.get("revision", 0)),
+		])
 	print("MP_SETTLEMENT_ACTION action=%s ok=1 code=none revision=%d" % [
 		_settlement_last_action, int(record.get("revision", 0))
 	])
@@ -2792,6 +2910,13 @@ func _build_settlement_panel() -> void:
 	_settlement_at_label.add_theme_font_size_override("font_size", 13)
 	vbox.add_child(_settlement_at_label)
 
+	_settlement_page_label = Label.new()
+	_settlement_page_label.name = "SettlementPage"
+	_settlement_page_label.visible = false
+	_settlement_page_label.add_theme_color_override("font_color", Color(0.70, 0.80, 0.90))
+	_settlement_page_label.add_theme_font_size_override("font_size", 12)
+	vbox.add_child(_settlement_page_label)
+
 func _refresh_settlement_panel() -> void:
 	if _settlement_panel == null:
 		return
@@ -2801,7 +2926,20 @@ func _refresh_settlement_panel() -> void:
 		_settlement_panel.visible = false
 		return
 	_settlement_panel.visible = true
-	_settlement_title.text = "Settlements: %d" % ids.size()
+	if _settlement_page_seen:
+		_settlement_title.text = "Settlements: %d shown / %d matched" % [
+			ids.size(), _settlement_page_matched
+		]
+		_settlement_page_label.visible = true
+		_settlement_page_label.text = "Page %d · after %d · next %d · more %s" % [
+			_settlement_page_index,
+			_settlement_page_after,
+			_settlement_page_next,
+			"yes" if _settlement_page_more else "no",
+		]
+	else:
+		_settlement_title.text = "Settlements: %d" % ids.size()
+		_settlement_page_label.visible = false
 	var lines := PackedStringArray()
 	var rows := mini(ids.size(), SETTLEMENT_PANEL_ROWS)
 	for index in range(rows):
