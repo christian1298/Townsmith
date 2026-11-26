@@ -2,7 +2,7 @@
 title: Content Registry Modes
 project: Townsmith
 status: proposed
-updated: 2026-11-25
+updated: 2026-11-26
 tags:
   - townsmith
   - modding
@@ -28,7 +28,7 @@ Related: [[06 - Modding and Resource Packs]], [[28 - Blueprint Package]], [[42 -
 >
 > The parser rejects unknown fields, `format_version` other than 1, explicit `base`, invalid IDs/namespaces, missing or non-canonical `blake3:<64 lowercase hex>` checksums, duplicate IDs/namespaces, and cross-kind claims. It enforces the §8 caps (256 entries, 1 MiB, 64-byte IDs).
 >
-> **No server or CLI wiring exists.** There is no `--content-registry` flag, no registry I/O, no `SERVER_CONTENT` status line, no placement or save behavior change, and no protocol or checksum change. D-042 remains **Proposed**; Q-127 and Q-128 remain **Open**.
+> **Opt-in implementation landed (proposed).** The core parser and the server `--content-registry PATH` startup path exist; the default remains base-only and no save, protocol, or world checksum changes. D-042 remains **Proposed**; Q-127 and Q-128 remain **Open**.
 
 ## 1. Why now
 
@@ -101,23 +101,26 @@ townsmith-server --content-ids base,mymod,mymod:pack
 townsmith-server --content-registry /abs/content-registry.json
 ```
 
-- Mutually exclusive with `--content-ids`; both set is `content.cli_conflict` at startup.
-- The file is read before the listener binds; a missing/unreadable file is `content.registry_io`.
+- `--content-registry` may be used alone or with `--content-ids`:
+  - alone selects every non-base manifest ID plus implicit `base`;
+  - with `--content-ids`, the short form is a requested subset of the manifest catalog (`manifest.select(requested)`), including namespace aliases and explicit `base`.
+- The file is read before the listener binds, bounded to 1 MiB; a missing/unreadable file is `content.registry_io`.
 - `format_version` must be `1`; any other value is `content.unsupported_registry_version`.
 - An empty `ids` array is valid and means base-only.
+- The selected IDs replace `ServerWorld.active_content_ids`; placement then resolves `.tsbp` dependencies against them.
 - Startup prints one stable line:
 
 ```text
-SERVER_CONTENT status=ok mode=manifest ids=<n> checksum=<16hex>
+SERVER_CONTENT_REGISTRY status=ok path=<path> ids=<n> selected=<n> checksum=<16hex>
 ```
 
 or
 
 ```text
-SERVER_CONTENT status=error code=content.invalid_registry error=<message>
+SERVER_CONTENT_REGISTRY status=error code=<stable> error=<message>
 ```
 
-and exits 2 before binding.
+and exits 2 before binding. A successful registry application is followed by the existing `SERVER_CONTENT status=ok ids=...` line. The checksum is FNV-1a over sorted selected IDs plus each manifest entry's kind, namespace, and checksum; `base` is implicit, and file bytes/path are excluded.
 
 ### Content hash pin
 
@@ -157,7 +160,6 @@ Mapping:
 | `content.unknown_id` | `--content-ids` names an ID not in the manifest (manifest mode only) | 2 |
 | `content.kind_mismatch` | Same ID/namespace used by both mod and pack, or a dependency resolves to the wrong kind | 2 at startup / placed rejection at runtime |
 | `content.pin_mismatch` | `--content-hash` does not match the deployment pin or the registry-derived pin, when that check is enabled | 2 |
-| `content.cli_conflict` | `--content-ids` and `--content-registry` are both set | 2 |
 | `blueprint.missing_dependency` | A package requires a missing/wrong-kind ID at placement | placement rejection |
 
 All codes are stable API names; messages are human-readable and may include the ID.
@@ -168,7 +170,8 @@ All codes are stable API names; messages are human-readable and may include the 
 - D-035 read-only missing-pack inspection is unchanged; it never invents registry entries.
 - D-036 prior-checksum compatibility and D-037 ID migrations apply before this registry check: a migrated ID must resolve in the active registry, and an unmapped ID still fails.
 - Base-only servers and packages with no dependencies behave exactly as today.
-- The short form keeps #386 semantics; the manifest form is additive and opt-in.
+- The short form alone keeps #386 semantics and output. The manifest form is additive and opt-in; both flags together treat the short form as a subset selector.
+- A failed manifest load leaves the world untouched and exits before binding.
 - The registry checksum is process-local; it is not part of `ServerWorld::checksum` or protocol goldens.
 
 ## 8. Security and limits
@@ -197,11 +200,12 @@ Unit:
 
 - Parse valid base-only, one-mod, one-pack, and mixed manifests; round-trip normalized checksum.
 - Reject duplicate IDs/namespaces, base as an entry, invalid kinds, bad checksums, oversized files/IDs, control characters, and unsupported versions.
-- `--content-ids` + manifest conflict; unknown ID in manifest mode.
+- Manifest alone selects every ID; both flags select a subset; unknown ID and kind mismatch in manifest mode; explicit `base`.
 
 Integration:
 
-- Server startup prints the expected `SERVER_CONTENT` line and exits 2 on every error.
+- Server startup prints `SERVER_CONTENT_REGISTRY` then `SERVER_CONTENT`, and exits 2 on every error; `--content-ids` alone still prints only `SERVER_CONTENT`.
+- Malformed, missing, oversized, and unsupported-version manifests fail before binding and leave the world base-only.
 - A package requiring a mod places when the mod is active; rejects with `MissingMod` when absent; rejects with `MissingResourcePack` when the ID exists only as a mod.
 - Namespace matching (`mymod` vs `mymod:pack`) works for both kinds.
 - Placement rejection leaves placement/construction/treasury checksums unchanged.

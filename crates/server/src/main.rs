@@ -5,10 +5,15 @@
 //! socket, and `--listen PORT [--sessions N]` serves the authoritative world
 //! with optional persistence. `--once` is shorthand for `--sessions 1`.
 
+use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use core_city::content_registry::{
+    parse_content_registry_manifest, ContentRegistryError, ContentRegistryManifest,
+    BASE_CONTENT_ID, MAX_CONTENT_REGISTRY_BYTES,
+};
 use core_sim::{Cohort, CohortSimulation};
 use townsmith_server::chat_smoke::run_chat_smoke;
 use townsmith_server::listen::{run_listen, run_save_load_smoke, ListenConfig};
@@ -104,6 +109,159 @@ fn apply_content_ids(world: &mut ServerWorld, raw: &str) -> Result<(), Rejection
     world.set_active_content_ids(&ids)
 }
 
+/// Read `--content-registry` from an explicit argument list.
+fn content_registry_arg(args: &[String]) -> Option<String> {
+    args.iter()
+        .position(|argument| argument == "--content-registry")
+        .and_then(|index| args.get(index + 1))
+        .cloned()
+}
+
+/// Stable D-042 code for a missing or unreadable manifest file.
+const CONTENT_REGISTRY_IO: &str = "content.registry_io";
+
+/// A D-042 registry startup failure with a stable code and human message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContentRegistryStartupError {
+    code: &'static str,
+    message: String,
+}
+
+impl ContentRegistryStartupError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    fn from_registry(error: ContentRegistryError) -> Self {
+        Self::new(error.code(), error.to_string())
+    }
+}
+
+/// Summary of one successful `--content-registry` startup application.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContentRegistryReport {
+    /// Number of entries in the manifest (excluding implicit `base`).
+    manifest_ids: usize,
+    /// Number of active ids after selection, including implicit `base`.
+    selected: usize,
+    /// Deterministic 16-hex summary of the selected registry.
+    checksum: String,
+}
+
+/// Read a D-042 manifest with a hard 1 MiB bound.
+///
+/// File I/O failures use `content.registry_io`; an oversized or non-UTF-8 file
+/// and every parser/validator failure use the parser's stable code.
+fn read_content_registry_manifest(
+    path: &Path,
+) -> Result<ContentRegistryManifest, ContentRegistryStartupError> {
+    let io_error = |error: std::io::Error| {
+        ContentRegistryStartupError::new(
+            CONTENT_REGISTRY_IO,
+            format!("read {}: {error}", path.display()),
+        )
+    };
+    let file = std::fs::File::open(path).map_err(io_error)?;
+    let mut bytes = Vec::new();
+    file.take((MAX_CONTENT_REGISTRY_BYTES as u64) + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_error)?;
+    if bytes.len() > MAX_CONTENT_REGISTRY_BYTES {
+        return Err(ContentRegistryStartupError::new(
+            "content.invalid_registry",
+            format!("manifest exceeds {MAX_CONTENT_REGISTRY_BYTES} bytes"),
+        ));
+    }
+    let json = std::str::from_utf8(&bytes).map_err(|_| {
+        ContentRegistryStartupError::new("content.invalid_registry", "manifest is not valid UTF-8")
+    })?;
+    parse_content_registry_manifest(json).map_err(ContentRegistryStartupError::from_registry)
+}
+
+/// Resolve the active ids from the manifest catalog.
+///
+/// Without a requested list the whole catalog is selected (base plus every
+/// manifest entry). With `--content-ids` the list is a requested subset passed
+/// through [`ContentRegistryManifest::select`], which owns `base` handling,
+/// namespace matching, sorting, and deduplication.
+fn select_content_registry_ids(
+    manifest: &ContentRegistryManifest,
+    requested: Option<&str>,
+) -> Result<Vec<String>, ContentRegistryStartupError> {
+    match requested {
+        Some(raw) => {
+            let parsed = parse_content_ids(raw);
+            let requested: Vec<&str> = parsed.iter().map(String::as_str).collect();
+            manifest
+                .select(&requested)
+                .map_err(ContentRegistryStartupError::from_registry)
+        }
+        None => Ok(manifest.implicit_ids()),
+    }
+}
+
+/// Apply an opt-in D-042 manifest to a served world.
+///
+/// This is process configuration: it reads one operator-supplied file, selects
+/// active ids, and replaces the world's content registry. It does not touch the
+/// save, protocol, or world checksum. A failed call leaves the world untouched.
+fn apply_content_registry(
+    world: &mut ServerWorld,
+    path: &Path,
+    requested: Option<&str>,
+) -> Result<ContentRegistryReport, ContentRegistryStartupError> {
+    let manifest = read_content_registry_manifest(path)?;
+    let selected = select_content_registry_ids(&manifest, requested)?;
+    let ids: Vec<&str> = selected.iter().map(String::as_str).collect();
+    world
+        .set_active_content_ids(&ids)
+        .map_err(|rejection| ContentRegistryStartupError::new(rejection.code, rejection.message))?;
+    let checksum = content_registry_checksum(&manifest, &selected);
+    Ok(ContentRegistryReport {
+        manifest_ids: manifest.ids.len(),
+        selected: selected.len(),
+        checksum,
+    })
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Deterministic 16-hex summary of the selected active registry.
+///
+/// The summary is built from sorted active ids plus each manifest entry's kind,
+/// namespace, and checksum; `base` is implicit. File bytes, file order, and the
+/// path are excluded, so two runs over equivalent catalogs agree.
+fn content_registry_checksum(manifest: &ContentRegistryManifest, selected: &[String]) -> String {
+    let mut summary = String::new();
+    for id in selected {
+        if id == BASE_CONTENT_ID {
+            summary.push_str("base\tbase\t\t\n");
+            continue;
+        }
+        if let Some(entry) = manifest.ids.iter().find(|entry| entry.id == *id) {
+            summary.push_str(&entry.id);
+            summary.push('\t');
+            summary.push_str(entry.kind.as_str());
+            summary.push('\t');
+            summary.push_str(entry.namespace.as_deref().unwrap_or(""));
+            summary.push('\t');
+            summary.push_str(entry.checksum.as_deref().unwrap_or(""));
+            summary.push('\n');
+        }
+    }
+    format!("{:016x}", fnv1a64(summary.as_bytes()))
+}
+
 fn percentile(samples: &[f64], fraction: f64) -> f64 {
     if samples.is_empty() {
         return 0.0;
@@ -136,10 +294,12 @@ fn print_usage() {
             "  --content-hash HEX         Require this 64-hex content-registry hash in hello\n",
             "  --content-ids IDS          Active content ids, comma-separated (default base)\n",
             "                             e.g. --content-ids base,mymod,mymod:pack\n",
+            "  --content-registry PATH    Opt-in D-042 manifest catalog for active content\n",
+            "                             selects every id; with --content-ids, a subset\n",
             "  --blueprint-library DIR    Absolute content-addressed .tsbp library\n",
             "  --policies PATH            District policy registry JSON for this seed\n",
             "\n",
-            "--content-ids and --content-hash are independent process configuration;\n",
+            "--content-registry and --content-ids are independent process configuration;\n",
             "neither is saved, and a loaded world starts from the base-only registry.\n",
         )
     );
@@ -458,8 +618,27 @@ fn run_listen_mode(port: &str) {
         }
     }
     // The registry is process configuration, not save data. Apply it after any
-    // load and before the listener binds so a bad list fails closed.
-    if let Some(raw) = content_ids_arg(&args) {
+    // load and before the listener binds so a bad registry fails closed.
+    //
+    // D-042 is Proposed. `--content-registry` is the opt-in manifest catalog;
+    // `--content-ids`, when both are present, is a requested subset of it.
+    // `--content-ids` alone keeps the short-form behavior from #386.
+    if let Some(raw_path) = content_registry_arg(&args) {
+        let path = Path::new(&raw_path);
+        match apply_content_registry(&mut world, path, content_ids_arg(&args).as_deref()) {
+            Ok(report) => println!(
+                "SERVER_CONTENT_REGISTRY status=ok path={} ids={} selected={} checksum={}",
+                raw_path, report.manifest_ids, report.selected, report.checksum
+            ),
+            Err(error) => {
+                eprintln!(
+                    "SERVER_CONTENT_REGISTRY status=error code={} error={}",
+                    error.code, error.message
+                );
+                std::process::exit(2);
+            }
+        }
+    } else if let Some(raw) = content_ids_arg(&args) {
         if let Err(error) = apply_content_ids(&mut world, &raw) {
             eprintln!(
                 "SERVER_CONTENT status=error code={} error={}",
@@ -783,5 +962,209 @@ mod tests {
             vec!["base".to_string(), "mymod".to_string()]
         );
         assert_eq!(world.checksum(), checksum, "neither setting is saved");
+    }
+
+    struct TempManifest {
+        directory: PathBuf,
+        path: PathBuf,
+    }
+
+    impl Drop for TempManifest {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    fn temp_manifest(name: &str, json: &str) -> TempManifest {
+        let directory = std::env::temp_dir().join(format!(
+            "townsmith-content-registry-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("temp manifest directory");
+        let path = directory.join("registry.json");
+        std::fs::write(&path, json).expect("write temp manifest");
+        TempManifest { directory, path }
+    }
+
+    fn content_checksum(byte: char) -> String {
+        format!("blake3:{}", byte.to_string().repeat(64))
+    }
+
+    fn manifest_json(entries: &[(&str, &str)]) -> String {
+        let entries: Vec<String> = entries
+            .iter()
+            .map(|(id, kind)| {
+                format!(
+                    r#"{{"id":"{id}","kind":"{kind}","checksum":"{}"}}"#,
+                    content_checksum('a')
+                )
+            })
+            .collect();
+        format!(r#"{{"format_version":1,"ids":[{}]}}"#, entries.join(","))
+    }
+
+    fn registry_error(path: &Path, requested: Option<&str>) -> ContentRegistryStartupError {
+        let mut world = ServerWorld::new(LOOPBACK_SEED);
+        let before = world.active_content_ids.clone();
+        let error = apply_content_registry(&mut world, path, requested).unwrap_err();
+        assert_eq!(
+            world.active_content_ids, before,
+            "a registry failure mutates nothing"
+        );
+        error
+    }
+
+    #[test]
+    fn content_registry_without_ids_selects_the_whole_manifest() {
+        let file = temp_manifest(
+            "all",
+            &manifest_json(&[("mymod", "mod"), ("mymod:pack", "resource_pack")]),
+        );
+        let mut world = ServerWorld::new(LOOPBACK_SEED);
+        let report = apply_content_registry(&mut world, &file.path, None).expect("valid manifest");
+
+        assert_eq!(
+            world.active_content_ids,
+            vec![
+                "base".to_string(),
+                "mymod".to_string(),
+                "mymod:pack".to_string()
+            ]
+        );
+        assert_eq!(report.manifest_ids, 2);
+        assert_eq!(report.selected, 3);
+        assert_eq!(report.checksum.len(), 16);
+        assert!(
+            report
+                .checksum
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')),
+            "lowercase 16-hex checksum: {}",
+            report.checksum
+        );
+        let again =
+            apply_content_registry(&mut world, &file.path, None).expect("repeat manifest load");
+        assert_eq!(again, report, "the registry summary is deterministic");
+    }
+
+    #[test]
+    fn content_registry_and_content_ids_together_select_a_subset() {
+        let file = temp_manifest(
+            "subset",
+            &manifest_json(&[("mymod", "mod"), ("mymod:pack", "resource_pack")]),
+        );
+        let mut world = ServerWorld::new(LOOPBACK_SEED);
+        let report = apply_content_registry(&mut world, &file.path, Some("mymod:pack, base"))
+            .expect("subset");
+
+        assert_eq!(
+            world.active_content_ids,
+            vec!["base".to_string(), "mymod:pack".to_string()]
+        );
+        assert_eq!(report.manifest_ids, 2);
+        assert_eq!(report.selected, 2);
+    }
+
+    #[test]
+    fn content_registry_subset_resolves_namespace_aliases() {
+        let json = format!(
+            r#"{{"format_version":1,"ids":[
+                {{"id":"other:addon","kind":"mod","namespace":"other","checksum":"{}"}}
+            ]}}"#,
+            content_checksum('b')
+        );
+        let file = temp_manifest("namespace", &json);
+        let mut world = ServerWorld::new(LOOPBACK_SEED);
+        apply_content_registry(&mut world, &file.path, Some("other")).expect("namespace alias");
+
+        assert_eq!(
+            world.active_content_ids,
+            vec!["base".to_string(), "other:addon".to_string()]
+        );
+    }
+
+    #[test]
+    fn content_registry_unknown_subset_id_fails_closed() {
+        let file = temp_manifest("unknown", &manifest_json(&[("mymod", "mod")]));
+        let error = registry_error(&file.path, Some("missing"));
+        assert_eq!(error.code, "content.unknown_id");
+    }
+
+    #[test]
+    fn content_registry_kind_mismatch_fails_closed() {
+        let json = format!(
+            r#"{{"format_version":1,"ids":[
+                {{"id":"mymod:addon","kind":"mod","checksum":"{}"}},
+                {{"id":"mymod:pack","kind":"resource_pack","checksum":"{}"}}
+            ]}}"#,
+            content_checksum('a'),
+            content_checksum('b')
+        );
+        let file = temp_manifest("kind-mismatch", &json);
+        let error = registry_error(&file.path, Some("mymod"));
+        assert_eq!(error.code, "content.kind_mismatch");
+    }
+
+    #[test]
+    fn content_registry_malformed_json_and_unsupported_version_fail_closed() {
+        let malformed = temp_manifest("malformed", "{not json");
+        assert_eq!(
+            registry_error(&malformed.path, None).code,
+            "content.invalid_registry"
+        );
+
+        let unsupported = temp_manifest("version", r#"{"format_version":2,"ids":[]}"#);
+        assert_eq!(
+            registry_error(&unsupported.path, None).code,
+            "content.unsupported_registry_version"
+        );
+    }
+
+    #[test]
+    fn content_registry_missing_file_uses_the_registry_io_code() {
+        let file = temp_manifest("missing", &manifest_json(&[]));
+        std::fs::remove_file(&file.path).expect("remove temp manifest");
+        let error = registry_error(&file.path, None);
+        assert_eq!(error.code, CONTENT_REGISTRY_IO);
+        assert!(
+            error.message.contains("registry.json"),
+            "the supplied path appears in the message"
+        );
+    }
+
+    #[test]
+    fn content_registry_rejects_an_oversized_manifest() {
+        let file = temp_manifest("oversized", &" ".repeat(MAX_CONTENT_REGISTRY_BYTES + 1));
+        assert_eq!(
+            registry_error(&file.path, None).code,
+            "content.invalid_registry"
+        );
+    }
+
+    #[test]
+    fn content_registry_accepts_an_explicit_base_selection() {
+        let file = temp_manifest("base", &manifest_json(&[("mymod", "mod")]));
+        let mut world = ServerWorld::new(LOOPBACK_SEED);
+        let report = apply_content_registry(&mut world, &file.path, Some("base"))
+            .expect("explicit base is allowed");
+
+        assert_eq!(world.active_content_ids, vec!["base".to_string()]);
+        assert_eq!(report.selected, 1);
+    }
+
+    #[test]
+    fn content_registry_absent_keeps_the_default_registry() {
+        let plain = args(&["--listen", "0", "--once"]);
+        assert_eq!(content_registry_arg(&plain), None);
+        assert_eq!(
+            content_registry_arg(&args(&["--content-registry", "x"])),
+            Some("x".to_string())
+        );
+        assert_eq!(content_ids_arg(&plain), None);
+        assert_eq!(
+            ServerWorld::new(LOOPBACK_SEED).active_content_ids,
+            vec!["base".to_string()]
+        );
     }
 }
