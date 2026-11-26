@@ -13127,6 +13127,9 @@ mod content_identity_faults;
 mod save_compat_tests;
 
 #[cfg(test)]
+mod save_composition_matrix;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
