@@ -28,7 +28,7 @@ Related: [[06 - Modding and Resource Packs]], [[28 - Blueprint Package]], [[42 -
 >
 > The parser rejects unknown fields, `format_version` other than 1, explicit `base`, invalid IDs/namespaces, missing or non-canonical `blake3:<64 lowercase hex>` checksums, duplicate IDs/namespaces, and cross-kind claims. It enforces the §8 caps (256 entries, 1 MiB, 64-byte IDs).
 >
-> **Opt-in implementation landed (proposed).** The core parser and the server `--content-registry PATH` startup path exist; the default remains base-only and no save, protocol, or world checksum changes. D-042 remains **Proposed**; Q-127 and Q-128 remain **Open**.
+> **Opt-in implementation landed (proposed).** The core parser and the server `--content-registry PATH` startup path exist; the default remains base-only and no save, protocol, or world checksum changes. `--check-content-registry` validates the same manifest/selection without starting a server. D-042 remains **Proposed**; Q-127 and Q-128 remain **Open**.
 
 ## 1. Why now
 
@@ -122,6 +122,24 @@ SERVER_CONTENT_REGISTRY status=error code=<stable> error=<message>
 
 and exits 2 before binding. A successful registry application is followed by the existing `SERVER_CONTENT status=ok ids=...` line. The checksum is FNV-1a over sorted selected IDs plus each manifest entry's kind, namespace, and checksum; `base` is implicit, and file bytes/path are excluded.
 
+### Check mode (non-binding)
+
+```text
+townsmith-server --check-content-registry --content-registry /abs/content-registry.json [--content-ids IDS]
+```
+
+- Validates exactly the `--content-registry` / `--content-ids` combination the listen path would apply, then exits **0**.
+- Prints the same two lines as startup, in the same order:
+
+```text
+SERVER_CONTENT_REGISTRY status=ok path=<path> ids=<n> selected=<n> checksum=<16hex>
+SERVER_CONTENT status=ok ids=<comma-separated>
+```
+
+- On failure it prints `SERVER_CONTENT_REGISTRY status=error code=<stable> error=<message>` to stderr and exits **2**. A missing `--content-registry` is `content.registry_required`.
+- It does **not** activate content, bind a socket, load a save, create a world, or write a save. `--listen`, `--once`, and `--save` are ignored, so an operator or CI job can validate one argument set and then reuse it to start the server.
+- It is a dry run, so it has no effect on placement or protocol state; the manifest is still read once and bounded to 1 MiB.
+
 ### Content hash pin
 
 `--content-hash` remains an independent client hello pin. It is not derived automatically from the registry, because the pin is a deployment decision and may cover client-only assets. A future convenience flag may derive it, but it must be explicit.
@@ -156,6 +174,7 @@ Mapping:
 |---|---|---|
 | `content.invalid_registry` | Malformed JSON/schema, empty ID, invalid checksum, duplicate ID/namespace, unknown kind | 2 |
 | `content.registry_io` | Manifest path missing/unreadable | 2 |
+| `content.registry_required` | `--check-content-registry` was given without `--content-registry` | 2 |
 | `content.unsupported_registry_version` | `format_version` is not 1 | 2 |
 | `content.unknown_id` | `--content-ids` names an ID not in the manifest (manifest mode only) | 2 |
 | `content.kind_mismatch` | Same ID/namespace used by both mod and pack, or a dependency resolves to the wrong kind | 2 at startup / placed rejection at runtime |
@@ -205,6 +224,7 @@ Unit:
 Integration:
 
 - Server startup prints `SERVER_CONTENT_REGISTRY` then `SERVER_CONTENT`, and exits 2 on every error; `--content-ids` alone still prints only `SERVER_CONTENT`.
+- `--check-content-registry` prints the same two lines and exits 0/2 without binding, loading, or creating a world; it ignores `--listen`, `--once`, and `--save` (covered by `crates/server/tests/content_registry_cli.rs`, including an occupied-port no-bind check).
 - Malformed, missing, oversized, and unsupported-version manifests fail before binding and leave the world base-only.
 - A package requiring a mod places when the mod is active; rejects with `MissingMod` when absent; rejects with `MissingResourcePack` when the ID exists only as a mod.
 - Namespace matching (`mymod` vs `mymod:pack`) works for both kinds.
