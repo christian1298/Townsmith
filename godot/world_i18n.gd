@@ -287,6 +287,7 @@ const TABLES := {
 
 		# Settlement tax control (Shift+T). Only the sentence is translated;
 		# bridge error codes, ids, and checksums stay verbatim parameters.
+		"base.ui.dashboard.settlement_tax.projection": "Projected local multiplier: x{multiplier} (preview, D-039 proposed)",
 		"base.ui.dashboard.settlement_tax.success": "Settlement tax: {rate}% · checksum {checksum}",
 		"base.ui.dashboard.settlement_tax.unowned": "settlement.unowned",
 		"base.ui.dashboard.settlement_tax.failed": "{code}: {message}",
@@ -723,6 +724,7 @@ const TABLES := {
 
 		# Siedlungssteuerung (Umschalt+T). Nur der Satz ist übersetzt;
 		# Bridge-Fehlercodes, IDs und Prüfsummen bleiben unveränderte Parameter.
+		"base.ui.dashboard.settlement_tax.projection": "Voraussichtlicher lokaler Multiplikator: x{multiplier} (Vorschau, D-039 vorgeschlagen)",
 		"base.ui.dashboard.settlement_tax.success": "Siedlungssteuer: {rate} % · Prüfsumme {checksum}",
 		"base.ui.dashboard.settlement_tax.unowned": "Siedlung ohne Eigentümer (settlement.unowned)",
 		"base.ui.dashboard.settlement_tax.failed": "{code}: {message}",

@@ -3598,6 +3598,9 @@ func _settlement_detail_section(settlement: Dictionary, district: Dictionary, po
 		"radius": i18n.format_float(float(settlement.get("radius_m", 0.0)), 0),
 	}) + "\n"
 	block += _settlement_membership_line(settlement) + "\n"
+	var projection := _settlement_tax_projection_line(int(settlement.get("tax_rate", 0)))
+	if not projection.is_empty():
+		block += projection + "\n"
 	var district_center := _xz_from_pair(district.get("center", null))
 	if not bool(district.get("ok", false)) or not is_finite(district_center.x) \
 		or not is_finite(district_center.y) or district_center.distance_to(center) >= 0.001:
@@ -3665,6 +3668,19 @@ func _settlement_detail_section(settlement: Dictionary, district: Dictionary, po
 ## the payload's ascending member order and show the player id, role, and the
 ## localized permission tokens. An unowned record keeps the compact fallback
 ## and never invents an owner. Numbers use `WorldI18n.format_int`.
+## Read-only D-039 preview: base multiplier 1.0 plus the record's whole-percent
+## rate, capped by the core helper. It never mutates a store or the treasury.
+func _settlement_tax_projection_line(rate: int) -> String:
+	var projection: Dictionary = core.tax_projection(rate)
+	if not bool(projection.get("ok", false)):
+		return ""
+	var multiplier := float(projection.get("combined_multiplier", 0.0))
+	if not is_finite(multiplier):
+		return ""
+	return i18n.t("base.ui.dashboard.settlement_tax.projection", {
+		"multiplier": i18n.format_float(multiplier, 2),
+	})
+
 func _settlement_membership_line(settlement: Dictionary) -> String:
 	var revision: String = i18n.format_int(int(settlement.get("membership_revision", 0)))
 	if not bool(settlement.get("owned", false)):
@@ -5526,6 +5542,7 @@ func _run_scene_smoke() -> void:
 	var settlement_select_ok := false
 	var settlement_detail_ok := false
 	var dashboard_tax_ok := false
+	var dashboard_tax_projection_ok := false
 	var dashboard_claim_ok := false
 	var dashboard_transfer_ok := false
 	var dashboard_release_ok := false
@@ -6982,6 +6999,28 @@ func _run_scene_smoke() -> void:
 					owned_tax_next,
 					str(core.settlement_checksum()),
 				])
+				# The projection is a read-only D-039 preview. It must expose
+				# the helper's 0/5/100 values, hide out-of-range rates, and
+				# leave the settlement store checksum untouched.
+				var projection_checksum := str(core.settlement_checksum())
+				var projection_zero: Dictionary = core.tax_projection(0)
+				var projection_five: Dictionary = core.tax_projection(5)
+				var projection_hundred: Dictionary = core.tax_projection(100)
+				var projection_negative: Dictionary = core.tax_projection(-1)
+				var projection_over: Dictionary = core.tax_projection(101)
+				dashboard_tax_projection_ok = bool(projection_zero.get("ok", false))
+				dashboard_tax_projection_ok = dashboard_tax_projection_ok and is_equal_approx(float(projection_zero.get("combined_multiplier", 0.0)), 1.0)
+				dashboard_tax_projection_ok = dashboard_tax_projection_ok and is_equal_approx(float(projection_five.get("combined_multiplier", 0.0)), 1.05)
+				dashboard_tax_projection_ok = dashboard_tax_projection_ok and is_equal_approx(float(projection_hundred.get("combined_multiplier", 0.0)), 2.0)
+				dashboard_tax_projection_ok = dashboard_tax_projection_ok and not bool(projection_negative.get("ok", true))
+				dashboard_tax_projection_ok = dashboard_tax_projection_ok and not bool(projection_over.get("ok", true))
+				dashboard_tax_projection_ok = dashboard_tax_projection_ok and str(projection_negative.get("error_code", "")) == "tax.projection.rate_out_of_range"
+				dashboard_tax_projection_ok = dashboard_tax_projection_ok and _settlement_tax_projection_line(0).contains("x1.00")
+				dashboard_tax_projection_ok = dashboard_tax_projection_ok and _settlement_tax_projection_line(5).contains("x1.05")
+				dashboard_tax_projection_ok = dashboard_tax_projection_ok and _settlement_tax_projection_line(100).contains("x2.00")
+				dashboard_tax_projection_ok = dashboard_tax_projection_ok and _settlement_tax_projection_line(-1).is_empty()
+				dashboard_tax_projection_ok = dashboard_tax_projection_ok and str(core.settlement_checksum()) == projection_checksum
+				print("DASHBOARD_TAX_PROJECTION zero=1.00 five=1.05 hundred=2.00 invalid=rejected checksum=%s" % projection_checksum)
 				# Shift+C: seed one fresh unowned record through the local
 				# bridge. The first key press registers and caches "Mayor",
 				# claims with the record's membership revision, and refreshes
@@ -7988,6 +8027,9 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and not dashboard_tax_ok:
 		status = "dashboard_tax_failed"
 
+	if status == "ok" and not dashboard_tax_projection_ok:
+		status = "dashboard_tax_projection_failed"
+
 	if status == "ok" and not dashboard_claim_ok:
 		status = "dashboard_claim_failed"
 
@@ -8005,7 +8047,7 @@ func _run_scene_smoke() -> void:
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s policy_edit=%s district_select=%s settlement_select=%s settlement_detail=%s dashboard_tax=%s dashboard_claim=%s dashboard_transfer=%s dashboard_release=%s dashboard_rename=%s dashboard_members=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s policy_edit=%s district_select=%s settlement_select=%s settlement_detail=%s dashboard_tax=%s dashboard_tax_projection=%s dashboard_claim=%s dashboard_transfer=%s dashboard_release=%s dashboard_rename=%s dashboard_members=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -8052,6 +8094,7 @@ func _run_scene_smoke() -> void:
 		"ok" if settlement_select_ok else "failed",
 		"ok" if settlement_detail_ok else "failed",
 		"ok" if dashboard_tax_ok else "failed",
+		"ok" if dashboard_tax_projection_ok else "failed",
 		"ok" if dashboard_claim_ok else "failed",
 		"ok" if dashboard_transfer_ok else "failed",
 		"ok" if dashboard_release_ok else "failed",

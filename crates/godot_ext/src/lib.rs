@@ -30,8 +30,8 @@ use core_blueprint::{
 };
 use core_city::named::{age_years_from_days, slot_is_employed, MAX_AGE_DAYS};
 use core_city::{
-    advise, diff_selection, evaluate_tutorial, first_construction_payment, heatmap_grid,
-    normalize_rotation, policy_placement_denial, settle_first_installment, starter,
+    advise, compose_tax_multiplier, diff_selection, evaluate_tutorial, first_construction_payment,
+    heatmap_grid, normalize_rotation, policy_placement_denial, settle_first_installment, starter,
     structure_age_error, summarize, summarize_district, summarize_heatmap, AdvisorInput,
     AdvisorReport, Age, AgeState, CitizenDeath, CitizenMotion, CitizenPosition, CityLayout,
     CityRuntime, CitySummary, CityTier, ConstructionSite, ConstructionStore, ConstructionTimeScale,
@@ -43,11 +43,12 @@ use core_city::{
     PlacementStore, PolicyPlacementDenial, PolicyServiceWeight, PolicyTaxWeights, ResearchStore,
     RoadError, RoadGraph, RoadRequest, RoadSegment, RoadStore, RouteCache, ServiceConsumer,
     ServiceKind, ServiceReport, ServiceStore, ServiceTier, Settlement, SettlementError,
-    SettlementRequest, SettlementRole, SettlementStore, TechTree, Trade, TradePool, TutorialInput,
-    UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
+    SettlementRequest, SettlementRole, SettlementStore, TaxLocation, TechTree, Trade, TradePool,
+    TutorialInput, UtilityConsumer, UtilityKind, UtilityReport, UtilityStore, Workplace, Zone,
     DEFAULT_LOAN_RATE_PER_DAY, DEFAULT_LOAN_TERM_DAYS, DEFAULT_ROUTE_CACHE_CAPACITY,
-    MAX_HEATMAP_CELLS, MAX_HEATMAP_CELL_M, MAX_LOANS, MAX_TOTAL_DEBT, MAX_WORLD_COORD_M,
-    MIN_HEATMAP_CELL_M, RESEARCH_PER_RESIDENT_PER_DAY, STARTING_BALANCE,
+    MAX_HEATMAP_CELLS, MAX_HEATMAP_CELL_M, MAX_LOANS, MAX_TAX_COMPOSITION_SETTLEMENT_RATE,
+    MAX_TOTAL_DEBT, MAX_WORLD_COORD_M, MIN_HEATMAP_CELL_M, RESEARCH_PER_RESIDENT_PER_DAY,
+    STARTING_BALANCE, TAX_COMPOSITION_CAP,
 };
 use core_rooms::{
     count_materials, demo as room_demo, detect_rooms, PropInput, PropKind, RoomBounds,
@@ -2972,6 +2973,18 @@ impl TownsmithCore {
         };
         let outcome = settlement_set_tax_in_store(store, id, rate);
         settlement_mutation_payload(store, outcome)
+    }
+
+    /// Read-only settlement-tax projection for one settlement rate.
+    ///
+    /// This previews the proposed D-039 option-A composition at one neutral
+    /// base location (`TaxLocation::new(1.0, rate)`): the result is
+    /// `min(8.0, 1 + rate / 100)`. It never reads or writes the treasury, the
+    /// settlement store, the world save, content, or a path. D-039 remains
+    /// Proposed; the dashboard uses this only to render a preview line.
+    #[func]
+    fn tax_projection(&self, rate: i64) -> VarDictionary {
+        tax_projection_payload(rate)
     }
 
     /// Owner of a world cell, or `{ ok, found: false }`.
@@ -8730,6 +8743,58 @@ fn lot_to_dictionary(lot: &Lot) -> VarDictionary {
     result
 }
 
+/// Pure payload for [`TownsmithCore::tax_projection`].
+///
+/// Validates `rate` in whole percent, composes one neutral-base location, and
+/// reports the effective multiplier plus whether the per-location cap applied.
+/// The helper is deliberately stateless: no bridge lock, save, content, or
+/// path is touched, so the dashboard preview cannot mutate the world.
+fn tax_projection_value(rate: i64) -> Result<(u16, f64, bool), (&'static str, &'static str)> {
+    let Ok(rate) = u16::try_from(rate) else {
+        return Err((
+            "tax.projection.rate_out_of_range",
+            "settlement tax rate must be between 0 and 100",
+        ));
+    };
+    if rate > MAX_TAX_COMPOSITION_SETTLEMENT_RATE {
+        return Err((
+            "tax.projection.rate_out_of_range",
+            "settlement tax rate must be between 0 and 100",
+        ));
+    }
+    let location = TaxLocation::new(1.0, rate).map_err(|error| {
+        (
+            error.code(),
+            "settlement tax rate must be between 0 and 100",
+        )
+    })?;
+    let combined_multiplier = compose_tax_multiplier(&[location]).map_err(|error| {
+        (
+            error.code(),
+            "settlement tax rate must be between 0 and 100",
+        )
+    })?;
+    Ok((
+        rate,
+        combined_multiplier,
+        combined_multiplier >= TAX_COMPOSITION_CAP,
+    ))
+}
+
+fn tax_projection_payload(rate: i64) -> VarDictionary {
+    match tax_projection_value(rate) {
+        Ok((rate, combined_multiplier, capped)) => {
+            let mut result = VarDictionary::new();
+            result.set("ok", true);
+            result.set("rate", i64::from(rate));
+            result.set("combined_multiplier", combined_multiplier);
+            result.set("capped", capped);
+            result
+        }
+        Err((code, message)) => placement_simple_error(code, message),
+    }
+}
+
 fn settlement_error_result(error: &SettlementError) -> VarDictionary {
     placement_simple_error(error.code(), error.to_string())
 }
@@ -14159,6 +14224,27 @@ mod tests {
         let payload = serde_json::to_value(settlement_payload(&settlement)).expect("json");
         assert_eq!(payload["tax_rate"], 35);
         assert_eq!(payload["membership_revision"], 1);
+    }
+
+    #[test]
+    fn tax_projection_preview_matches_the_d039_helper() {
+        for (rate, expected) in [(0, 1.0), (5, 1.05), (100, 2.0)] {
+            let (found_rate, combined, capped) =
+                tax_projection_value(rate).expect("valid projection");
+            assert_eq!(found_rate, u16::try_from(rate).expect("rate"));
+            assert!((combined - expected).abs() < 1e-12, "rate {rate}");
+            assert!(!capped);
+        }
+    }
+
+    #[test]
+    fn tax_projection_rejects_out_of_range_rates() {
+        for rate in [-1, 101, i64::MAX] {
+            assert_eq!(
+                tax_projection_value(rate).expect_err("out of range").0,
+                "tax.projection.rate_out_of_range"
+            );
+        }
     }
 
     #[test]
