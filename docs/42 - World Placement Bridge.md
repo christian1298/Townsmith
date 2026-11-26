@@ -334,6 +334,8 @@ The bridge remembers the verified identity in a bridge-only slot. A later save m
 
 A v2 match removes `content` and sets `format_version: 1` in memory for `PlacementStore` and the other store parsers; the file is not rewritten, and the stores, placement checksum, and result counts are identical to the same v1 records. The verified identity is committed only after the whole load succeeds; any failure leaves every store, package map, and the previous identity untouched. A successful absent/legacy load clears the identity.
 
+A deterministic test-only fault corpus (`crates/godot_ext/src/content_identity_faults.rs`, 12 tests with 60+ envelope cases) covers malformed v1/v2 envelopes, pack IDs and checksums, multiple active packs, inspecting `missing`/`mismatch` statuses, retained identity, and the read-only save refusal. It uses only the pure verifier helpers and changes no production behavior.
+
 Save adds `content_bound`, `content_identity_status` (`absent`/`new`/`match`), `content_pack_id`, `content_pack_checksum`, `content_registry_checksum`, and `content_format_version` (`0`/`1`). Load adds `content_identity_status` (`absent`/`legacy_unbound`/`match`/`missing`/`mismatch`), `content_read_only`, the same pack/checksum fields (empty/zero when no identity is recorded), and `content_format_version` (`0` without a recorded identity). `world_load_content_checked(path, expected_seed, accept_missing_content)` with `false` delegates to `world_load`; with `true` a missing or different pack loads read-only, keeps the recorded identity, and every later save fails with `content_read_only`. A strict load with the exact pack restores read-write mode. There is no substitution, discovery, path rewrite, or auto-download.
 
 `world_load` rejects:
