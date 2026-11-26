@@ -87,13 +87,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
+start_server_sessions() {
+	local port="$1"
+	local sessions="$2"
+	shift 2
+	: >"$SERVER_LOG"
+	"$ROOT/target/debug/townsmith-server" --listen "$port" --sessions "$sessions" "$@" >"$SERVER_LOG" 2>&1 &
+	SERVER_PID=$!
+	wait_for_log "$SERVER_LOG" "$SERVER_PID" "SERVER_LISTEN status=ok address=" 10
+}
+
 start_server() {
 	local port="$1"
 	shift
-	: >"$SERVER_LOG"
-	"$ROOT/target/debug/townsmith-server" --listen "$port" --sessions 1 "$@" >"$SERVER_LOG" 2>&1 &
-	SERVER_PID=$!
-	wait_for_log "$SERVER_LOG" "$SERVER_PID" "SERVER_LISTEN status=ok address=" 10
+	start_server_sessions "$port" 1 "$@"
 }
 
 # run_script NAME PORT ROLE SCRIPT MARKER_REGEX
@@ -185,5 +192,77 @@ for needle in \
 	fi
 done
 
+run_pair() {
+	local name="$1"
+	local port="$2"
+	local preseed_output
+	local main_output
+	local status
+	local builder_id
+	local save_path="$SMOKE_DIR/$name-world.json"
+
+	start_server "$port" --role mayor --save "$save_path"
+	set +e
+	preseed_output="$(timeout 90s env -u DISPLAY -u WAYLAND_DISPLAY \
+		"$GODOT_BIN" --headless --path "$ROOT/godot" res://mp_world_client.tscn -- \
+		--smoke --port "$port" --settlement-preseed \
+		--settlement-script "found:BuilderTown|list" 2>&1)"
+	status=$?
+	set -e
+	printf '%s\n' "$preseed_output" >&2
+	if [[ $status -ne 0 ]]; then
+		echo "Settlement preseed ($name) failed: Godot exited $status" >&2
+		exit 1
+	fi
+	builder_id="$(sed -n 's/^MP_SETTLEMENT_PRESEED player=\([0-9][0-9]*\).*/\1/p' <<<"$preseed_output" | tail -1)"
+	if [[ -z "$builder_id" ]]; then
+		echo "Settlement preseed ($name) failed: no player id" >&2
+		exit 1
+	fi
+	stop_server
+	if [[ ! -f "$save_path" ]]; then
+		echo "Settlement preseed ($name) failed: no saved world" >&2
+		exit 1
+	fi
+	start_server "$port" --role mayor --save "$save_path"
+
+	set +e
+	main_output="$(timeout 90s env -u DISPLAY -u WAYLAND_DISPLAY \
+		"$GODOT_BIN" --headless --path "$ROOT/godot" res://mp_world_client.tscn -- \
+		--smoke --port "$port" --settlement-ui --skip-roads --name builder \
+		--settlement-script "found:Harbor|list:0:2|transfer:$builder_id|list:0:2" 2>&1)"
+	status=$?
+	set -e
+	printf '%s\n' "$main_output" >&2
+	if [[ $status -ne 0 ]]; then
+		echo "Settlement transfer ($name) failed: Godot exited $status" >&2
+		exit 1
+	fi
+	for needle in \
+		"MP_SETTLEMENT_TRANSFER ok=1 from=2 to=$builder_id" \
+		"MP_SETTLEMENT_PAGE after=0 limit=2 count=2 matched=2 next=2 more=0" \
+		"MP_SETTLEMENT_UI status=ok settlements=2 members=3 at=none actions=4 accepted=4 rejected=0"; do
+		if ! grep -Fq "$needle" <<<"$main_output"; then
+			echo "Settlement transfer ($name) missing: $needle" >&2
+			exit 1
+		fi
+	done
+	if ! grep -q '^MP_SETTLEMENT_UI status=ok ' <<<"$main_output"; then
+		echo "Settlement transfer ($name) failed: no final marker" >&2
+		exit 1
+	fi
+	printf '%s\n' "$main_output" >"$SMOKE_DIR/$name.log"
+	stop_server
+}
+
+run_pair transfer_first "$(pick_port)"
+run_pair transfer_second "$(pick_port)"
+if ! diff -u \
+	<(grep '^MP_SETTLEMENT_TRANSFER ok=1 ' "$SMOKE_DIR/transfer_first.log") \
+	<(grep '^MP_SETTLEMENT_TRANSFER ok=1 ' "$SMOKE_DIR/transfer_second.log"); then
+	echo "Settlement transfer smoke failed: transfer markers differ" >&2
+	exit 1
+fi
+
 MARKER="$(cat "$SMOKE_DIR/read_first.marker")"
-echo "MP_SETTLEMENT_UI_SMOKE status=ok runs=6 ${MARKER#MP_SETTLEMENT_UI status=ok }"
+echo "MP_SETTLEMENT_UI_SMOKE status=ok runs=8 ${MARKER#MP_SETTLEMENT_UI status=ok }"

@@ -16,8 +16,8 @@ tags:
 > [!info] What this note covers
 > The opt-in settlement probe in `godot/mp_world_client.gd`: the read-only client readout merged as **#424**, and the planned mutation actions that follow it. It is a connected-client debug surface over the existing D-033 protocol commands. It adds **no** protocol command, wire field, save field, or ADR. [[48 - Settlement Boundaries]] §3 is the command contract; [[05 - Multiplayer]] §5 is the server behavior.
 
-> [!warning] Status: read-only current, mutation planned
-> `--settlement-ui` with `found` / `list` / `at` is implemented and smoke-pinned. The mutation actions, their script grammar, and `MP_SETTLEMENT_ACTION` are **planned / in progress** and are not emitted by master. They reuse the commands already accepted by `ServerWorld`; the server remains authoritative. Without `--settlement-ui`, no settlement code runs.
+> [!success] Status: readout and scripted mutations implemented
+> `--settlement-ui` implements readout plus `rename`, `set_tax`, `release`, `invite`, `set_role`, `remove`, `claim`, and `transfer`, including settlement-list paging. They reuse the commands accepted by `ServerWorld`; the server remains authoritative. Without `--settlement-ui`, no settlement code runs.
 
 ## 1. Where it sits
 
@@ -31,12 +31,12 @@ flowchart LR
 
 The probe is a connected client, not a local editor. It speaks the same 4-byte length-prefixed JSON protocol as the rest of `mp_world_client`, uses the session's stable `player_id`, and draws only what the server returns. It never opens a local `TownsmithCore`, never calls a bridge mutation, and never writes a world save.
 
-| Piece | Current (#424) | Planned mutation step |
-|---|---|---|
-| Script actions | `found:<name>[:x,z]`, `list`, `at:<x,z>` | Add `rename`, `set-tax`, `release`, `invite`, `set-role`, `remove-member`, `claim`, `transfer` |
-| Commands sent | `found_settlement`, `settlement_list`, `settlement_at` | The same plus the existing D-033 mutation commands |
-| Panel | Read-only rows and the last `at` result | Same rows, refreshed after each accepted mutation |
-| Markers | `MP_SETTLEMENT_UI` | `MP_SETTLEMENT_UI` plus one `MP_SETTLEMENT_ACTION` per mutation attempt |
+| Piece | Current |
+|---|---|
+| Script actions | `found:<name>[:x,z]`, `list[:<after>:<limit>]`, `at:<x,z>`, `rename`, `set_tax`, `release`, `invite`, `set_role`, `remove`, `claim`, `transfer` |
+| Commands sent | `found_settlement`, `settlement_list`, `settlement_at`, and the existing D-033 mutation commands |
+| Panel | Rows from the current page, refreshed after each accepted mutation |
+| Markers | `MP_SETTLEMENT_UI`, `MP_SETTLEMENT_PAGE`, `MP_SETTLEMENT_ACTION`, `MP_SETTLEMENT_TRANSFER`, `MP_SETTLEMENT_PRESEED` |
 | Protocol / save | Unchanged | Unchanged; no new command or field |
 
 ## 2. Command contract
@@ -103,40 +103,40 @@ Actions are separated by `|`; at most 64 actions are allowed.
 | Token | Meaning |
 |---|---|
 | `found:<name>[:<x>,<z>]` | `found_settlement` at `x,z` with radius 64 m; omitted coordinates default to `0,0` |
-| `list` | `settlement_list` |
+| `list` | `settlement_list` with no paging fields (all records) |
+| `list:<after_id>:<limit>` | `settlement_list { after_id, limit }`; exclusive cursor, limit 1–256 |
 | `at:<x>,<z>` | `settlement_at` at an integer point |
 
 - `name` is 1–48 characters with no control characters, trimmed; empty names reject the script.
 - Coordinates are canonical integer pairs inside ±1,000,000.
 - An empty segment, unknown token, bad coordinate pair, or empty name rejects the whole script with `settlement_script_invalid`.
-- `found` is the only write in the current path; it is the ordinary D-033 founding command, not a dashboard control.
+- `found` is the ordinary D-033 founding command, not a dashboard control.
 - `at` is display-only: it does not add a row to the list unless `found`/`list` already populated one.
+- `--skip-roads` starts the settlement script immediately after welcome, for a world that already has the deterministic roads (used by the transfer smoke).
 
-### 3.2 Planned mutation grammar
-
-The planned step adds mutation tokens to the same ordered script. They are not implemented on master.
+### 3.2 Mutation grammar
 
 | Token | Sends | Local validation |
 |---|---|---|
 | `rename:<name>` | `settlement_rename { settlement_id, name, expected_revision }` | name rules |
-| `set-tax:<rate>` | `settlement_set_tax { settlement_id, rate }` | integer `0..=100` |
+| `set_tax:<rate>` | `settlement_set_tax { settlement_id, rate }` | integer `0..=100` |
 | `release` | `settlement_release { settlement_id, expected_revision }` | target must be owned |
-| `invite:<player_id>:<role>` | `settlement_invite { settlement_id, player_id, role, expected_revision }` | positive id, valid role |
-| `set-role:<player_id>:<role>` | `settlement_set_role { settlement_id, player_id, role, expected_revision }` | positive id, valid role |
-| `remove-member:<player_id>` | `settlement_remove_member { settlement_id, player_id, expected_revision }` | positive id |
+| `invite:<player_id>[:<role>]` | `settlement_invite { settlement_id, player_id, role, expected_revision }` | positive id, valid role |
+| `set_role:<player_id>:<role>` | `settlement_set_role { settlement_id, player_id, role, expected_revision }` | positive id, valid role |
+| `remove:<player_id>` | `settlement_remove_member { settlement_id, player_id, expected_revision }` | positive id |
 | `claim` | `settlement_claim { settlement_id, expected_revision }` | target must be unowned |
-| `transfer:<player_id>` | `settlement_transfer { settlement_id, player_id, expected_revision }` | positive id |
+| `transfer:<player_id>` | `settlement_transfer { settlement_id, player_id, expected_revision }` | positive id; recipient must already be registered |
 
 Example (one server that stays Mayor; `release` would need an Admin server):
 
 ```text
-found:Harbor|list|at:0,0|set-tax:12|rename:Port Harbor|invite:7:builder|set-role:7:manager
+found:Harbor|list|at:0,0|set_tax:12|rename:Port Harbor|invite:7:builder|set_role:7:manager
 ```
 
 **Target selection.** Mutation tokens do not carry a settlement id. The selected record is resolved deterministically:
 
 1. A successful `found` selects the record it returned.
-2. Otherwise, a successful `list` selects the **lowest id** in the returned list.
+2. Otherwise, a successful `list` selects the **highest id** in the returned page.
 3. A successful `at` selects its containing record and overrides the previous selection.
 4. An `at` with `found:false` clears the selection.
 5. A mutation with no selected record fails locally with `settlement_no_target` and sends nothing.
@@ -177,7 +177,7 @@ The important distinction is the authority boundary. A dashboard or editor mutat
 
 ## 6. Test approach
 
-**Current read-only smoke.** `scripts/smoke_mp_settlement_ui.sh` starts a fresh server per run (`--listen PORT --sessions 1`), waits for `SERVER_LISTEN status=ok address=`, and runs the client headless twice with `found:Harbor|list|at:0,0`. It requires:
+**Read-only smoke.** `scripts/smoke_mp_settlement_ui.sh` starts a fresh server per run (`--listen PORT --sessions 1`), waits for `SERVER_LISTEN status=ok address=`, and runs the client headless twice with `found:Harbor|list|at:0,0`. It requires:
 
 ```text
 MP_SETTLEMENT_UI status=ok settlements=1 members=1 at=1 checksum=<16 hex>
@@ -191,15 +191,15 @@ MP_SETTLEMENT_UI_SMOKE status=ok runs=2 settlements=1 members=1 at=1 checksum=<1
 
 No sleeps are used; readiness is the bounded server-log poll. The checksum is SHA-256 over ascending lines of `id|name|owner_id|revision|tax|member_ids`, first 16 hex; unowned records use owner id `0` and an empty member list.
 
-**Planned mutation smoke.** When the mutation step lands, extend the same harness with a fresh server per run and a script that covers both outcomes:
+**Mutation and transfer smoke.** The same harness runs two more fresh-server scripts: `found:Harbor|rename:Riverside|set_tax:5|release` under Admin, and `found:Harbor|claim|invite:9999:builder|set_role:9998:manager|remove:9998` under Mayor. A final pair pre-seeds `BuilderTown` with one player, saves the world, reloads it for a second player named `builder`, pages `list:0:2`, transfers `Harbor` to the registered player, and pages again. It requires:
 
-1. `found` / `list` / `at` warm-up and a pinned baseline checksum.
-2. Success: `rename`, `set-tax`, `invite` / `set-role` / `remove-member`, `claim` on an unowned record, and `transfer` to a recipient registered by a second connection.
-3. Rejection: stale `expected_revision`, invalid role, out-of-range tax, duplicate name, removing the owner, and an unknown transfer recipient.
-4. A final `list` / `at` tail that must not move the settlement or world checksum.
-5. Two fresh runs with identical `MP_SETTLEMENT_ACTION` lines, the same final `MP_SETTLEMENT_UI` checksum, and pinned frame counts.
+1. `MP_SETTLEMENT_PAGE after=0 limit=2 count=2 matched=2 next=2 more=0`.
+2. `MP_SETTLEMENT_TRANSFER ok=1 from=2 to=1 settlement=2 revision=2`.
+3. A final `MP_SETTLEMENT_UI` with `settlements=2 members=3 actions=4 accepted=4 rejected=0`.
+4. Rejection markers for claim, non-member role change/remove, and unknown recipient.
+5. Two fresh runs with identical `MP_SETTLEMENT_ACTION`/`MP_SETTLEMENT_TRANSFER` lines and the same final checksum.
 
-`settlement_release` needs an Admin process role; a Mayor server must reject it, and a separate Admin run should accept it. The test is deterministic: fixed seed, fixed script order, fresh server, no wall-clock sleeps, and no dependency on real network timing.
+`settlement_release` needs an Admin process role; a Mayor server must reject it, and a separate Admin run accepts it. The test is deterministic: fixed seed, fixed script order, fresh server, no wall-clock sleeps, and no dependency on real network timing.
 
 ## 7. Limits
 
@@ -209,7 +209,7 @@ No sleeps are used; readiness is the bounded server-log poll. The checksum is SH
 - **Developer probe, not a production settlement UI.** There is no 3D selection, mouse control, confirmation dialog, localized text, or role-aware control state.
 - **No prediction, optimistic UI, or offline queue.** Every mutation is a request/response round trip; a reject leaves the cached row unchanged.
 - **No authentication.** The session identity is the existing dev identity; ownership and member ids are only as trustworthy as the server process that assigned them.
-- **No paging.** The panel shows at most eight rows even though the store allows up to 1,000 settlements.
+- **Page rendering is bounded.** `list:<after>:<limit>` supports server paging, but the panel still renders at most eight rows per page.
 - **No member names or role/permission rows.** `SettlementView` carries member ids, roles, and permissions, but the panel only counts members. The owner is shown as an id.
 - **No treasury consumer.** `tax_rate` is stored and permission-gated but does not affect income yet.
 - **No protocol or save change.** The probe uses existing commands; its cache, selection, and markers are process-local and are not persisted. The optional `ServerSave` settlement store is the only persistence.
