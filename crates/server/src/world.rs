@@ -53,6 +53,7 @@ use crate::protocol::{
     Rejection, RoadView, ServerMessage, SessionConfig, SettlementMemberView, SettlementView,
     TimeAction, CHAT_LOG_CAPACITY, DEFAULT_INTEREST_RADIUS_M, LOOPBACK_SEED, MAX_CHAT_CHARS,
     MAX_INTEREST_BUILDINGS, MAX_INTEREST_ROADS, PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
+    SETTLEMENT_LIST_PAGE_CAP,
 };
 
 /// Fixed road width for v0 placement commands.
@@ -1897,7 +1898,9 @@ impl ServerWorld {
                 z,
                 radius_m,
             } => self.apply_found_settlement(name, *x, *z, *radius_m),
-            ClientCommand::SettlementList => self.apply_settlement_list(),
+            ClientCommand::SettlementList { after_id, limit } => {
+                self.apply_settlement_list(*after_id, *limit)
+            }
             ClientCommand::SettlementInvite {
                 settlement_id,
                 player_id,
@@ -2619,11 +2622,27 @@ impl ServerWorld {
         }
     }
 
-    fn apply_settlement_list(&mut self) -> (Vec<ServerMessage>, &'static str) {
+    /// Bounded settlement list read.
+    ///
+    /// `after_id` is exclusive (`id > after_id`). `limit` is clamped to
+    /// `1..=SETTLEMENT_LIST_PAGE_CAP`; `None` returns every matching record.
+    /// Records stay ascending. `matched` counts every match before the page
+    /// limit, `next_after` is the last returned id (or `after_id`/0 when the
+    /// page is empty), and `has_more` reports whether records follow the page.
+    /// The query never advances the tick or mutates the store.
+    fn apply_settlement_list(
+        &mut self,
+        after_id: Option<u64>,
+        limit: Option<u32>,
+    ) -> (Vec<ServerMessage>, &'static str) {
+        let after_id = after_id.unwrap_or(0);
         let Some(store) = self.settlements.as_ref() else {
             return accepted(ServerMessage::SettlementList {
                 tick: self.tick,
                 count: 0,
+                matched: 0,
+                next_after: after_id,
+                has_more: false,
                 checksum: "0000000000000000".to_string(),
                 settlements: Vec::new(),
             });
@@ -2637,11 +2656,26 @@ impl ServerWorld {
                 ),
             );
         }
+        let matched = store.settlements.iter().filter(|s| s.id > after_id).count();
+        let page_cap = limit.map(|limit| limit.clamp(1, SETTLEMENT_LIST_PAGE_CAP) as usize);
+        let settlements: Vec<SettlementView> = store
+            .settlements
+            .iter()
+            .filter(|settlement| settlement.id > after_id)
+            .take(page_cap.unwrap_or(usize::MAX))
+            .map(settlement_view)
+            .collect();
+        let count = settlements.len();
         accepted(ServerMessage::SettlementList {
             tick: self.tick,
-            count: store.count(),
+            count,
+            matched: u32::try_from(matched).unwrap_or(u32::MAX),
+            next_after: settlements
+                .last()
+                .map_or(after_id, |settlement| settlement.id),
+            has_more: count < matched,
             checksum: format!("{:016x}", store.checksum()),
-            settlements: store.settlements.iter().map(settlement_view).collect(),
+            settlements,
         })
     }
 
@@ -8160,7 +8194,10 @@ mod tests {
         assert_ne!(world_checksum, checksum_before);
         assert_eq!(world_checksum, world.checksum());
 
-        let list = world.apply(&ClientCommand::SettlementList);
+        let list = world.apply(&ClientCommand::SettlementList {
+            after_id: None,
+            limit: None,
+        });
         let ServerMessage::SettlementList {
             count,
             checksum,
@@ -8199,6 +8236,110 @@ mod tests {
     }
 
     #[test]
+    fn settlement_list_pages_with_an_exclusive_cursor_and_page_cap() {
+        type ListPage = (u64, usize, u32, u64, bool, Vec<u64>, String);
+        fn page(world: &mut ServerWorld, after_id: Option<u64>, limit: Option<u32>) -> ListPage {
+            let ServerMessage::SettlementList {
+                tick,
+                count,
+                matched,
+                next_after,
+                has_more,
+                checksum,
+                settlements,
+            } = world.apply(&ClientCommand::SettlementList { after_id, limit })
+            else {
+                panic!("expected settlement_list");
+            };
+            assert_eq!(count, settlements.len(), "count is the page length");
+            assert!(
+                settlements.windows(2).all(|pair| pair[0].id < pair[1].id),
+                "a page stays ascending"
+            );
+            (
+                tick,
+                count,
+                matched,
+                next_after,
+                has_more,
+                settlements.iter().map(|settlement| settlement.id).collect(),
+                checksum,
+            )
+        }
+
+        let mut world = world_with_hello();
+        let tick = world.tick;
+
+        // No store: every request is an empty page with a stable tick.
+        for after_id in [None, Some(7)] {
+            let (page_tick, count, matched, next_after, has_more, ids, store_checksum) =
+                page(&mut world, after_id, Some(2));
+            assert_eq!(page_tick, tick);
+            assert_eq!(count, 0);
+            assert_eq!(matched, 0);
+            assert_eq!(next_after, after_id.unwrap_or(0));
+            assert!(!has_more);
+            assert!(ids.is_empty());
+            assert_eq!(store_checksum, "0000000000000000");
+        }
+
+        let mut ids = Vec::new();
+        for (name, x) in [("Harbour", 0), ("Docks", 100), ("Mills", 200)] {
+            let found = world.apply(&found_settlement(name, x, 0, 32));
+            let ServerMessage::SettlementFound { settlement, .. } = found else {
+                panic!("expected settlement_found, got {found:?}");
+            };
+            ids.push(settlement.id);
+        }
+        assert_eq!(ids, vec![1, 2, 3]);
+        let store_checksum = format!(
+            "{:016x}",
+            world.settlements.as_ref().expect("store").checksum()
+        );
+        let checksum = world.checksum();
+
+        let assert_page = |result: ListPage,
+                           expected_count: usize,
+                           expected_matched: u32,
+                           expected_next: u64,
+                           expected_more: bool,
+                           expected_ids: &[u64]| {
+            let (page_tick, count, matched, next_after, has_more, page_ids, checksum) = result;
+            assert_eq!(page_tick, tick, "paging never advances the tick");
+            assert_eq!(count, expected_count);
+            assert_eq!(matched, expected_matched);
+            assert_eq!(next_after, expected_next);
+            assert_eq!(has_more, expected_more);
+            assert_eq!(page_ids, expected_ids);
+            assert_eq!(checksum, store_checksum, "the store checksum is unchanged");
+        };
+
+        // No cursor, no limit: the pre-paging all-records behavior.
+        assert_page(page(&mut world, None, None), 3, 3, 3, false, &ids);
+        // Explicit limits clamp to 1..=256; 3 records fit under the cap.
+        assert_page(page(&mut world, None, Some(1)), 1, 3, 1, true, &[1]);
+        assert_page(page(&mut world, None, Some(2)), 2, 3, 2, true, &[1, 2]);
+        assert_page(page(&mut world, None, Some(256)), 3, 3, 3, false, &ids);
+        assert_page(page(&mut world, None, Some(0)), 1, 3, 1, true, &[1]);
+        assert_page(page(&mut world, None, Some(10_000)), 3, 3, 3, false, &ids);
+
+        // `after_id` is exclusive at the first, middle, and last record.
+        assert_page(page(&mut world, Some(1), None), 2, 2, 3, false, &[2, 3]);
+        assert_page(page(&mut world, Some(2), None), 1, 1, 3, false, &[3]);
+        assert_page(page(&mut world, Some(3), None), 0, 0, 3, false, &[]);
+        // Unknown and beyond-last cursors return an empty page that echoes it.
+        assert_page(page(&mut world, Some(999), Some(2)), 0, 0, 999, false, &[]);
+        assert_page(page(&mut world, Some(0), Some(1)), 1, 3, 1, true, &[1]);
+
+        // Cursor plus page size walks the list without gaps or repeats.
+        assert_page(page(&mut world, Some(1), Some(1)), 1, 2, 2, true, &[2]);
+        assert_page(page(&mut world, Some(2), Some(1)), 1, 1, 3, false, &[3]);
+
+        assert_eq!(world.tick, tick);
+        assert_eq!(world.checksum(), checksum);
+    }
+
+    #[test]
     fn settlement_commands_require_hello_and_the_mayor_role() {
         let mut viewer = ServerWorld::with_role(SEED, ClientRole::Viewer);
         first_response(viewer.apply_all(&hello()));
@@ -8208,10 +8349,27 @@ mod tests {
             ServerMessage::Reject { ref code, .. } if code == codes::FORBIDDEN
         ));
 
-        let list = viewer.apply(&ClientCommand::SettlementList);
+        let list = viewer.apply(&ClientCommand::SettlementList {
+            after_id: None,
+            limit: None,
+        });
         assert!(matches!(
             list,
             ServerMessage::SettlementList { count: 0, .. }
+        ));
+        let paged = viewer.apply(&ClientCommand::SettlementList {
+            after_id: Some(7),
+            limit: Some(1),
+        });
+        assert!(matches!(
+            paged,
+            ServerMessage::SettlementList {
+                count: 0,
+                matched: 0,
+                next_after: 7,
+                has_more: false,
+                ..
+            }
         ));
 
         let mut unopened = ServerWorld::with_role(SEED, ClientRole::Mayor);
@@ -8225,7 +8383,10 @@ mod tests {
     #[test]
     fn settlement_list_starts_empty_and_found_state_survives_save_load() {
         let mut world = world_with_hello();
-        let empty = world.apply(&ClientCommand::SettlementList);
+        let empty = world.apply(&ClientCommand::SettlementList {
+            after_id: None,
+            limit: None,
+        });
         assert!(matches!(
             empty,
             ServerMessage::SettlementList {
@@ -8239,7 +8400,10 @@ mod tests {
         let json = world.to_save_json_pretty().expect("save");
         let mut loaded = ServerWorld::from_save_json(&json).expect("load");
         first_response(loaded.apply_all(&hello()));
-        let list = loaded.apply(&ClientCommand::SettlementList);
+        let list = loaded.apply(&ClientCommand::SettlementList {
+            after_id: None,
+            limit: None,
+        });
         let ServerMessage::SettlementList {
             count, settlements, ..
         } = list
@@ -8395,7 +8559,10 @@ mod tests {
         let json = world.to_save_json_pretty().expect("save");
         let mut loaded = ServerWorld::from_save_json(&json).expect("load");
         first_response(loaded.apply_all(&hello()));
-        let list = loaded.apply(&ClientCommand::SettlementList);
+        let list = loaded.apply(&ClientCommand::SettlementList {
+            after_id: None,
+            limit: None,
+        });
         let ServerMessage::SettlementList { settlements, .. } = list else {
             panic!("expected settlement_list, got {list:?}");
         };
