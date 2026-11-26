@@ -13,7 +13,7 @@ tags:
 # Phase 6 Remaining Work
 
 > [!abstract] Purpose
-> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `dfef2ff` (2026-11-26). It is a plan, not an implementation claim.
+> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `62214f7` (2026-11-26). It is a plan, not an implementation claim.
 
 Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/D-032/D-033/D-035/D-038/D-039/D-040/D-041/D-042, [[09 - Open Questions]] Q-101/Q-117/Q-119/Q-120/Q-121/Q-122/Q-123/Q-124/Q-125/Q-126/Q-127/Q-128, [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]], [[81 - Settlement Tax Composition]], [[82 - Journal and Rollback]], [[83 - Remote Transport and Authentication]], [[84 - Content Registry Modes]].
 
@@ -38,6 +38,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 | ✅ Done | Server content-dependent placement, `--retain-locks`, settlement-editor player picker, dashboard claim, wired outbound writer | #379–#383 |
 | ✅ Done | Audited Admin force-unlock, `--content-ids`, local release, dashboard transfer, server chat push over concurrent listen | #385–#389 |
 | ✅ Done | Opt-in `--content-registry` startup loading, bridge manifest reader, chat panel badge, dashboard invite/role/remove, lock loopback coverage | #404–#408 |
+| ✅ Done | Non-binding content-registry check, `chat_seq` watermark, resume catch-up smoke, deterministic catch-up merge, read-only D-039 tax preview | #410–#414 |
 | ⛔ Blocked | Q-101 human playtest; 1M/RTX 3060 render gate | person / reference hardware |
 
 ## 2. Dependency order
@@ -71,7 +72,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.2 Settlement tax treasury consumer
 
-**Scope.** Give `Settlement.tax_rate` a defined economic effect. The open decision is composition with D-030 home/workplace weights and D-031 service funding: settlement surcharge first, district multiplier first, or cap the combined rate. D-039 records the proposed option A, and #366 adds the pure helper; record acceptance before wiring a consumer.
+**Scope.** Give `Settlement.tax_rate` a defined economic effect. The open decision is composition with D-030 home/workplace weights and D-031 service funding: settlement surcharge first, district multiplier first, or cap the combined rate. D-039 records the proposed option A; #366 adds the pure helper and #414 a read-only dashboard preview. Record acceptance before wiring a treasury consumer.
 
 **Protocol/save.** Prefer no protocol change; the rate already round-trips. If revenue is reported, extend the snapshot/audit read model, not the save.
 
@@ -109,7 +110,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.5 Chat push/broadcast
 
-**Scope.** Push `chat_sent`/`chat_log` deltas to connected clients instead of polling only; keep `chat_since` for reconnect. Bounded log and 64-line cap stay. Server push (#389), the 3D passive listener (#394), the 3D unread HUD (#398), and the panel badge (#406) are done; remaining is reconnect catch-up presentation. Multi-session ordering is covered by #395/#402.
+**Scope.** Push `chat_sent`/`chat_log` deltas to connected clients instead of polling only; keep `chat_since` for reconnect. Bounded log and 64-line cap stay. Server push (#389), the 3D passive listener (#394), the unread HUD (#398), the panel badge (#406), the `chat_seq` watermark (#411), resume catch-up (#412), and deterministic catch-up merging (#413) are done. Multi-session ordering is covered by #395/#402.
 
 **Protocol/save.** Add a server push message or include chat deltas in the existing outbound stream; no save field. Sequence numbers remain authoritative.
 
@@ -149,7 +150,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.9 Remote transport and authentication
 
-**Scope.** Move beyond loopback: TLS (or an operator-terminated tunnel), authenticated join, per-player identity that survives reconnect/restart, and a documented trusted-LAN/operator-token mode. F-039 applies: the resume token is derivable and not auth.
+**Scope.** Move beyond loopback: TLS (or an operator-terminated tunnel), authenticated join, per-player identity that survives reconnect/restart, and a documented trusted-LAN/operator-token mode. F-039 applies: the resume token is derivable and not auth. D-041/[[83 - Remote Transport and Authentication]] proposes the contract; Q-125/Q-126 are open.
 
 **Tests.** Bad token, expired token, replay, reconnect, certificate/hostname failure, rate-limit, role escalation attempts, no state mutation on rejection.
 
