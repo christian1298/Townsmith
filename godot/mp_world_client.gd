@@ -76,6 +76,16 @@ extends Node3D
 ## The first message is never re-sent. It cannot be combined with
 ## `--chat-listen` (`chat_mode_conflict`) or `--chat-script`.
 ##
+## Settlement readout is a fourth opt-in path: `--settlement-ui
+## [--settlement-script "..."]`. After the main `MP_WORLD_CLIENT` marker it
+## skips the zero-view probe, runs `found:<name>[:x,z]`, `list`, and `at:<x,z>`
+## actions in order, and renders a right-side read-only panel (at most eight
+## records). It sends only `found_settlement`, `settlement_list`, and
+## `settlement_at`; there are no mutation controls. The extra
+## `MP_SETTLEMENT_UI status=ok settlements=N members=M at=<id|none>
+## checksum=<16 hex>` marker is printed before the unchanged done marker.
+## Without `--settlement-ui` no settlement code runs.
+##
 ## `godot/mp_interest_render.gd` is reused for road parsing, the 64-road wire
 ## cap, and the deterministic 16-hex road checksum. Buildings are parsed
 ## defensively here (cap 64, ascending id, malformed entries skipped) with a
@@ -134,6 +144,9 @@ enum Phase {
 	CHAT_RESUME_WELCOME_WAIT,
 	CHAT_RESUME_SNAPSHOT_WAIT,
 	CHAT_RECONNECT_CATCHUP_WAIT,
+	SETTLEMENT_FOUND_WAIT,
+	SETTLEMENT_LIST_WAIT,
+	SETTLEMENT_AT_WAIT,
 	DISCONNECT_SENT,
 }
 
@@ -224,6 +237,19 @@ const CHAT_MARGIN := 12.0
 const CHAT_PANEL_WIDTH := 540.0
 const CHAT_PANEL_HEIGHT := 430.0
 const CHAT_UNREAD_MAX := 999
+
+# Opt-in settlement readout (`--settlement-ui`). Pipe-separated actions:
+# `found:<name>[:x,z]`, `list`, or `at:<x,z>`. Read-only: `found` is the only
+# write, and it is the normal D-033 founding command, not a dashboard control.
+const DEFAULT_SETTLEMENT_SCRIPT := "found:Harbor|list"
+const SETTLEMENT_FOUND_RADIUS_M := 64
+const SETTLEMENT_MAX_ACTIONS := 64
+const SETTLEMENT_MAX_NAME_CHARS := 48
+const SETTLEMENT_MAX_COORD := 1000000
+const SETTLEMENT_PANEL_ROWS := 8
+const SETTLEMENT_LAYER := 1
+const SETTLEMENT_MARGIN := 12.0
+const SETTLEMENT_PANEL_WIDTH := 420.0
 
 var _peer: StreamPeerTCP
 var _phase: int = Phase.CONNECTING
@@ -359,6 +385,24 @@ var _chat_unread := 0
 var _chat_pushes := 0
 var _chat_unread_label: Label
 
+# Opt-in settlement readout (`--settlement-ui`). Inert without the flag.
+var _settlement_ui := false
+var _settlement_script := DEFAULT_SETTLEMENT_SCRIPT
+var _settlement_actions: Array = []
+var _settlement_action_index := 0
+var _settlement_records: Dictionary = {}
+var _settlement_at_set := false
+var _settlement_at_found := false
+var _settlement_at_x := 0
+var _settlement_at_z := 0
+var _settlement_at_id := 0
+var _settlement_at_name := ""
+var _settlement_marker := ""
+var _settlement_panel: PanelContainer
+var _settlement_title: Label
+var _settlement_body: RichTextLabel
+var _settlement_at_label: Label
+
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
 	_smoke = args.has("--smoke")
@@ -388,6 +432,9 @@ func _ready() -> void:
 	_chat_script = _arg(args, "--chat-script", DEFAULT_CHAT_SCRIPT)
 	_chat_reconnect_text = _arg(args, "--chat-text", DEFAULT_CHAT_RECONNECT_TEXT)
 
+	_settlement_ui = args.has("--settlement-ui")
+	_settlement_script = _arg(args, "--settlement-script", DEFAULT_SETTLEMENT_SCRIPT)
+
 	_container = Node3D.new()
 	_container.name = "WorldClientRoot"
 	add_child(_container)
@@ -396,6 +443,9 @@ func _ready() -> void:
 		_ui_root.name = "WorldClientPlacementUI"
 		add_child(_ui_root)
 	_build_hud()
+
+	if _settlement_ui and not _prepare_settlement_ui():
+		return
 
 	if _chat_enabled and not _prepare_chat():
 		return
@@ -602,6 +652,94 @@ func _mount_chat_panel() -> void:
 	_chat_panel.offset_right = CHAT_MARGIN + CHAT_PANEL_WIDTH
 	_chat_panel.offset_bottom = -CHAT_MARGIN
 
+## Validate the opt-in settlement readout arguments before opening the socket.
+## The script is parsed up front so a typo fails fast with the requested stable
+## marker. Settlement mode skips the zero-view probe, so it cannot be combined
+## with the placement/chat modes that own the post-view flow.
+func _prepare_settlement_ui() -> bool:
+	if _place_ui or not _place_hash.is_empty() or _chat_enabled:
+		_fail("settlement_ui_conflict")
+		return false
+	var parsed := _parse_settlement_script(_settlement_script)
+	if not bool(parsed.get("ok", false)):
+		_fail("settlement_script_invalid")
+		return false
+	_settlement_actions = parsed.get("actions", [])
+	if _settlement_actions.is_empty() or _settlement_actions.size() > SETTLEMENT_MAX_ACTIONS:
+		_fail("settlement_script_invalid")
+		return false
+	_build_settlement_panel()
+	return true
+
+## Parse `found:<name>[:x,z]|list|at:<x,z>` into ordered read-only actions.
+## Empty segments, an empty name, a colon suffix that is not an integer pair,
+## and unknown tokens all reject the whole script.
+func _parse_settlement_script(text: String) -> Dictionary:
+	var actions: Array = []
+	if text.strip_edges().is_empty():
+		return {"ok": false, "actions": actions}
+	for raw in text.split("|", true):
+		var token := str(raw).strip_edges()
+		if token.is_empty():
+			return {"ok": false, "actions": actions}
+		if token == "list":
+			actions.append({"type": "list"})
+			continue
+		if token.begins_with("at:"):
+			var at_coords := _parse_settlement_coords(token.substr(3))
+			if at_coords.is_empty():
+				return {"ok": false, "actions": actions}
+			actions.append({"type": "at", "x": at_coords[0], "z": at_coords[1]})
+			continue
+		if token.begins_with("found:"):
+			var rest := token.substr(6)
+			var name := rest
+			var x := 0
+			var z := 0
+			var split := rest.rfind(":")
+			if split >= 0:
+				var found_coords := _parse_settlement_coords(rest.substr(split + 1))
+				if found_coords.is_empty():
+					return {"ok": false, "actions": actions}
+				name = rest.substr(0, split)
+				x = found_coords[0]
+				z = found_coords[1]
+			name = name.strip_edges()
+			if not _settlement_name_valid(name):
+				return {"ok": false, "actions": actions}
+			actions.append({"type": "found", "name": name, "x": x, "z": z})
+			continue
+		return {"ok": false, "actions": actions}
+	if actions.is_empty() or actions.size() > SETTLEMENT_MAX_ACTIONS:
+		return {"ok": false, "actions": actions}
+	return {"ok": true, "actions": actions}
+
+## Return `[x, z]` for a canonical integer pair, or `[]` when either component
+## is missing, non-integer, or outside the server's practical coordinate range.
+func _parse_settlement_coords(text: String) -> Array:
+	var parts := text.split(",", true)
+	if parts.size() != 2:
+		return []
+	var x_text := str(parts[0]).strip_edges()
+	var z_text := str(parts[1]).strip_edges()
+	if not x_text.is_valid_int() or not z_text.is_valid_int():
+		return []
+	var x := x_text.to_int()
+	var z := z_text.to_int()
+	if absi(x) > SETTLEMENT_MAX_COORD or absi(z) > SETTLEMENT_MAX_COORD:
+		return []
+	return [x, z]
+
+## Mirror the core's settlement name rule: 1–48 characters, no control chars.
+func _settlement_name_valid(name: String) -> bool:
+	if name.is_empty() or name.length() > SETTLEMENT_MAX_NAME_CHARS:
+		return false
+	for index in range(name.length()):
+		var codepoint := name.unicode_at(index)
+		if codepoint < 32 or codepoint == 127:
+			return false
+	return true
+
 func _process(_delta: float) -> void:
 	if _finished:
 		return
@@ -719,6 +857,12 @@ func _handle_message(message: Dictionary) -> void:
 			_on_chat_sent(message)
 		"chat_log":
 			_on_chat_log(message)
+		"settlement_found":
+			_on_settlement_found(message)
+		"settlement_list":
+			_on_settlement_list(message)
+		"settlement_at":
+			_on_settlement_at(message)
 		"reject":
 			_on_reject(message)
 		"goodbye":
@@ -962,6 +1106,9 @@ func _on_interest_view(message: Dictionary) -> void:
 			return
 		_main_marker = _marker_text("MP_WORLD_CLIENT", false)
 		print(_main_marker)
+		if _settlement_ui:
+			_settlement_begin()
+			return
 		if _place_ui:
 			_ui_begin()
 			return
@@ -2180,6 +2327,337 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			_ui_select(_ui_selected + 1)
 
+func _settlement_begin() -> void:
+	_settlement_action_index = 0
+	_set_status("Settlement readout ready; running the script.")
+	_settlement_advance()
+
+## Send the next scripted settlement command, or disconnect after the last one.
+## Every response advances exactly one action; pushes never skip a step.
+func _settlement_advance() -> void:
+	if _settlement_action_index >= _settlement_actions.size():
+		_settlement_finish()
+		return
+	var action: Dictionary = _settlement_actions[_settlement_action_index]
+	var kind := str(action.get("type", ""))
+	if kind == "found":
+		var name := str(action.get("name", ""))
+		if not _send({
+			"type": "found_settlement",
+			"name": name,
+			"x": int(action.get("x", 0)),
+			"z": int(action.get("z", 0)),
+			"radius_m": SETTLEMENT_FOUND_RADIUS_M,
+		}):
+			return
+		_phase = Phase.SETTLEMENT_FOUND_WAIT
+		_set_status("Founding settlement %s." % name)
+	elif kind == "list":
+		if not _send({"type": "settlement_list"}):
+			return
+		_phase = Phase.SETTLEMENT_LIST_WAIT
+		_set_status("Requesting the settlement list.")
+	elif kind == "at":
+		_settlement_at_x = int(action.get("x", 0))
+		_settlement_at_z = int(action.get("z", 0))
+		_settlement_at_set = false
+		if not _send({
+			"type": "settlement_at",
+			"x": _settlement_at_x,
+			"z": _settlement_at_z,
+		}):
+			return
+		_phase = Phase.SETTLEMENT_AT_WAIT
+		_set_status("Requesting the settlement at (%d, %d)." % [
+			_settlement_at_x, _settlement_at_z
+		])
+	else:
+		_fail("settlement_script_invalid")
+		return
+	_arm_deadline(_timeout_ms)
+
+func _on_settlement_found(message: Dictionary) -> void:
+	if _phase != Phase.SETTLEMENT_FOUND_WAIT:
+		_fail("settlement_found_in_%s" % _phase_name())
+		return
+	if not _is_hex16(str(message.get("settlement_checksum", ""))):
+		_fail("settlement_found_checksum")
+		return
+	if not _is_hex16(str(message.get("world_checksum", ""))):
+		_fail("settlement_found_world_checksum")
+		return
+	var record := _parse_settlement_record(message.get("settlement", null))
+	if record.is_empty():
+		_fail("settlement_found_record")
+		return
+	_settlement_records[int(record.get("id", 0))] = record
+	_settlement_action_done("Founded settlement #%d." % int(record.get("id", 0)))
+
+func _on_settlement_list(message: Dictionary) -> void:
+	if _phase != Phase.SETTLEMENT_LIST_WAIT:
+		_fail("settlement_list_in_%s" % _phase_name())
+		return
+	var settlements_raw: Variant = message.get("settlements", null)
+	if typeof(settlements_raw) != TYPE_ARRAY:
+		_fail("settlement_list_records")
+		return
+	var settlements: Array = settlements_raw
+	if int(message.get("count", -1)) != settlements.size():
+		_fail("settlement_list_count_%d" % settlements.size())
+		return
+	if not _is_hex16(str(message.get("checksum", ""))):
+		_fail("settlement_list_checksum")
+		return
+	var records: Dictionary = {}
+	for raw in settlements:
+		var record := _parse_settlement_record(raw)
+		if record.is_empty():
+			_fail("settlement_list_record")
+			return
+		var id := int(record.get("id", 0))
+		if records.has(id):
+			_fail("settlement_list_duplicate_%d" % id)
+			return
+		records[id] = record
+	_settlement_records = records
+	_settlement_action_done("Settlement list received: %d record(s)." % records.size())
+
+func _on_settlement_at(message: Dictionary) -> void:
+	if _phase != Phase.SETTLEMENT_AT_WAIT:
+		_fail("settlement_at_in_%s" % _phase_name())
+		return
+	var found := bool(message.get("found", false))
+	_settlement_at_set = true
+	if found:
+		var record := _parse_settlement_record(message.get("settlement", null))
+		if record.is_empty():
+			_fail("settlement_at_record")
+			return
+		_settlement_at_found = true
+		_settlement_at_id = int(record.get("id", 0))
+		_settlement_at_name = str(record.get("name", ""))
+		_settlement_action_done("At point is settlement #%d." % _settlement_at_id)
+		return
+	if message.get("settlement", null) != null:
+		_fail("settlement_at_unexpected_record")
+		return
+	_settlement_at_found = false
+	_settlement_at_id = 0
+	_settlement_at_name = ""
+	_settlement_action_done("No settlement at the requested point.")
+
+## Normalize one `SettlementView` from the wire. Only read-only display fields
+## are kept; member ids are sorted so the marker checksum is order-stable.
+func _parse_settlement_record(raw: Variant) -> Dictionary:
+	if typeof(raw) != TYPE_DICTIONARY:
+		return {}
+	var record: Dictionary = raw
+	var id := int(record.get("id", 0))
+	if id < 1:
+		return {}
+	var name := str(record.get("name", ""))
+	if not _settlement_name_valid(name):
+		return {}
+	var center := _finite_array(record.get("center", null), 2)
+	if center.is_empty():
+		return {}
+	var radius_raw: Variant = record.get("radius_m", null)
+	if typeof(radius_raw) != TYPE_INT and typeof(radius_raw) != TYPE_FLOAT:
+		return {}
+	var radius_m := int(radius_raw)
+	if radius_m < 0:
+		return {}
+	var revision := int(record.get("membership_revision", -1))
+	if revision < 0:
+		return {}
+	var tax := int(record.get("tax_rate", -1))
+	if tax < 0 or tax > 100:
+		return {}
+	var members_raw: Variant = record.get("members", null)
+	if typeof(members_raw) != TYPE_ARRAY:
+		return {}
+	var members: Array = []
+	var seen: Dictionary = {}
+	for member_raw in members_raw:
+		if typeof(member_raw) != TYPE_DICTIONARY:
+			return {}
+		var member: Dictionary = member_raw
+		var player_raw: Variant = member.get("player", null)
+		if typeof(player_raw) != TYPE_INT and typeof(player_raw) != TYPE_FLOAT:
+			return {}
+		var player := int(player_raw)
+		if player < 1 or seen.has(player):
+			return {}
+		seen[player] = true
+		members.append(player)
+	members.sort()
+	var owner_id := 0
+	var owner_raw: Variant = record.get("owner_id", null)
+	if owner_raw != null:
+		if typeof(owner_raw) != TYPE_INT and typeof(owner_raw) != TYPE_FLOAT:
+			return {}
+		owner_id = int(owner_raw)
+		if owner_id < 1:
+			return {}
+	var owned := bool(record.get("owned", owner_id > 0))
+	if owned and owner_id < 1:
+		return {}
+	return {
+		"id": id,
+		"name": name,
+		"owner": str(record.get("owner", "")),
+		"owner_id": owner_id,
+		"owned": owned,
+		"center": Vector2i(int(center[0]), int(center[1])),
+		"radius_m": radius_m,
+		"members": members,
+		"revision": revision,
+		"tax": tax,
+	}
+
+func _settlement_action_done(status: String) -> void:
+	_settlement_action_index += 1
+	_refresh_settlement_panel()
+	_set_status(status)
+	_settlement_advance()
+
+## Print the additive marker, then run the normal disconnect/goodbye path so
+## `MP_WORLD_CLIENT_DONE` keeps its existing shape.
+func _settlement_finish() -> void:
+	_settlement_marker = _settlement_marker_text()
+	print(_settlement_marker)
+	_set_status("Settlement readout complete; disconnecting.")
+	if not _send({"type": "disconnect"}):
+		return
+	_phase = Phase.DISCONNECT_SENT
+	_arm_deadline(_timeout_ms)
+
+## SHA-256 over ascending `id|name|owner_id|revision|tax|member_ids` lines,
+## first 16 hex. Unowned records use owner id 0 and an empty member list.
+func _settlement_marker_text() -> String:
+	var ids: Array = _settlement_records.keys()
+	ids.sort()
+	var lines := PackedStringArray()
+	var members := 0
+	for raw_id in ids:
+		var record: Dictionary = _settlement_records[raw_id]
+		var member_ids: Array = record.get("members", [])
+		member_ids.sort()
+		members += member_ids.size()
+		var member_text := PackedStringArray()
+		for member in member_ids:
+			member_text.append(str(member))
+		lines.append("%d|%s|%d|%d|%d|%s" % [
+			int(record.get("id", 0)),
+			str(record.get("name", "")),
+			int(record.get("owner_id", 0)),
+			int(record.get("revision", 0)),
+			int(record.get("tax", 0)),
+			",".join(member_text),
+		])
+	var digest := "\n".join(lines).sha256_text().substr(0, 16)
+	return "MP_SETTLEMENT_UI status=ok settlements=%d members=%d at=%s checksum=%s" % [
+		ids.size(),
+		members,
+		str(_settlement_at_id) if _settlement_at_set and _settlement_at_found else "none",
+		digest,
+	]
+
+## Right-side read-only panel. It is hidden until at least one settlement
+## record is known; `at` alone never creates a row list.
+func _build_settlement_panel() -> void:
+	var layer := CanvasLayer.new()
+	layer.name = "WorldClientSettlement"
+	layer.layer = SETTLEMENT_LAYER
+	add_child(layer)
+
+	_settlement_panel = PanelContainer.new()
+	_settlement_panel.name = "WorldClientSettlementPanel"
+	_settlement_panel.anchor_left = 1.0
+	_settlement_panel.anchor_right = 1.0
+	_settlement_panel.anchor_top = 0.0
+	_settlement_panel.anchor_bottom = 0.0
+	_settlement_panel.offset_left = -SETTLEMENT_PANEL_WIDTH - SETTLEMENT_MARGIN
+	_settlement_panel.offset_right = -SETTLEMENT_MARGIN
+	_settlement_panel.offset_top = SETTLEMENT_MARGIN
+	_settlement_panel.offset_bottom = SETTLEMENT_MARGIN
+	_settlement_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	_settlement_panel.grow_vertical = Control.GROW_DIRECTION_END
+	_settlement_panel.visible = false
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.02, 0.03, 0.04, 0.78)
+	style.border_color = Color(0.25, 0.32, 0.40)
+	style.set_border_width_all(1)
+	style.set_content_margin_all(10.0)
+	_settlement_panel.add_theme_stylebox_override("panel", style)
+	layer.add_child(_settlement_panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.name = "SettlementRows"
+	_settlement_panel.add_child(vbox)
+
+	_settlement_title = Label.new()
+	_settlement_title.name = "SettlementTitle"
+	_settlement_title.text = "Settlements: 0"
+	_settlement_title.add_theme_color_override("font_color", Color(0.86, 0.90, 0.95))
+	_settlement_title.add_theme_font_size_override("font_size", 14)
+	vbox.add_child(_settlement_title)
+
+	_settlement_body = RichTextLabel.new()
+	_settlement_body.name = "SettlementBody"
+	_settlement_body.bbcode_enabled = false
+	_settlement_body.fit_content = true
+	_settlement_body.scroll_active = false
+	_settlement_body.autowrap_mode = TextServer.AUTOWRAP_OFF
+	_settlement_body.custom_minimum_size = Vector2(SETTLEMENT_PANEL_WIDTH, 0.0)
+	_settlement_body.add_theme_color_override("default_color", Color(0.72, 0.82, 0.92))
+	_settlement_body.add_theme_font_size_override("normal_font_size", 13)
+	vbox.add_child(_settlement_body)
+
+	_settlement_at_label = Label.new()
+	_settlement_at_label.name = "SettlementAt"
+	_settlement_at_label.visible = false
+	_settlement_at_label.add_theme_color_override("font_color", Color(1.0, 0.86, 0.45))
+	_settlement_at_label.add_theme_font_size_override("font_size", 13)
+	vbox.add_child(_settlement_at_label)
+
+func _refresh_settlement_panel() -> void:
+	if _settlement_panel == null:
+		return
+	var ids: Array = _settlement_records.keys()
+	ids.sort()
+	if ids.is_empty():
+		_settlement_panel.visible = false
+		return
+	_settlement_panel.visible = true
+	_settlement_title.text = "Settlements: %d" % ids.size()
+	var lines := PackedStringArray()
+	var rows := mini(ids.size(), SETTLEMENT_PANEL_ROWS)
+	for index in range(rows):
+		var record: Dictionary = _settlement_records[ids[index]]
+		var owner_id := int(record.get("owner_id", 0))
+		var owner_text: String = "#%d" % owner_id if owner_id > 0 else "none"
+		var member_ids: Array = record.get("members", [])
+		lines.append("#%d %s · owner %s · rev %d · tax %d%% · members %d" % [
+			int(record.get("id", 0)),
+			str(record.get("name", "")),
+			owner_text,
+			int(record.get("revision", 0)),
+			int(record.get("tax", 0)),
+			member_ids.size(),
+		])
+	_settlement_body.text = "\n".join(lines)
+	_settlement_at_label.visible = _settlement_at_set
+	if _settlement_at_set:
+		if _settlement_at_found:
+			_settlement_at_label.text = "At (%d,%d): #%d %s" % [
+				_settlement_at_x, _settlement_at_z, _settlement_at_id, _settlement_at_name
+			]
+		else:
+			_settlement_at_label.text = "At (%d,%d): none" % [
+				_settlement_at_x, _settlement_at_z
+			]
+
 func _finish_ok() -> void:
 	if _finished:
 		return
@@ -3156,6 +3634,12 @@ func _phase_name() -> String:
 			return "chat_resume_snapshot_wait"
 		Phase.CHAT_RECONNECT_CATCHUP_WAIT:
 			return "chat_reconnect_catchup_wait"
+		Phase.SETTLEMENT_FOUND_WAIT:
+			return "settlement_found_wait"
+		Phase.SETTLEMENT_LIST_WAIT:
+			return "settlement_list_wait"
+		Phase.SETTLEMENT_AT_WAIT:
+			return "settlement_at_wait"
 		Phase.DISCONNECT_SENT:
 			return "disconnect_sent"
 		_:
