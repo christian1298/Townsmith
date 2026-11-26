@@ -22,6 +22,11 @@ set -euo pipefail
 # markers. Because every run gets a fresh server, seq restarts at 1: entries=2
 # proves the second run sees only its own chat, not an accumulated transcript.
 #
+# The scripted flow reads every line it consumes and never counts its own
+# `chat_sent`, so every `MP_CHAT_BADGE unread=0 panel=0 hidden=true` line it
+# prints (one per panel push: entering chat, each send, each poll) proves the
+# active-chat badge stays hidden.
+#
 # This is a debug render/networking integration, not a gameplay chat UI test,
 # a benchmark gate, or the 1M render gate.
 #
@@ -32,12 +37,12 @@ set -euo pipefail
 # the sender still receives its own response exactly once (12 sent / 13
 # received). The listener must print `MP_CHAT_PUSH` with the deterministic
 # `seq|player|text` checksum, `MP_CHAT_UNREAD unread=1 total=1`, and
-# `MP_CHAT_BADGE status=ok unread=1 panel=1 text=1 visible=true`; then poll
-# (`chat_since` after the pushed seq), print `MP_CHAT_UNREAD unread=0 total=1`
-# and `MP_CHAT_BADGE status=ok unread=0 panel=0 text=- visible=false`, and
-# disconnect. The sender must never print an unread or badge marker: its own
-# `chat_sent` response is not a push and its active flow stays at 0. Both
-# sessions must end cleanly.
+# `MP_CHAT_BADGE unread=1 panel=1 hidden=false`; then poll (`chat_since` after
+# the pushed seq), print `MP_CHAT_UNREAD unread=0 total=1` and
+# `MP_CHAT_BADGE unread=0 panel=0 hidden=true`, and disconnect. The sender must
+# never print an unread marker and only zero badge lines: its own `chat_sent`
+# response is not a push and its active flow stays at 0. Both sessions must end
+# cleanly.
 #
 # A fourth scenario proves chat catch-up across a real resume. Two fresh
 # `--sessions 2` servers each run `--chat --chat-reconnect`: the client sends
@@ -45,9 +50,9 @@ set -euo pipefail
 # local transcript, and asks `chat_since {after: 0}`. The returned log must
 # contain exactly that one pre-resume entry, merged once. Each run must print
 # `MP_CHAT_RECONNECT status=ok entries=1 last_seq=1 token_reused=true
-# checksum=<16 hex>` (no `MP_CHAT`, no unread/push markers) and end at 13 sent
-# / 15 received. Both markers must be byte-identical, which proves the token
-# was reused and the catch-up did not duplicate the line.
+# checksum=<16 hex>` (no `MP_CHAT`, no unread/push markers, badge updates only
+# at 0) and end at 13 sent / 15 received. Both markers must be byte-identical,
+# which proves the token was reused and the catch-up did not duplicate the line.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GODOT_BIN="${GODOT:-godot}"
@@ -237,8 +242,14 @@ run_block() {
 		echo "chat smoke ($name) failed: scripted chat reported an unread line" >&2
 		exit 1
 	fi
-	if grep -q '^MP_CHAT_BADGE ' <<<"$output"; then
-		echo "chat smoke ($name) failed: scripted chat reported a badge line" >&2
+	badge_lines="$(grep '^MP_CHAT_BADGE ' <<<"$output" || true)"
+	badge_count="$(grep -c '^MP_CHAT_BADGE ' <<<"$output" || true)"
+	if [[ "$badge_count" == "0" ]]; then
+		echo "chat smoke ($name) failed: scripted chat printed no badge updates" >&2
+		exit 1
+	fi
+	if grep -vqx 'MP_CHAT_BADGE unread=0 panel=0 hidden=true' <<<"$badge_lines"; then
+		echo "chat smoke ($name) failed: active chat moved the badge off zero" >&2
 		exit 1
 	fi
 
@@ -262,6 +273,7 @@ run_block() {
 	fi
 
 	grep '^MP_WORLD_CLIENT ' <<<"$output" >"$prefix.txt"
+	{ grep '^MP_CHAT_BADGE ' <<<"$output" || true; } >"$prefix.badge"
 	printf '%s\n' "$main_line" >"$prefix.main"
 	printf '%s\n' "$chat_line" >"$prefix.chat"
 	printf '%s\n' "$done_line" >"$prefix.done"
@@ -392,16 +404,17 @@ run_push_block() {
 	fi
 	badge_first="$(sed -n '1p' <<<"$badge_lines")"
 	badge_reset="$(sed -n '2p' <<<"$badge_lines")"
-	if [[ "$badge_first" != "MP_CHAT_BADGE status=ok unread=1 panel=1 text=1 visible=true" ]]; then
+	if [[ "$badge_first" != "MP_CHAT_BADGE unread=1 panel=1 hidden=false" ]]; then
 		echo "chat push smoke listener badge mismatch: $badge_first" >&2
 		exit 1
 	fi
-	if [[ "$badge_reset" != "MP_CHAT_BADGE status=ok unread=0 panel=0 text=- visible=false" ]]; then
+	if [[ "$badge_reset" != "MP_CHAT_BADGE unread=0 panel=0 hidden=true" ]]; then
 		echo "chat push smoke listener badge reset mismatch: $badge_reset" >&2
 		exit 1
 	fi
-	if grep -q '^MP_CHAT_BADGE ' <<<"$sender_output"; then
-		echo "chat push smoke failed: sender reported a badge transition" >&2
+	sender_badges="$(grep '^MP_CHAT_BADGE ' <<<"$sender_output" || true)"
+	if [[ -n "$sender_badges" ]] && grep -vqx 'MP_CHAT_BADGE unread=0 panel=0 hidden=true' <<<"$sender_badges"; then
+		echo "chat push smoke failed: sender moved the badge" >&2
 		exit 1
 	fi
 
@@ -456,6 +469,8 @@ run_reconnect_block() {
 	local reconnect_count
 	local reconnect_checksum
 	local done_line
+	local badge_lines
+	local badge_count
 
 	start_server "$port" 2
 
@@ -487,8 +502,18 @@ run_reconnect_block() {
 		echo "chat reconnect smoke ($name) failed: printed a scripted MP_CHAT marker" >&2
 		exit 1
 	fi
-	if grep -q '^MP_CHAT_UNREAD \|^MP_CHAT_BADGE \|^MP_CHAT_PUSH ' <<<"$output"; then
-		echo "chat reconnect smoke ($name) failed: printed a push, unread, or badge marker" >&2
+	if grep -q '^MP_CHAT_UNREAD \|^MP_CHAT_PUSH ' <<<"$output"; then
+		echo "chat reconnect smoke ($name) failed: printed a push or unread marker" >&2
+		exit 1
+	fi
+	badge_lines="$(grep '^MP_CHAT_BADGE ' <<<"$output" || true)"
+	badge_count="$(grep -c '^MP_CHAT_BADGE ' <<<"$output" || true)"
+	if [[ "$badge_count" == "0" ]]; then
+		echo "chat reconnect smoke ($name) failed: printed no badge updates" >&2
+		exit 1
+	fi
+	if grep -vqx 'MP_CHAT_BADGE unread=0 panel=0 hidden=true' <<<"$badge_lines"; then
+		echo "chat reconnect smoke ($name) failed: reconnect moved the badge off zero" >&2
 		exit 1
 	fi
 
@@ -533,6 +558,7 @@ run_reconnect_block() {
 	printf '%s\n' "$reconnect_line" >"$prefix.reconnect"
 	printf '%s\n' "$done_line" >"$prefix.done"
 	printf '%s\n' "$reconnect_checksum" >"$prefix.checksum"
+	{ grep '^MP_CHAT_BADGE ' <<<"$output" || true; } >"$prefix.badge"
 
 	wait_for_log "$SERVER_LOG" "$SERVER_PID" "SERVER_LISTEN status=ok sessions=2 commands=13 " 10
 	wait_for_exit "$SERVER_PID" 10
@@ -593,7 +619,7 @@ RECONNECT_SECOND_PORT="$(claim_port "${MP_CHAT_RECONNECT_SECOND_PORT:-}")"
 run_block first "$FIRST_PORT" "$SMOKE_DIR/first"
 run_block second "$SECOND_PORT" "$SMOKE_DIR/second"
 
-for marker in main chat done; do
+for marker in main chat done badge; do
 	if ! diff -u "$SMOKE_DIR/first.$marker" "$SMOKE_DIR/second.$marker"; then
 		echo "chat smoke failed: $marker markers differ between runs" >&2
 		exit 1
@@ -613,7 +639,7 @@ run_push_block "$THIRD_PORT"
 run_reconnect_block reconnect_a "$RECONNECT_FIRST_PORT" "$SMOKE_DIR/reconnect_a"
 run_reconnect_block reconnect_b "$RECONNECT_SECOND_PORT" "$SMOKE_DIR/reconnect_b"
 
-for marker in main reconnect done; do
+for marker in main reconnect done badge; do
 	if ! diff -u "$SMOKE_DIR/reconnect_a.$marker" "$SMOKE_DIR/reconnect_b.$marker"; then
 		echo "chat reconnect smoke failed: $marker markers differ between runs" >&2
 		exit 1
@@ -627,5 +653,5 @@ fi
 echo "MP_CHAT_SMOKE status=ok runs=2 entries=2 checksum=$(cat "$SMOKE_DIR/first.checksum") world_checksum=$(sed -n 's/.* checksum=\([0-9a-f]\{16\}\).*/\1/p' "$SMOKE_DIR/first.main") frames_sent=13 frames_received=14"
 echo "MP_CHAT_PUSH_SMOKE status=ok sessions=2 listener=$LISTENER_NAME sender=$PUSH_SENDER_NAME seq=1 text=$PUSH_TEXT checksum=$PUSH_MARKER_CHECKSUM sender_chat_checksum=$PUSH_CHAT_CHECKSUM sender_frames_sent=12 sender_frames_received=13"
 echo "MP_CHAT_UNREAD_SMOKE status=ok listener_unread=1 listener_total=1 listener_reset=0 sender_unread=0"
-echo "MP_CHAT_BADGE status=ok transitions=2 unread=1->0 panel=1->0 text=1->- visible=true->false sender_badges=0"
+echo "MP_CHAT_BADGE_SMOKE status=ok transitions=2 unread=1->0 panel=1->0 hidden=false->true sender_nonzero=0"
 echo "MP_CHAT_RECONNECT_SMOKE status=ok runs=2 sessions=2 entries=1 last_seq=1 token_reused=true checksum=$(cat "$SMOKE_DIR/reconnect_a.checksum") frames_sent=13 frames_received=15"

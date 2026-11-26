@@ -1425,19 +1425,22 @@ func _chat_unread_text() -> String:
 
 func _set_chat_unread(value: int) -> void:
 	var clamped := clampi(value, 0, CHAT_UNREAD_MAX)
+	var changed := clamped != _chat_unread
+	_chat_unread = clamped
 	# Push every owner decision into the panel (push, reset, send, poll),
 	# including 0; the panel never clears itself and owns only display state.
+	# The mirror is re-checked after every push, so a stuck badge fails at the
+	# decision that broke it instead of at disconnect.
 	if _chat_panel != null:
-		_chat_panel.set_unread(clamped)
-	if clamped == _chat_unread:
+		_chat_panel.set_unread(_chat_unread)
+		_assert_chat_badge()
+	if not changed:
 		return
-	_chat_unread = clamped
 	_refresh_chat_unread_hud()
 	# Change-only marker: the sender's own response never moves the counter, so
 	# it prints nothing; a passive listener prints 1 and then 0 on catch-up.
 	if _chat_enabled:
 		print(_chat_unread_text())
-		_assert_chat_badge()
 
 func _refresh_chat_unread_hud() -> void:
 	if _chat_unread_label == null:
@@ -1445,30 +1448,29 @@ func _refresh_chat_unread_hud() -> void:
 	_chat_unread_label.text = "Chat: %d new" % _chat_unread
 	_chat_unread_label.visible = _chat_unread > 0
 
-## Prove the panel mirror kept up with the owner and print one deterministic
-## line per transition. The standalone panel smoke owns the 0/N/99+ rendering
-## rules; this only checks the pushed count, badge text, and visibility.
+## Prove the panel mirror kept up with the owner after every push and print one
+## deterministic line per update. `hidden` is true only while the badge is
+## invisible, i.e. the owner count is 0. The standalone panel smoke owns the
+## 0/N/99+ rendering rules; this only checks the pushed count and visibility.
 func _assert_chat_badge() -> void:
-	if _chat_panel == null:
+	if not _chat_enabled or _chat_panel == null:
 		return
 	var panel_snapshot: Dictionary = _chat_panel.snapshot()
 	var panel_unread := int(panel_snapshot.get("unread", -1))
 	var text := str(_chat_panel.badge_text())
-	var visible := bool(_chat_panel.badge_visible())
+	var hidden := not bool(_chat_panel.badge_visible())
 	var expected := ""
 	if _chat_unread > 0:
 		expected = "99+" if _chat_unread > 99 else str(_chat_unread)
 	var ok := (
 		panel_unread == _chat_unread
 		and text == expected
-		and visible == (_chat_unread > 0)
+		and hidden == (_chat_unread == 0)
 	)
-	print("MP_CHAT_BADGE status=%s unread=%d panel=%d text=%s visible=%s" % [
-		"ok" if ok else "fail",
+	print("MP_CHAT_BADGE unread=%d panel=%d hidden=%s" % [
 		_chat_unread,
 		panel_unread,
-		text if text != "" else "-",
-		"true" if visible else "false",
+		"true" if hidden else "false",
 	])
 	if not ok:
 		_fail("chat_badge_mismatch")
