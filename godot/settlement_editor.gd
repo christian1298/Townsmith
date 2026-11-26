@@ -10,6 +10,11 @@ extends Control
 ## `settlements()` reads. No server, protocol, simulation, treasury, or save/load
 ## code is involved. See `docs/48 - Settlement Boundaries.md` §2.2.
 ##
+## The record list is paged client-side (8 rows per page) so the D-033 1,000
+## settlement cap stays usable. `PageUp`/`PageDown` move pages; number keys and
+## mutations apply to the visible page only. Paging is display state: it never
+## calls the bridge, persists anything, or changes the protocol.
+##
 ## Run:
 ##   godot --path godot res://settlement_editor.tscn
 ##   godot --headless --path godot res://settlement_editor.tscn -- --smoke
@@ -47,6 +52,12 @@ const DEFAULT_SEED := 2026
 const DEFAULT_NAME := "Settlement"
 const DEFAULT_OWNER_LABEL := "wilderness"
 const DEFAULT_RADIUS_M := 256
+
+# Client-side list paging. The ItemList fits eight rows in the current panel;
+# the D-033 cap is 1,000 settlements, so paging keeps every record reachable
+# without one giant list. This is display-only state, never bridge state.
+const PAGE_SIZE := 8
+const PAGING_FIXTURE_COUNT := 23
 
 # Smoke-only seed names. They prove name-to-id selection without wall-clock or
 # RNG input; normal runs start with an empty registry.
@@ -88,6 +99,8 @@ var _seed := DEFAULT_SEED
 var _settlements: Array = []
 var _checksum := ""
 var _selected_id := 0
+var _page := 0
+var _page_count := 1
 var _actions := 0
 var _failures := 0
 
@@ -97,6 +110,7 @@ var _roster_label: Label
 var _target_label: Label
 var _message_label: Label
 var _detail_label: Label
+var _page_label: Label
 var _list: ItemList
 var _form_title: Label
 
@@ -134,6 +148,8 @@ func _reset_session(reset_seed: bool) -> void:
 	_settlements = []
 	_checksum = ""
 	_selected_id = 0
+	_page = 0
+	_page_count = 1
 	_target_player_id = 1
 	_target_player_name = ""
 	_pending_release_id = 0
@@ -284,6 +300,7 @@ func _refresh() -> void:
 		if _selected_id != 0 and _form_title != null:
 			_form_title.text = _i18n.t("base.ui.settlement_editor.no_selection")
 		_selected_id = 0
+	_sync_page_to_selection()
 	_rebuild_list()
 
 
@@ -484,13 +501,87 @@ func _apply_bridge_result(context: String, result: Dictionary) -> bool:
 
 # --- Editor state ----------------------------------------------------------
 
+func _index_of(id: int) -> int:
+	for index in range(_settlements.size()):
+		if int(_settlements[index].get("id", 0)) == id:
+			return index
+	return -1
+
+
 func _find_record(id: int) -> Dictionary:
-	if _core == null:
+	var index := _index_of(id)
+	if index < 0:
 		return {}
-	for record in _settlements:
-		if int(record.get("id", 0)) == id:
-			return record
-	return {}
+	return _settlements[index]
+
+
+# --- Paging ----------------------------------------------------------------
+
+func _page_total() -> int:
+	return maxi(1, ceili(float(_settlements.size()) / float(PAGE_SIZE)))
+
+
+func _clamp_page() -> void:
+	_page_count = _page_total()
+	_page = clampi(_page, 0, _page_count - 1)
+
+
+func _page_records() -> Array:
+	if _settlements.is_empty():
+		return []
+	var start := _page * PAGE_SIZE
+	return _settlements.slice(start, mini(start + PAGE_SIZE, _settlements.size()))
+
+
+func _first_id_at(page: int) -> int:
+	var index := page * PAGE_SIZE
+	if index < 0 or index >= _settlements.size():
+		return 0
+	return int(_settlements[index].get("id", 0))
+
+
+func _first_id_on_page() -> int:
+	return _first_id_at(_page)
+
+
+## Point `_page` at the selected record when it exists. Used after a re-read so
+## a mutation or refresh never silently hides the selected row on another page.
+func _sync_page_to_selection() -> void:
+	var index := _index_of(_selected_id)
+	if index >= 0:
+		_page = int(index / float(PAGE_SIZE))
+	_clamp_page()
+
+
+## Move one page and keep a valid selection. When the old selection is not on
+## the new page, the first visible row becomes selected. Returns false at the
+## first/last page boundary so callers can detect the clamp.
+func _page_by(delta: int) -> bool:
+	_clamp_page()
+	var next_page := clampi(_page + delta, 0, _page_count - 1)
+	if next_page == _page:
+		return false
+	var index := _index_of(_selected_id)
+	if index < 0 or int(index / float(PAGE_SIZE)) != next_page:
+		var first_id := _first_id_at(next_page)
+		if first_id != 0:
+			# `_select` points `_page` at the record and rebuilds the list when
+			# the page actually changes.
+			_select(first_id)
+			return true
+	_page = next_page
+	_rebuild_list()
+	return true
+
+
+## Ids currently rendered in the ItemList, i.e. the visible page only.
+func _visible_ids() -> Array:
+	var ids: Array = []
+	if _list == null:
+		return ids
+	for index in range(_list.item_count):
+		ids.append(int(_list.get_item_metadata(index)))
+	return ids
 
 
 func _members_text(record: Dictionary) -> String:
@@ -538,15 +629,29 @@ func _row_text(record: Dictionary) -> String:
 func _rebuild_list() -> void:
 	if _list == null:
 		return
+	_clamp_page()
 	_list.clear()
-	for record in _settlements:
+	for record in _page_records():
 		var id := int(record.get("id", 0))
 		_list.add_item(_row_text(record))
 		_list.set_item_metadata(_list.item_count - 1, id)
 		if id == _selected_id:
 			_list.select(_list.item_count - 1)
+	_refresh_page_label()
 	_refresh_state_label()
 	_refresh_detail()
+
+
+func _refresh_page_label() -> void:
+	if _page_label == null:
+		return
+	_page_label.visible = _page_count > 1
+	if _page_count <= 1:
+		_page_label.text = ""
+		return
+	_page_label.text = "Page %d/%d · %s settlements · PageUp/PageDown" % [
+		_page + 1, _page_count, _i18n.format_int(_settlements.size())
+	]
 
 
 func _refresh_state_label() -> void:
@@ -612,18 +717,27 @@ func _set_message(text: String, is_error: bool) -> void:
 
 func _select(id: int) -> void:
 	_pending_release_id = 0
-	if _find_record(id).is_empty():
+	var record_index := _index_of(id)
+	if record_index < 0:
 		_selected_id = 0
 		_form_title.text = _i18n.t("base.ui.settlement_editor.no_selection")
 		_rebuild_list()
 		return
 	_selected_id = id
-	var record := _find_record(id)
+	var page_before := _page
+	_page = int(record_index / float(PAGE_SIZE))
+	_clamp_page()
+	var record: Dictionary = _settlements[record_index]
 	_name_edit.text = str(record.get("name", ""))
 	_tax_spin.set_value_no_signal(float(record.get("tax_rate", 0)))
 	_form_title.text = _i18n.t("base.ui.settlement_editor.form.selected", {
 		"id": _i18n.format_int(id),
 	})
+	if _page != page_before:
+		# Selection moved off the visible page; render the new page with the
+		# selected row highlighted.
+		_rebuild_list()
+		return
 	for index in range(_list.item_count):
 		if int(_list.get_item_metadata(index)) == id:
 			_list.select(index)
@@ -632,9 +746,10 @@ func _select(id: int) -> void:
 
 
 func _select_number(index: int) -> void:
-	if index < 0 or index >= _settlements.size():
+	var records := _page_records()
+	if index < 0 or index >= records.size():
 		return
-	_select(int(_settlements[index].get("id", 0)))
+	_select(int(records[index].get("id", 0)))
 
 
 func _selected_or_message(context: String) -> int:
@@ -752,6 +867,10 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		return
 	var handled := true
 	match key.keycode:
+		KEY_PAGEUP:
+			_page_by(-1)
+		KEY_PAGEDOWN:
+			_page_by(1)
 		KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9:
 			_select_number(key.keycode - KEY_1)
 		KEY_F:
@@ -914,6 +1033,149 @@ func _smoke_player_registry() -> void:
 		"player_invalid_name",
 		_register_player_on(cap_core, ""),
 		"player.invalid_name"
+	)
+
+
+func _smoke_paging() -> void:
+	_reset_session(true)
+	var empty_hidden := _page_count == 1 and not _page_label.visible and _list.item_count == 0
+	print("SETTLEMENT_EDITOR_PAGING phase=empty page=1/1 hidden=%s rows=%s" % [
+		"1" if not _page_label.visible else "0",
+		_i18n.format_int(_list.item_count),
+	])
+	_check("paging_empty_hidden", empty_hidden)
+
+	_found("Paged 1", 0, 0, 256)
+	var single_hidden := _page_count == 1 and not _page_label.visible and _list.item_count == 1
+	print("SETTLEMENT_EDITOR_PAGING phase=single page=1/1 hidden=%s rows=%s" % [
+		"1" if not _page_label.visible else "0",
+		_i18n.format_int(_list.item_count),
+	])
+	_check("paging_single_hidden", single_hidden)
+
+	for index in range(1, PAGING_FIXTURE_COUNT):
+		_found("Paged %d" % (index + 1), 0, 0, 256)
+	var seeded_ok := _settlements.size() == PAGING_FIXTURE_COUNT \
+		and _page_count == 3 and _page == 0 and _list.item_count == PAGE_SIZE \
+		and _page_label.visible \
+		and _page_label.text == "Page 1/3 · 23 settlements · PageUp/PageDown"
+	print("SETTLEMENT_EDITOR_PAGING phase=seed count=%s page=1/%s hidden=%s rows=%s" % [
+		_i18n.format_int(_settlements.size()), _i18n.format_int(_page_count),
+		"0" if _page_label.visible else "1", _i18n.format_int(_list.item_count),
+	])
+	_check("paging_seeded_pages", seeded_ok)
+
+	# Off-page fallback: selecting id 1 and moving to page 2 must select the
+	# first visible row (id 9), not keep an invisible selection.
+	_select(1)
+	_page_by(1)
+	var down_ids := _visible_ids()
+	print("SETTLEMENT_EDITOR_PAGING phase=down page=%s/%s selected=%s rows=%s first=%s last=%s" % [
+		_i18n.format_int(_page + 1), _i18n.format_int(_page_count),
+		_i18n.format_int(_selected_id), _i18n.format_int(down_ids.size()),
+		_i18n.format_int(int(down_ids[0])), _i18n.format_int(int(down_ids[-1])),
+	])
+	_check(
+		"paging_page_down",
+		_page == 1 and _selected_id == 9 and down_ids.size() == 8 \
+			and int(down_ids[0]) == 9 and int(down_ids[-1]) == 16
+	)
+
+	_page_by(1)
+	var last_ids := _visible_ids()
+	print("SETTLEMENT_EDITOR_PAGING phase=down_last page=%s/%s selected=%s rows=%s first=%s last=%s" % [
+		_i18n.format_int(_page + 1), _i18n.format_int(_page_count),
+		_i18n.format_int(_selected_id), _i18n.format_int(last_ids.size()),
+		_i18n.format_int(int(last_ids[0])), _i18n.format_int(int(last_ids[-1])),
+	])
+	_check(
+		"paging_page_down_last",
+		_page == 2 and _selected_id == 17 and last_ids.size() == 7 \
+			and int(last_ids[0]) == 17 and int(last_ids[-1]) == 23
+	)
+
+	# PageDown at the last page clamps and leaves the visible selection alone.
+	var clamped := not _page_by(1)
+	print("SETTLEMENT_EDITOR_PAGING phase=clamp page=%s/%s selected=%s clamped=%s" % [
+		_i18n.format_int(_page + 1), _i18n.format_int(_page_count),
+		_i18n.format_int(_selected_id), "1" if clamped else "0",
+	])
+	_check("paging_clamp_end", clamped and _page == 2 and _selected_id == 17)
+
+	_page_by(-1)
+	var up_ids := _visible_ids()
+	print("SETTLEMENT_EDITOR_PAGING phase=up page=%s/%s selected=%s rows=%s first=%s last=%s" % [
+		_i18n.format_int(_page + 1), _i18n.format_int(_page_count),
+		_i18n.format_int(_selected_id), _i18n.format_int(up_ids.size()),
+		_i18n.format_int(int(up_ids[0])), _i18n.format_int(int(up_ids[-1])),
+	])
+	_check(
+		"paging_page_up",
+		_page == 1 and _selected_id == 9 and up_ids.size() == 8 \
+			and int(up_ids[0]) == 9 and int(up_ids[-1]) == 16
+	)
+
+	# Number keys index the visible page, not the global array.
+	_select_number(2)
+	print("SETTLEMENT_EDITOR_PAGING phase=number page=%s/%s index=3 selected=%s" % [
+		_i18n.format_int(_page + 1), _i18n.format_int(_page_count),
+		_i18n.format_int(_selected_id),
+	])
+	_check("paging_number_key", _page == 1 and _selected_id == 11)
+
+	# An external/refresh selection on another page moves the page to it, and
+	# the id survives a re-read.
+	_select(23)
+	var jump_ids := _visible_ids()
+	print("SETTLEMENT_EDITOR_PAGING phase=jump page=%s/%s selected=%s rows=%s" % [
+		_i18n.format_int(_page + 1), _i18n.format_int(_page_count),
+		_i18n.format_int(_selected_id), _i18n.format_int(jump_ids.size()),
+	])
+	_check(
+		"paging_jump_selected",
+		_page == 2 and _selected_id == 23 and jump_ids.size() == 7 \
+			and int(jump_ids[-1]) == 23
+	)
+	_refresh()
+	print("SETTLEMENT_EDITOR_PAGING phase=refresh page=%s/%s selected=%s checked=%s" % [
+		_i18n.format_int(_page + 1), _i18n.format_int(_page_count),
+		_i18n.format_int(_selected_id),
+		"1" if _visible_ids().has(23) else "0",
+	])
+	_check(
+		"paging_refresh_stable",
+		_page == 2 and _selected_id == 23 and _visible_ids().has(23)
+	)
+
+	# Walk every page once and prove each seeded id is reachable exactly once.
+	_select(1)
+	var walked: Array = []
+	var rows := PackedStringArray()
+	while true:
+		var ids := _visible_ids()
+		rows.append(str(ids.size()))
+		for id in ids:
+			walked.append(id)
+		if not _page_by(1):
+			break
+	var unique := {}
+	for id in walked:
+		unique[id] = true
+	var sorted_ids := walked.duplicate()
+	sorted_ids.sort()
+	var expected: Array = []
+	for index in range(PAGING_FIXTURE_COUNT):
+		expected.append(index + 1)
+	print("SETTLEMENT_EDITOR_PAGING phase=walk pages=%s ids=%s unique=%s rows=%s" % [
+		_i18n.format_int(_page_count), _i18n.format_int(walked.size()),
+		_i18n.format_int(unique.size()), "/".join(rows),
+	])
+	_check(
+		"paging_walk_unique",
+		walked.size() == PAGING_FIXTURE_COUNT
+			and unique.size() == PAGING_FIXTURE_COUNT
+			and sorted_ids == expected
+			and "/".join(rows) == "8/8/7"
 	)
 
 
@@ -1111,6 +1373,11 @@ func _run_smoke() -> void:
 			and int(probe_record.get("membership_revision", -1)) == 2
 	)
 
+	# --- Client-side paging over a 23-record fixture (8 per page). Runs last so
+	# the pinned two-settlement state, release, and registry markers above are
+	# unaffected; `main_checksum` is captured before the throwaway probes. ---
+	_smoke_paging()
+
 	if _failures > 0:
 		print("SETTLEMENT_EDITOR status=failed actions=%s failures=%s checksum=%s" % [
 			_i18n.format_int(_actions),
@@ -1176,6 +1443,7 @@ func _build_ui() -> void:
 
 	var help := Label.new()
 	help.text = _i18n.t("base.ui.settlement_editor.help") + "\n" + \
+		"PageUp/PageDown page · " + \
 		"Players: N register · P cycle target · Shift+P set role · " + \
 		"Shift+X release (press twice) · Shift+N new session"
 	help.add_theme_color_override("font_color", MUTED_COLOR)
@@ -1234,9 +1502,14 @@ func _build_list_panel() -> Control:
 	_target_label.add_theme_color_override("font_color", MUTED_COLOR)
 	registry_row.add_child(_target_label)
 
+	_page_label = Label.new()
+	_page_label.add_theme_color_override("font_color", MUTED_COLOR)
+	_page_label.visible = false
+	panel.add_child(_page_label)
+
 	_list = ItemList.new()
 	_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_list.custom_minimum_size = Vector2(0, 160)
+	_list.custom_minimum_size = Vector2(0, 180)
 	_list.item_selected.connect(_on_list_selected)
 	panel.add_child(_list)
 	return panel
