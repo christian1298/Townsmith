@@ -16,6 +16,9 @@ tags:
 > [!info] What this note is
 > Phase 3.8 adds a city dashboard and a deterministic advisor. The dashboard is an overlay over the world scene; its data sections are read-only except the compact policy editor (§5.3), the settlement tax cycle (§5.4), the settlement claim control (§5.5), the settlement transfer control (§5.6), the settlement release control (§5.7), the settlement rename overlay (§5.8), and the settlement membership controls (§5.9), which mutate bridge data through explicit keyboard controls. The advisor turns the derived city snapshot into ranked messages. Neither layer runs simulation or writes a save.
 
+> [!note] Current local surface; production settlement UI is planned
+> This dashboard remains the **current local** settlement surface: it reads and mutates the local `TownsmithCore` bridge and never speaks protocol v1. The production connected settlement surface — list/detail/membership/tax/ownership screens, permission-gated controls, gamepad focus, and localized empty/error states — is planned in [[85 - Connected Settlement Surface]] §7. That section is planning only; it does not replace this dashboard, and a local bridge success here is not a server-accepted settlement mutation.
+
 ## 1. Scope
 
 In:
