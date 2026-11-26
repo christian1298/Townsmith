@@ -38,6 +38,16 @@ set -euo pipefail
 # disconnect. The sender must never print an unread or badge marker: its own
 # `chat_sent` response is not a push and its active flow stays at 0. Both
 # sessions must end cleanly.
+#
+# A fourth scenario proves chat catch-up across a real resume. Two fresh
+# `--sessions 2` servers each run `--chat --chat-reconnect`: the client sends
+# one `before-resume` line, disconnects, resumes with the same token, drops its
+# local transcript, and asks `chat_since {after: 0}`. The returned log must
+# contain exactly that one pre-resume entry, merged once. Each run must print
+# `MP_CHAT_RECONNECT status=ok entries=1 last_seq=1 token_reused=true
+# checksum=<16 hex>` (no `MP_CHAT`, no unread/push markers) and end at 13 sent
+# / 15 received. Both markers must be byte-identical, which proves the token
+# was reused and the catch-up did not duplicate the line.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GODOT_BIN="${GODOT:-godot}"
@@ -52,6 +62,9 @@ LISTENER_NAME="mp-chat-listener"
 PUSH_MARKER_CHECKSUM="af94bd1e7ca9c364"
 # sha256("#1 mp-world-client: push-me")[:16]
 PUSH_CHAT_CHECKSUM="a664b2fdb8f94b8c"
+RECONNECT_TEXT="before-resume"
+# sha256("#1 mp-world-client: before-resume")[:16]
+RECONNECT_CHECKSUM="55e0d244cfb6ae55"
 
 if ! command -v "$GODOT_BIN" >/dev/null 2>&1; then
 	echo "Godot binary not found: $GODOT_BIN (set GODOT=/path/to/godot)" >&2
@@ -426,25 +439,156 @@ run_push_block() {
 	fi
 }
 
-FIRST_PORT="$(pick_port "${MP_CHAT_PORT:-}")"
-SECOND_PORT="$(pick_port "${MP_CHAT_SECOND_PORT:-}")"
-for _ in 1 2 3 4 5; do
-	[[ "$SECOND_PORT" != "$FIRST_PORT" ]] && break
-	SECOND_PORT="$(pick_port "")"
-done
-if [[ "$SECOND_PORT" == "$FIRST_PORT" ]]; then
-	echo "chat smoke failed: both runs selected port $FIRST_PORT" >&2
-	exit 1
-fi
-THIRD_PORT="$(pick_port "${MP_CHAT_PUSH_PORT:-}")"
-for _ in 1 2 3 4 5; do
-	[[ "$THIRD_PORT" != "$FIRST_PORT" && "$THIRD_PORT" != "$SECOND_PORT" ]] && break
-	THIRD_PORT="$(pick_port "")"
-done
-if [[ "$THIRD_PORT" == "$FIRST_PORT" || "$THIRD_PORT" == "$SECOND_PORT" ]]; then
-	echo "chat smoke failed: push scenario selected a duplicate port $THIRD_PORT" >&2
-	exit 1
-fi
+# run_reconnect_block NAME PORT PREFIX
+#
+# One fresh `--sessions 2` server. The client sends one `before-resume` line,
+# disconnects, resumes with the recorded token, drops its local transcript, and
+# catches the line up with `chat_since {after: 0}`. Exactly one pre-resume
+# entry may come back; a missing or repeated line fails the block.
+run_reconnect_block() {
+	local name="$1"
+	local port="$2"
+	local prefix="$3"
+	local output
+	local godot_status
+	local main_line
+	local reconnect_line
+	local reconnect_count
+	local reconnect_checksum
+	local done_line
+
+	start_server "$port" 2
+
+	set +e
+	output="$(timeout 60s env -u DISPLAY -u WAYLAND_DISPLAY \
+		"$GODOT_BIN" --headless --path "$ROOT/godot" res://mp_world_client.tscn -- \
+		--smoke --chat --chat-reconnect --chat-text "$RECONNECT_TEXT" \
+		--port "$port" 2>&1)"
+	godot_status=$?
+	set -e
+	printf '%s\n' "$output" >&2
+
+	if [[ $godot_status -ne 0 ]]; then
+		echo "chat reconnect smoke ($name) failed: Godot exited with status $godot_status" >&2
+		exit 1
+	fi
+	if grep -q '^MP_WORLD_CLIENT status=fail ' <<<"$output"; then
+		echo "chat reconnect smoke ($name) failed: client reported a failure" >&2
+		exit 1
+	fi
+	if grep -q '^MP_WORLD_CLIENT_ZERO ' <<<"$output"; then
+		echo "chat reconnect smoke ($name) failed: reconnect mode ran the zero-view probe" >&2
+		exit 1
+	fi
+	# Reconnect prints MP_CHAT_RECONNECT only. A scripted MP_CHAT marker would
+	# mean the normal chat path ran, and a push/unread marker would mean the
+	# first line was echoed back instead of caught up.
+	if grep -q '^MP_CHAT ' <<<"$output"; then
+		echo "chat reconnect smoke ($name) failed: printed a scripted MP_CHAT marker" >&2
+		exit 1
+	fi
+	if grep -q '^MP_CHAT_UNREAD \|^MP_CHAT_BADGE \|^MP_CHAT_PUSH ' <<<"$output"; then
+		echo "chat reconnect smoke ($name) failed: printed a push, unread, or badge marker" >&2
+		exit 1
+	fi
+
+	main_line="$(grep '^MP_WORLD_CLIENT status=ok ' <<<"$output" | tail -1 || true)"
+	reconnect_line="$(grep '^MP_CHAT_RECONNECT status=ok ' <<<"$output" | tail -1 || true)"
+	reconnect_count="$(grep -c '^MP_CHAT_RECONNECT ' <<<"$output" || true)"
+	done_line="$(grep '^MP_WORLD_CLIENT_DONE status=ok ' <<<"$output" | tail -1 || true)"
+	if [[ -z "$main_line" || -z "$reconnect_line" || -z "$done_line" ]]; then
+		echo "chat reconnect smoke ($name) failed: missing main, reconnect, or done marker" >&2
+		exit 1
+	fi
+	if [[ "$reconnect_count" != "1" ]]; then
+		echo "chat reconnect smoke ($name) failed: saw $reconnect_count reconnect markers" >&2
+		exit 1
+	fi
+
+	if [[ ! "$main_line" =~ ^MP_WORLD_CLIENT\ status=ok\ tick=6\ population=3277\ balance=100000\ roads=6\ buildings=4\ truncated=false\ buildings_truncated=false\ checksum=[0-9a-f]{16}\ road_checksum=48aff8a44b921666\ building_checksum=a98d781faa5c1d5b\ rendered_roads=6\ rendered_buildings=4\ center=0\.0,0\.0\ radius=96\.0\ session=session-[0-9a-f]{16}(-[0-9]+)?$ ]]; then
+		echo "chat reconnect smoke ($name) main marker mismatch: $main_line" >&2
+		exit 1
+	fi
+	# entries=1 and last_seq=1: the resumed session recovered exactly the one
+	# line sent before the disconnect and did not replay it as a second entry.
+	if [[ ! "$reconnect_line" =~ ^MP_CHAT_RECONNECT\ status=ok\ entries=1\ last_seq=1\ token_reused=true\ checksum=[0-9a-f]{16}$ ]]; then
+		echo "chat reconnect smoke ($name) reconnect marker mismatch: $reconnect_line" >&2
+		exit 1
+	fi
+	reconnect_checksum="$(sed -n 's/.* checksum=\([0-9a-f]\{16\}\)$/\1/p' <<<"$reconnect_line")"
+	if [[ "$reconnect_checksum" != "$RECONNECT_CHECKSUM" ]]; then
+		echo "chat reconnect smoke ($name) failed: checksum '$reconnect_checksum' != '$RECONNECT_CHECKSUM'" >&2
+		exit 1
+	fi
+	# Ten commands/frames on the first session (hello, six roads, set_interest,
+	# chat, disconnect) and three on the resumed one (resume, chat_since,
+	# disconnect). Fifteen responses include the resumed welcome and snapshot;
+	# a re-sent line or an extra chat_sent would push this count up.
+	if [[ ! "$done_line" =~ ^MP_WORLD_CLIENT_DONE\ status=ok\ session=session-[0-9a-f]{16}(-[0-9]+)?\ tick=6\ frames_sent=13\ frames_received=15$ ]]; then
+		echo "chat reconnect smoke ($name) done marker mismatch: $done_line" >&2
+		exit 1
+	fi
+
+	printf '%s\n' "$main_line" >"$prefix.main"
+	printf '%s\n' "$reconnect_line" >"$prefix.reconnect"
+	printf '%s\n' "$done_line" >"$prefix.done"
+	printf '%s\n' "$reconnect_checksum" >"$prefix.checksum"
+
+	wait_for_log "$SERVER_LOG" "$SERVER_PID" "SERVER_LISTEN status=ok sessions=2 commands=13 " 10
+	wait_for_exit "$SERVER_PID" 10
+	stop_server
+	if ! grep -Eq "SERVER_LISTEN status=ok sessions=2 commands=13 " "$SERVER_LOG"; then
+		echo "chat reconnect smoke ($name) failed: server did not report two sessions with 13 commands" >&2
+		cat "$SERVER_LOG" >&2
+		exit 1
+	fi
+}
+
+
+# claim_port [EXPLICIT]
+#
+# Honors an explicit port (environment override) or picks a free one, and
+# guarantees it is not already claimed by another scenario in this run.
+claim_port() {
+	local port="${1:-}"
+	local used
+	local clash
+	if [[ -n "$port" ]]; then
+		for used in "${PORT_POOL[@]}"; do
+			if [[ "$port" == "$used" ]]; then
+				echo "chat smoke failed: duplicate explicit port $port" >&2
+				exit 1
+			fi
+		done
+	else
+		clash=0
+		for _ in 1 2 3 4 5 6 7 8; do
+			port="$(pick_port "")"
+			clash=0
+			for used in "${PORT_POOL[@]}"; do
+				if [[ "$port" == "$used" ]]; then
+					clash=1
+				fi
+			done
+			if [[ $clash -eq 0 ]]; then
+				break
+			fi
+		done
+		if [[ $clash -ne 0 ]]; then
+			echo "chat smoke failed: could not allocate a unique port" >&2
+			exit 1
+		fi
+	fi
+	PORT_POOL+=("$port")
+	printf '%s\n' "$port"
+}
+
+PORT_POOL=()
+FIRST_PORT="$(claim_port "${MP_CHAT_PORT:-}")"
+SECOND_PORT="$(claim_port "${MP_CHAT_SECOND_PORT:-}")"
+THIRD_PORT="$(claim_port "${MP_CHAT_PUSH_PORT:-}")"
+RECONNECT_FIRST_PORT="$(claim_port "${MP_CHAT_RECONNECT_PORT:-}")"
+RECONNECT_SECOND_PORT="$(claim_port "${MP_CHAT_RECONNECT_SECOND_PORT:-}")"
 
 run_block first "$FIRST_PORT" "$SMOKE_DIR/first"
 run_block second "$SECOND_PORT" "$SMOKE_DIR/second"
@@ -466,7 +610,22 @@ fi
 
 run_push_block "$THIRD_PORT"
 
+run_reconnect_block reconnect_a "$RECONNECT_FIRST_PORT" "$SMOKE_DIR/reconnect_a"
+run_reconnect_block reconnect_b "$RECONNECT_SECOND_PORT" "$SMOKE_DIR/reconnect_b"
+
+for marker in main reconnect done; do
+	if ! diff -u "$SMOKE_DIR/reconnect_a.$marker" "$SMOKE_DIR/reconnect_b.$marker"; then
+		echo "chat reconnect smoke failed: $marker markers differ between runs" >&2
+		exit 1
+	fi
+done
+if [[ "$(cat "$SMOKE_DIR/reconnect_a.checksum")" != "$(cat "$SMOKE_DIR/reconnect_b.checksum")" ]]; then
+	echo "chat reconnect smoke failed: checksums differ between runs" >&2
+	exit 1
+fi
+
 echo "MP_CHAT_SMOKE status=ok runs=2 entries=2 checksum=$(cat "$SMOKE_DIR/first.checksum") world_checksum=$(sed -n 's/.* checksum=\([0-9a-f]\{16\}\).*/\1/p' "$SMOKE_DIR/first.main") frames_sent=13 frames_received=14"
 echo "MP_CHAT_PUSH_SMOKE status=ok sessions=2 listener=$LISTENER_NAME sender=$PUSH_SENDER_NAME seq=1 text=$PUSH_TEXT checksum=$PUSH_MARKER_CHECKSUM sender_chat_checksum=$PUSH_CHAT_CHECKSUM sender_frames_sent=12 sender_frames_received=13"
 echo "MP_CHAT_UNREAD_SMOKE status=ok listener_unread=1 listener_total=1 listener_reset=0 sender_unread=0"
 echo "MP_CHAT_BADGE status=ok transitions=2 unread=1->0 panel=1->0 text=1->- visible=true->false sender_badges=0"
+echo "MP_CHAT_RECONNECT_SMOKE status=ok runs=2 sessions=2 entries=1 last_seq=1 token_reused=true checksum=$(cat "$SMOKE_DIR/reconnect_a.checksum") frames_sent=13 frames_received=15"
