@@ -2,9 +2,11 @@
 # Headless deterministic smoke for the standalone developer chat panel.
 #
 # Runs `godot/chat_panel.tscn -- --smoke` twice, requires the synthetic contract
-# marker `CHAT_PANEL status=ok cases=N checks=N checksum=<8 hex>`, and diffs
-# every `CHAT_PANEL*` line between the two processes. It also probes the panel
-# headlessly *without* `--smoke` and requires the usage text plus exit status 2.
+# marker `CHAT_PANEL status=ok cases=N checks=N checksum=<8 hex>` plus the
+# reconnect merge marker `MP_CHAT_CATCHUP status=ok added=N skipped=N
+# last_seq=N unread=N`, and diffs every `CHAT_PANEL*` / `MP_CHAT_CATCHUP` line
+# between the two processes. It also probes the panel headlessly *without*
+# `--smoke` and requires the usage text plus exit status 2.
 #
 # No socket, server, display, or human input is required; the panel is a
 # client-only debug scene and this script does not touch the Rust crates.
@@ -35,6 +37,7 @@ SMOKE_DIR="$(mktemp -d)"
 trap 'rm -rf "$SMOKE_DIR"' EXIT
 
 CONTRACT='^CHAT_PANEL status=ok cases=[0-9]+ checks=[0-9]+ checksum=[0-9a-f]{8}$'
+CATCHUP_CONTRACT='^MP_CHAT_CATCHUP status=ok added=[1-9][0-9]* skipped=[1-9][0-9]* last_seq=[0-9]+ unread=[0-9]+$'
 
 run_usage_probe() {
 	local log="$1"
@@ -77,7 +80,7 @@ run_smoke() {
 		exit 1
 	fi
 
-	grep '^CHAT_PANEL' "$log" || true
+	grep -E '^(CHAT_PANEL|MP_CHAT_CATCHUP)' "$log" || true
 }
 
 run_usage_probe "$SMOKE_DIR/usage.log"
@@ -110,6 +113,16 @@ if ! grep -q '^CHAT_PANEL_STAGE name=locale ' <<<"$FIRST"; then
 fi
 if ! grep -q '^CHAT_PANEL_LOCALE de=ok fr=en en=ok ' <<<"$FIRST"; then
 	echo "Chat panel smoke failed: missing EN/DE locale evidence" >&2
+	exit 1
+fi
+
+CATCHUP_LINE="$(grep '^MP_CHAT_CATCHUP status=' <<<"$FIRST" | tail -1 || true)"
+if [[ -z "$CATCHUP_LINE" ]]; then
+	echo "Chat panel smoke failed: no reconnect catch-up marker" >&2
+	exit 1
+fi
+if [[ ! "$CATCHUP_LINE" =~ $CATCHUP_CONTRACT ]]; then
+	echo "Chat panel smoke catch-up contract mismatch: $CATCHUP_LINE" >&2
 	exit 1
 fi
 

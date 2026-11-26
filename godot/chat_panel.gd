@@ -5,8 +5,9 @@ extends PanelContainer
 ## Consumes the protocol `chat_sent` / `chat_log` dictionaries, validates drafts
 ## with the server's local rules, and composes the exact `chat` / `chat_since`
 ## wire commands. The owning client owns the socket: feed `set_identity`,
-## `set_log`, `apply_chat_sent`, `apply_chat_log`, `set_status`, and `set_error`,
-## then send whatever the panel emits on `command_issued`.
+## `set_log`, `apply_chat_sent`, `apply_chat_log`, `apply_chat_catchup`,
+## `set_status`, and `set_error`, then send whatever the panel emits on
+## `command_issued`.
 ##
 ## This scene never connects, polls on a timer, or pushes anything by itself.
 ##
@@ -115,7 +116,7 @@ func set_locale(locale: String) -> String:
 func set_log(entries: Array) -> void:
 	_entries.clear()
 	last_seq = 0
-	_merge_entries(entries)
+	_merge_catchup(entries, 0)
 	_refresh()
 
 
@@ -208,26 +209,52 @@ func apply_chat_sent(payload: Dictionary) -> bool:
 
 
 ## Apply one `chat_log` payload and return how many new lines were added.
-## Duplicates, out-of-order sequences, and entries past the 64-line cap are
-## handled locally; `last_seq` always advances to the highest sequence seen.
+## Uses the same ascending catch-up merge as `apply_chat_catchup` with the
+## panel's own `last_seq` as the floor: malformed entries, stale sequences, and
+## duplicates are dropped, and `last_seq` never rewinds.
 func apply_chat_log(payload: Dictionary) -> int:
 	var entries = payload.get("entries")
 	if not (entries is Array):
 		set_error("chat.invalid", _i18n.t("base.ui.chat.error.malformed_log"))
 		return 0
-	var added := 0
-	var malformed := 0
-	for entry in entries:
-		var normalized := _normalized_entry(entry)
-		if normalized.is_empty():
-			malformed += 1
-			continue
-		if _merge_entry(normalized):
-			added += 1
-	_refresh()
-	if malformed > 0 and added == 0:
+	var merged := _merge_catchup(entries, last_seq)
+	if int(merged["skipped"]) > 0 and int(merged["added"]) == 0:
 		set_error("chat.invalid", _i18n.t("base.ui.chat.error.malformed_entries"))
-	return added
+	else:
+		_refresh()
+	return int(merged["added"])
+
+
+## Merge a `chat_log`-style batch after a reconnect. `last_seq` is the caller's
+## resume cursor; the panel never rewinds past its own `last_seq`.
+##
+## Entries are normalized and applied in ascending `seq` order. Malformed
+## entries are counted in `skipped`; sequences at or below the floor and repeat
+## sequences are counted in `duplicate`. The transcript keeps its existing
+## 64-line cap. The unread badge becomes the number of newly added lines from
+## other players (clamped at zero); the draft and error line are untouched.
+##
+## Returns `{ok, added, skipped, last_seq, duplicate}`; `ok` is false only when
+## `entries` is not an array.
+func apply_chat_catchup(entries: Array, last_seq: int) -> Dictionary:
+	var merged := _merge_catchup(entries, last_seq)
+	if not bool(merged["ok"]):
+		return {
+			"ok": false,
+			"added": 0,
+			"skipped": 0,
+			"duplicate": 0,
+			"last_seq": int(merged["last_seq"]),
+		}
+	set_unread(int(merged["unread"]))
+	_refresh()
+	return {
+		"ok": true,
+		"added": int(merged["added"]),
+		"skipped": int(merged["skipped"]),
+		"duplicate": int(merged["duplicate"]),
+		"last_seq": int(merged["last_seq"]),
+	}
 
 
 ## Validate and emit one `chat` command. Returns the `draft` result. A rejected
@@ -492,15 +519,66 @@ func _has_control_character(text: String) -> bool:
 	return false
 
 
-func _merge_entries(entries: Array) -> int:
-	var added := 0
+func _merge_catchup(entries, last_seq: int) -> Dictionary:
+	var floor_seq := maxi(maxi(last_seq, self.last_seq), 0)
+	if not (entries is Array):
+		return {
+			"ok": false,
+			"added": 0,
+			"skipped": 0,
+			"duplicate": 0,
+			"last_seq": floor_seq,
+			"unread": 0,
+		}
+	var accepted: Array = []
+	var seen: Dictionary = {}
+	var skipped := 0
+	var duplicate := 0
 	for entry in entries:
 		var normalized := _normalized_entry(entry)
 		if normalized.is_empty():
+			skipped += 1
 			continue
-		if _merge_entry(normalized):
-			added += 1
-	return added
+		var seq := int(normalized["seq"])
+		if seq <= floor_seq or seen.has(seq):
+			duplicate += 1
+			continue
+		seen[seq] = true
+		accepted.append(normalized)
+	accepted.sort_custom(_entry_seq_before)
+	var added := 0
+	var unread := 0
+	for normalized in accepted:
+		if not _merge_entry(normalized):
+			duplicate += 1
+			continue
+		added += 1
+		if not _is_local_entry(normalized):
+			unread += 1
+	self.last_seq = maxi(self.last_seq, floor_seq)
+	return {
+		"ok": true,
+		"added": added,
+		"skipped": skipped,
+		"duplicate": duplicate,
+		"last_seq": self.last_seq,
+		"unread": unread,
+	}
+
+
+func _entry_seq_before(a: Dictionary, b: Dictionary) -> bool:
+	return int(a["seq"]) < int(b["seq"])
+
+
+## Whether an entry was authored by the signed-in local player. The server id is
+## authoritative; the display name only covers entries without a `player_id`.
+func _is_local_entry(entry: Dictionary) -> bool:
+	var entry_id := int(entry.get("player_id", 0))
+	if entry_id > 0 and player_id > 0:
+		return entry_id == player_id
+	if entry_id > 0:
+		return false
+	return player_name != "" and str(entry.get("player", "")) == player_name
 
 
 func _merge_entry(normalized: Dictionary) -> bool:
@@ -832,6 +910,132 @@ func _run_smoke() -> void:
 	_check(str(snap["error_line"]) == "", "status.no_error")
 	set_status("")
 	_check(str(snapshot()["status_line"]) == "Signed in as alice (#7)", "status.identity_fallback")
+
+	# --- Reconnect catch-up merge (deterministic, local seq math) ---
+	var failures_before_catchup := _failures
+	set_log([])
+	set_unread(0)
+	_draft_edit.text = "draft survives catch-up"
+
+	var tail := apply_chat_catchup([
+		{"seq": 1, "tick": 1, "player_id": 2, "player": "bob", "text": "one"},
+		{"seq": 2, "tick": 2, "player_id": 7, "player": "alice", "text": "two"},
+		{"seq": 3, "tick": 3, "player_id": 3, "player": "carol", "text": "three"},
+	], 2)
+	snap = _case("catchup_tail")
+	_check(bool(tail.get("ok", false)), "catchup.tail.ok", JSON.stringify(tail))
+	_check(int(tail.get("added", -1)) == 1, "catchup.tail.added", JSON.stringify(tail))
+	_check(int(tail.get("skipped", -1)) == 0, "catchup.tail.skipped", JSON.stringify(tail))
+	_check(int(tail.get("duplicate", -1)) == 2, "catchup.tail.duplicate", JSON.stringify(tail))
+	_check(int(tail.get("last_seq", -1)) == 3, "catchup.tail.last_seq", JSON.stringify(tail))
+	_check(int(snap["line_count"]) == 1, "catchup.tail.count", str(snap["line_count"]))
+	_check(str(snap["lines"][0]).contains("#3 carol: three"), "catchup.tail.line", str(snap["lines"][0]))
+	_check(int(snap["unread"]) == 1, "catchup.tail.unread", str(snap["unread"]))
+	_check(_draft_edit.text == "draft survives catch-up", "catchup.tail.draft", _draft_edit.text)
+
+	set_log([])
+	set_unread(0)
+	var ordered := apply_chat_catchup([
+		{"seq": 9, "tick": 9, "player_id": 2, "player": "bob", "text": "nine"},
+		{"seq": 7, "tick": 7, "player_id": 3, "player": "carol", "text": "seven"},
+		{"seq": 8, "tick": 8, "player_id": 2, "player": "bob", "text": "eight"},
+		{"seq": 8, "tick": 8, "player_id": 2, "player": "bob", "text": "eight again"},
+	], 6)
+	snap = _case("catchup_order")
+	_check(bool(ordered.get("ok", false)), "catchup.order.ok", JSON.stringify(ordered))
+	_check(int(ordered.get("added", -1)) == 3, "catchup.order.added", JSON.stringify(ordered))
+	_check(int(ordered.get("skipped", -1)) == 0, "catchup.order.skipped", JSON.stringify(ordered))
+	_check(int(ordered.get("duplicate", -1)) == 1, "catchup.order.duplicate", JSON.stringify(ordered))
+	_check(int(ordered.get("last_seq", -1)) == 9, "catchup.order.last_seq", JSON.stringify(ordered))
+	_check(int(snap["line_count"]) == 3, "catchup.order.count", str(snap["line_count"]))
+	_check(str(snap["lines"][0]).contains("#7 carol: seven"), "catchup.order.first", str(snap["lines"][0]))
+	_check(str(snap["lines"][1]).contains("#8 bob: eight"), "catchup.order.second", str(snap["lines"][1]))
+	_check(str(snap["lines"][2]).contains("#9 bob: nine"), "catchup.order.third", str(snap["lines"][2]))
+
+	set_log([])
+	set_unread(0)
+	var malformed_catchup := apply_chat_catchup([
+		{"seq": 4, "tick": 4, "player_id": 2, "player": "bob", "text": "valid"},
+		{"seq": 5, "tick": 5, "player_id": 2, "player": "bob"},
+		"not an entry",
+		{"seq": 0, "player": "bob", "text": "zero"},
+	], 0)
+	snap = _case("catchup_malformed")
+	_check(bool(malformed_catchup.get("ok", false)), "catchup.malformed.ok", JSON.stringify(malformed_catchup))
+	_check(int(malformed_catchup.get("added", -1)) == 1, "catchup.malformed.added", JSON.stringify(malformed_catchup))
+	_check(int(malformed_catchup.get("skipped", -1)) == 3, "catchup.malformed.skipped", JSON.stringify(malformed_catchup))
+	_check(int(malformed_catchup.get("duplicate", -1)) == 0, "catchup.malformed.duplicate", JSON.stringify(malformed_catchup))
+	_check(int(malformed_catchup.get("last_seq", -1)) == 4, "catchup.malformed.last_seq", JSON.stringify(malformed_catchup))
+	_check(int(snap["line_count"]) == 1, "catchup.malformed.count", str(snap["line_count"]))
+	_check(str(snap["lines"][0]).contains("#4 bob: valid"), "catchup.malformed.line", str(snap["lines"][0]))
+
+	set_log([])
+	set_unread(3)
+	var mixed := apply_chat_catchup([
+		{"seq": 1, "tick": 1, "player_id": 7, "player": "alice", "text": "mine one"},
+		{"seq": 2, "tick": 2, "player_id": 2, "player": "bob", "text": "theirs one"},
+		{"seq": 3, "tick": 3, "player_id": 7, "player": "alice", "text": "mine two"},
+		{"seq": 4, "tick": 4, "player_id": 3, "player": "carol", "text": "theirs two"},
+	], 0)
+	snap = _case("catchup_identity")
+	_check(int(mixed.get("added", -1)) == 4, "catchup.identity.added", JSON.stringify(mixed))
+	_check(int(mixed.get("last_seq", -1)) == 4, "catchup.identity.last_seq", JSON.stringify(mixed))
+	_check(int(snap["unread"]) == 2, "catchup.identity.unread", str(snap["unread"]))
+	_check(badge_text() == "2", "catchup.identity.badge", badge_text())
+
+	set_log([])
+	set_unread(0)
+	var own_only := apply_chat_catchup([
+		{"seq": 5, "tick": 5, "player_id": 7, "player": "alice", "text": "mine three"},
+	], 4)
+	_check(int(own_only.get("added", -1)) == 1, "catchup.own.added", JSON.stringify(own_only))
+	_check(int(own_only.get("last_seq", -1)) == 5, "catchup.own.last_seq", JSON.stringify(own_only))
+	_check(int(snapshot()["unread"]) == 0, "catchup.own.unread", str(snapshot()["unread"]))
+
+	set_log([])
+	set_unread(0)
+	var catchup_bulk: Array = []
+	for index in range(1, MAX_LINES + 7):
+		catchup_bulk.append({
+			"seq": index,
+			"tick": index,
+			"player_id": 2,
+			"player": "bob",
+			"text": "bulk %d" % index,
+		})
+	var capped := apply_chat_catchup(catchup_bulk, 0)
+	snap = _case("catchup_cap")
+	_check(int(capped.get("added", -1)) == MAX_LINES + 6, "catchup.cap.added", JSON.stringify(capped))
+	_check(int(capped.get("last_seq", -1)) == MAX_LINES + 6, "catchup.cap.last_seq", JSON.stringify(capped))
+	_check(int(snap["line_count"]) == MAX_LINES, "catchup.cap.display", str(snap["line_count"]))
+	_check(str(snap["lines"][0]).contains("#7 "), "catchup.cap.oldest", str(snap["lines"][0]))
+	_check(str(snap["lines"][MAX_LINES - 1]).contains("#70 "), "catchup.cap.newest", str(snap["lines"][MAX_LINES - 1]))
+
+	var ahead := apply_chat_catchup([], MAX_LINES + 16)
+	snap = _case("catchup_ahead")
+	_check(bool(ahead.get("ok", false)), "catchup.ahead.ok", JSON.stringify(ahead))
+	_check(int(ahead.get("added", -1)) == 0, "catchup.ahead.added", JSON.stringify(ahead))
+	_check(int(ahead.get("last_seq", -1)) == MAX_LINES + 16, "catchup.ahead.last_seq", JSON.stringify(ahead))
+	_check(int(snap["last_seq"]) == MAX_LINES + 16, "catchup.ahead.panel_last_seq", str(snap["last_seq"]))
+	_check(int(snap["unread"]) == 0, "catchup.ahead.unread", str(snap["unread"]))
+
+	var catchup_added := (
+		int(tail["added"]) + int(ordered["added"]) + int(malformed_catchup["added"])
+		+ int(mixed["added"]) + int(own_only["added"]) + int(capped["added"])
+		+ int(ahead["added"])
+	)
+	var catchup_skipped := (
+		int(tail["skipped"]) + int(ordered["skipped"]) + int(malformed_catchup["skipped"])
+		+ int(mixed["skipped"]) + int(own_only["skipped"]) + int(capped["skipped"])
+		+ int(ahead["skipped"])
+	)
+	if _failures == failures_before_catchup:
+		print("MP_CHAT_CATCHUP status=ok added=%d skipped=%d last_seq=%d unread=%d" % [
+			catchup_added, catchup_skipped, int(snap["last_seq"]), int(snap["unread"]),
+		])
+	else:
+		print("MP_CHAT_CATCHUP status=fail added=0 skipped=0 last_seq=0 unread=0")
+
 	_case("final")
 
 	_check(_commands.size() == 2, "final.command_count", str(_commands.size()))
