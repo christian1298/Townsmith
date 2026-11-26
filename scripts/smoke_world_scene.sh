@@ -32,7 +32,7 @@ fi
 if [[ "$LINE" != *"rooms=4"* || "$LINE" != *"preview=ok"* || "$LINE" != *"water=ok"* || "$LINE" != *"rotate=ok"* || "$LINE" != *"edits=ok"* || "$LINE" != *"chunk_cells=ok"* || "$LINE" != *"place=ok"* || "$LINE" != *"roads=ok"* || "$LINE" != *"lots=ok"* || "$LINE" != *"settlements=ok"* || "$LINE" != *"build=ok"* || "$LINE" != *"done=ok"* || "$LINE" != *"trades=ok"* || "$LINE" != *"render=ok"* || "$LINE" != *"structure=ok"* || "$LINE" != *"age=ok"* || "$LINE" != *"research=ok"* || "$LINE" != *"tutorial=ok"* || "$LINE" != *"starter=ok"* || "$LINE" != *"named=ok"* || "$LINE" != *"citizens=ok"*
 		|| "$LINE" != *"citizen_rows=ok"*
 		|| "$LINE" != *"content_i18n=ok"* || "$LINE" != *"content_ui=ok"* || "$LINE" != *"follow=ok"* || "$LINE" != *"citizen_i18n=ok"* || "$LINE" != *"materialization=ok"* || "$LINE" != *"materialization_step=ok"* || "$LINE" != *"materialization_fade=ok"* || "$LINE" != *"movement_scene=ok"* || "$LINE" != *"movement_pool=ok"*
-		|| "$LINE" != *"movement_routes=ok"* || "$LINE" != *"movement_lod=ok"* || "$LINE" != *"occupancy=ok"* || "$LINE" != *"industry=ok"* || "$LINE" != *"utilities=ok"* || "$LINE" != *"services=ok"* || "$LINE" != *"economy=ok"* || "$LINE" != *"dashboard=ok"* || "$LINE" != *"district_ui=ok"* || "$LINE" != *"policy_ui=ok"* || "$LINE" != *"policy_edit=ok"* || "$LINE" != *"district_select=ok"* || "$LINE" != *"settlement_select=ok"* || "$LINE" != *"settlement_detail=ok"* || "$LINE" != *"dashboard_tax=ok"* || "$LINE" != *"dashboard_tax_projection=ok"* || "$LINE" != *"dashboard_claim=ok"* || "$LINE" != *"dashboard_transfer=ok"* || "$LINE" != *"dashboard_release=ok"* || "$LINE" != *"dashboard_rename=ok"* || "$LINE" != *"dashboard_members=ok"* || "$LINE" != *"heatmap_ui=ok"* || "$LINE" != *"heatmap_modes=ok"*
+		|| "$LINE" != *"movement_routes=ok"* || "$LINE" != *"movement_lod=ok"* || "$LINE" != *"occupancy=ok"* || "$LINE" != *"industry=ok"* || "$LINE" != *"utilities=ok"* || "$LINE" != *"services=ok"* || "$LINE" != *"economy=ok"* || "$LINE" != *"dashboard=ok"* || "$LINE" != *"district_ui=ok"* || "$LINE" != *"policy_ui=ok"* || "$LINE" != *"policy_edit=ok"* || "$LINE" != *"district_select=ok"* || "$LINE" != *"settlement_select=ok"* || "$LINE" != *"settlement_detail=ok"* || "$LINE" != *"dashboard_tax=ok"* || "$LINE" != *"dashboard_tax_projection=ok"* || "$LINE" != *"dashboard_claim=ok"* || "$LINE" != *"dashboard_transfer=ok"* || "$LINE" != *"dashboard_release=ok"* || "$LINE" != *"dashboard_rename=ok"* || "$LINE" != *"dashboard_members=ok"* || "$LINE" != *"dashboard_member_cap=ok"* || "$LINE" != *"heatmap_ui=ok"* || "$LINE" != *"heatmap_modes=ok"*
 		|| "$LINE" != *"hud_i18n=ok"* || "$LINE" != *"hud_body_i18n=ok"* || "$LINE" != *"hud_status_i18n=ok"* || "$LINE" != *"dashboard_body_i18n=ok"*
 		|| "$LINE" != *"advisor_i18n=ok"*
 		|| "$LINE" != *"advisor_detail_i18n=ok"* || "$LINE" != *"modal_i18n=ok"*
@@ -119,5 +119,14 @@ if [[ -z "$NAMES_LINE" ]]; then
 fi
 if [[ "$NAMES_LINE" != *"status=ok"* || "$NAMES_LINE" != *"named=Builder"* || "$NAMES_LINE" != *"fallback=#9001"* ]]; then
 	echo "World scene smoke member names contract mismatch: $NAMES_LINE" >&2
+	exit 1
+fi
+CAP_LINE="$(grep "DASHBOARD_MEMBER_CAP " <<<"$OUTPUT" | tail -1 || true)"
+if [[ -z "$CAP_LINE" ]]; then
+	echo "World scene smoke failed: no DASHBOARD_MEMBER_CAP marker" >&2
+	exit 1
+fi
+if [[ "$CAP_LINE" != *"status=ok"* || "$CAP_LINE" != *"rows=8"* || "$CAP_LINE" != *"overflow=+2"* || "$CAP_LINE" != *"short=ok"* || "$CAP_LINE" != *"unowned=ok"* ]]; then
+	echo "World scene smoke member cap contract mismatch: $CAP_LINE" >&2
 	exit 1
 fi
