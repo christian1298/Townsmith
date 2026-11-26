@@ -82,6 +82,9 @@ const HEATMAP_METRIC_KEYS := {
 # role is intentionally absent: ownership only changes through claim, transfer,
 # or release, and core rejects an owner demotion.
 const SETTLEMENT_ROLE_CYCLE := ["member", "builder", "manager"]
+# The dashboard settlement detail renders at most this many member rows, then
+# one localized overflow count. The full roster stays in the settlement editor.
+const SETTLEMENT_MEMBER_DISPLAY_CAP := 8
 # Permission bit -> localized token. Mirrors `SettlementPermission` in
 # `core_city::settlement`; only granted bits are rendered, in this stable order.
 const SETTLEMENT_PERMISSION_TOKENS := [
@@ -3713,13 +3716,38 @@ func _settlement_membership_line(settlement: Dictionary) -> String:
 	if rows.is_empty():
 		lines.append(i18n.t("base.ui.dashboard.settlement_members.empty"))
 	else:
-		for member in rows:
-			if member is Dictionary:
-				lines.append(_settlement_member_row(member))
+		lines.append_array(_settlement_member_lines(settlement))
 	lines.append(i18n.t("base.ui.dashboard.settlement_members.hint_invite"))
 	lines.append(i18n.t("base.ui.dashboard.settlement_members.hint_role"))
 	lines.append(i18n.t("base.ui.dashboard.settlement_members.hint_remove"))
 	return "\n".join(lines)
+
+## Dashboard detail member rows: at most SETTLEMENT_MEMBER_DISPLAY_CAP rows,
+## followed by one localized `+N more members` line when members remain. The
+## full roster stays in the settlement editor. An unowned or malformed record
+## renders no rows; member order and the named/`#id` fallback match
+## `_settlement_member_row`. Pure read: safe to call without a dashboard.
+func _settlement_member_lines(record: Dictionary) -> Array[String]:
+	var lines: Array[String] = []
+	if not bool(record.get("owned", false)):
+		return lines
+	var rows_value = record.get("members", [])
+	var rows: Array = rows_value if rows_value is Array else []
+	var shown := 0
+	var hidden := 0
+	for member in rows:
+		if not (member is Dictionary):
+			continue
+		if shown < SETTLEMENT_MEMBER_DISPLAY_CAP:
+			lines.append(_settlement_member_row(member))
+			shown += 1
+		else:
+			hidden += 1
+	if hidden > 0:
+		lines.append(i18n.t("base.ui.dashboard.body.settlement_members_more", {
+			"count": i18n.format_int(hidden),
+		}))
+	return lines
 
 ## Rebuild the local player id -> name map. Called once per membership rebuild
 ## or action, never per row. A failed or malformed `players_list()` clears the
@@ -5622,6 +5650,7 @@ func _run_scene_smoke() -> void:
 	var dashboard_release_ok := false
 	var dashboard_rename_ok := false
 	var dashboard_members_ok := false
+	var dashboard_member_cap_ok := false
 	var heatmap_ui_ok := false
 	var heatmap_modes_ok := false
 	var advisor_i18n_ok := false
@@ -7322,6 +7351,42 @@ func _run_scene_smoke() -> void:
 					"ok" if member_names_ok else "failed",
 				])
 
+				# The detail block caps at 8 member rows plus one overflow
+				# count; the full roster stays in the settlement editor.
+				var cap_members: Array = []
+				for cap_index in range(10):
+					cap_members.append({"player": 9100 + cap_index, "role": "member", "permissions": 0})
+				var cap_overflow: String = i18n.t("base.ui.dashboard.body.settlement_members_more", {
+					"count": i18n.format_int(2),
+				})
+				var cap_lines: Array[String] = _settlement_member_lines({
+					"owned": true,
+					"owner_id": named_builder_id,
+					"members": cap_members,
+				})
+				dashboard_member_cap_ok = cap_lines.size() == SETTLEMENT_MEMBER_DISPLAY_CAP + 1
+				dashboard_member_cap_ok = dashboard_member_cap_ok and cap_lines[0] == _settlement_member_row(cap_members[0])
+				dashboard_member_cap_ok = dashboard_member_cap_ok and cap_lines[7] == _settlement_member_row(cap_members[7])
+				dashboard_member_cap_ok = dashboard_member_cap_ok and cap_lines[8] == cap_overflow
+				dashboard_member_cap_ok = dashboard_member_cap_ok and cap_overflow.contains("+2")
+				var short_member := {"player": 9200, "role": "builder", "permissions": 1}
+				var short_lines: Array[String] = _settlement_member_lines({
+					"owned": true,
+					"owner_id": named_builder_id,
+					"members": [short_member],
+				})
+				dashboard_member_cap_ok = dashboard_member_cap_ok and short_lines.size() == 1
+				dashboard_member_cap_ok = dashboard_member_cap_ok and short_lines[0] == _settlement_member_row(short_member)
+				dashboard_member_cap_ok = dashboard_member_cap_ok and not short_lines.has(cap_overflow)
+				var unowned_lines: Array[String] = _settlement_member_lines({
+					"owned": false,
+					"members": cap_members,
+				})
+				dashboard_member_cap_ok = dashboard_member_cap_ok and unowned_lines.is_empty()
+				print("DASHBOARD_MEMBER_CAP status=%s rows=8 overflow=+2 short=ok unowned=ok" % [
+					"ok" if dashboard_member_cap_ok else "failed",
+				])
+
 				# Shift+R: open the overlay through the real input handler,
 				# rename the owned record, and assert the revision bump and
 				# checksum change. Empty, unchanged, and stale names reject
@@ -8143,11 +8208,13 @@ func _run_scene_smoke() -> void:
 		status = "dashboard_rename_failed"
 	if status == "ok" and not dashboard_members_ok:
 		status = "dashboard_members_failed"
+	if status == "ok" and not dashboard_member_cap_ok:
+		status = "dashboard_member_cap_failed"
 
 	if status == "ok" and rooms != 4:
 		status = "rooms_mismatch"
 
-	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s policy_edit=%s district_select=%s settlement_select=%s settlement_detail=%s dashboard_tax=%s dashboard_tax_projection=%s dashboard_claim=%s dashboard_transfer=%s dashboard_release=%s dashboard_rename=%s dashboard_members=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
+	print("WORLD_SCENE rooms=%d preview=%s water=%s rotate=%s edits=%s chunk_cells=%s place=%s roads=%s lots=%s settlements=%s build=%s done=%s trades=%s render=%s structure=%s age=%s research=%s tutorial=%s starter=%s named=%s citizens=%s citizen_rows=%s content_i18n=%s content_ui=%s follow=%s citizen_i18n=%s materialization=%s materialization_step=%s materialization_fade=%s movement_scene=%s movement_pool=%s movement_routes=%s movement_lod=%s occupancy=%s industry=%s utilities=%s services=%s economy=%s dashboard=%s district_ui=%s policy_ui=%s policy_edit=%s district_select=%s settlement_select=%s settlement_detail=%s dashboard_tax=%s dashboard_tax_projection=%s dashboard_claim=%s dashboard_transfer=%s dashboard_release=%s dashboard_rename=%s dashboard_members=%s dashboard_member_cap=%s heatmap_ui=%s heatmap_modes=%s hud_i18n=%s hud_body_i18n=%s hud_status_i18n=%s dashboard_body_i18n=%s advisor_i18n=%s advisor_detail_i18n=%s modal_i18n=%s number_i18n=%s traffic=%s select=%s enter=%s return=%s save=%s load=%s guard=%s lifecycle_scene=%s campaign_hud=%s status=%s" % [
 		rooms,
 		"ok" if preview_ok else "failed",
 		"ok" if water_ok else "failed",
@@ -8200,6 +8267,7 @@ func _run_scene_smoke() -> void:
 		"ok" if dashboard_release_ok else "failed",
 		"ok" if dashboard_rename_ok else "failed",
 		"ok" if dashboard_members_ok else "failed",
+		"ok" if dashboard_member_cap_ok else "failed",
 		"ok" if heatmap_ui_ok else "failed",
 		"ok" if heatmap_modes_ok else "failed",
 		"ok" if hud_i18n_ok else "failed",
