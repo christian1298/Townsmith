@@ -2,7 +2,7 @@
 title: Blueprint Package
 project: Townsmith
 status: active
-updated: 2026-11-25
+updated: 2026-11-26
 tags:
   - townsmith
   - vertical-slice
@@ -243,7 +243,9 @@ let summary = library.summary()?;
 
 ## 8. Tests
 
-`core_blueprint` has **37 integration tests** (16 package roundtrip/validation + 21 local-library tests) and 3 voxel-stream unit tests:
+`core_blueprint` has **66 tests**: 13 unit, 18 package roundtrip/validation, 22 local-library, and 13 corruption-corpus tests.
+
+The corruption corpus (`tests/corruption.rs`) mutates a freshly built valid package and asserts typed errors, not panics: zip magic/truncation, manifest version/JSON/path traversal, RLE magic/version/chunk-size/zero-run/short-stream/overlong-count/palette errors, flipped content and dependency hashes, oversized dimensions/volumes/chunk or solid counts, manifest size, non-Stored compression, and a zip-bomb guard. Valid packages still load with the golden hash, and the seed fixture is never mutated on disk. Stable surfaces include `Zip`, `Io`/`Unsupported`, `UnknownEntry`, `Json`, `UnsupportedVersion`, `TooLarge`, `Format`, `Voxel(VoxelError::*)`, `HashMismatch`, and `BlueprintLibraryError::InvalidPackage`.
 
 - empty and non-empty roundtrip;
 - volume/hash preservation;
