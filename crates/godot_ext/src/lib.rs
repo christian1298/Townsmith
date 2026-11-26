@@ -2717,6 +2717,62 @@ impl TownsmithCore {
         result
     }
 
+    /// Read-only page of settlements ordered by ascending id.
+    ///
+    /// `after_id` is an exclusive cursor (pass the previous page's
+    /// `next_after`). `limit` is clamped to 1–256; `0` means every remaining
+    /// record. Never mutates the store or exposes a filesystem path.
+    #[func]
+    fn settlements_page(&self, after_id: i64, limit: i64) -> VarDictionary {
+        let (after_id, limit) = match settlement_page_args(after_id, limit) {
+            Ok(args) => args,
+            Err((error_code, error)) => {
+                let mut result = VarDictionary::new();
+                result.set("ok", false);
+                result.set("error_code", error_code);
+                result.set("error", &GString::from(error.as_str()));
+                return result;
+            }
+        };
+        let store = self
+            .settlements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut result = VarDictionary::new();
+        result.set("ok", true);
+        match store.as_ref() {
+            Some(store) => {
+                let page = settlement_page(store.settlements(), after_id, limit);
+                let mut settlements: Array<VarDictionary> = Array::new();
+                for settlement in &page.settlements {
+                    settlements.push(&settlement_to_dictionary(settlement));
+                }
+                result.set("open", true);
+                result.set("seed", store.seed as i64);
+                result.set("count", page.settlements.len() as i64);
+                result.set("matched", page.matched as i64);
+                result.set("next_after", page.next_after as i64);
+                result.set("has_more", page.has_more);
+                result.set(
+                    "checksum",
+                    &GString::from(&format!("{:016x}", store.checksum())),
+                );
+                result.set("settlements", &settlements.to_variant());
+            }
+            None => {
+                result.set("open", false);
+                result.set("seed", 0);
+                result.set("count", 0);
+                result.set("matched", 0);
+                result.set("next_after", 0);
+                result.set("has_more", false);
+                result.set("checksum", &GString::from("0000000000000000"));
+                result.set("settlements", &Array::<VarDictionary>::new().to_variant());
+            }
+        }
+        result
+    }
+
     /// Number of settlements.
     #[func]
     fn settlement_count(&self) -> i64 {
@@ -8795,6 +8851,79 @@ fn tax_projection_payload(rate: i64) -> VarDictionary {
     }
 }
 
+/// Largest explicit page the bridge will serialize in one call.
+const BRIDGE_SETTLEMENT_PAGE_LIMIT: u64 = 256;
+
+/// Validated paging arguments: exclusive id cursor and optional page size.
+///
+/// `limit == 0` means "all remaining", which keeps the cursor usable for a
+/// full read without inventing a sentinel beyond 256.
+fn settlement_page_args(
+    after_id: i64,
+    limit: i64,
+) -> Result<(u64, Option<usize>), (&'static str, String)> {
+    let after_id = u64::try_from(after_id).map_err(|_| {
+        (
+            "invalid_page",
+            format!("after_id must be a non-negative integer: {after_id}"),
+        )
+    })?;
+    let limit = u64::try_from(limit).map_err(|_| {
+        (
+            "invalid_page",
+            format!("limit must be non-negative: {limit}"),
+        )
+    })?;
+    let limit = if limit == 0 {
+        None
+    } else {
+        Some(
+            usize::try_from(limit.min(BRIDGE_SETTLEMENT_PAGE_LIMIT))
+                .expect("page limit is bounded to 256"),
+        )
+    };
+    Ok((after_id, limit))
+}
+
+/// One read-only slice of a settlement store.
+struct SettlementPage<'a> {
+    /// Selected records in ascending id order.
+    settlements: Vec<&'a Settlement>,
+    /// Records strictly after the cursor, before the page cap.
+    matched: usize,
+    /// Last returned id, or 0 for an empty page.
+    next_after: u64,
+    /// Whether at least one record remains after this page.
+    has_more: bool,
+}
+
+/// Select `id > after_id` in ascending order, capped by `limit`.
+///
+/// The store keeps records sorted by id, but sorting here keeps paging correct
+/// if a future loader accepts records out of order.
+fn settlement_page<'a>(
+    settlements: &'a [Settlement],
+    after_id: u64,
+    limit: Option<usize>,
+) -> SettlementPage<'a> {
+    let mut remaining: Vec<&Settlement> = settlements
+        .iter()
+        .filter(|settlement| settlement.id > after_id)
+        .collect();
+    remaining.sort_by_key(|settlement| settlement.id);
+    let matched = remaining.len();
+    let page_len = limit.unwrap_or(matched).min(matched);
+    remaining.truncate(page_len);
+    let next_after = remaining.last().map_or(0, |settlement| settlement.id);
+    let has_more = page_len < matched;
+    SettlementPage {
+        settlements: remaining,
+        matched,
+        next_after,
+        has_more,
+    }
+}
+
 fn settlement_error_result(error: &SettlementError) -> VarDictionary {
     placement_simple_error(error.code(), error.to_string())
 }
@@ -14292,6 +14421,175 @@ mod tests {
             center: [10, 20],
             radius_m: 64,
         }
+    }
+
+    fn page_settlement(id: u64) -> Settlement {
+        Settlement {
+            id,
+            name: format!("S{id}"),
+            owner: String::new(),
+            center: [0, 0],
+            radius_m: 1,
+            owner_id: None,
+            members: Vec::new(),
+            membership_revision: 0,
+            tax_rate: 0,
+        }
+    }
+
+    fn page_ids(page: &SettlementPage<'_>) -> Vec<u64> {
+        page.settlements
+            .iter()
+            .map(|settlement| settlement.id)
+            .collect()
+    }
+
+    #[test]
+    fn settlement_page_args_rejects_negative_values() {
+        for (after_id, limit) in [(-1, 1), (0, -1), (i64::MIN, i64::MIN)] {
+            let (code, _) = settlement_page_args(after_id, limit).expect_err("invalid page");
+            assert_eq!(code, "invalid_page", "after_id={after_id} limit={limit}");
+        }
+    }
+
+    #[test]
+    fn settlement_page_args_clamps_limit_and_keeps_zero_as_all() {
+        assert_eq!(settlement_page_args(0, 0), Ok((0, None)));
+        assert_eq!(settlement_page_args(5, 1), Ok((5, Some(1))));
+        assert_eq!(settlement_page_args(5, 256), Ok((5, Some(256))));
+        assert_eq!(settlement_page_args(5, 257), Ok((5, Some(256))));
+        assert_eq!(settlement_page_args(5, i64::MAX), Ok((5, Some(256))));
+    }
+
+    #[test]
+    fn settlement_page_on_empty_store_is_empty() {
+        let settlements: Vec<Settlement> = Vec::new();
+        for (after_id, limit) in [(0, None), (7, Some(2)), (7, Some(256))] {
+            let page = settlement_page(&settlements, after_id, limit);
+            assert!(page.settlements.is_empty());
+            assert_eq!(page.matched, 0);
+            assert_eq!(page.next_after, 0);
+            assert!(!page.has_more);
+        }
+    }
+
+    #[test]
+    fn settlement_page_cursor_is_exclusive_and_past_end_is_empty() {
+        let settlements: Vec<Settlement> = (1..=3).map(page_settlement).collect();
+        assert_eq!(
+            page_ids(&settlement_page(&settlements, 0, None)),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            page_ids(&settlement_page(&settlements, 1, None)),
+            vec![2, 3]
+        );
+        assert_eq!(page_ids(&settlement_page(&settlements, 2, None)), vec![3]);
+        let past = settlement_page(&settlements, 3, Some(2));
+        assert!(past.settlements.is_empty());
+        assert_eq!(past.matched, 0);
+        assert_eq!(past.next_after, 0);
+        assert!(!past.has_more);
+        assert!(settlement_page(&settlements, u64::MAX, None)
+            .settlements
+            .is_empty());
+    }
+
+    #[test]
+    fn settlement_page_reports_matched_next_after_and_has_more() {
+        let settlements: Vec<Settlement> = (1..=3).map(page_settlement).collect();
+        let first = settlement_page(&settlements, 0, Some(2));
+        assert_eq!(page_ids(&first), vec![1, 2]);
+        assert_eq!(first.matched, 3);
+        assert_eq!(first.next_after, 2);
+        assert!(first.has_more);
+        let second = settlement_page(&settlements, first.next_after, Some(2));
+        assert_eq!(page_ids(&second), vec![3]);
+        assert_eq!(second.matched, 1);
+        assert_eq!(second.next_after, 3);
+        assert!(!second.has_more);
+    }
+
+    #[test]
+    fn settlement_page_sorts_records_by_id() {
+        let settlements = vec![page_settlement(3), page_settlement(1), page_settlement(2)];
+        assert_eq!(
+            page_ids(&settlement_page(&settlements, 0, Some(2))),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn settlement_pages_cover_every_record_once_and_keep_the_checksum() {
+        for count in 0..=3 {
+            let mut store = SettlementStore::new(2026);
+            for index in 0..count {
+                store
+                    .found(&bridge_settlement_request(&format!("S{index}")))
+                    .expect("found");
+            }
+            let all: Vec<u64> = store
+                .settlements()
+                .iter()
+                .map(|settlement| settlement.id)
+                .collect();
+            let checksum = store.checksum();
+            for limit in [Some(1), Some(2), Some(256), None] {
+                let mut after_id = 0;
+                let mut seen = Vec::new();
+                let mut pages = 0;
+                loop {
+                    let page = settlement_page(store.settlements(), after_id, limit);
+                    assert_eq!(
+                        page.matched,
+                        all.iter().filter(|id| **id > after_id).count(),
+                        "matched after {after_id}"
+                    );
+                    assert_eq!(page.has_more, page.settlements.len() < page.matched);
+                    seen.extend(page_ids(&page));
+                    pages += 1;
+                    assert!(pages <= 10, "paging did not terminate");
+                    if !page.has_more {
+                        break;
+                    }
+                    let next = page.next_after;
+                    assert!(next > after_id, "cursor must advance");
+                    after_id = next;
+                }
+                assert_eq!(seen, all, "count={count} limit={limit:?}");
+                assert_eq!(
+                    seen.len(),
+                    seen.iter().collect::<std::collections::HashSet<_>>().len()
+                );
+                assert_eq!(store.checksum(), checksum, "paging must not mutate");
+            }
+        }
+    }
+
+    #[test]
+    fn settlement_pages_match_the_unpaged_order() {
+        let mut store = SettlementStore::new(2026);
+        for index in 0..3 {
+            store
+                .found(&bridge_settlement_request(&format!("S{index}")))
+                .expect("found");
+        }
+        let unpaged: Vec<u64> = store
+            .settlements()
+            .iter()
+            .map(|settlement| settlement.id)
+            .collect();
+        let mut paged = Vec::new();
+        let mut after_id = 0;
+        loop {
+            let page = settlement_page(store.settlements(), after_id, Some(1));
+            paged.extend(page_ids(&page));
+            if !page.has_more {
+                break;
+            }
+            after_id = page.next_after;
+        }
+        assert_eq!(paged, unpaged);
     }
 
     #[test]
