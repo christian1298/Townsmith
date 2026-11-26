@@ -16,6 +16,8 @@ mod save_crash;
 mod save_store_matrix;
 #[cfg(test)]
 mod settlement_faults;
+#[cfg(test)]
+mod settlement_paging_faults;
 pub mod settlement_smoke;
 pub mod vote;
 pub mod world;
