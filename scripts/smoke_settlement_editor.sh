@@ -6,7 +6,10 @@
 # transfer, change role, remove member, two-press release, and seven rejections)
 # plus the local
 # player registry path (seed three names, register a fourth, cycle the invite
-# target, invite by the selected name's id, cap/invalid-name rejection). Every
+# target, invite by the selected name's id, cap/invalid-name rejection) and the
+# client-side paging path (23 records over 8-row pages: empty/one-page hidden,
+# PageDown/PageUp, off-page selection fallback, number-key page indexing,
+# selection survives refresh, every id reachable once). Every
 # `SETTLEMENT_EDITOR*` line is diffed between runs so the state checksum and
 # the action sequence are proven deterministic. No display or server is needed.
 set -euo pipefail
@@ -70,8 +73,8 @@ run_editor() {
 
 	local actions
 	actions="$(sed -E 's/^SETTLEMENT_EDITOR status=ok actions=([0-9]+) checksum=[0-9a-f]+$/\1/' <<<"$marker")"
-	if [[ "$actions" != "45" ]]; then
-		echo "Settlement editor smoke failed: expected 45 actions, got $actions" >&2
+	if [[ "$actions" != "56" ]]; then
+		echo "Settlement editor smoke failed: expected 56 actions, got $actions" >&2
 		exit 1
 	fi
 
@@ -133,6 +136,24 @@ run_editor() {
 		echo "Settlement editor smoke failed: final state marker mismatch" >&2
 		exit 1
 	fi
+	for expected in \
+		'SETTLEMENT_EDITOR_PAGING phase=empty page=1/1 hidden=1 rows=0' \
+		'SETTLEMENT_EDITOR_PAGING phase=single page=1/1 hidden=1 rows=1' \
+		'SETTLEMENT_EDITOR_PAGING phase=seed count=23 page=1/3 hidden=0 rows=8' \
+		'SETTLEMENT_EDITOR_PAGING phase=down page=2/3 selected=9 rows=8 first=9 last=16' \
+		'SETTLEMENT_EDITOR_PAGING phase=down_last page=3/3 selected=17 rows=7 first=17 last=23' \
+		'SETTLEMENT_EDITOR_PAGING phase=clamp page=3/3 selected=17 clamped=1' \
+		'SETTLEMENT_EDITOR_PAGING phase=up page=2/3 selected=9 rows=8 first=9 last=16' \
+		'SETTLEMENT_EDITOR_PAGING phase=number page=2/3 index=3 selected=11' \
+		'SETTLEMENT_EDITOR_PAGING phase=jump page=3/3 selected=23 rows=7' \
+		'SETTLEMENT_EDITOR_PAGING phase=refresh page=3/3 selected=23 checked=1' \
+		'SETTLEMENT_EDITOR_PAGING phase=walk pages=3 ids=23 unique=23 rows=8/8/7'
+	do
+		if ! grep -Fxq "$expected" <<<"$output"; then
+			echo "Settlement editor smoke failed: paging marker missing: $expected" >&2
+			exit 1
+		fi
+	done
 	if ! grep -Eq '^SETTLEMENT_EDITOR_UNOWNED id=1 owned=0 owner=unowned revision=0$' <<<"$output"; then
 		echo "Settlement editor smoke failed: unowned marker mismatch" >&2
 		exit 1
