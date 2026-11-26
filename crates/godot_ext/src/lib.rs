@@ -64,6 +64,7 @@ use core_world::{
 };
 
 mod content_identity;
+mod content_registry_ui;
 mod placement_ui;
 
 use content_identity::{
@@ -1074,6 +1075,32 @@ impl TownsmithCore {
             .unwrap_or_else(|error| error.into_inner())
             .clear()
             .is_ok()
+    }
+
+    /// Read-only report of one D-042 content-registry manifest file.
+    ///
+    /// `path` names an existing local JSON manifest of at most 1 MiB. The file
+    /// is parsed and validated by `parse_content_registry_manifest`; this call
+    /// never loads, selects, merges, or activates content, never touches the
+    /// live registry, and never reads a pack directory. Returns:
+    ///
+    /// - `ok` (bool)
+    /// - `format_version` (int)
+    /// - `ids` (Array of `{id, kind, namespace, checksum}`), sorted by ID;
+    ///   `kind` is `mod`/`resource_pack`, and an absent namespace or checksum
+    ///   is `null`
+    /// - `implicit_ids` (Array of String; `base` plus every manifest ID)
+    /// - `checksum` (String, 16 lowercase hex digits over the sorted entries)
+    ///
+    /// On failure, returns `{ ok: false, error_code, error }` with a stable
+    /// `content.*` code or `content.registry_io`. The path and raw file
+    /// contents are never echoed.
+    #[func]
+    fn content_registry_manifest(&self, path: GString) -> VarDictionary {
+        match content_registry_ui::content_registry_manifest_from_arg(&path.to_string()) {
+            Ok(result) => result,
+            Err((code, message)) => placement_simple_error(code, message),
+        }
     }
 
     /// Generate a synthetic city layout for the rendering benchmark.

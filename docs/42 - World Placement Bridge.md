@@ -2,7 +2,7 @@
 title: World Placement Bridge
 project: Townsmith
 status: active
-updated: 2026-11-25
+updated: 2026-11-26
 tags:
   - townsmith
   - phase-2
@@ -54,6 +54,7 @@ tags:
 | `city_summary()` | `Dictionary` | Derived population, housing, jobs, employment, happiness; see [[49 - Phase 3 Slice Plan]] |
 | `content_registry_summary()` | `Dictionary` | Live content counts, `format_version`, `packs`, `checksum`, and the D-034 `pack_id`/`namespace`/`pack_checksum`/`registry_checksum`/`base_checksum` identity fields |
 | `content_load_dir(path)` | `Dictionary` | Load one absolute local mod directory through the pack validators and merge it after base; a failed load leaves the previous registry untouched |
+| `content_registry_manifest(path)` | `Dictionary` | Read-only D-042 manifest inspection: `{ok, format_version, ids:[{id,kind,namespace,checksum}], implicit_ids, checksum}`; sorted by ID, missing namespace/checksum are `null`, `base` is implicit; never returns the path or file contents |
 | `content_registry_clear()` | `bool` | Drop the live pack and restore the bundled base content registry; it does not unpin a loaded content-bound world |
 
 Terrain-edit methods (`terrain_edit_height`, `terrain_delta_count`, `terrain_delta_checksum`, `terrain_clear_deltas`, and `reset_terrain_workers`) are documented in [[43 - Terrain Edits]]. `world_height_at` and placement validation use those deltas. `city_summary` is derived from completed placements and is not a separate save field; see [[49 - Phase 3 Slice Plan]].
@@ -69,6 +70,8 @@ Lot methods (`lot_validate`, `lot_add`, `lots`, `lot_count`, `lot_checksum`, `lo
 `x` and `z` are the **centre** of the rotated footprint in world metres. The blueprint mesh is volume-local with its minimum corner at `(0, 0, 0)`; a renderer offsets it by `-bounds_m / 2` on X/Z, then rotates around Y. `rotation` is normalized to 0/90/180/270.
 
 Content methods (`content_load_dir`, `content_registry_summary`, `content_registry_clear`) manage bridge state. The slot opens on `ContentRegistry::base()`, loads at most one absolute local mod directory at a time, and commits the merged registry only after the pack, namespace, path, size, UTF-8, and duplicate checks pass. Since D-034, `world_save` records only the summary identity of that one live pack (see §3); no content definition, namespace list, or path enters the save. `content_registry_clear` returns to base content but does not unpin a world that already recorded an identity. See [[06 - Modding and Resource Packs]] §5.1 and §5.3.
+
+The content-registry manifest reader (`content_registry_manifest`) is **stateless** and read-only: it opens one explicitly supplied absolute JSON path, bounded to 1 MiB, parses it with the D-042 core validator, and returns the catalog view above. It does not load, select, merge, or activate content, does not touch the live `content_load_dir` registry or any world/save checksum, and does not return the path or file bytes. A file/read failure is `content.registry_io`; schema and selection errors keep the core `content.invalid_registry` / `content.unsupported_registry_version` / `content.unknown_id` / `content.kind_mismatch` codes. D-042 remains Proposed.
 
 Blueprint-library methods (`blueprint_library_summary`, `blueprint_library_entries`, `blueprint_library_insert`, `blueprint_library_resolve`) are **stateless** and local-only: each call opens the explicit absolute root, performs one operation, and returns. They do not open the world, are not written by `world_save`, and do not change placement, blueprint, or existing save checksums. `entries` revalidates every stored package with `load_tsbp` and skips one that is corrupt, mismatched, or has non-finite/non-positive bounds; it returns metadata only, never package bytes or paths. `insert` validates with `load_tsbp` and stores the exact validated bytes at `<root>/<first-two-hash-hex>/<hash-hex>.tsbp`; the address is the package's semantic `blake3:` content hash. A duplicate is a no-op, a different file under the same hash is a collision, and a failed insert leaves the library unchanged. The package cap is 96 MiB (`MAX_PACKAGE_BYTES`). Roots and sources must be absolute without `.`/`..`; symlinked shards and entries are rejected. Error codes are stable: `invalid_blueprint_library_root`, `blueprint_library_root_missing`, `blueprint_library_not_a_directory`, `invalid_blueprint_library_hash`, `invalid_blueprint_path`, `blueprint_library_missing_file`, `blueprint_library_not_a_file`, `blueprint_library_invalid_package`, `blueprint_library_too_large`, `blueprint_library_path_escape`, `blueprint_library_collision`, and `blueprint_library_io`.
 
