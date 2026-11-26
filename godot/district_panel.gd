@@ -20,9 +20,9 @@ extends Control
 ## deterministic settlements (the first claimed by player 7 and given manager,
 ## member, and builder invites), creates two overlapping policies, selects both
 ## settlements, checks the 256 m district summary, the smallest-id containing
-## policy, and the owned/unowned member blocks in EN and DE, exercises
-## button/keyboard stepping, and checks the seed-mismatch unavailable state
-## without logging a push_error. Final marker:
+## policy, the named owner/member rows and the unknown-id fallback in EN and DE,
+## exercises button/keyboard stepping, and checks the seed-mismatch unavailable
+## state without logging a push_error. Final marker:
 ##   DISTRICT_PANEL status=ok settlements=2 selected=1 population=0 policy=1 checksum=<8 hex>
 ##
 ## `--empty` prints the empty contract:
@@ -30,10 +30,12 @@ extends Control
 ##
 ## Most chrome is still English-only developer text; the settlement member block
 ## is keyed under `base.ui.district.*` so the panel already proves the EN/DE
-## slice. Settlement names, owners, roles, bridge error codes, and policy ids
-## stay verbatim; `--locale de` previews the localized block. Display numbers go
-## through `WorldI18n.format_int`/`format_float` so the tool follows the EN/DE
-## number rules from `docs/16 - Localization.md`.
+## slice. Player names come from the local bridge registry (`players_list()`,
+## cached once per refresh) and fall back to the plain `#id` when an id is
+## absent, empty, or malformed. Settlement names, owners, roles, bridge error
+## codes, and policy ids stay verbatim; `--locale de` previews the localized
+## block. Display numbers go through `WorldI18n.format_int`/`format_float` so
+## the tool follows the EN/DE number rules from `docs/16 - Localization.md`.
 
 const WorldI18n = preload("res://world_i18n.gd")
 
@@ -76,6 +78,17 @@ const MEMBER_PERMISSION_KEYS := [
 	[4, "base.ui.district.members.permission.tax"],
 	[8, "base.ui.district.members.permission.members"],
 ]
+# Local bridge registry fixture names. `players_register` assigns ids from 1 in
+# registration order, so the filler loop lands the display names on the ids the
+# fixture claim/invites already use. Names are display-only and never saved.
+const FIXTURE_PLAYER_NAMES := {
+	7: "Mayor",
+	11: "Manager",
+	12: "Member",
+	13: "Builder",
+}
+const FIXTURE_PLAYER_MAX_ID := 13
+
 const FIXTURE_POLICIES := [
 	{"name": "Smoke Core", "x": 0.0, "z": 0.0, "radius": 300.0, "tax": 1.25, "funding": 0.5},
 	{"name": "Smoke Outer", "x": 0.0, "z": 0.0, "radius": 400.0, "tax": 0.75, "funding": 1.5},
@@ -98,6 +111,7 @@ var _settlement_checksum := ""
 var _selected_id := 0
 var _locale_override := ""
 var _member_lines: Array[String] = []
+var _player_names: Dictionary = {}
 var _district: Dictionary = {}
 var _district_ok := false
 var _policies: Array = []
@@ -184,6 +198,7 @@ func _refresh() -> void:
 	if _core == null:
 		_show_unavailable("no_core", "the bridge is not loaded")
 		return
+	_refresh_player_names()
 	var state: Dictionary = _core.settlements()
 	if not bool(state.get("ok", false)):
 		_show_unavailable(str(state.get("error_code", "error")), str(state.get("error", "")))
@@ -304,7 +319,9 @@ func _membership_summary(settlement: Dictionary) -> String:
 
 ## Render the read-only member block directly under the owner/revision/tax
 ## line. Owned records get an owner line plus one row per payload member in
-## payload order; unowned records get a single line. A missing or non-array
+## payload order; unowned records get a single line. Player names come from the
+## per-refresh registry map, so a known id renders `Name (#id)` and an unknown,
+## empty, or malformed name keeps the plain `#id` row. A missing or non-array
 ## `members` payload yields no rows rather than synthesized ones.
 func _render_members(settlement: Dictionary) -> void:
 	_clear_members()
@@ -330,10 +347,16 @@ func _render_members(settlement: Dictionary) -> void:
 	# The owner record is structurally the `owner` role; the payload repeats it.
 	if owner_role.is_empty():
 		owner_role = "owner"
-	_add_member_line(_i18n.t("base.ui.district.members.owner", {
-		"id": _i18n.format_int(owner_id),
+	var owner_name := _player_display_name(owner_id)
+	var owner_params := {
+		"id": str(owner_id),
 		"role": owner_role,
-	}))
+	}
+	if owner_name.is_empty():
+		_add_member_line(_i18n.t("base.ui.district.members.owner", owner_params))
+	else:
+		owner_params["name"] = owner_name
+		_add_member_line(_i18n.t("base.ui.district.members.owner_named", owner_params))
 	for member in rows:
 		if not (member is Dictionary):
 			continue
@@ -342,11 +365,17 @@ func _render_members(settlement: Dictionary) -> void:
 		var permissions := _int_field(member.get("permissions", null))
 		if player < 0 or role.is_empty() or permissions < 0:
 			continue
-		_add_member_line(_i18n.t("base.ui.district.members.row", {
-			"id": _i18n.format_int(player),
+		var params := {
+			"id": str(player),
 			"role": role,
 			"permissions": _permission_tokens(permissions),
-		}))
+		}
+		var name := _player_display_name(player)
+		if name.is_empty():
+			_add_member_line(_i18n.t("base.ui.district.members.row", params))
+		else:
+			params["name"] = name
+			_add_member_line(_i18n.t("base.ui.district.members.row_named", params))
 
 
 func _permission_tokens(bits: int) -> String:
@@ -391,6 +420,30 @@ func _member_block_leaks() -> bool:
 		if line.contains("!base.ui."):
 			return true
 	return false
+
+
+## Rebuild the local bridge player id -> name map. Called once per refresh,
+## never per row. A failed or malformed `players_list()` clears the map, so
+## every lookup keeps the plain `#id` fallback.
+func _refresh_player_names() -> void:
+	var names := {}
+	if _core != null:
+		var listed: Dictionary = _core.players_list()
+		if bool(listed.get("ok", false)):
+			var value = listed.get("players", [])
+			var players: Array = value if value is Array else []
+			for entry in players:
+				if entry is Dictionary:
+					var player := _int_field(entry.get("id", null))
+					var name := str(entry.get("name", "")).strip_edges()
+					if player > 0 and not name.is_empty():
+						names[player] = name
+	_player_names = names
+
+
+## Local bridge display name for one id; empty when unknown.
+func _player_display_name(player_id: int) -> String:
+	return str(_player_names.get(player_id, ""))
 
 
 func _policy_center(policy: Dictionary) -> Vector2:
@@ -1010,6 +1063,8 @@ func _load_fixture() -> bool:
 				true
 			)
 			return false
+	if not _register_fixture_players():
+		return false
 	_refresh()
 	_set_message("Deterministic fixture loaded (2 settlements, 2 policies).", false)
 	return true
@@ -1018,6 +1073,27 @@ func _load_fixture() -> bool:
 func _mutation_record(result: Dictionary) -> Dictionary:
 	var value = result.get("settlement", {})
 	return value if value is Dictionary else {}
+
+
+## Register the deterministic display names through the local bridge registry.
+## Ids start at 1 and follow registration order, so fillers advance the counter
+## to the ids the fixture claim/invites already use. Re-running is idempotent
+## because registration reuses an existing name.
+func _register_fixture_players() -> bool:
+	for player_id in range(1, FIXTURE_PLAYER_MAX_ID + 1):
+		var player_name := str(FIXTURE_PLAYER_NAMES.get(player_id, "Player %d" % player_id))
+		var result: Dictionary = _core.players_register(player_name)
+		if not bool(result.get("ok", false)):
+			_set_message(
+				"Fixture player failed: %s" % str(result.get("error_code", "error")),
+				true
+			)
+			return false
+		var player = result.get("player", {})
+		if not (player is Dictionary) or _int_field(player.get("id", null)) != player_id:
+			_set_message("Fixture player id drift at %d." % player_id, true)
+			return false
+	return true
 
 
 # --- Headless smoke --------------------------------------------------------
@@ -1053,6 +1129,7 @@ func _run_smoke() -> void:
 	var member_block_en := ""
 	var member_block_de := ""
 	var member_block_unowned := ""
+	var fallback_block := ""
 
 	# 1. Initial empty state: settlement layer closed, no list rows, no district
 	# query, and the empty label visible. No store may be created by a read.
@@ -1136,15 +1213,15 @@ func _run_smoke() -> void:
 			status = "select_first_membership_revision"
 		elif _member_lines.size() != 5 or _members_box.get_child_count() != 5:
 			status = "select_first_member_rows"
-		elif _member_lines[0] != "Owner #7 · owner":
+		elif _member_lines[0] != "Owner Mayor (#7) · owner":
 			status = "select_first_member_owner"
-		elif not _member_block_text().contains("#11 manager · build/manage/tax/members"):
+		elif not _member_block_text().contains("Manager (#11) manager · build/manage/tax/members"):
 			status = "select_first_member_manager"
-		elif not _member_block_text().contains("#12 member · no permissions"):
+		elif not _member_block_text().contains("Member (#12) member · no permissions"):
 			status = "select_first_member_no_permissions"
-		elif not _member_block_text().contains("#13 builder · build"):
+		elif not _member_block_text().contains("Builder (#13) builder · build"):
 			status = "select_first_member_builder"
-		elif not _member_block_text().contains("#7 owner · build/manage/tax/members"):
+		elif not _member_block_text().contains("Mayor (#7) owner · build/manage/tax/members"):
 			status = "select_first_member_owner_row"
 		elif _member_block_leaks():
 			status = "select_first_member_en_key"
@@ -1167,13 +1244,35 @@ func _run_smoke() -> void:
 		member_block_de = _member_block_text()
 		if _member_block_leaks():
 			status = "select_first_member_de_key"
-		elif not member_block_de.contains("Eigentümer #7"):
+		elif not member_block_de.contains("Eigentümer Mayor (#7)"):
 			status = "select_first_member_de_owner"
 		elif not member_block_de.contains("keine Berechtigungen"):
 			status = "select_first_member_de_no_permissions"
-		elif not member_block_de.contains("bauen/verwalten/Steuern/Mitglieder"):
+		elif not member_block_de.contains("Manager (#11) manager · bauen/verwalten/Steuern/Mitglieder"):
 			status = "select_first_member_de_tokens"
 		_i18n.set_locale("en")
+		_render_selection()
+
+	# 4c. A member id the local registry does not know keeps the plain `#id`
+	# row. The probe copies the selected record so the fixture store, membership
+	# revision, and panel checksum stay untouched.
+	if status == "ok":
+		var probe := _find_settlement(1).duplicate(true)
+		var probe_rows = probe.get("members", [])
+		if not (probe_rows is Array):
+			status = "fallback_member_payload"
+		else:
+			(probe_rows as Array).append({
+				"player": 9001,
+				"role": "member",
+				"permissions": 0,
+			})
+			_render_members(probe)
+			fallback_block = _member_block_text()
+			if not fallback_block.contains("#9001 member · no permissions"):
+				status = "fallback_member_row"
+			elif _member_block_leaks():
+				status = "fallback_member_key"
 		_render_selection()
 
 	# 5. Settlement 2 is 1,024 m away and outside both policy circles: the
@@ -1284,6 +1383,7 @@ func _run_smoke() -> void:
 	print("DISTRICT_MEMBERS en=%s" % member_block_en)
 	print("DISTRICT_MEMBERS de=%s" % member_block_de)
 	print("DISTRICT_MEMBERS unowned=%s" % member_block_unowned)
+	print("DISTRICT_NAMES fallback=%s" % fallback_block)
 	_print_marker(status, _settlements.size(), selected_id, population, contained_id)
 	get_tree().quit(0 if status == "ok" else 1)
 
