@@ -112,3 +112,12 @@ if [[ ! "$MEMBERS_LINE" =~ DASHBOARD_MEMBERS\ status=ok\ id=[0-9]+\ player=[0-9]
 	echo "World scene smoke members contract mismatch: $MEMBERS_LINE" >&2
 	exit 1
 fi
+NAMES_LINE="$(grep "DASHBOARD_MEMBER_NAMES " <<<"$OUTPUT" | tail -1 || true)"
+if [[ -z "$NAMES_LINE" ]]; then
+	echo "World scene smoke failed: no DASHBOARD_MEMBER_NAMES marker" >&2
+	exit 1
+fi
+if [[ "$NAMES_LINE" != *"status=ok"* || "$NAMES_LINE" != *"named=Builder"* || "$NAMES_LINE" != *"fallback=#9001"* ]]; then
+	echo "World scene smoke member names contract mismatch: $NAMES_LINE" >&2
+	exit 1
+fi
