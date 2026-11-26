@@ -771,6 +771,13 @@ pub enum ServerMessage {
         /// True when this `welcome` answers a successful `resume`.
         #[serde(default)]
         resumed: bool,
+        /// Authoritative chat sequence at send time.
+        ///
+        /// A watermark only: clients still call `chat_since { after }` to fetch
+        /// retained lines. It is excluded from the world checksum and does not
+        /// advance the tick.
+        #[serde(default)]
+        chat_seq: u64,
     },
     Pong {
         nonce: u64,
@@ -805,6 +812,12 @@ pub enum ServerMessage {
         /// for the same viewport, so this count can exceed `roads.len()`.
         #[serde(default)]
         visible_roads: u32,
+        /// Authoritative chat sequence at send time.
+        ///
+        /// A watermark only, like the field on [`ServerMessage::Welcome`].
+        /// Excluded from `checksum`; fetch retained lines with `chat_since`.
+        #[serde(default)]
+        chat_seq: u64,
     },
     /// Bounded road and building details for the current interest viewport.
     ///
@@ -1462,6 +1475,8 @@ impl Session {
                     tick: self.tick,
                     protocol_version: PROTOCOL_VERSION,
                     resumed: false,
+                    // The transport-only session has no chat log.
+                    chat_seq: 0,
                 }]
             }
             ClientCommand::Resume { .. } => reject(
@@ -1575,6 +1590,8 @@ impl Session {
             interest_center: [0.0, 0.0],
             interest_radius_m: default_interest_radius(),
             visible_roads: self.roads,
+            // The transport-only session has no chat log.
+            chat_seq: 0,
         }
     }
 }

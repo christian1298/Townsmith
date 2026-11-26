@@ -264,9 +264,9 @@ The first runnable protocol lives in `crates/server/src/protocol.rs`. Protocol v
 
 | Tag | Fields |
 |---|---|
-| `welcome` | `session_id`, `session_token`, `tick`, `protocol_version`, `resumed` |
+| `welcome` | `session_id`, `session_token`, `tick`, `protocol_version`, `resumed`, `chat_seq` |
 | `pong` | `nonce` |
-| `snapshot` | `tick`, `population`, `balance`, `checksum`, `interest_center`, `interest_radius_m`, `visible_roads` |
+| `snapshot` | `tick`, `population`, `balance`, `checksum`, `interest_center`, `interest_radius_m`, `visible_roads`, `chat_seq` |
 | `interest_view` | `tick`, `center`, `radius_m`, `roads` (≤64 × `{id, start, end, width_m}`), `truncated`, `buildings` (≤64 × `{id, center, radius_m}`), `buildings_truncated` |
 | `place_blueprint_result` | `tick`, `placement_id`, `blueprint_hash`, `placement_checksum`, `world_checksum`, `placement` (a `PlacementView` with no path) |
 | `settlement_found` | `tick`, `settlement` (`SettlementView`), `settlement_checksum`, `world_checksum` |
@@ -396,7 +396,7 @@ Population, employment, and building counts are static for v1. `employed` is 60%
 | `set_session_role(connection_id, role)` | Dev-only per-connection role; not authentication |
 | `set_blueprint_library(root)` / `clear_blueprint_library()` | Configure or drop the pre-seeded content-addressed `.tsbp` library used by `place_blueprint`; process config, not save data |
 | `set_policy_registry(store)` / `clear_policy_registry()` | Configure or drop the same-seed JSON district policy registry used by the placement gate |
-| `snapshot() -> ServerMessage` | Current `tick`, `population`, `balance`, `checksum`, plus the session viewport (`interest_center`, `interest_radius_m`, `visible_roads`) |
+| `snapshot() -> ServerMessage` | Current `tick`, `population`, `balance`, `checksum`, the session viewport (`interest_center`, `interest_radius_m`, `visible_roads`), and the `chat_seq` watermark |
 | `interest_roads() -> Vec<RoadView>` | At most 64 matching roads, ascending id; the bounded detail list without the envelope |
 | `interest_view() -> ServerMessage` | `InterestView` with the viewport, the bounded road list, and `truncated` |
 | `advance_day(dt_s) -> EconomyTick` | Run one economy tick, capped at `DAY_SECONDS`, then increment `tick` |
@@ -439,7 +439,7 @@ Population, employment, and building counts are static for v1. `employed` is 60%
 
 `hello` and `disconnect` are accepted before `hello`; every other command is rejected with `not_hello`. Rejections never mutate state.
 
-**Chat push v0.** The world keeps a 64-line, in-memory chat log with a monotonic `seq` independent of the tick. `chat` stores the trimmed text, the sender's stable `player_id`, and a display-name snapshot; empty/whitespace, over-280-character, and control-character messages are rejected without mutation. The log is not saved, is cleared on restart, and is excluded from the world checksum. The listen loop pushes the accepted `chat_sent` frame to every other hello-complete live session in ascending connection-id order; the sender receives its normal command response and no duplicate. A recipient whose bounded queue is full or closed is disconnected without failing the sender or dropping the log entry. `chat_since` remains the authoritative reconnect catch-up path and returns retained entries with `seq > after`; clients should still poll it after resume. `chat` and `chat_since` are Viewer-level; the transport-only session rejects both with `chat.unavailable`.
+**Chat push v0.** The world keeps a 64-line, in-memory chat log with a monotonic `seq` independent of the tick. `chat` stores the trimmed text, the sender's stable `player_id`, and a display-name snapshot; empty/whitespace, over-280-character, and control-character messages are rejected without mutation. The log is not saved, is cleared on restart, and is excluded from the world checksum. The listen loop pushes the accepted `chat_sent` frame to every other hello-complete live session in ascending connection-id order; the sender receives its normal command response and no duplicate. A recipient whose bounded queue is full or closed is disconnected without failing the sender or dropping the log entry. `chat_since` remains the authoritative reconnect catch-up path and returns retained entries with `seq > after`; clients should still poll it after resume. `welcome` and every `snapshot` carry an additive `chat_seq` watermark equal to the current log sequence; it is not world state, does not move the checksum or tick, and is only a hint for choosing the next `chat_since`. `chat` and `chat_since` are Viewer-level; the transport-only session rejects both with `chat.unavailable`.
 
 The 3D client consumes pushed `chat_sent` outside its scripted exchange as well: when `--chat` is enabled, a pushed line is merged into the panel transcript without advancing the script, while `chat_log` remains catch-up. The smoke's extra `--chat-listen --chat-expect TEXT` mode starts a second client that sends no `chat` or `chat_since`; it waits for the pushed line, prints `MP_CHAT_LISTEN status=ready` and `MP_CHAT_PUSH status=ok ...`, and proves the sender still receives its own response exactly once.
 
