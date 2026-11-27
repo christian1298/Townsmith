@@ -91,10 +91,14 @@ impl Server {
             }
             text
         });
+        let (ready_sender, ready_receiver) = mpsc::channel();
         let stderr = thread::spawn(move || {
             let mut text = String::new();
             for line in BufReader::new(stderr).lines() {
                 let line = line.expect("read stderr");
+                if line == "SERVER_SHUTDOWN install=ready" {
+                    let _ = ready_sender.send(());
+                }
                 text.push_str(&line);
                 text.push('\n');
             }
@@ -103,6 +107,9 @@ impl Server {
         let address = receiver
             .recv_timeout(Duration::from_secs(10))
             .expect("server did not report SERVER_LISTEN");
+        ready_receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server did not install the shutdown handler");
         Self {
             child,
             address,
