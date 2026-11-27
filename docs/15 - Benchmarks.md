@@ -356,6 +356,16 @@ townsmith-bench --server \
 - The server benchmark measures cohort ticks, building aggregates, economy, pathfinding, memory, and save/load.
 - No GPU or rendering; it is a pure simulation benchmark.
 
+#### Concurrent chat load smoke
+
+```bash
+cargo run --release -p townsmith-server -- --load-smoke --clients 4 --messages 4
+```
+
+The in-process smoke starts the real concurrent listener on an ephemeral loopback port, connects `N` clients, completes hello, sends `M` unique chat lines per client below the 48-message burst, and drains live pushes plus `chat_since` catch-up until every expected message and push is seen. Counts and checksum are deterministic (defaults: 8 clients × 16 messages → 128 messages / 112 pushes per client); `elapsed_ms` is advisory and not pinned. Example: `SERVER_LOAD status=ok clients=4 messages_sent=16 messages_received=16 pushes_expected=48 pushes_received=48 queue_capacity=256 tick=0 checksum=b0cc4bdba67f99d5`.
+
+This is **non-gating** and does not replace a network benchmark. The 64-line chat retention cap means the run relies on live pushes plus catch-up; it is not a full-log recovery test. The listener's stress matrix in `crates/server/src/listen/stress.rs` remains the deterministic correctness gate.
+
 #### Authoritative placement smoke (D-032)
 
 ```bash
