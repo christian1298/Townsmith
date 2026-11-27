@@ -450,6 +450,47 @@ fn unknown_optional_fields_are_ignored_and_stripped_on_re_save() {
 }
 
 #[test]
+fn a_future_version_primary_fails_closed_instead_of_recovering_the_backup() {
+    let dir = TempDir::new();
+    let path = dir.join("world.json");
+
+    // Two valid v1 generations: the first rotates to `.bak`, so a naive
+    // recovery path would happily load it.
+    let mut world = ServerWorld::new(LOOPBACK_SEED);
+    world.save_to(&path).expect("first save");
+    let backup_bytes = fs::read(&path).expect("backup bytes");
+    world.advance_day(DAY_SECONDS);
+    world.save_to(&path).expect("second save");
+    assert!(backup_path(&path).is_file());
+
+    // A structurally valid document from a future server version.
+    let mut future = world.to_save();
+    future.format_version = 3;
+    let future_json = serde_json::to_string_pretty(&future).expect("future json");
+    fs::write(&path, future_json.as_bytes()).expect("future primary");
+
+    let error = ServerWorld::load_from(&path).expect_err("future version must fail closed");
+    assert_eq!(error.code(), codes::UNSUPPORTED_VERSION);
+    assert!(matches!(error, SaveError::UnsupportedVersion(3)));
+    assert!(
+        error.to_string().contains("expected 1"),
+        "stable message names the supported version: {error}"
+    );
+
+    // No downgrade and no side effects: both files stay byte-identical and no
+    // temp file is created.
+    assert_eq!(
+        fs::read(&path).expect("primary untouched"),
+        future_json.as_bytes()
+    );
+    assert_eq!(
+        fs::read(backup_path(&path)).expect("backup untouched"),
+        backup_bytes
+    );
+    assert!(!temp_path(&path).exists());
+}
+
+#[test]
 fn a_legacy_save_without_optional_stores_is_byte_identical_on_a_noop_save() {
     let dir = TempDir::new();
     let path = dir.join("legacy.json");
