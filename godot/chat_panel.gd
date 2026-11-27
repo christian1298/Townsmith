@@ -38,6 +38,63 @@ const SUPPORTED_LOCALES := ["en", "de"]
 ## stays out of the tab cycle; the status line is the last stop.
 const FOCUS_ORDER := ["draft", "send", "transcript", "status"]
 
+## Deterministic gamepad actions. `ui_up` / `ui_down` reuse the keyboard focus
+## cycle, `ui_accept` activates the focused control, `ui_cancel` runs the Escape
+## contract, and page actions move the transcript view when it owns focus.
+const GAMEPAD_ACTIONS := [
+	"ui_up",
+	"ui_down",
+	"ui_accept",
+	"ui_cancel",
+	"ui_page_up",
+	"ui_page_down",
+]
+
+## Logical lines moved by one transcript page. Paging is a view offset: it
+## never edits entries, `last_seq`, the draft, or the unread badge.
+const TRANSCRIPT_PAGE_LINES := 8
+
+## Compact glyph names for joypad buttons. Footer text reads these from the
+## active InputMap bindings; this table only names the buttons.
+const JOY_BUTTON_GLYPHS := {
+	JOY_BUTTON_A: "A",
+	JOY_BUTTON_B: "B",
+	JOY_BUTTON_X: "X",
+	JOY_BUTTON_Y: "Y",
+	JOY_BUTTON_LEFT_SHOULDER: "LB",
+	JOY_BUTTON_RIGHT_SHOULDER: "RB",
+	JOY_BUTTON_BACK: "Back",
+	JOY_BUTTON_START: "Start",
+	JOY_BUTTON_DPAD_UP: "D-pad Up",
+	JOY_BUTTON_DPAD_DOWN: "D-pad Down",
+	JOY_BUTTON_DPAD_LEFT: "D-pad Left",
+	JOY_BUTTON_DPAD_RIGHT: "D-pad Right",
+}
+
+const JOY_AXIS_GLYPHS := {
+	JOY_AXIS_LEFT_Y: "Left Stick",
+	JOY_AXIS_TRIGGER_LEFT: "LT",
+	JOY_AXIS_TRIGGER_RIGHT: "RT",
+}
+
+## Local fallbacks for actions the stock InputMap leaves keyboard-only
+## (`ui_accept` / `ui_cancel` / page actions). Live routing checks InputMap
+## first, so a project rebinding still wins; these keep the panel usable with
+## the default map and are shown in the footer, never hidden.
+const JOY_BUTTON_ACTIONS := {
+	JOY_BUTTON_A: "ui_accept",
+	JOY_BUTTON_B: "ui_cancel",
+	JOY_BUTTON_LEFT_SHOULDER: "ui_page_up",
+	JOY_BUTTON_RIGHT_SHOULDER: "ui_page_down",
+	JOY_BUTTON_DPAD_UP: "ui_up",
+	JOY_BUTTON_DPAD_DOWN: "ui_down",
+}
+
+const JOY_AXIS_ACTIONS := {
+	JOY_AXIS_TRIGGER_LEFT: "ui_page_up",
+	JOY_AXIS_TRIGGER_RIGHT: "ui_page_down",
+}
+
 const ERROR_CODES := [
 	"chat.empty",
 	"chat.too_long",
@@ -70,6 +127,15 @@ var _unread := 0
 ## Logical focus target. Synthetic mode moves this without touching the engine
 ## focus owner, so the focus contract is deterministic under `--headless`.
 var _focus_id := "draft"
+## Whether the last handled navigation came from a gamepad action. Keyboard,
+## mouse, and API focus moves clear it; a handled gamepad action sets it.
+var _gamepad_active := false
+## Last accepted gamepad action name. Diagnostic only.
+var _last_action := ""
+## Transcript page offset: 0 is the newest page, 1 is one page older.
+var _transcript_page := 0
+var _trigger_left_held := false
+var _trigger_right_held := false
 
 var _box: VBoxContainer
 var _title: Label
@@ -80,6 +146,7 @@ var _draft_edit: LineEdit
 var _send_button: Button
 var _counter_label: Label
 var _help_label: Label
+var _gamepad_label: Label
 var _overlay: Control
 var _focus_ring: Panel
 
@@ -329,6 +396,9 @@ func focus_snapshot() -> Dictionary:
 	var draft_text := _draft_edit.text if _draft_edit != null else ""
 	return {
 		"focus": _focus_id,
+		"gamepad_focus": _gamepad_active and _focus_id != "",
+		"last_action": _last_action,
+		"transcript_page": _transcript_page,
 		"tab_order": FOCUS_ORDER.duplicate(),
 		"draft": draft_text,
 		"can_send": bool(draft(draft_text).get("ok", false)),
@@ -360,6 +430,7 @@ func focus_step(backwards: bool = false) -> String:
 ## Apply one keyboard command to the focus target. Used by the field handlers
 ## and by the synthetic smoke; returns whether the key was consumed.
 func focus_key(keycode: int, shift: bool = false) -> bool:
+	_gamepad_active = false
 	if keycode == KEY_TAB:
 		focus_step(shift)
 		return true
@@ -371,6 +442,23 @@ func focus_key(keycode: int, shift: bool = false) -> bool:
 	return false
 
 
+## Apply one named gamepad action and return the same shape as
+## `focus_snapshot`. Unknown actions are ignored. This is the synthetic entry
+## point used by the headless smoke; live joypad events call the same dispatch.
+func gamepad_action(action: String) -> Dictionary:
+	_dispatch_gamepad(action)
+	return focus_snapshot()
+
+
+## Footer text built from the current InputMap joypad glyphs. An action with no
+## joypad binding falls back to its action name (plus the panel's local
+## fallback button), so every reachable control stays visible.
+func gamepad_footer() -> String:
+	if _gamepad_label != null:
+		return _gamepad_label.text
+	return _gamepad_footer_text()
+
+
 ## Release focus to the surrounding UI. The draft is untouched.
 func focus_release() -> void:
 	if not _smoke_mode:
@@ -378,7 +466,121 @@ func focus_release() -> void:
 		if control != null and control.is_inside_tree() and control.has_focus():
 			control.release_focus()
 	_focus_id = ""
+	_gamepad_active = false
 	_update_focus_ring()
+
+
+## One dispatch path for synthetic smoke actions and live joypad events.
+## Returns whether the action applied; only accepted actions update
+## `last_action` and the gamepad modality flag.
+func _dispatch_gamepad(action: String) -> bool:
+	if not GAMEPAD_ACTIONS.has(action):
+		return false
+	var handled := false
+	match action:
+		"ui_up":
+			handled = _gamepad_step(true)
+		"ui_down":
+			handled = _gamepad_step(false)
+		"ui_accept":
+			handled = _gamepad_accept()
+		"ui_cancel":
+			handled = _handle_escape()
+		"ui_page_up":
+			handled = _page_transcript(true)
+		"ui_page_down":
+			handled = _page_transcript(false)
+	if not handled:
+		return false
+	_gamepad_active = true
+	_last_action = action
+	_update_focus_ring()
+	return true
+
+
+func _gamepad_step(backwards: bool) -> bool:
+	focus_step(backwards)
+	return true
+
+
+## `ui_accept` activates the focused control exactly once: the draft submits
+## through the same guard as Enter, and the send button uses its pressed path.
+func _gamepad_accept() -> bool:
+	match _focus_id:
+		"draft":
+			return _submit_from_draft()
+		"send":
+			_on_send_pressed()
+			return true
+	return false
+
+
+## Page the transcript only while it owns focus. Direction: older pages up,
+## newer pages down; 0 is the newest page and the offset clamps at both ends.
+func _page_transcript(older: bool) -> bool:
+	if _focus_id != "transcript" or _entries.is_empty():
+		return false
+	var max_page := _transcript_max_page()
+	_transcript_page = clampi(
+		_transcript_page + (1 if older else -1), 0, max_page
+	)
+	_apply_transcript_page()
+	return true
+
+
+func _transcript_max_page() -> int:
+	if _entries.size() <= TRANSCRIPT_PAGE_LINES:
+		return 0
+	return int(ceil(float(_entries.size()) / float(TRANSCRIPT_PAGE_LINES))) - 1
+
+
+func _apply_transcript_page() -> void:
+	if _transcript == null:
+		return
+	if _transcript_page <= 0:
+		_transcript.scroll_following = true
+		return
+	_transcript.scroll_following = false
+	if not _transcript.is_inside_tree():
+		return
+	var first_line := maxi(
+		0, _entries.size() - (_transcript_page + 1) * TRANSCRIPT_PAGE_LINES
+	)
+	_transcript.scroll_to_line(first_line)
+
+
+func _gamepad_footer_text() -> String:
+	var parts: Array = []
+	for action in GAMEPAD_ACTIONS:
+		parts.append("%s=%s" % [action, _action_glyph(action)])
+	return "Gamepad: " + "  ".join(parts)
+
+
+## Prefer the first joypad glyph bound in InputMap; otherwise show the action
+## name with the panel's local fallback binding in parentheses.
+func _action_glyph(action: String) -> String:
+	for event in InputMap.action_get_events(action):
+		if event is InputEventJoypadButton:
+			var button := (event as InputEventJoypadButton).button_index
+			return str(JOY_BUTTON_GLYPHS.get(button, "Button %d" % button))
+		if event is InputEventJoypadMotion:
+			var axis := (event as InputEventJoypadMotion).axis
+			if JOY_AXIS_GLYPHS.has(axis):
+				return str(JOY_AXIS_GLYPHS[axis])
+	return _local_fallback_label(action)
+
+
+func _local_fallback_label(action: String) -> String:
+	var glyphs: Array = []
+	for button in JOY_BUTTON_ACTIONS:
+		if str(JOY_BUTTON_ACTIONS[button]) == action:
+			glyphs.append(str(JOY_BUTTON_GLYPHS.get(button, "Button %d" % int(button))))
+	for axis in JOY_AXIS_ACTIONS:
+		if str(JOY_AXIS_ACTIONS[axis]) == action:
+			glyphs.append(str(JOY_AXIS_GLYPHS.get(axis, "Axis %d" % int(axis))))
+	if glyphs.is_empty():
+		return action
+	return "%s (%s)" % [action, "/".join(glyphs)]
 
 
 func _focus_control(target: String) -> Control:
@@ -398,6 +600,7 @@ func _set_focus(target: String, grab: bool) -> void:
 	if not FOCUS_ORDER.has(target):
 		return
 	_focus_id = target
+	_gamepad_active = false
 	_update_focus_ring()
 	if not grab or _smoke_mode:
 		return
@@ -410,6 +613,7 @@ func _on_focus_entered(target: String) -> void:
 	if _focus_id == target:
 		return
 	_focus_id = target
+	_gamepad_active = false
 	_update_focus_ring()
 
 
@@ -525,6 +729,16 @@ func _build_ui() -> void:
 	_help_label.add_theme_color_override("font_color", Color(0.62, 0.67, 0.74))
 	_box.add_child(_help_label)
 
+	# Gamepad footer is generated from the live InputMap, so a rebinding is
+	# reflected here instead of hidden in code.
+	_gamepad_label = Label.new()
+	_gamepad_label.name = "GamepadHelp"
+	_gamepad_label.text = ""
+	_gamepad_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_gamepad_label.add_theme_font_size_override("font_size", 11)
+	_gamepad_label.add_theme_color_override("font_color", Color(0.62, 0.67, 0.74))
+	_box.add_child(_gamepad_label)
+
 	# Anchored overlay outside the VBox flow so the badge sits at the top-right
 	# of the header without moving the title or the transcript.
 	_overlay = Control.new()
@@ -611,6 +825,8 @@ func _refresh_labels() -> void:
 		_send_button.text = _i18n.t("base.ui.chat.send")
 	if _help_label != null:
 		_help_label.text = _i18n.t("base.ui.chat.help")
+	if _gamepad_label != null:
+		_gamepad_label.text = _gamepad_footer_text()
 	_refresh_counter()
 	_refresh()
 
@@ -643,9 +859,14 @@ func _refresh() -> void:
 	if _transcript == null:
 		return
 	var lines := transcript_lines()
+	_transcript_page = mini(_transcript_page, _transcript_max_page())
 	_transcript.text = (
 		_i18n.t("base.ui.chat.empty_log") if lines.is_empty() else "\n".join(lines)
 	)
+	if _transcript_page > 0:
+		_apply_transcript_page()
+	else:
+		_transcript.scroll_following = true
 	var has_error := _error_code != ""
 	_status_label.text = _status_line()
 	_status_label.add_theme_color_override(
@@ -745,6 +966,63 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	):
 		_set_focus("draft", true)
 		get_viewport().set_input_as_handled()
+
+
+## Joypad-only fallback. Keyboard events never enter this path, so the #464
+## Tab/Enter/Esc model is unchanged and no key can fire a gamepad action.
+## Focused controls and modals get first refusal because this is unhandled
+## input; a released panel does not steal the pad from surrounding UI.
+func _unhandled_input(event: InputEvent) -> void:
+	if _smoke_mode or _focus_id == "" or not is_visible_in_tree():
+		return
+	var action := _gamepad_action_for_event(event)
+	if action == "":
+		return
+	if _dispatch_gamepad(action):
+		get_viewport().set_input_as_handled()
+
+
+func _gamepad_action_for_event(event: InputEvent) -> String:
+	if event is InputEventJoypadButton:
+		var button := event as InputEventJoypadButton
+		if not button.pressed:
+			return ""
+		for action in GAMEPAD_ACTIONS:
+			if InputMap.event_is_action(button, action, true):
+				return action
+		return str(JOY_BUTTON_ACTIONS.get(button.button_index, ""))
+	if event is InputEventJoypadMotion:
+		var motion := event as InputEventJoypadMotion
+		if motion.axis == JOY_AXIS_TRIGGER_LEFT:
+			return _trigger_action(motion.axis_value, true)
+		if motion.axis == JOY_AXIS_TRIGGER_RIGHT:
+			return _trigger_action(motion.axis_value, false)
+		for action in GAMEPAD_ACTIONS:
+			if action != "ui_up" and action != "ui_down":
+				continue
+			if InputMap.event_is_action(motion, action, true):
+				return action
+	return ""
+
+
+## Analog triggers are edge-triggered so one pull is one page. Shoulder buttons
+## and PageUp/PageDown use the digital path.
+func _trigger_action(value: float, left: bool) -> String:
+	if left:
+		if value <= 0.25:
+			_trigger_left_held = false
+			return ""
+		if value < 0.5 or _trigger_left_held:
+			return ""
+		_trigger_left_held = true
+		return "ui_page_up"
+	if value <= 0.25:
+		_trigger_right_held = false
+		return ""
+	if value < 0.5 or _trigger_right_held:
+		return ""
+	_trigger_right_held = true
+	return "ui_page_down"
 
 
 func _failure(code: String) -> Dictionary:
@@ -1406,6 +1684,35 @@ func _run_smoke() -> void:
 		print("CHAT_PANEL_FOCUS status=fail checks=%d errors=%d" % [
 			focus_check_count, _failures - focus_failures,
 		])
+
+	# --- Deterministic gamepad navigation (no commands, no render cases) ---
+	var gamepad_failures := _failures
+	var gamepad_checks_before := _checks
+	_check(focus_target("draft"), "gamepad.reset.ok")
+	_draft_edit.text = ""
+	_refresh_counter()
+	var pad := gamepad_action("ui_down")
+	_check(str(pad["focus"]) == "send", "gamepad.down.draft_send", str(pad["focus"]))
+	_check(bool(pad["gamepad_focus"]), "gamepad.down.active", str(pad["gamepad_focus"]))
+	pad = gamepad_action("ui_down")
+	_check(str(pad["focus"]) == "transcript", "gamepad.down.send_log", str(pad["focus"]))
+	pad = gamepad_action("ui_up")
+	_check(str(pad["focus"]) == "send", "gamepad.up.log_send", str(pad["focus"]))
+	_check(str(pad["last_action"]) == "ui_up", "gamepad.last_action", str(pad["last_action"]))
+	_check(str(gamepad_footer()).contains("ui_accept"), "gamepad.footer.accept", gamepad_footer())
+	_check(str(gamepad_footer()).contains("ui_cancel"), "gamepad.footer.cancel", gamepad_footer())
+	pad = gamepad_action("ui_accept")
+	_check(_commands.size() == 3, "gamepad.accept.no_send", str(_commands.size()))
+	_check(str(pad["focus"]) == "send", "gamepad.accept.send_focus", str(pad["focus"]))
+	pad = gamepad_action("ui_cancel")
+	_check(["", "send", "draft"].has(str(pad["focus"])), "gamepad.cancel.no_draft", str(pad["focus"]))
+	_check(not bool(pad["gamepad_focus"]), "gamepad.cancel.released", str(pad["gamepad_focus"]))
+	_check(focus_target("draft"), "gamepad.keyboard_reset.ok")
+	_check(not bool(focus_snapshot()["gamepad_focus"]), "gamepad.keyboard_clears", str(focus_snapshot()["gamepad_focus"]))
+	if _failures == gamepad_failures:
+		print("CHAT_PANEL_GAMEPAD status=ok checks=%d" % (_checks - gamepad_checks_before))
+	else:
+		print("CHAT_PANEL_GAMEPAD status=fail checks=%d" % (_checks - gamepad_checks_before))
 
 	_case("final")
 
