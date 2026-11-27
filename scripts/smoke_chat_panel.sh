@@ -37,12 +37,13 @@ fi
 SMOKE_DIR="$(mktemp -d)"
 trap 'rm -rf "$SMOKE_DIR"' EXIT
 
-CONTRACT='^CHAT_PANEL status=ok cases=23 checks=199 checksum=06986775$'
+CONTRACT='^CHAT_PANEL status=ok cases=23 checks=213 checksum=047b366f$'
 CATCHUP_CONTRACT='^MP_CHAT_CATCHUP status=ok added=[1-9][0-9]* skipped=[1-9][0-9]* last_seq=[0-9]+ unread=[0-9]+$'
 # Focus checks run after every render stage, so the 23 render cases and their
 # checksum stay at the pre-focus baseline; the focus block adds 47 checks.
 # Update all three pins together with any render or focus change.
 FOCUS_CONTRACT='^CHAT_PANEL_FOCUS status=ok checks=47$'
+GAMEPAD_CONTRACT='^CHAT_PANEL_GAMEPAD status=ok checks=14$'
 
 run_usage_probe() {
 	local log="$1"
@@ -128,6 +129,16 @@ if [[ -z "$FOCUS_LINE" ]]; then
 fi
 if [[ ! "$FOCUS_LINE" =~ $FOCUS_CONTRACT ]]; then
 	echo "Chat panel smoke focus contract mismatch: $FOCUS_LINE" >&2
+	exit 1
+fi
+
+GAMEPAD_LINE="$(grep '^CHAT_PANEL_GAMEPAD status=' <<<"$FIRST" | tail -1 || true)"
+if [[ -z "$GAMEPAD_LINE" ]]; then
+	echo "Chat panel smoke failed: no gamepad marker" >&2
+	exit 1
+fi
+if [[ ! "$GAMEPAD_LINE" =~ $GAMEPAD_CONTRACT ]]; then
+	echo "Chat panel smoke gamepad contract mismatch: $GAMEPAD_LINE" >&2
 	exit 1
 fi
 
