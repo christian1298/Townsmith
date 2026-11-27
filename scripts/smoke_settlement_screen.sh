@@ -32,7 +32,7 @@ fi
 SMOKE_DIR="$(mktemp -d)"
 trap 'rm -rf "$SMOKE_DIR"' EXIT
 
-CONTRACT='^SETTLEMENT_SCREEN status=ok pages=3 settlements=23 selected=2 checksum=[0-9a-f]{16}$'
+CONTRACT='^SETTLEMENT_SCREEN status=ok pages=3 settlements=23 selected=2 actions=11 accepted=8 rejected=3 checksum=[0-9a-f]{16}$'
 PAGES_CONTRACT='^SETTLEMENT_SCREEN_PAGES sizes=8/8/7 selected_last=23$'
 NAMES_CONTRACT='^SETTLEMENT_SCREEN_NAMES owner=Mayor#7 manager=Manager#11 builder=Builder#13 member=Member#12 fallback=#9001 owner_fallback=#9002$'
 PROJECTION_CONTRACT='^SETTLEMENT_SCREEN_PROJECTION tax0=x1\.00 tax5=x1\.05 tax100=x2\.00 invalid=tax\.projection\.rate_out_of_range$'

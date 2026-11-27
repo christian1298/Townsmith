@@ -17,7 +17,7 @@ tags:
 > The opt-in settlement probe in `godot/mp_world_client.gd`: the read-only client readout merged as **#424**, and the planned mutation actions that follow it. It is a connected-client debug surface over the existing D-033 protocol commands. It adds **no** protocol command, wire field, save field, or ADR. [[48 - Settlement Boundaries]] §3 is the command contract; [[05 - Multiplayer]] §5 is the server behavior.
 
 > [!success] Status: readout and scripted mutations implemented
-> `--settlement-ui` implements readout plus `rename`, `set_tax`, `release`, `invite`, `set_role`, `remove`, `claim`, and `transfer`, including settlement-list paging. They reuse the commands accepted by `ServerWorld`; the server remains authoritative. Without `--settlement-ui`, no settlement code runs. §7's read-only local shell is now implemented (§7 status below); the connected transport, mutation controls, permission matrix, focus model, and canonical navigation remain planning.
+> `--settlement-ui` implements readout plus `rename`, `set_tax`, `release`, `invite`, `set_role`, `remove`, `claim`, and `transfer`, including settlement-list paging. They reuse the commands accepted by `ServerWorld`; the server remains authoritative. Without `--settlement-ui`, no settlement code runs. §7's local shell now includes the mutation controls; the connected transport, global-role ceiling, focus model, and canonical navigation remain planning.
 
 ## 1. Where it sits
 
@@ -203,8 +203,8 @@ No sleeps are used; readiness is the bounded server-log poll. The checksum is SH
 
 ## 7. Production UI plan
 
-> [!success] Shell implemented (read-only)
-> The standalone `godot/settlement_screen.tscn` implements the first **production settlement shell** slice over the local bridge. It is not connected to the server and it performs no mutation.
+> [!success] Shell implemented with local mutations
+> The standalone `godot/settlement_screen.tscn` implements the first **production settlement shell** slice over the local bridge. It is not connected to the server; every mutation is a local-bridge call with the same revision and permission rules as the developer editor.
 >
 > **Implemented**
 > - Cursor-paged list (`settlements_page(after_id, limit)`, 8 rows/page) with name, `#id`, owner name/`#id` or `unowned`, tax, membership revision, and member count. The cursor is the order; the client never re-sorts a page.
@@ -224,7 +224,9 @@ No sleeps are used; readiness is the bounded server-log poll. The checksum is SH
 > `GODOT=/path/to/godot ./scripts/smoke_settlement_screen.sh` seeds 23 local settlements (one unowned, one owned with owner + manager + builder + member + an unregistered member, varied tax) and asserts 8/8/7 paging, page-local selection, name/`#id` fallbacks, projections at 0/5/100/invalid, EN/DE key coverage, and identical two-run output. Final marker:
 > `SETTLEMENT_SCREEN status=ok pages=3 settlements=23 selected=2 checksum=<16 hex>`
 >
-> **Remaining mutations** (target §7.1–§7.4, no new ADR): claim, rename, set tax, invite, set role, remove member, transfer, and release, each behind the permission/ceiling matrix and confirmation rules. The connected transport and a read-only roster/name source are prerequisites for member-name parity. `settlements_page` and `players_list` are already read-only; no bridge change is required for this slice.
+> **Mutations wired locally:** claim, rename, set tax, invite, set role, remove member, transfer, and release, each re-reading the selected page for a fresh revision and showing a localized reason when unavailable. Destructive release/remove use a two-press confirmation; the owner cannot be removed or demoted. The smoke exercises 11 actions (8 accepted, 3 rejected) and prints `SETTLEMENT_SCREEN status=ok pages=3 settlements=23 selected=2 actions=11 accepted=8 rejected=3 checksum=<16hex>`.
+>
+> **Remaining connected work** (target §7.1–§7.4, no new ADR): replace the local adapter with the connected `settlement_list`/`player_list` sources, wire the global-role ceiling and server rejection display, add the connected modal/focus flow, and embed the shell in the canonical Mayor/Architect navigation. The page and name reads already have connected equivalents (`settlement_list`, `player_list`).
 
 The rest of this section is the target **production settlement surface**. §1–§6 remain the developer probe, and the dashboard in [[57 - Dashboard and Advisor]] remains the current local settlement surface. The plan uses the existing D-033 commands, the `settlements_page` read in [[42 - World Placement Bridge]], and the EN/DE string rules in [[16 - Localization]]. It does not add a protocol command, wire field, save field, permission, or ADR.
 

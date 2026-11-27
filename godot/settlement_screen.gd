@@ -1,16 +1,17 @@
 extends Control
 
-## Standalone read-only production settlement screen shell (local bridge).
+## Standalone production settlement screen shell (local bridge mutations).
 ##
-## Implements the first slice of `docs/85 - Connected Settlement Surface.md` §7:
-## a cursor-paged list over `settlements_page(after_id, limit)` and a read-only
-## detail pane with player names from `players_list()` and the D-039 preview
-## from `tax_projection(rate)`. The header records the `Local` authority mode.
+## Implements `docs/85 - Connected Settlement Surface.md` §7 over the local
+## bridge: a cursor-paged list over `settlements_page(after_id, limit)`, the
+## detail pane with `players_list()` names and the D-039 `tax_projection(rate)`
+## preview, plus local claim, rename, tax, invite, role, remove, transfer, and
+## release actions. The header records the `Local` authority mode.
 ##
-## Deliberately no mutations: no claim, rename, transfer, release, invite,
-## set-role, remove-member, or set-tax controls, and no settlement founding.
-## The smoke/fixture path seeds the in-memory bridge before the screen settles
-## into read-only display, exactly like the developer district panel.
+## Every mutation re-reads the selected record/page first and sends the fresh
+## `membership_revision`; a rejection never changes a row, the selected member,
+## or the page. Rename and the destructive actions use an explicit confirm or
+## two-press flow. Settlement founding stays outside this screen.
 ##
 ## Run:
 ##   godot --path godot res://settlement_screen.tscn
@@ -18,7 +19,7 @@ extends Control
 ##   godot --headless --path godot res://settlement_screen.tscn -- --smoke
 ##
 ## Final smoke marker, printed twice with identical output:
-##   SETTLEMENT_SCREEN status=ok pages=3 settlements=23 selected=2 checksum=<16 hex>
+##   SETTLEMENT_SCREEN status=ok pages=3 settlements=23 actions=13 accepted=8 rejected=5 checksum=<16 hex>
 
 const WorldI18n = preload("res://world_i18n.gd")
 
@@ -26,6 +27,32 @@ const SUITE := "settlement_screen"
 const DEFAULT_SEED := 2026
 const PAGE_SIZE := 8
 const MAX_TAX_RATE := 100
+const TAX_STEP := 5
+const NAME_MAX_CHARS := 48
+const MEMBER_ROLE_CYCLE := ["member", "builder", "manager"]
+
+## Visible action order and keyboard shortcuts. Number keys 1–8 and the page
+## keys stay list navigation; these are the only action shortcuts.
+const ACTION_ORDER := [
+	["claim", "C"],
+	["rename", "N"],
+	["tax", "T"],
+	["transfer", "Y"],
+	["invite", "I"],
+	["cycle_role", "M"],
+	["remove_member", "Del"],
+	["release", "X"],
+]
+const ACTION_LABEL_KEYS := {
+	"claim": "base.ui.settlement_screen.action.claim",
+	"rename": "base.ui.settlement_screen.action.rename",
+	"tax": "base.ui.settlement_screen.action.tax",
+	"transfer": "base.ui.settlement_screen.action.transfer",
+	"invite": "base.ui.settlement_screen.action.invite",
+	"cycle_role": "base.ui.settlement_screen.action.cycle_role",
+	"remove_member": "base.ui.settlement_screen.action.remove_member",
+	"release": "base.ui.settlement_screen.action.release",
+}
 
 ## Permission bit -> localized token. Mirrors `SettlementPermission` in
 ## `core_city::settlement`; only granted tokens are rendered.
@@ -79,6 +106,20 @@ var _error_code := ""
 var _player_names: Dictionary = {}
 var _syncing_list := false
 
+# Mutation state. `_selected_member` is a player id, so a page refresh keeps
+# the member selection by identity. Pending confirmations are scoped to the
+# settlement id and player id that armed them.
+var _selected_member := 0
+var _pending_remove_id := 0
+var _pending_remove_player := 0
+var _pending_release_id := 0
+var _status_text := ""
+var _rename_open := false
+var _rename_target_id := 0
+var _action_count := 0
+var _accepted_count := 0
+var _rejected_count := 0
+
 var _title_label: Label
 var _authority_label: Label
 var _page_label: Label
@@ -95,6 +136,16 @@ var _members_title: Label
 var _members_box: VBoxContainer
 var _detail_empty: Label
 var _status_label: Label
+var _action_bar: HFlowContainer
+var _action_buttons: Dictionary = {}
+
+var _rename_overlay: Control
+var _rename_title: Label
+var _rename_edit: LineEdit
+var _rename_count: Label
+var _rename_error: Label
+var _rename_cancel: Button
+var _rename_save: Button
 
 
 func _ready() -> void:
@@ -234,9 +285,85 @@ func _build_ui() -> void:
 	right.add_child(_detail_empty)
 
 	root.add_child(HSeparator.new())
+	_action_bar = HFlowContainer.new()
+	_action_bar.add_theme_constant_override("h_separation", 6)
+	_action_bar.add_theme_constant_override("v_separation", 4)
+	root.add_child(_action_bar)
+	for entry in ACTION_ORDER:
+		var name := str(entry[0])
+		var button := Button.new()
+		button.pressed.connect(_on_action_pressed.bind(name))
+		_action_bar.add_child(button)
+		_action_buttons[name] = button
+
 	_status_label = Label.new()
 	_status_label.add_theme_color_override("font_color", MUTED_COLOR)
+	_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	root.add_child(_status_label)
+
+	_build_rename_modal()
+
+
+func _build_rename_modal() -> void:
+	_rename_overlay = Control.new()
+	_rename_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_rename_overlay.visible = false
+	_rename_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(_rename_overlay)
+
+	var shade := ColorRect.new()
+	shade.set_anchors_preset(Control.PRESET_FULL_RECT)
+	shade.color = Color(0.02, 0.03, 0.05, 0.72)
+	shade.mouse_filter = Control.MOUSE_FILTER_STOP
+	_rename_overlay.add_child(shade)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_rename_overlay.add_child(center)
+
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(440, 0)
+	center.add_child(panel)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 8)
+	panel.add_child(box)
+
+	_rename_title = Label.new()
+	_rename_title.add_theme_font_size_override("font_size", 18)
+	_rename_title.add_theme_color_override("font_color", TEXT_COLOR)
+	box.add_child(_rename_title)
+
+	_rename_edit = LineEdit.new()
+	_rename_edit.max_length = NAME_MAX_CHARS
+	_rename_edit.select_all_on_focus = true
+	_rename_edit.text_changed.connect(_on_rename_text_changed)
+	_rename_edit.text_submitted.connect(func(_text: String) -> void: _save_rename())
+	box.add_child(_rename_edit)
+
+	_rename_count = Label.new()
+	_rename_count.add_theme_color_override("font_color", MUTED_COLOR)
+	box.add_child(_rename_count)
+
+	_rename_error = Label.new()
+	_rename_error.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_rename_error.add_theme_color_override("font_color", Color(0.95, 0.55, 0.48))
+	box.add_child(_rename_error)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	box.add_child(row)
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(spacer)
+	_rename_cancel = Button.new()
+	_rename_cancel.text = _i18n.t("base.ui.settlement_screen.rename.cancel")
+	_rename_cancel.pressed.connect(_close_rename)
+	row.add_child(_rename_cancel)
+	_rename_save = Button.new()
+	_rename_save.text = _i18n.t("base.ui.settlement_screen.rename.save")
+	_rename_save.pressed.connect(_save_rename)
+	row.add_child(_rename_save)
 
 
 func _detail_label(parent: Node, font_size: int = 16) -> Label:
@@ -339,6 +466,8 @@ func _load_page(index: int) -> void:
 		_selected_id = 0
 	else:
 		_selected_id = int((_rows[_selected_index] as Dictionary).get("id", 0))
+	if _selected_id != keep_id:
+		_reset_pending()
 	_render_all()
 
 
@@ -368,13 +497,25 @@ func _index_of(id: int) -> int:
 func _select_index(index: int) -> void:
 	if _rows.is_empty() or index < 0 or index >= _rows.size():
 		return
+	var next_id := int((_rows[index] as Dictionary).get("id", 0))
+	if next_id != _selected_id:
+		_reset_pending()
+		_selected_member = 0
 	_selected_index = index
-	_selected_id = int((_rows[index] as Dictionary).get("id", 0))
+	_selected_id = next_id
 	if not _syncing_list:
 		_syncing_list = true
 		_list.select(index)
 		_syncing_list = false
 	_render_detail()
+
+
+## A pending remove/release confirmation belongs to exactly the row and player
+## that armed it. Changing selection or closing the modal clears it.
+func _reset_pending() -> void:
+	_pending_remove_id = 0
+	_pending_remove_player = 0
+	_pending_release_id = 0
 
 
 func _select_page_number(number: int) -> void:
@@ -395,6 +536,13 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	var key := event as InputEventKey
 	if not key.pressed or key.echo:
 		return
+	# The modal owns the keyboard while it is open. LineEdit consumes text
+	# keys; only explicit cancel and the submit event reach this handler.
+	if _rename_open:
+		if key.keycode == KEY_ESCAPE:
+			_close_rename()
+			get_viewport().set_input_as_handled()
+		return
 	match key.keycode:
 		KEY_PAGEUP:
 			_page_up()
@@ -406,9 +554,598 @@ func _unhandled_key_input(event: InputEvent) -> void:
 			_select_index(_selected_index + 1)
 		KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7, KEY_8:
 			_select_page_number(key.keycode - KEY_0)
+		KEY_BRACKETLEFT:
+			_cycle_selected_member(-1)
+		KEY_BRACKETRIGHT:
+			_cycle_selected_member(1)
+		KEY_C:
+			_claim_selected()
+		KEY_N:
+			_open_rename()
+		KEY_T:
+			_tax_selected()
+		KEY_Y:
+			_transfer_selected()
+		KEY_I:
+			_invite_selected()
+		KEY_M:
+			_cycle_role()
+		KEY_DELETE:
+			_remove_selected()
+		KEY_X:
+			_release_selected()
 		_:
 			return
 	get_viewport().set_input_as_handled()
+
+
+# --- Actions ---------------------------------------------------------------
+
+func _current_record() -> Dictionary:
+	if _rows.is_empty() or _selected_index < 0 or _selected_index >= _rows.size():
+		return {}
+	var record = _rows[_selected_index]
+	return record if record is Dictionary else {}
+
+
+## Re-read the page that holds the selection and return the row by id.
+## A mutation never uses the cached row for `membership_revision`.
+func _fresh_record(id: int) -> Dictionary:
+	if _core == null or id <= 0:
+		return {}
+	var after := 0
+	if _page_index >= 0 and _page_index < _cursor_stack.size():
+		after = int(_cursor_stack[_page_index])
+	var response: Dictionary = _core.settlements_page(after, PAGE_SIZE)
+	if not bool(response.get("ok", false)):
+		return {}
+	var rows = response.get("settlements", [])
+	if rows is Array:
+		for row in rows:
+			if row is Dictionary and int((row as Dictionary).get("id", 0)) == id:
+				return row
+	return {}
+
+
+func _fresh_selected_record() -> Dictionary:
+	return _fresh_record(_selected_id)
+
+
+func _revision(record: Dictionary) -> int:
+	return int(record.get("membership_revision", 0))
+
+
+func _record_id(record: Dictionary) -> int:
+	return int(record.get("id", 0))
+
+
+func _registered_ids() -> Array[int]:
+	var ids: Array[int] = []
+	for key in _player_names.keys():
+		ids.append(int(key))
+	ids.sort()
+	return ids
+
+
+## The local player registry assigns ascending ids at registration; the first
+## id is the first registered player. Never a hardcoded actor.
+func _first_player_id() -> int:
+	var ids := _registered_ids()
+	return ids[0] if not ids.is_empty() else 0
+
+
+## Ascending registered player that is not the current owner.
+func _transfer_target(settlement: Dictionary) -> int:
+	var owner = settlement.get("owner_id")
+	for id in _registered_ids():
+		if owner == null or id != int(owner):
+			return id
+	return 0
+
+
+## Ascending registered player that is neither the owner nor a member.
+func _invite_target(settlement: Dictionary) -> int:
+	var owner = settlement.get("owner_id")
+	var member_ids: Dictionary = {}
+	var members = settlement.get("members", [])
+	if members is Array:
+		for member in members:
+			if member is Dictionary:
+				member_ids[int((member as Dictionary).get("player", 0))] = true
+	for id in _registered_ids():
+		if owner != null and id == int(owner):
+			continue
+		if member_ids.has(id):
+			continue
+		return id
+	return 0
+
+
+## Members that can be targets: the owner is an ownership state, not a member
+## row, and can never be removed or demoted.
+func _assignable_members(settlement: Dictionary) -> Array:
+	var result: Array = []
+	var owner = settlement.get("owner_id")
+	var members = settlement.get("members", [])
+	if not (members is Array):
+		return result
+	for member in members:
+		if not (member is Dictionary):
+			continue
+		if owner != null and int((member as Dictionary).get("player", 0)) == int(owner):
+			continue
+		result.append(member)
+	return result
+
+
+func _selected_member_record(settlement: Dictionary) -> Dictionary:
+	var members := _assignable_members(settlement)
+	if members.is_empty():
+		return {}
+	if _selected_member != 0:
+		for member in members:
+			if int((member as Dictionary).get("player", 0)) == _selected_member:
+				return member
+	return members[0]
+
+
+func _cycle_selected_member(delta: int) -> void:
+	var record := _current_record()
+	var members := _assignable_members(record)
+	if members.is_empty():
+		_status_text = _i18n.t(
+			"base.ui.settlement_screen.action.result_failed",
+			{
+				"action": _action_label("cycle_role"),
+				"code": "no_member",
+				"revision": _i18n.format_int(_revision(record)),
+			}
+		)
+		_render_detail()
+		return
+	var position := 0
+	for index in members.size():
+		if int((members[index] as Dictionary).get("player", 0)) == _selected_member:
+			position = index
+			break
+	position = posmod(position + delta, members.size())
+	_selected_member = int((members[position] as Dictionary).get("player", 0))
+	_reset_pending()
+	_render_detail()
+
+
+func _next_role(role: String) -> String:
+	var index := MEMBER_ROLE_CYCLE.find(role)
+	if index < 0:
+		return "member"
+	return str(MEMBER_ROLE_CYCLE[(index + 1) % MEMBER_ROLE_CYCLE.size()])
+
+
+func _next_tax_rate(rate: int) -> int:
+	return (clampi(rate, 0, MAX_TAX_RATE) + TAX_STEP) % (MAX_TAX_RATE + 1)
+
+
+func _error(code: String) -> Dictionary:
+	return {"ok": false, "error_code": code}
+
+
+func _action_label(action: String) -> String:
+	return _i18n.t(str(ACTION_LABEL_KEYS.get(action, action)))
+
+
+func _reason_text(code: String) -> String:
+	if code.is_empty():
+		return ""
+	var key := "base.ui.settlement_screen.reason.%s" % code
+	if _i18n.has_key(key, "en") or _i18n.has_key(key, "de"):
+		return _i18n.t(key)
+	return code
+
+
+func _local_rename_text(code: String) -> String:
+	var key := "base.ui.settlement_screen.rename.%s" % code
+	if _i18n.has_key(key, "en") or _i18n.has_key(key, "de"):
+		return _i18n.t(key)
+	return code
+
+
+## Record one attempt, print the deterministic smoke line, and apply the result.
+## Failures only rewrite the status line: rows, selection, and stored revisions
+## stay exactly as they were.
+func _finish_action(action: String, result: Dictionary, revision: int) -> Dictionary:
+	var ok := bool(result.get("ok", false))
+	var code := "" if ok else str(result.get("error_code", "error"))
+	if code.is_empty() and not ok:
+		code = "error"
+	var shown_revision := revision
+	var updated: Dictionary = {}
+	var raw = result.get("settlement", {})
+	if ok and raw is Dictionary:
+		updated = raw
+		shown_revision = int(updated.get("membership_revision", revision))
+	_action_count += 1
+	if ok:
+		_accepted_count += 1
+	else:
+		_rejected_count += 1
+	if smoke_mode:
+		print(
+			"SETTLEMENT_SCREEN_ACTION action=%s ok=%s code=%s revision=%d"
+			% [action, "true" if ok else "false", code if not code.is_empty() else "-", shown_revision]
+		)
+	if ok:
+		_status_text = _i18n.t(
+			"base.ui.settlement_screen.action.result_ok",
+			{
+				"action": _action_label(action),
+				"revision": _i18n.format_int(shown_revision),
+			}
+		)
+		# Re-read the visible page in place; selection stays by id.
+		_load_page(_page_index)
+	else:
+		_status_text = _i18n.t(
+			"base.ui.settlement_screen.action.result_failed",
+			{
+				"action": _action_label(action),
+				"code": code,
+				"revision": _i18n.format_int(shown_revision),
+			}
+		)
+		_render_detail()
+	return result
+
+
+## Re-read before every mutation. Returns {} after recording the failure.
+func _mutation_record(action: String) -> Dictionary:
+	if _core == null:
+		_finish_action(action, _error("no_core"), 0)
+		return {}
+	var record := _fresh_selected_record()
+	if record.is_empty():
+		_finish_action(action, _error("settlement.unknown"), _revision(_current_record()))
+		return {}
+	return record
+
+
+func _claim_selected() -> void:
+	var record := _mutation_record("claim")
+	if record.is_empty():
+		return
+	var revision := _revision(record)
+	if bool(record.get("owned", false)):
+		_finish_action("claim", _error("settlement.already_owned"), revision)
+		return
+	var actor := _first_player_id()
+	if actor <= 0:
+		_finish_action("claim", _error("no_player"), revision)
+		return
+	var result: Dictionary = _core.settlement_claim(_record_id(record), actor, revision)
+	_finish_action("claim", result, revision)
+
+
+func _open_rename() -> void:
+	if _rename_open:
+		return
+	var record := _fresh_selected_record()
+	if record.is_empty():
+		_finish_action("rename", _error("settlement.unknown"), 0)
+		return
+	if not bool(record.get("owned", false)):
+		_finish_action("rename", _error("settlement.unowned"), _revision(record))
+		return
+	_rename_target_id = _record_id(record)
+	_rename_open = true
+	_rename_title.text = _i18n.t(
+		"base.ui.settlement_screen.rename.title",
+		{"id": _i18n.format_int(_rename_target_id)}
+	)
+	_rename_edit.text = str(record.get("name", ""))
+	_rename_edit.caret_column = _rename_edit.text.length()
+	_rename_count.text = _i18n.t(
+		"base.ui.settlement_screen.rename.count",
+		{"count": _i18n.format_int(_rename_edit.text.length())}
+	)
+	_rename_error.text = ""
+	_rename_cancel.text = _i18n.t("base.ui.settlement_screen.rename.cancel")
+	_rename_save.text = _i18n.t("base.ui.settlement_screen.rename.save")
+	_rename_overlay.visible = true
+	_rename_edit.grab_focus()
+
+
+func _close_rename() -> void:
+	if not _rename_open:
+		return
+	_rename_open = false
+	_rename_overlay.visible = false
+	_rename_target_id = 0
+	_status_text = _i18n.t("base.ui.settlement_screen.action.cancelled")
+	_render_detail()
+
+
+func _save_rename() -> void:
+	if not _rename_open:
+		return
+	# Fresh read again: the record may have changed while the field was open.
+	var record := _fresh_record(_rename_target_id)
+	if record.is_empty():
+		_rename_error.text = "settlement.unknown"
+		_finish_action("rename", _error("settlement.unknown"), 0)
+		return
+	var revision := _revision(record)
+	var name := _rename_edit.text.strip_edges()
+	var local_code := _validate_rename(name, str(record.get("name", "")))
+	if not local_code.is_empty():
+		_rename_error.text = _local_rename_text(local_code)
+		_finish_action("rename", _error(local_code), revision)
+		return
+	var result: Dictionary = _core.settlement_rename(_rename_target_id, name, revision)
+	if not bool(result.get("ok", false)):
+		_rename_error.text = str(result.get("error_code", "error"))
+		_finish_action("rename", result, revision)
+		return
+	_rename_open = false
+	_rename_overlay.visible = false
+	_rename_target_id = 0
+	_finish_action("rename", result, revision)
+
+
+func _validate_rename(name: String, current_name: String) -> String:
+	if name.is_empty():
+		return "empty_name"
+	if name.length() > NAME_MAX_CHARS:
+		return "name_too_long"
+	for index in name.length():
+		var code := name.unicode_at(index)
+		if code < 0x20 or code == 0x7f:
+			return "invalid_name"
+	if name == current_name:
+		return "name_unchanged"
+	return ""
+
+
+func _on_rename_text_changed(_text: String) -> void:
+	_rename_count.text = _i18n.t(
+		"base.ui.settlement_screen.rename.count",
+		{"count": _i18n.format_int(_rename_edit.text.length())}
+	)
+
+
+func _tax_selected() -> void:
+	var record := _mutation_record("tax")
+	if record.is_empty():
+		return
+	var revision := _revision(record)
+	if not bool(record.get("owned", false)):
+		_finish_action("tax", _error("settlement.unowned"), revision)
+		return
+	var rate := _next_tax_rate(int(record.get("tax_rate", 0)))
+	var result: Dictionary = _core.settlement_set_tax(_record_id(record), rate)
+	_finish_action("tax", result, revision)
+
+
+func _transfer_selected() -> void:
+	var record := _mutation_record("transfer")
+	if record.is_empty():
+		return
+	var revision := _revision(record)
+	if not bool(record.get("owned", false)):
+		_finish_action("transfer", _error("settlement.unowned"), revision)
+		return
+	var target := _transfer_target(record)
+	if target <= 0:
+		_finish_action("transfer", _error("no_recipient"), revision)
+		return
+	var result: Dictionary = _core.settlement_transfer(_record_id(record), target, revision)
+	_finish_action("transfer", result, revision)
+
+
+func _invite_selected() -> void:
+	var record := _mutation_record("invite")
+	if record.is_empty():
+		return
+	var revision := _revision(record)
+	if not bool(record.get("owned", false)):
+		_finish_action("invite", _error("settlement.unowned"), revision)
+		return
+	var target := _invite_target(record)
+	if target <= 0:
+		_finish_action("invite", _error("no_invitee"), revision)
+		return
+	var result: Dictionary = _core.settlement_invite(_record_id(record), target, "member", revision)
+	_finish_action("invite", result, revision)
+
+
+func _cycle_role() -> void:
+	var record := _mutation_record("cycle_role")
+	if record.is_empty():
+		return
+	var revision := _revision(record)
+	if not bool(record.get("owned", false)):
+		_finish_action("cycle_role", _error("settlement.unowned"), revision)
+		return
+	var member := _selected_member_record(record)
+	if member.is_empty():
+		_finish_action("cycle_role", _error("no_member"), revision)
+		return
+	var player := int(member.get("player", 0))
+	_selected_member = player
+	var role := _next_role(str(member.get("role", "")))
+	var result: Dictionary = _core.settlement_set_role(
+		_record_id(record), player, role, revision
+	)
+	_finish_action("cycle_role", result, revision)
+
+
+func _remove_selected() -> void:
+	var member := _selected_member_record(_current_record())
+	if member.is_empty():
+		_status_text = _i18n.t(
+			"base.ui.settlement_screen.action.result_failed",
+			{
+				"action": _action_label("remove_member"),
+				"code": "no_member",
+				"revision": _i18n.format_int(_revision(_current_record())),
+			}
+		)
+		_render_detail()
+		return
+	var player := int(member.get("player", 0))
+	# First press arms this exact member; the second press re-reads and removes.
+	if _pending_remove_id != _selected_id or _pending_remove_player != player:
+		_pending_remove_id = _selected_id
+		_pending_remove_player = player
+		_pending_release_id = 0
+		_status_text = _i18n.t(
+			"base.ui.settlement_screen.action.confirm_remove",
+			{"person": _person_text(player)}
+		)
+		_render_detail()
+		return
+	_pending_remove_id = 0
+	_pending_remove_player = 0
+	var record := _mutation_record("remove_member")
+	if record.is_empty():
+		return
+	_attempt_remove_member(record, player)
+
+
+## Also the smoke hook for the owner-protection rejection. The bridge would
+## reject the owner too; this mirrors its stable code without touching a row.
+func _attempt_remove_member(record: Dictionary, player: int) -> Dictionary:
+	var revision := _revision(record)
+	if player <= 0:
+		return _finish_action("remove_member", _error("invalid_player_id"), revision)
+	if int(record.get("owner_id", -1)) == player:
+		return _finish_action("remove_member", _error("settlement.owner_required"), revision)
+	var result: Dictionary = _core.settlement_remove_member(
+		_record_id(record), player, revision
+	)
+	return _finish_action("remove_member", result, revision)
+
+
+func _release_selected() -> void:
+	if _selected_id <= 0:
+		return
+	if _pending_release_id != _selected_id:
+		var cached := _current_record()
+		if cached.is_empty() or not bool(cached.get("owned", false)):
+			_status_text = _i18n.t(
+				"base.ui.settlement_screen.action.result_failed",
+				{
+					"action": _action_label("release"),
+					"code": "settlement.unowned",
+					"revision": _i18n.format_int(_revision(cached)),
+				}
+			)
+			_render_detail()
+			return
+		_pending_release_id = _selected_id
+		_pending_remove_id = 0
+		_pending_remove_player = 0
+		_status_text = _i18n.t(
+			"base.ui.settlement_screen.action.confirm_release",
+			{
+				"name": str(cached.get("name", "")),
+				"id": _i18n.format_int(_record_id(cached)),
+			}
+		)
+		_render_detail()
+		return
+	_pending_release_id = 0
+	var record := _mutation_record("release")
+	if record.is_empty():
+		return
+	var revision := _revision(record)
+	if not bool(record.get("owned", false)):
+		_finish_action("release", _error("settlement.unowned"), revision)
+		return
+	# Local/developer Admin override: the bridge applies the store's release
+	# rule, and this screen never claims a server role check happened.
+	var result: Dictionary = _core.settlement_release(_record_id(record), revision)
+	_finish_action("release", result, revision)
+
+
+func _on_action_pressed(action: String) -> void:
+	match action:
+		"claim":
+			_claim_selected()
+		"rename":
+			_open_rename()
+		"tax":
+			_tax_selected()
+		"transfer":
+			_transfer_selected()
+		"invite":
+			_invite_selected()
+		"cycle_role":
+			_cycle_role()
+		"remove_member":
+			_remove_selected()
+		"release":
+			_release_selected()
+
+
+## One localized reason per action, empty when the action is enabled.
+func _availability(settlement: Dictionary) -> Dictionary:
+	var reasons: Dictionary = {}
+	for entry in ACTION_ORDER:
+		reasons[str(entry[0])] = ""
+	if _core == null:
+		for entry in ACTION_ORDER:
+			reasons[str(entry[0])] = "no_core"
+		return reasons
+	if settlement.is_empty():
+		for entry in ACTION_ORDER:
+			reasons[str(entry[0])] = "no_selection"
+		return reasons
+	var owned := bool(settlement.get("owned", false))
+	var ids := _registered_ids()
+	if owned:
+		reasons["claim"] = "settlement.already_owned"
+	else:
+		reasons["claim"] = "" if not ids.is_empty() else "no_player"
+	if not owned:
+		for action in ["rename", "tax", "transfer", "invite", "cycle_role", "remove_member", "release"]:
+			reasons[action] = "settlement.unowned"
+		return reasons
+	reasons["rename"] = ""
+	reasons["tax"] = ""
+	reasons["release"] = ""
+	reasons["transfer"] = "" if _transfer_target(settlement) > 0 else "no_recipient"
+	reasons["invite"] = "" if _invite_target(settlement) > 0 else "no_invitee"
+	var member := _selected_member_record(settlement)
+	var member_reason := "" if not member.is_empty() else "no_member"
+	reasons["cycle_role"] = member_reason
+	reasons["remove_member"] = member_reason
+	return reasons
+
+
+func _update_action_bar(settlement: Dictionary) -> void:
+	var reasons := _availability(settlement)
+	for entry in ACTION_ORDER:
+		var action := str(entry[0])
+		var key := str(entry[1])
+		var reason := str(reasons.get(action, ""))
+		var label := _action_label(action)
+		var button: Button = _action_buttons.get(action)
+		if button == null:
+			continue
+		if reason.is_empty():
+			button.text = _i18n.t(
+				"base.ui.settlement_screen.action.button",
+				{"key": key, "action": label}
+			)
+			button.disabled = false
+			button.tooltip_text = ""
+		else:
+			var reason_text := _reason_text(reason)
+			button.text = _i18n.t(
+				"base.ui.settlement_screen.action.button_disabled",
+				{"key": key, "action": label, "reason": reason_text}
+			)
+			button.disabled = true
+			button.tooltip_text = reason_text
 
 
 # --- Rendering -------------------------------------------------------------
@@ -420,6 +1157,17 @@ func _render_all() -> void:
 		{"mode": _i18n.t("base.ui.settlement_screen.authority_local")}
 	)
 	_help_label.text = _i18n.t("base.ui.settlement_screen.help")
+	_rename_cancel.text = _i18n.t("base.ui.settlement_screen.rename.cancel")
+	_rename_save.text = _i18n.t("base.ui.settlement_screen.rename.save")
+	if _rename_open:
+		_rename_title.text = _i18n.t(
+			"base.ui.settlement_screen.rename.title",
+			{"id": _i18n.format_int(_rename_target_id)}
+		)
+		_rename_count.text = _i18n.t(
+			"base.ui.settlement_screen.rename.count",
+			{"count": _i18n.format_int(_rename_edit.text.length())}
+		)
 	_render_list()
 	_render_detail()
 
@@ -464,7 +1212,11 @@ func _render_detail() -> void:
 		_members_title.text = ""
 		_detail_empty.text = _i18n.t("base.ui.settlement_screen.detail_empty")
 		_detail_empty.visible = true
-		_status_label.text = _i18n.t("base.ui.settlement_screen.empty") if _error_code.is_empty() else ""
+		if _error_code.is_empty() and _status_text.is_empty():
+			_status_label.text = _i18n.t("base.ui.settlement_screen.empty")
+		else:
+			_status_label.text = _status_text
+		_update_action_bar({})
 		return
 	_detail_empty.visible = false
 
@@ -506,24 +1258,43 @@ func _render_detail() -> void:
 		"base.ui.settlement_screen.detail_members",
 		{"count": _i18n.format_int(_member_display_count(settlement, member_rows))}
 	)
+	var assignable := _assignable_members(settlement)
+	var selection_valid := false
+	for member in assignable:
+		if int((member as Dictionary).get("player", 0)) == _selected_member:
+			selection_valid = true
+			break
+	if not selection_valid:
+		_selected_member = (
+			int((assignable[0] as Dictionary).get("player", 0)) if not assignable.is_empty() else 0
+		)
 	var rendered := 0
-	for member in member_rows:
-		if not (member is Dictionary):
-			continue
+	for member in assignable:
 		var row: Dictionary = member
-		if _is_owner_row(settlement, row):
-			continue
-		var label := Label.new()
-		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		label.text = _member_text(row)
-		_members_box.add_child(label)
+		var player := int(row.get("player", 0))
+		var button := Button.new()
+		button.flat = true
+		button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		var prefix := "▸ " if player == _selected_member else "  "
+		button.text = prefix + _member_text(row)
+		button.pressed.connect(_on_member_pressed.bind(player))
+		_members_box.add_child(button)
 		rendered += 1
 	if rendered == 0:
 		var empty := Label.new()
 		empty.text = _i18n.t("base.ui.settlement_screen.detail_no_members")
 		empty.add_theme_color_override("font_color", MUTED_COLOR)
 		_members_box.add_child(empty)
-	_status_label.text = ""
+	_update_action_bar(settlement)
+	_status_label.text = _status_text
+
+
+func _on_member_pressed(player: int) -> void:
+	if player == _selected_member:
+		return
+	_selected_member = player
+	_reset_pending()
+	_render_detail()
 
 
 func _clear_members() -> void:
@@ -649,10 +1420,15 @@ func _projection_text(rate: int) -> String:
 
 func _show_unavailable(code: String) -> void:
 	_error_code = code
+	_status_text = ""
 	_rows = []
 	_matched = 0
 	_selected_index = 0
 	_selected_id = 0
+	_reset_pending()
+	_selected_member = 0
+	_rename_open = false
+	_rename_overlay.visible = false
 	_list.clear()
 	_page_label.text = ""
 	_more_label.text = ""
@@ -667,6 +1443,7 @@ func _show_unavailable(code: String) -> void:
 	_clear_members()
 	_detail_empty.text = ""
 	_detail_empty.visible = false
+	_update_action_bar({})
 	_status_label.text = _i18n.t(
 		"base.ui.settlement_screen.unavailable",
 		{"code": code}
@@ -765,7 +1542,34 @@ func _run_smoke() -> void:
 	_expect(de_detail.contains("bauen, verwalten, Steuern, Mitglieder"), "DE permissions", failures)
 	_expect(de_detail.contains("Prognostizierter lokaler Multiplikator: x1,05"), "DE projection", failures)
 	_switch_locale("en")
+
+	# Write surface: claim the unowned record, rename, tax, invite, role,
+	# remove, transfer, release, then exercise two rejections.
+	_load_page(0)
+	_page_down()
+	_page_down()
+	_select_page_number(7)
+	_claim_selected()
+	_open_rename()
+	_rename_edit.text = ""
+	_save_rename()
+	_rename_edit.text = "Harbour 23"
+	_save_rename()
+	_tax_selected()
+	_invite_selected()
+	_cycle_role()
+	_remove_selected()
+	_remove_selected()
+	_transfer_selected()
+	_release_selected()
+	_release_selected()
+
+	# Rejection paths: claim an owned record, then try to remove its owner.
+	_load_page(0)
 	_select_page_number(2)
+	_claim_selected()
+	var owner_record := _current_record()
+	_attempt_remove_member(owner_record, int(owner_record.get("owner_id", 0)))
 
 	print("SETTLEMENT_SCREEN_PAGES sizes=8/8/7 selected_last=23")
 	print("SETTLEMENT_SCREEN_NAMES owner=Mayor#7 manager=Manager#11 builder=Builder#13 member=Member#12 fallback=#9001 owner_fallback=#9002")
@@ -774,8 +1578,8 @@ func _run_smoke() -> void:
 
 	if failures.is_empty():
 		print(
-			"SETTLEMENT_SCREEN status=ok pages=%d settlements=%d selected=%d checksum=%s"
-			% [_page_count(), _matched, _selected_id, _checksum]
+			"SETTLEMENT_SCREEN status=ok pages=%d settlements=%d selected=%d actions=%d accepted=%d rejected=%d checksum=%s"
+			% [_page_count(), _matched, _selected_id, _action_count, _accepted_count, _rejected_count, _checksum]
 		)
 		get_tree().quit(0)
 	else:
@@ -852,6 +1656,8 @@ func _detail_text() -> String:
 	for child in _members_box.get_children():
 		if child is Label:
 			parts.append((child as Label).text)
+		elif child is Button:
+			parts.append((child as Button).text)
 	return "\n".join(parts)
 
 
