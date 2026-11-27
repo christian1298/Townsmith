@@ -116,7 +116,10 @@ extends Node3D
 ## `MP_PLACEMENT` result plus 11/13 frame counts across two runs.
 ## `scripts/smoke_mp_placement_ui.sh` seeds separate client and server fixture
 ## libraries, runs `--place-ui` with a scripted place/overlap/cancel sequence,
-## and asserts identical `MP_PLACE_UI*` markers across two fresh runs.
+## and asserts identical `MP_PLACE_UI*` markers across two fresh runs. Its
+## retained-lock block reconnects with a fresh hello under the same display
+## name and asserts the `MP_PLACE_UI_LOCKS_RETAINED` marker (same stable player
+## id, same hash/owner/lease) before unlocking the retained hash.
 ##
 ## See docs/05 - Multiplayer.md §Interest view 3D world client.
 
@@ -365,6 +368,11 @@ var _ui_lock_checksum := ""
 var _ui_lock_pending_hash := ""
 var _ui_locks_taken := 0
 var _ui_locks_released := 0
+# First `blueprint_locks` of the connection. It is requested once per welcome
+# and the reply is the only list that can prove locks survived a disconnect
+# (`MP_PLACE_UI_LOCKS_RETAINED`); later scripted refreshes never reprint it.
+var _ui_locks_sent := false
+var _ui_locks_welcome_pending := false
 # Lock/unlock results carry only the lock-table checksum, not the world
 # checksum; the next placement refresh may legitimately move it.
 var _ui_checksum_stale := false
@@ -399,6 +407,10 @@ var _chat_unread_label: Label
 var _settlement_ui := false
 var _settlement_preseed := false
 var _skip_roads := false
+# Opt-in fresh-hello reuse (`--reuse-world` with `--place-ui`): the deterministic
+# roads and zero-view probe already exist in the live world this same display
+# name set up, so skip the road replay and seed the checksum from the first view.
+var _reuse_world := false
 var _settlement_script := DEFAULT_SETTLEMENT_SCRIPT
 var _settlement_actions: Array = []
 var _settlement_action_index := 0
@@ -467,6 +479,7 @@ func _ready() -> void:
 	_settlement_ui = args.has("--settlement-ui") or args.has("--settlement-preseed")
 	_settlement_preseed = args.has("--settlement-preseed")
 	_skip_roads = args.has("--skip-roads")
+	_reuse_world = args.has("--reuse-world")
 	_settlement_script = _arg(args, "--settlement-script", DEFAULT_SETTLEMENT_SCRIPT)
 
 	_container = Node3D.new()
@@ -477,6 +490,10 @@ func _ready() -> void:
 		_ui_root.name = "WorldClientPlacementUI"
 		add_child(_ui_root)
 	_build_hud()
+
+	if _reuse_world and not _place_ui:
+		_fail("reuse_world_requires_place_ui")
+		return
 
 	if _settlement_ui and not _prepare_settlement_ui():
 		return
@@ -554,21 +571,34 @@ func _prepare_place_ui() -> bool:
 	return true
 
 ## Extend the shared `PlacementUI.parse_script` grammar with `lock`, `unlock`,
-## and `locks`. The tokens are parsed as `cancel` so the shared parser owns every
-## other validation and error index, then restored by position. Empty segments
-## are skipped by the shared parser, so only non-empty tokens are walked.
+## and `locks`, plus optional `lock:<hash>`/`unlock:<hash>` targets. The tokens
+## are parsed as `cancel` so the shared parser owns every other validation and
+## error index, then restored by position. Empty segments are skipped by the
+## shared parser, so only non-empty tokens are walked.
 func _parse_place_ui_script(text: String) -> Dictionary:
 	var source: Array = text.split(";", true)
 	var transformed: Array = []
 	var kinds: Array = []
+	var hashes: Array = []
 	for raw in source:
 		var token := str(raw).strip_edges()
+		var kind := ""
+		var hash := ""
 		if token == "lock" or token == "unlock" or token == "locks":
-			transformed.append("cancel")
-			kinds.append(token)
-		else:
+			kind = token
+		elif token.begins_with("lock:") or token.begins_with("unlock:"):
+			kind = token.get_slice(":", 0)
+			hash = PlacementUI.canonical_hash(token.substr(token.find(":") + 1))
+			if hash.is_empty():
+				return {"ok": false, "error": "action_invalid", "actions": []}
+		if kind.is_empty():
 			transformed.append(raw)
 			kinds.append("")
+			hashes.append("")
+		else:
+			transformed.append("cancel")
+			kinds.append(kind)
+			hashes.append(hash)
 	var parsed := PlacementUI.parse_script(";".join(transformed))
 	if not bool(parsed.get("ok", false)):
 		return parsed
@@ -580,7 +610,10 @@ func _parse_place_ui_script(text: String) -> Dictionary:
 		if kind_index >= actions.size():
 			return {"ok": false, "error": "action_%d_invalid" % token_index, "actions": []}
 		if not str(kinds[token_index]).is_empty():
-			actions[kind_index] = {"kind": str(kinds[token_index])}
+			var action := {"kind": str(kinds[token_index])}
+			if not str(hashes[token_index]).is_empty():
+				action["hash"] = str(hashes[token_index])
+			actions[kind_index] = action
 		kind_index += 1
 	return {"ok": true, "error": "", "actions": actions}
 
@@ -1020,7 +1053,24 @@ func _on_welcome(message: Dictionary) -> void:
 		_arm_deadline(_timeout_ms)
 		_set_status("Chat push listener ready; waiting for a pushed line.")
 		return
-	if _place_ui and not _ui_request_locks():
+	if _place_ui and not _ui_request_welcome_locks():
+		return
+	if _reuse_world:
+		# Fresh hello into the live world this name already populated: replaying
+		# the road plan would be rejected as duplicates. The view is authoritative
+		# for roads/buildings/checksum, so go straight to the interest request and
+		# let the normal placement flow continue from there.
+		_set_status("Welcome %s; reusing the deterministic world." % _session_id)
+		_refresh_hud()
+		if not _send({
+			"type": "set_interest",
+			"center_x": _center.x,
+			"center_z": _center.y,
+			"radius_m": _radius_m,
+		}):
+			return
+		_phase = Phase.INTEREST_SENT
+		_arm_deadline(_timeout_ms)
 		return
 	if _skip_roads:
 		# A resumed world already has the deterministic roads; jump straight to
@@ -1152,9 +1202,16 @@ func _check_view_snapshot(
 		_fail("interest_tick_%d_after_%d" % [tick, _last_tick])
 		return false
 	if checksum != _last_checksum:
+		# A fresh hello into a reused world has no prior snapshot to compare
+		# against, so the first main view seeds the world checksum.
+		var seeds_reused_checksum := (
+			_reuse_world and _last_checksum.is_empty() and _phase == Phase.INTEREST_SENT
+		)
 		# Lock/unlock results carry only the lock-table checksum, so the world
 		# checksum is unknown until the next view refresh.
-		if not (_place_ui and _ui_checksum_stale and _phase == Phase.UI_SNAPSHOT_SENT):
+		if not seeds_reused_checksum and not (
+			_place_ui and _ui_checksum_stale and _phase == Phase.UI_SNAPSHOT_SENT
+		):
 			_fail("interest_checksum_changed")
 			return false
 	if not _is_pair_close(message.get("interest_center", null), center, 0.001):
@@ -1856,9 +1913,9 @@ func _ui_next_action() -> void:
 		"place":
 			_ui_place()
 		"lock":
-			_ui_lock_action()
+			_ui_lock_action(action)
 		"unlock":
-			_ui_unlock_action()
+			_ui_unlock_action(action)
 		"locks":
 			_ui_locks_action()
 		"cancel":
@@ -2005,6 +2062,20 @@ func _on_ui_place_result(message: Dictionary) -> void:
 func _ui_request_locks() -> bool:
 	return _send({"type": "blueprint_locks"})
 
+## Send the welcome-time lock table request exactly once. A fresh hello with the
+## same display name reuses the stable player id, so the reply may list locks
+## this player held before reconnecting; the pending flag lets the list handler
+## report that retained state without touching the scripted refresh path.
+func _ui_request_welcome_locks() -> bool:
+	if _ui_locks_sent:
+		return true
+	_ui_locks_welcome_pending = true
+	if not _ui_request_locks():
+		_ui_locks_welcome_pending = false
+		return false
+	_ui_locks_sent = true
+	return true
+
 ## Ask for the authoritative lock table and hold the script until the list
 ## arrives. Used after each lock/unlock result and by the scripted `locks`
 ## action; `_on_blueprint_lock_list` resumes `UI_ACTIVE`.
@@ -2077,6 +2148,10 @@ func _on_blueprint_lock_list(message: Dictionary) -> void:
 	_ui_locks = locks
 	_ui_lock_checksum = checksum
 	print(_ui_locks_marker_text(locks.size(), checksum, tick))
+	if _ui_locks_welcome_pending:
+		_ui_locks_welcome_pending = false
+		if not locks.is_empty():
+			print(_ui_locks_retained_marker_text())
 	_refresh_hud()
 	# A scripted `locks`/post-result refresh waits here so the HUD reflects the
 	# authoritative table before the next action can mutate it again.
@@ -2260,18 +2335,83 @@ func _ui_locks_marker_text(count: int, checksum: String, tick: int) -> String:
 		+ " visible=%s text=%s"
 	) % [count, checksum, tick, "true" if visible else "false", text]
 
+## Locks whose holder label is this client's display name. Welcome carries no
+## stable id, and the server maps one name to one id across a fresh hello, so
+## this is exactly the set a same-name reconnect should have retained.
+func _ui_held_lock_count() -> int:
+	var held := 0
+	for lock in _ui_locks.values():
+		if str(lock.get("player", "")) == _player_name:
+			held += 1
+	return held
+
+## Little-endian bytes for a non-negative lock field, used by the retained
+## checksum so id/expiry byte order does not depend on the host.
+func _ui_u64_bytes(value: int) -> Array:
+	var bytes: Array = []
+	for shift in range(0, 64, 8):
+		bytes.append((value >> shift) & 0xff)
+	return bytes
+
+## 16-hex FNV-1a 64 over sorted hashes plus each holder id and lease expiry.
+## Deliberately independent of the server wire checksum (which also folds in the
+## lock tick and map iteration order): this checksum is stable for a retained
+## table across a fresh hello, and changes exactly when hash/id/expires changes.
+func _ui_locks_retained_checksum() -> String:
+	var hashes: Array = _ui_locks.keys()
+	hashes.sort()
+	var value := -3750763034362895579 # 0xcbf29ce484222325 as signed i64
+	for hash_key in hashes:
+		var lock: Dictionary = _ui_locks[hash_key]
+		for byte in str(hash_key).to_utf8_buffer():
+			value = (value ^ int(byte)) * 1099511628211
+		for byte in _ui_u64_bytes(int(lock.get("player_id", 0))):
+			value = (value ^ byte) * 1099511628211
+		for byte in _ui_u64_bytes(int(lock.get("expires_tick", 0))):
+			value = (value ^ byte) * 1099511628211
+	# Mask the sign bit so `%x` always renders 16 lowercase hex digits.
+	return "%016x" % (value & 0x7fffffffffffffff)
+
+## Additive marker for the welcome-time list. `locks` is the whole table;
+## `held` is this display name's retained rows. Never printed at zero or for a
+## scripted refresh, so fresh runs keep their existing marker stream.
+func _ui_locks_retained_marker_text() -> String:
+	return "MP_PLACE_UI_LOCKS_RETAINED status=ok locks=%d held=%d checksum=%s" % [
+		_ui_locks.size(),
+		_ui_held_lock_count(),
+		_ui_locks_retained_checksum(),
+	]
+
 func _ui_selected_hash() -> String:
 	if _ui_entries.is_empty():
 		return ""
 	return str(_ui_entries[_ui_selected].get("hash", ""))
 
+## Resolve a scripted lock/unlock target: the explicit `lock:<hash>`/
+## `unlock:<hash>` argument when present (selected for the HUD), otherwise the
+## current selection. An explicit hash outside the catalog fails without a wire
+## command, keeping the smoke deterministic and path-free.
+func _ui_action_hash(action: Dictionary) -> String:
+	var requested := str(action.get("hash", ""))
+	if requested.is_empty():
+		var selected := _ui_selected_hash()
+		if selected.is_empty():
+			_fail("place_ui_empty")
+		return selected
+	for index in range(_ui_entries.size()):
+		if str(_ui_entries[index].get("hash", "")) == requested:
+			_ui_selected = index
+			_ui_render_ghost()
+			return requested
+	_fail("place_ui_hash")
+	return ""
+
 ## Scripted `lock`: always ask the server to lock (a re-lock refreshes), unless
 ## another holder is already visible, in which case it fails locally and the
 ## script continues without a wire command.
-func _ui_lock_action() -> void:
-	var hash := _ui_selected_hash()
+func _ui_lock_action(action: Dictionary) -> void:
+	var hash := _ui_action_hash(action)
 	if hash.is_empty():
-		_fail("place_ui_empty")
 		return
 	var lock: Dictionary = _ui_locks.get(hash, {})
 	if not lock.is_empty() and not _ui_own_locks.has(hash):
@@ -2288,10 +2428,9 @@ func _ui_locks_action() -> void:
 
 ## Scripted `unlock`: always send `blueprint_unlock`; an unknown/foreign lock
 ## comes back as a rejection, which is recorded and does not abort the script.
-func _ui_unlock_action() -> void:
-	var hash := _ui_selected_hash()
+func _ui_unlock_action(action: Dictionary) -> void:
+	var hash := _ui_action_hash(action)
 	if hash.is_empty():
-		_fail("place_ui_empty")
 		return
 	_ui_send_unlock(hash)
 
