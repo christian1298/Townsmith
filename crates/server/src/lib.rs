@@ -9,6 +9,7 @@
 mod chat_faults;
 pub mod chat_smoke;
 pub mod listen;
+pub mod load_smoke;
 pub mod placement;
 #[cfg(test)]
 mod player_faults;

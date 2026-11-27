@@ -17,6 +17,7 @@ use core_city::content_registry::{
 use core_sim::{Cohort, CohortSimulation};
 use townsmith_server::chat_smoke::run_chat_smoke;
 use townsmith_server::listen::{run_listen, run_save_load_smoke, ListenConfig};
+use townsmith_server::load_smoke;
 use townsmith_server::placement::{run_placement_smoke, write_placement_fixture};
 use townsmith_server::protocol::{run_loopback_smoke, Rejection, LOOPBACK_SEED};
 use townsmith_server::save::LoadedWorld;
@@ -330,6 +331,14 @@ fn print_usage() {
             "  townsmith-server --listen PORT [options]\n",
             "  townsmith-server --check-content-registry --content-registry PATH [--content-ids IDS]\n",
             "  townsmith-server --loopback-smoke | --placement-smoke | --resume-smoke\n",
+            "  townsmith-server --load-smoke [--clients N] [--messages M]\n",
+            "\n",
+            "Concurrent load smoke:\n",
+            "  --load-smoke               Serve N loopback clients on an ephemeral port,\n",
+            "                             drive chat pushes, print counters + JSON, exit\n",
+            "  --clients N                Clients per run (default 8, range 2..=64)\n",
+            "  --messages M               Chat sends per client (default 16, max 48)\n",
+            "                             Non-gating; never binds --listen or writes a save\n",
             "\n",
             "Content check mode:\n",
             "  --check-content-registry   Validate the manifest/selection, print\n",
@@ -474,6 +483,19 @@ fn main() {
             ),
             Err(error) => {
                 eprintln!("SERVER_CHAT status=error error={error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if has_flag("--load-smoke") {
+        let clients = parse_arg("--clients", load_smoke::DEFAULT_CLIENTS);
+        let messages = parse_arg("--messages", load_smoke::DEFAULT_MESSAGES);
+        match load_smoke::run_load_smoke(clients, messages) {
+            Ok(report) => print_load_smoke(&report),
+            Err(error) => {
+                print_load_smoke_error(&error);
                 std::process::exit(1);
             }
         }
@@ -809,6 +831,51 @@ fn configure_placement(world: &mut ServerWorld) {
             std::process::exit(1);
         }
     }
+}
+
+fn print_load_smoke(report: &load_smoke::LoadSmokeReport) {
+    println!(
+        "SERVER_LOAD status=ok clients={} messages_sent={} messages_received={} pushes_expected={} pushes_received={} queue_capacity={} elapsed_ms={} tick={} checksum={}",
+        report.clients,
+        report.messages_sent,
+        report.messages_received,
+        report.pushes_expected,
+        report.pushes_received,
+        report.queue_capacity,
+        report.elapsed_ms,
+        report.tick,
+        report.checksum
+    );
+    println!(
+        "{}",
+        serde_json::json!({
+            "status": "ok",
+            "clients": report.clients,
+            "messages_sent": report.messages_sent,
+            "messages_received": report.messages_received,
+            "pushes_expected": report.pushes_expected,
+            "pushes_received": report.pushes_received,
+            "queue_capacity": report.queue_capacity,
+            "elapsed_ms": report.elapsed_ms,
+            "tick": report.tick,
+            "checksum": report.checksum,
+        })
+    );
+}
+
+fn print_load_smoke_error(error: &load_smoke::LoadSmokeError) {
+    eprintln!(
+        "SERVER_LOAD status=error code={} error={}",
+        error.code(),
+        error
+    );
+    println!(
+        "{}",
+        serde_json::json!({
+            "status": "error",
+            "code": error.code(),
+        })
+    );
 }
 
 fn print_interest(report: &townsmith_server::world::InterestReport) {
