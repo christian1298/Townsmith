@@ -34,6 +34,10 @@ const UNREAD_DISPLAY_MAX := 99
 const DEFAULT_LOCALE := "en"
 const SUPPORTED_LOCALES := ["en", "de"]
 
+## Deterministic keyboard focus order. The unread badge is display-only and
+## stays out of the tab cycle; the status line is the last stop.
+const FOCUS_ORDER := ["draft", "send", "transcript", "status"]
+
 const ERROR_CODES := [
 	"chat.empty",
 	"chat.too_long",
@@ -63,6 +67,9 @@ var _smoke_mode := false
 ## Owner-supplied unread count. Negative values clamp to 0; this is display
 ## state only and never moves the transcript or `last_seq`.
 var _unread := 0
+## Logical focus target. Synthetic mode moves this without touching the engine
+## focus owner, so the focus contract is deterministic under `--headless`.
+var _focus_id := "draft"
 
 var _box: VBoxContainer
 var _title: Label
@@ -73,6 +80,8 @@ var _draft_edit: LineEdit
 var _send_button: Button
 var _counter_label: Label
 var _help_label: Label
+var _overlay: Control
+var _focus_ring: Panel
 
 
 func _ready() -> void:
@@ -87,6 +96,8 @@ func _ready() -> void:
 		get_tree().quit(2)
 		return
 	_refresh()
+	_set_focus("draft", true)
+	call_deferred("_update_focus_ring")
 
 
 ## Set the local identity shown in the default status line. The server owns the
@@ -258,16 +269,23 @@ func apply_chat_catchup(entries: Array, last_seq: int) -> Dictionary:
 
 
 ## Validate and emit one `chat` command. Returns the `draft` result. A rejected
-## draft sets the matching error line and emits nothing.
-func submit(text: String) -> Dictionary:
+## draft sets the matching error line, returns focus to the control that asked
+## (`"send"` or the draft), and emits nothing. A successful send clears the
+## draft and returns focus to it.
+func submit(text: String, origin: String = "draft") -> Dictionary:
+	var had_focus := _smoke_mode or _focus_id != ""
 	var result := draft(text)
 	if not bool(result.get("ok", false)):
 		set_error(str(result.get("code", "chat.invalid")), str(result.get("message", "")))
+		if had_focus:
+			_set_focus("send" if origin == "send" else "draft", true)
 		return result
 	clear_error()
 	if _draft_edit != null:
 		_draft_edit.text = ""
 		_refresh_counter()
+	if had_focus:
+		_set_focus("draft", true)
 	var command: Dictionary = result["command"]
 	command_issued.emit(command.duplicate(true))
 	return result
@@ -303,6 +321,132 @@ func snapshot() -> Dictionary:
 		"render": render,
 		"render_checksum": _fnv32(render),
 	}
+
+
+## Keyboard focus contract, independent of the engine focus owner. Synthetic
+## mode moves `focus` logically, so the smoke needs no display or focus calls.
+func focus_snapshot() -> Dictionary:
+	var draft_text := _draft_edit.text if _draft_edit != null else ""
+	return {
+		"focus": _focus_id,
+		"tab_order": FOCUS_ORDER.duplicate(),
+		"draft": draft_text,
+		"can_send": bool(draft(draft_text).get("ok", false)),
+		"unread": _unread,
+	}
+
+
+## Move focus to a named target, as a click on that control would. Returns
+## false for an unknown target. Synthetic mode only updates the logical focus.
+func focus_target(target: String) -> bool:
+	if not FOCUS_ORDER.has(target):
+		return false
+	_set_focus(target, true)
+	return true
+
+
+## Advance one step through FOCUS_ORDER. `backwards` is Shift+Tab. When focus
+## was released, forward starts at the draft and backwards at the last stop.
+func focus_step(backwards: bool = false) -> String:
+	var index := FOCUS_ORDER.find(_focus_id)
+	if index < 0:
+		index = FOCUS_ORDER.size() - 1 if backwards else 0
+	else:
+		index = posmod(index + (-1 if backwards else 1), FOCUS_ORDER.size())
+	_set_focus(FOCUS_ORDER[index], true)
+	return _focus_id
+
+
+## Apply one keyboard command to the focus target. Used by the field handlers
+## and by the synthetic smoke; returns whether the key was consumed.
+func focus_key(keycode: int, shift: bool = false) -> bool:
+	if keycode == KEY_TAB:
+		focus_step(shift)
+		return true
+	if keycode == KEY_ESCAPE:
+		_handle_escape()
+		return true
+	if keycode == KEY_ENTER or keycode == KEY_KP_ENTER:
+		return _submit_from_draft()
+	return false
+
+
+## Release focus to the surrounding UI. The draft is untouched.
+func focus_release() -> void:
+	if not _smoke_mode:
+		var control := _focus_control(_focus_id)
+		if control != null and control.is_inside_tree() and control.has_focus():
+			control.release_focus()
+	_focus_id = ""
+	_update_focus_ring()
+
+
+func _focus_control(target: String) -> Control:
+	match target:
+		"draft":
+			return _draft_edit
+		"send":
+			return _send_button
+		"transcript":
+			return _transcript
+		"status":
+			return _status_label
+	return null
+
+
+func _set_focus(target: String, grab: bool) -> void:
+	if not FOCUS_ORDER.has(target):
+		return
+	_focus_id = target
+	_update_focus_ring()
+	if not grab or _smoke_mode:
+		return
+	var control := _focus_control(target)
+	if control != null and control.is_inside_tree() and control.is_visible_in_tree():
+		control.grab_focus()
+
+
+func _on_focus_entered(target: String) -> void:
+	if _focus_id == target:
+		return
+	_focus_id = target
+	_update_focus_ring()
+
+
+func _on_focus_exited(_target: String) -> void:
+	if _smoke_mode:
+		return
+	call_deferred("_sync_focus_from_viewport")
+
+
+## Keep the logical focus honest when a modal, popup, or surrounding UI takes
+## the engine focus away from the panel.
+func _sync_focus_from_viewport() -> void:
+	if _smoke_mode or not is_inside_tree():
+		return
+	var owner := get_viewport().gui_get_focus_owner()
+	var next := ""
+	for target in FOCUS_ORDER:
+		if _focus_control(target) == owner:
+			next = target
+			break
+	if next == _focus_id:
+		return
+	_focus_id = next
+	_update_focus_ring()
+
+
+func _update_focus_ring() -> void:
+	if _focus_ring == null or _overlay == null or not is_inside_tree():
+		return
+	var target := _focus_control(_focus_id)
+	if target == null or not target.is_visible_in_tree():
+		_focus_ring.visible = false
+		return
+	var rect := target.get_global_rect().grow(1.0)
+	_focus_ring.position = rect.position - _overlay.get_global_rect().position
+	_focus_ring.size = rect.size
+	_focus_ring.visible = true
 
 
 func _parse_args() -> void:
@@ -346,6 +490,7 @@ func _build_ui() -> void:
 	_status_label = Label.new()
 	_status_label.name = "Status"
 	_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_status_label.mouse_filter = Control.MOUSE_FILTER_STOP
 	_box.add_child(_status_label)
 
 	var draft_row := HBoxContainer.new()
@@ -382,10 +527,10 @@ func _build_ui() -> void:
 
 	# Anchored overlay outside the VBox flow so the badge sits at the top-right
 	# of the header without moving the title or the transcript.
-	var overlay := Control.new()
-	overlay.name = "HeaderOverlay"
-	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(overlay)
+	_overlay = Control.new()
+	_overlay.name = "HeaderOverlay"
+	_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_overlay)
 
 	_badge = Label.new()
 	_badge.name = "UnreadBadge"
@@ -407,10 +552,52 @@ func _build_ui() -> void:
 	pill.content_margin_left = 6.0
 	pill.content_margin_right = 6.0
 	_badge.add_theme_stylebox_override("normal", pill)
-	overlay.add_child(_badge)
+	_overlay.add_child(_badge)
 
+	# One ring for every focus stop, including the status line (Labels do not
+	# draw a themed focus box). Mouse picking stays with the controls below it.
+	_focus_ring = Panel.new()
+	_focus_ring.name = "FocusRing"
+	_focus_ring.visible = false
+	_focus_ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_focus_ring.z_index = 20
+	var ring_style := StyleBoxFlat.new()
+	ring_style.bg_color = Color(0.0, 0.0, 0.0, 0.0)
+	ring_style.border_color = Color(0.40, 0.72, 1.0, 0.95)
+	ring_style.set_border_width_all(2)
+	ring_style.set_corner_radius_all(5)
+	_focus_ring.add_theme_stylebox_override("panel", ring_style)
+	_overlay.add_child(_focus_ring)
+
+	_wire_focus_targets()
 	_refresh_labels()
 	_refresh_unread()
+	_update_focus_ring()
+
+
+## Give every focus stop an explicit next/previous neighbour (Tab and
+## Shift+Tab), one shared input handler, and a focus listener that keeps the
+## logical target and the visible ring in sync with the engine focus owner.
+func _wire_focus_targets() -> void:
+	var controls: Array = []
+	for target in FOCUS_ORDER:
+		var control := _focus_control(target)
+		if control == null:
+			continue
+		control.focus_mode = Control.FOCUS_ALL
+		control.focus_entered.connect(_on_focus_entered.bind(target))
+		control.focus_exited.connect(_on_focus_exited.bind(target))
+		control.gui_input.connect(_on_focusable_gui_input.bind(target))
+		control.resized.connect(_update_focus_ring)
+		controls.append(control)
+	for index in controls.size():
+		var control: Control = controls[index]
+		control.focus_next = control.get_path_to(controls[(index + 1) % controls.size()])
+		control.focus_previous = control.get_path_to(
+			controls[(index - 1 + controls.size()) % controls.size()]
+		)
+	resized.connect(_update_focus_ring)
+	visibility_changed.connect(_update_focus_ring)
 
 
 func _refresh_labels() -> void:
@@ -472,27 +659,91 @@ func _on_draft_changed(_text: String) -> void:
 
 
 func _on_draft_submitted(text: String) -> void:
-	submit(text)
+	if not _can_submit_from_draft():
+		return
+	submit(text, "draft")
 
 
 func _on_send_pressed() -> void:
 	if _draft_edit != null:
-		submit(_draft_edit.text)
+		submit(_draft_edit.text, "send")
 
 
+## A click focuses the control under the pointer; native caret/selection
+## handling is left alone (the event is not accepted).
+func _on_focusable_gui_input(event: InputEvent, target: String) -> void:
+	if event is InputEventMouseButton:
+		var mouse := event as InputEventMouseButton
+		if mouse.button_index == MOUSE_BUTTON_LEFT and mouse.pressed:
+			_set_focus(target, true)
+		return
+	if not (event is InputEventKey):
+		return
+	var key := event as InputEventKey
+	if not key.pressed or key.echo:
+		return
+	if key.keycode == KEY_ESCAPE:
+		_handle_escape()
+		get_viewport().set_input_as_handled()
+
+
+## Enter only submits while the draft owns focus. An exclusive modal or popup
+## that took focus therefore blocks submission; an active IME composition is
+## left to the platform instead of being sent as text.
+func _can_submit_from_draft() -> bool:
+	if _focus_id != "draft":
+		return false
+	if _smoke_mode:
+		return true
+	return (
+		_draft_edit != null
+		and _draft_edit.has_focus()
+		and not _ime_composing()
+	)
+
+
+func _submit_from_draft() -> bool:
+	if not _can_submit_from_draft():
+		return false
+	var text := _draft_edit.text if _draft_edit != null else ""
+	submit(text, "draft")
+	return true
+
+
+## First Escape clears a non-empty draft (and its error line); the next one
+## releases focus to the surrounding UI. Only panel-owned input calls this.
+func _handle_escape() -> bool:
+	if _draft_edit != null and _draft_edit.text != "":
+		_draft_edit.text = ""
+		_refresh_counter()
+		clear_error()
+		return true
+	focus_release()
+	return true
+
+
+func _ime_composing() -> bool:
+	if DisplayServer.get_name() == "headless":
+		return false
+	return not DisplayServer.ime_get_text().is_empty()
+
+
+## Fallback for a key event that no focused panel control consumed. Tab and
+## Shift+Tab use the explicit focus_next/focus_previous chain; Escape and the
+## documented Ctrl+L focus alias are handled here. No destructive shortcut.
 func _unhandled_key_input(event: InputEvent) -> void:
 	if not (event is InputEventKey) or not event.pressed or event.echo:
 		return
 	var key_event := event as InputEventKey
-	if key_event.keycode == KEY_ESCAPE:
-		if _draft_edit != null:
-			_draft_edit.text = ""
-			_refresh_counter()
-		clear_error()
+	if key_event.keycode == KEY_ESCAPE and _focus_id != "":
+		_handle_escape()
 		get_viewport().set_input_as_handled()
-	elif key_event.keycode == KEY_L and key_event.ctrl_pressed:
-		if _draft_edit != null:
-			_draft_edit.grab_focus()
+	elif (
+		key_event.keycode == KEY_L
+		and key_event.ctrl_pressed
+		and _focus_id != ""
+	):
+		_set_focus("draft", true)
 		get_viewport().set_input_as_handled()
 
 
@@ -686,6 +937,12 @@ var _cases := 0
 
 func _run_smoke() -> void:
 	command_issued.connect(_on_smoke_command)
+
+	var initial_focus := focus_snapshot()
+	_check(str(initial_focus["focus"]) == "draft", "focus.initial", str(initial_focus["focus"]))
+	_check(initial_focus["tab_order"] == FOCUS_ORDER, "focus.initial_order", JSON.stringify(initial_focus["tab_order"]))
+	_check(str(initial_focus["draft"]) == "", "focus.initial_draft", str(initial_focus["draft"]))
+	_check(not bool(initial_focus["can_send"]), "focus.initial_can_send")
 
 	set_identity(7, "alice")
 	var snap := _case("identity")
@@ -1036,14 +1293,128 @@ func _run_smoke() -> void:
 	else:
 		print("MP_CHAT_CATCHUP status=fail added=0 skipped=0 last_seq=0 unread=0")
 
+	# --- Deterministic keyboard focus (logical, no engine focus calls) ---
+	var focus_failures := _failures
+	var focus_checks_before := _checks
+
+	_check(focus_target("draft"), "focus.reset.ok")
+	_draft_edit.text = ""
+	_refresh_counter()
+	var focus := focus_snapshot()
+	_check(str(focus["focus"]) == "draft", "focus.reset.draft", str(focus["focus"]))
+	_check(focus["tab_order"] == FOCUS_ORDER, "focus.reset.order", JSON.stringify(focus["tab_order"]))
+
+	var moved := focus_step()
+	_check(moved == "send", "focus.tab.draft_to_send", moved)
+	moved = focus_step()
+	_check(moved == "transcript", "focus.tab.send_to_log", moved)
+	moved = focus_step()
+	_check(moved == "status", "focus.tab.log_to_status", moved)
+	moved = focus_step()
+	_check(moved == "draft", "focus.tab.status_wraps", moved)
+
+	moved = focus_step(true)
+	_check(moved == "status", "focus.shift_tab.draft_to_status", moved)
+	moved = focus_step(true)
+	_check(moved == "transcript", "focus.shift_tab.status_to_log", moved)
+
+	_check(focus_target("send"), "focus.click.send.ok")
+	_check(str(focus_snapshot()["focus"]) == "send", "focus.click.send")
+	_check(focus_target("transcript"), "focus.click.log.ok")
+	_check(str(focus_snapshot()["focus"]) == "transcript", "focus.click.log")
+	_check(not focus_target("badge"), "focus.click.badge_not_focusable")
+	_check(str(focus_snapshot()["focus"]) == "transcript", "focus.click.unknown_unchanged")
+
+	_check(focus_target("draft"), "focus.enter.focus_ok")
+	_draft_edit.text = "focus enter"
+	_refresh_counter()
+	focus = focus_snapshot()
+	_check(
+		str(focus["draft"]) == "focus enter" and bool(focus["can_send"]),
+		"focus.enter.ready",
+		JSON.stringify(focus)
+	)
+	_check(focus_key(KEY_ENTER), "focus.enter.consumed")
+	focus = focus_snapshot()
+	_check(str(focus["focus"]) == "draft", "focus.enter.focus_draft", str(focus["focus"]))
+	_check(str(focus["draft"]) == "", "focus.enter.cleared", str(focus["draft"]))
+	_check(_commands.size() == 3, "focus.enter.command_count", str(_commands.size()))
+	_check(
+		_same_command(_commands[-1], {"type": "chat", "text": "focus enter"}),
+		"focus.enter.payload",
+		JSON.stringify(_commands[-1])
+	)
+	_check(_error_code == "", "focus.enter.error_cleared", _error_code)
+
+	focus_target("send")
+	var commands_before := _commands.size()
+	_check(not focus_key(KEY_ENTER), "focus.enter.send_does_not_submit")
+	_check(_commands.size() == commands_before, "focus.enter.send_silent", str(_commands.size()))
+
+	focus_target("draft")
+	_check(focus_key(KEY_ENTER), "focus.enter.empty_consumed")
+	_check(_error_code == "chat.empty", "focus.enter.empty_rejected", _error_code)
+	_check(str(focus_snapshot()["focus"]) == "draft", "focus.enter.empty_focus")
+	clear_error()
+
+	focus_target("draft")
+	_draft_edit.text = "unsent"
+	_refresh_counter()
+	_check(focus_key(KEY_ESCAPE), "focus.esc.consumed")
+	focus = focus_snapshot()
+	_check(str(focus["draft"]) == "", "focus.esc.cleared", str(focus["draft"]))
+	_check(str(focus["focus"]) == "draft", "focus.esc.keeps_focus", str(focus["focus"]))
+	_check(_error_code == "", "focus.esc.error_cleared", _error_code)
+	_check(focus_key(KEY_ESCAPE), "focus.esc.release_consumed")
+	_check(str(focus_snapshot()["focus"]) == "", "focus.esc.released", str(focus_snapshot()["focus"]))
+	_check(focus_step() == "draft", "focus.released_tab_starts_draft", str(focus_snapshot()["focus"]))
+	focus_release()
+	_check(focus_step(true) == "status", "focus.released_shift_tab_starts_last", str(focus_snapshot()["focus"]))
+
+	focus_target("send")
+	_draft_edit.text = "   "
+	_refresh_counter()
+	var rejected := submit(_draft_edit.text, "send")
+	_check(not bool(rejected["ok"]), "focus.reject.send.ok", JSON.stringify(rejected))
+	_check(_error_code == "chat.empty", "focus.reject.send.error", _error_code)
+	_check(str(focus_snapshot()["focus"]) == "send", "focus.reject.send.focus", str(focus_snapshot()["focus"]))
+	focus_target("draft")
+	rejected = submit(_draft_edit.text, "draft")
+	_check(not bool(rejected["ok"]), "focus.reject.draft.ok", JSON.stringify(rejected))
+	_check(str(focus_snapshot()["focus"]) == "draft", "focus.reject.draft.focus", str(focus_snapshot()["focus"]))
+	clear_error()
+	_draft_edit.text = ""
+	_refresh_counter()
+
+	focus_target("transcript")
+	set_unread(5)
+	focus = focus_snapshot()
+	_check(int(focus["unread"]) == 5, "focus.unread.count", str(focus["unread"]))
+	_check(badge_text() == "5" and badge_visible(), "focus.unread.badge", badge_text())
+	_check(str(focus["focus"]) == "transcript", "focus.unread.keeps_focus", str(focus["focus"]))
+	set_unread(0)
+	focus = focus_snapshot()
+	_check(int(focus["unread"]) == 0, "focus.unread.reset_count", str(focus["unread"]))
+	_check(not badge_visible() and badge_text() == "", "focus.unread.reset_badge", badge_text())
+	_check(str(focus["focus"]) == "transcript", "focus.unread.reset_keeps_focus", str(focus["focus"]))
+	focus_target("draft")
+
+	var focus_check_count := _checks - focus_checks_before
+	if _failures == focus_failures:
+		print("CHAT_PANEL_FOCUS status=ok checks=%d" % focus_check_count)
+	else:
+		print("CHAT_PANEL_FOCUS status=fail checks=%d errors=%d" % [
+			focus_check_count, _failures - focus_failures,
+		])
+
 	_case("final")
 
-	_check(_commands.size() == 2, "final.command_count", str(_commands.size()))
-	_check(_same_command(_commands[-1], {"type": "chat", "text": "padded"}), "final.last_payload", JSON.stringify(_commands[-1]))
+	_check(_commands.size() == 3, "final.command_count", str(_commands.size()))
+	_check(_same_command(_commands[-1], {"type": "chat", "text": "focus enter"}), "final.last_payload", JSON.stringify(_commands[-1]))
 	_check(_same_command(_commands[0], {"type": "chat", "text": "hello world"}), "final.first_payload", JSON.stringify(_commands[0]))
 
 	var checksum := _fnv32("\n".join(_stages))
-	if _failures == 0 and _commands.size() == 2:
+	if _failures == 0 and _commands.size() == 3:
 		print("CHAT_PANEL status=ok cases=%d checks=%d checksum=%s" % [_cases, _checks, checksum])
 		get_tree().quit(0)
 	else:
