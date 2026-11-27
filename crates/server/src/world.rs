@@ -50,10 +50,10 @@ use crate::protocol::{
     read_json_frame, session_id_for_seed, validate_hello, validate_interest,
     validate_place_blueprint, validate_road, validate_tax_rates, write_json_frame, AuditLogEntry,
     BlueprintLockView, BuildingView, ChatEntry, ClientCommand, FrameError, PlacementView,
-    Rejection, RoadView, ServerMessage, SessionConfig, SettlementMemberView, SettlementView,
-    TimeAction, CHAT_LOG_CAPACITY, DEFAULT_INTEREST_RADIUS_M, LOOPBACK_SEED, MAX_CHAT_CHARS,
-    MAX_INTEREST_BUILDINGS, MAX_INTEREST_ROADS, PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
-    SETTLEMENT_LIST_PAGE_CAP,
+    PlayerView, Rejection, RoadView, ServerMessage, SessionConfig, SettlementMemberView,
+    SettlementView, TimeAction, CHAT_LOG_CAPACITY, DEFAULT_INTEREST_RADIUS_M, LOOPBACK_SEED,
+    MAX_CHAT_CHARS, MAX_INTEREST_BUILDINGS, MAX_INTEREST_ROADS, PLAYER_LIST_PAGE_CAP,
+    PROTOCOL_VERSION, SESSION_IO_TIMEOUT, SETTLEMENT_LIST_PAGE_CAP,
 };
 
 /// Fixed road width for v0 placement commands.
@@ -324,8 +324,8 @@ impl ClientRole {
     pub fn required_role(tag: &str) -> Self {
         match tag {
             "hello" | "resume" | "ping" | "chat" | "chat_since" | "disconnect" | "time_vote"
-            | "set_interest" | "settlement_list" | "settlement_at" | "blueprint_locks"
-            | "server_status" => Self::Viewer,
+            | "set_interest" | "settlement_list" | "player_list" | "settlement_at"
+            | "blueprint_locks" | "server_status" => Self::Viewer,
             "set_tax"
             | "place_road"
             | "place_blueprint"
@@ -1900,6 +1900,9 @@ impl ServerWorld {
             ClientCommand::SettlementList { after_id, limit } => {
                 self.apply_settlement_list(*after_id, *limit)
             }
+            ClientCommand::PlayerList { after_id, limit } => {
+                self.apply_player_list(*after_id, *limit)
+            }
             ClientCommand::SettlementInvite {
                 settlement_id,
                 player_id,
@@ -2676,6 +2679,48 @@ impl ServerWorld {
             has_more: count < matched,
             checksum: format!("{:016x}", store.checksum()),
             settlements,
+        })
+    }
+
+    /// Read the player registry as a read-only, optionally paged roster.
+    ///
+    /// `after_id` is exclusive; `limit` is clamped to
+    /// `1..=PLAYER_LIST_PAGE_CAP` (`None` returns every match). The query never
+    /// advances the tick or mutates the registry. Names are display labels
+    /// only; authorization and ownership use ids.
+    fn apply_player_list(
+        &mut self,
+        after_id: Option<u64>,
+        limit: Option<u32>,
+    ) -> (Vec<ServerMessage>, &'static str) {
+        let after_id = after_id.unwrap_or(0);
+        let matched = self
+            .players
+            .players
+            .iter()
+            .filter(|player| player.id.get() > after_id)
+            .count();
+        let page_cap = limit.map(|limit| limit.clamp(1, PLAYER_LIST_PAGE_CAP) as usize);
+        let players: Vec<PlayerView> = self
+            .players
+            .players
+            .iter()
+            .filter(|player| player.id.get() > after_id)
+            .take(page_cap.unwrap_or(usize::MAX))
+            .map(|player| PlayerView {
+                id: player.id.get(),
+                name: player.display_name.clone(),
+            })
+            .collect();
+        let count = players.len();
+        accepted(ServerMessage::PlayerList {
+            tick: self.tick,
+            count,
+            matched: u32::try_from(matched).unwrap_or(u32::MAX),
+            next_after: players.last().map_or(after_id, |player| player.id),
+            has_more: count < matched,
+            checksum: format!("{:016x}", self.players.checksum()),
+            players,
         })
     }
 
@@ -8557,6 +8602,100 @@ mod tests {
             rejected,
             ServerMessage::Reject { ref code, .. } if code == codes::NOT_HELLO
         ));
+    }
+
+    #[test]
+    fn player_list_pages_the_registry_without_moving_world_state() {
+        type ListPage = (u64, usize, u32, u64, bool, Vec<(u64, String)>, String);
+        fn page(world: &mut ServerWorld, after_id: Option<u64>, limit: Option<u32>) -> ListPage {
+            let ServerMessage::PlayerList {
+                tick,
+                count,
+                matched,
+                next_after,
+                has_more,
+                checksum,
+                players,
+            } = world.apply(&ClientCommand::PlayerList { after_id, limit })
+            else {
+                panic!("expected player_list");
+            };
+            assert_eq!(count, players.len(), "count is the page length");
+            assert!(
+                players.windows(2).all(|pair| pair[0].id < pair[1].id),
+                "a page stays ascending"
+            );
+            (
+                tick,
+                count,
+                matched,
+                next_after,
+                has_more,
+                players
+                    .into_iter()
+                    .map(|player| (player.id, player.name))
+                    .collect(),
+                checksum,
+            )
+        }
+
+        let mut world = world_with_hello();
+        let tick = world.tick;
+        let world_checksum = world.checksum();
+        const SEED_PLAYER: u64 = 1;
+        assert_eq!(world.players.players.len(), 1);
+        assert_eq!(world.players.players[0].id.get(), SEED_PLAYER);
+        let registry_checksum = format!("{:016x}", world.players.checksum());
+
+        // Register two more names; world checksum stays a gameplay-only golden.
+        world.players.register("Builder").expect("register");
+        world.players.register("Auditor").expect("register");
+        assert_eq!(world.checksum(), world_checksum);
+
+        let all = page(&mut world, None, None);
+        assert_eq!(all.0, tick);
+        assert_eq!(all.1, 3);
+        assert_eq!(all.2, 3);
+        assert_eq!(all.3, 3);
+        assert!(!all.4);
+        assert_eq!(
+            all.5,
+            vec![
+                (1, "mayor".to_string()),
+                (2, "Builder".to_string()),
+                (3, "Auditor".to_string())
+            ]
+        );
+        assert_eq!(all.6, format!("{:016x}", world.players.checksum()));
+
+        let first = page(&mut world, None, Some(2));
+        assert_eq!(first.1, 2);
+        assert_eq!(first.2, 3);
+        assert_eq!(first.3, 2);
+        assert!(first.4);
+        assert_eq!(first.5.len(), 2);
+        let second = page(&mut world, Some(first.3), Some(2));
+        assert_eq!(second.1, 1);
+        assert_eq!(second.2, 1);
+        assert_eq!(second.3, 3);
+        assert!(!second.4);
+
+        // Zero and oversized limits clamp; an empty page echoes the cursor.
+        assert_eq!(page(&mut world, None, Some(0)).1, 1);
+        assert_eq!(page(&mut world, None, Some(999)).1, 3);
+        let empty = page(&mut world, Some(99), Some(8));
+        assert_eq!(empty.1, 0);
+        assert_eq!(empty.2, 0);
+        assert_eq!(empty.3, 99);
+        assert!(!empty.4);
+
+        assert_eq!(world.tick, tick, "the roster never advances the tick");
+        assert_eq!(world.checksum(), world_checksum);
+        assert_ne!(
+            format!("{:016x}", world.players.checksum()),
+            registry_checksum,
+            "new registrations change the registry checksum"
+        );
     }
 
     #[test]

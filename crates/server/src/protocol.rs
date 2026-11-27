@@ -42,6 +42,13 @@ pub const CHAT_LOG_CAPACITY: usize = 64;
 /// every matching record for compatibility with the pre-paging protocol.
 pub const SETTLEMENT_LIST_PAGE_CAP: u32 = 256;
 
+/// Maximum player records returned by one `player_list` page.
+///
+/// Requests clamp `limit` to `1..=PLAYER_LIST_PAGE_CAP`; `None` returns every
+/// registered player. The registry itself caps at
+/// [`core_city::player::MAX_PLAYERS`] (256), so an unlimited page is bounded.
+pub const PLAYER_LIST_PAGE_CAP: u32 = 256;
+
 /// Maximum number of client-provided characters echoed in a rejection message.
 ///
 /// Rejections must always fit in one [`MAX_FRAME_LEN`] frame: a client can send
@@ -188,6 +195,8 @@ pub mod codes {
     // Settlement commands. `unavailable` is specific to the transport-only
     // session, which has no player registry or settlement store.
     pub const SETTLEMENT_UNAVAILABLE: &str = "settlement.unavailable";
+    /// The transport-only session keeps no player registry.
+    pub const PLAYER_UNAVAILABLE: &str = "player.unavailable";
 
     // Audit query. `unavailable` is specific to the transport-only session,
     // which keeps no audit ring; `filter_invalid` covers malformed filter
@@ -408,6 +417,22 @@ pub enum ClientCommand {
         #[serde(default)]
         limit: Option<u32>,
     },
+    /// Read-only, optionally paged player registry roster (Viewer and above).
+    ///
+    /// Records are ascending by `id`. `after_id` is an exclusive cursor
+    /// (`id > after_id`, with `0`/`None` starting at the first record);
+    /// `limit` is clamped to `1..=PLAYER_LIST_PAGE_CAP`, while `None` returns
+    /// every registered player. The query is transport-only: it neither
+    /// advances the tick nor mutates the world or the registry. Names are
+    /// display labels only; authorization and ownership use ids.
+    PlayerList {
+        /// Return records with an id strictly greater than this.
+        #[serde(default)]
+        after_id: Option<u64>,
+        /// Page size; `None` returns all registered players.
+        #[serde(default)]
+        limit: Option<u32>,
+    },
     /// Read-only authoritative status summary (Viewer and above).
     ///
     /// Reports the current tick, treasury, store and roster counts, and the
@@ -567,6 +592,7 @@ impl ClientCommand {
             ClientCommand::PlaceBlueprint { .. } => "place_blueprint",
             ClientCommand::FoundSettlement { .. } => "found_settlement",
             ClientCommand::SettlementList { .. } => "settlement_list",
+            ClientCommand::PlayerList { .. } => "player_list",
             ClientCommand::SettlementInvite { .. } => "settlement_invite",
             ClientCommand::SettlementSetRole { .. } => "settlement_set_role",
             ClientCommand::SettlementRemoveMember { .. } => "settlement_remove_member",
@@ -696,6 +722,17 @@ pub struct SettlementMemberView {
     pub role: String,
     /// Effective permission bits (`build`=1, `manage`=2, `tax`=4, `members`=8).
     pub permissions: u8,
+}
+
+/// One player in the read-only [`ServerMessage::PlayerList`] roster.
+///
+/// Names are display labels only; authorization and ownership use `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerView {
+    /// Stable server-issued player id.
+    pub id: u64,
+    /// Current display name.
+    pub name: String,
 }
 
 /// Read-only settlement record returned by the settlement commands.
@@ -1039,6 +1076,31 @@ pub enum ServerMessage {
         /// Records in ascending id order.
         settlements: Vec<SettlementView>,
     },
+    /// Read-only player registry roster.
+    ///
+    /// `players` holds at most one page in ascending id order. `matched` is
+    /// the total number of records with `id > after_id` before the page limit;
+    /// `next_after` is the last returned id, or the request's `after_id` (0
+    /// when absent) for an empty page; `has_more` reports whether records
+    /// remain after the page. `count` is the page length. Names are display
+    /// labels only; authorization uses ids.
+    PlayerList {
+        /// Authoritative tick.
+        tick: u64,
+        /// Number of records in this page.
+        count: usize,
+        /// Total matching records before the page limit (saturating `u32`).
+        matched: u32,
+        /// Exclusive cursor for the next page: the last returned id, or the
+        /// request's `after_id`/0 when the page is empty.
+        next_after: u64,
+        /// Whether more matching records follow this page.
+        has_more: bool,
+        /// Stable checksum of the player registry (16 hex).
+        checksum: String,
+        /// Records in ascending id order.
+        players: Vec<PlayerView>,
+    },
     /// Bounded per-session audit ring (Admin only).
     ///
     /// `entries` are the retained ring, oldest first, truncated to the newest
@@ -1201,6 +1263,7 @@ pub fn decode_client_command(payload: &[u8]) -> Result<ClientCommand, Rejection>
         "place_blueprint",
         "found_settlement",
         "settlement_list",
+        "player_list",
         "settlement_invite",
         "settlement_set_role",
         "settlement_remove_member",
@@ -1625,6 +1688,10 @@ impl Session {
             ClientCommand::PlaceBlueprint { .. } => reject(
                 codes::PLACEMENT_UNAVAILABLE,
                 "blueprint placement requires the authoritative executor with a package library, not the transport-only session",
+            ),
+            ClientCommand::PlayerList { .. } => reject(
+                codes::PLAYER_UNAVAILABLE,
+                "player roster requires the authoritative executor with a player registry, not the transport-only session",
             ),
             ClientCommand::FoundSettlement { .. }
             | ClientCommand::SettlementList { .. }
@@ -2755,6 +2822,73 @@ mod tests {
             limit: Some(1),
         });
         expect_reject(&messages, codes::SETTLEMENT_UNAVAILABLE);
+        assert_eq!(session.tick(), tick);
+    }
+
+    #[test]
+    fn player_list_decodes_pages_and_maps_to_viewer() {
+        let list = decode_client_command(br#"{"type":"player_list"}"#)
+            .expect("legacy player_list decodes");
+        assert_eq!(
+            list,
+            ClientCommand::PlayerList {
+                after_id: None,
+                limit: None,
+            },
+            "an old payload keeps the all-records default"
+        );
+        assert_eq!(list.tag(), "player_list");
+        assert_eq!(
+            crate::world::ClientRole::required_role_for(&list),
+            crate::world::ClientRole::Viewer
+        );
+
+        let paged = decode_client_command(br#"{"type":"player_list","after_id":7,"limit":32}"#)
+            .expect("paged player_list decodes");
+        assert_eq!(
+            paged,
+            ClientCommand::PlayerList {
+                after_id: Some(7),
+                limit: Some(32),
+            }
+        );
+        assert_eq!(
+            crate::world::ClientRole::required_role_for(&paged),
+            crate::world::ClientRole::Viewer
+        );
+    }
+
+    #[test]
+    fn player_list_round_trips_and_transport_rejects_it() {
+        let message = ServerMessage::PlayerList {
+            tick: 4,
+            count: 1,
+            matched: 3,
+            next_after: 9,
+            has_more: true,
+            checksum: "0123456789abcdef".to_string(),
+            players: vec![PlayerView {
+                id: 9,
+                name: "Mayor".to_string(),
+            }],
+        };
+        let json = String::from_utf8(encode_json(&message).expect("encode")).expect("utf8");
+        assert!(json.contains("\"type\":\"player_list\""));
+        assert!(json.contains("\"has_more\":true"));
+        assert_eq!(
+            serde_json::from_str::<ServerMessage>(&json).expect("decode"),
+            message,
+            "player_list round-trips"
+        );
+
+        let mut session = Session::new(LOOPBACK_SEED);
+        session.handle(hello());
+        let tick = session.tick();
+        let messages = session.handle(ClientCommand::PlayerList {
+            after_id: Some(1),
+            limit: Some(1),
+        });
+        expect_reject(&messages, codes::PLAYER_UNAVAILABLE);
         assert_eq!(session.tick(), tick);
     }
 

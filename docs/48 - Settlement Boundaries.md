@@ -2,7 +2,7 @@
 title: Settlement Boundaries
 project: Townsmith
 status: active
-updated: 2026-11-26
+updated: 2026-11-27
 tags:
   - townsmith
   - phase-2
@@ -135,6 +135,7 @@ The local bridge player registry is a developer convenience, not server authenti
 |---|---|---|---|
 | `found_settlement` | `name`, `x`, `z`, `radius_m` | `settlement_found { tick, settlement, settlement_checksum, world_checksum }`; owner is the caller's stable `player_id` | Mayor |
 | `settlement_list` | `after_id?`, `limit?` | `settlement_list { tick, count, matched, next_after, has_more, checksum, settlements }` in ascending id order; `count` is the page length | Viewer |
+| `player_list` | `after_id?`, `limit?` | `player_list { tick, count, matched, next_after, has_more, checksum, players[{id,name}] }` in ascending id order; names are display labels only | Viewer |
 | `settlement_invite` | `settlement_id`, `player_id`, `role`, `expected_revision` | `settlement_updated`; actor needs the core `members` permission | Mayor |
 | `settlement_set_role` | `settlement_id`, `player_id`, `role`, `expected_revision` | `settlement_updated`; owner cannot be demoted | Mayor |
 | `settlement_remove_member` | `settlement_id`, `player_id`, `expected_revision` | `settlement_updated`; owner cannot be removed | Mayor |
@@ -148,6 +149,8 @@ The local bridge player registry is a developer convenience, not server authenti
 All commands require a successful hello/resume, do not advance the tick, and return `SettlementView` records with `owner_id`, `owned`, `members[{player, role, permissions}]`, and `membership_revision`. `found_settlement` creates the server store on first use, rejects duplicate names and invalid core payloads, and enforces the 16-owned-settlements-per-player limit. Membership mutations check the actor's core `members` permission and the expected revision, reject `owner` as an invited/changed role, and bump the revision. `settlement_claim` is the explicit Q-112 claim for legacy/admin-released records. `settlement_rename` and `settlement_transfer` complete the player lifecycle: rename requires `manage` and a unique name; transfer requires `manage` and a registered recipient, then demotes the previous owner to Manager. `settlement_set_tax` requires `tax`, stores a whole-percent rate `0..=100`, and deliberately leaves the membership revision unchanged. `settlement_release` is the Admin dead-owner override (Q-113): it clears ownership and members without an owner actor. The transport-only session rejects these commands with `settlement.unavailable`.
 
 `settlement_list` is paged for large worlds. `after_id` is an exclusive cursor (`id > after_id`); `limit` is clamped to `1..=256`, with `0` treated as `1`. Both fields are optional and default to absent, so `{"type":"settlement_list"}` keeps the pre-paging all-records behavior (the core store still caps at 1,000 records). `count` is the page length, `matched` is the total matching count before the page limit, `next_after` is the last returned id (or the request's `after_id`/0 for an empty page), and `has_more` reports whether records follow the page. The tick, store `checksum`, and world checksum are unaffected by paging; the query stays Viewer-level and non-tick-advancing, and the transport-only session still rejects it with `settlement.unavailable`.
+
+`player_list` mirrors the same cursor semantics over the authoritative `PlayerRegistry` (max 256 entries). `checksum` is the registry checksum, not the world checksum; a roster read never advances the tick or changes world state. Names are mutable display labels: authorization, ownership, membership, and locks always use the numeric `PlayerId`. The transport-only session rejects the query with `player.unavailable`.
 
 ## 4. Save
 
