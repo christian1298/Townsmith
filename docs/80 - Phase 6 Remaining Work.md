@@ -13,7 +13,7 @@ tags:
 # Phase 6 Remaining Work
 
 > [!abstract] Purpose
-> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `08b0d7a` (2026-11-27). It is a plan, not an implementation claim.
+> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `c2f7069` (2026-11-27). It is a plan, not an implementation claim.
 
 Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/D-032/D-033/D-035/D-038/D-039/D-040/D-041/D-042, [[09 - Open Questions]] Q-101/Q-117/Q-119/Q-120/Q-121/Q-122/Q-123/Q-124/Q-125/Q-126/Q-127/Q-128, [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]], [[81 - Settlement Tax Composition]], [[82 - Journal and Rollback]], [[83 - Remote Transport and Authentication]], [[84 - Content Registry Modes]].
 
@@ -51,6 +51,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 | ✅ Done | Bridge settlement paging, paging fault corpus, editor paging, bridge save/load composition matrix, connected-client transfer and paged lists | #433–#437 |
 | ✅ Done | Dashboard member cap, chat panel badge, `server_status`, production-UI plan, chat rejection corpus | #439–#443 |
 | ✅ Done | Server-status panel, paged player roster, shutdown save, content-registry benchmark, read-only production settlement shell | #445–#449 |
+| ✅ Done | Roster save matrix, status-watch faults, newer-command protocol corpus, transport resilience, production screen focus | #481–#485 |
 | ⛔ Blocked | Q-101 human playtest; 1M/RTX 3060 render gate | person / reference hardware |
 
 ## 2. Dependency order
