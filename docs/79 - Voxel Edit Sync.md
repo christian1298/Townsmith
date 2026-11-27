@@ -89,6 +89,7 @@ The edit log is append-only for the life of the placement. Compaction (rewriting
 > - `checksum()` is FNV-1a over placement id, hash, `base_revision`, `edit_revision`, and the ordered delta log; `effective_voxel` applies deltas in order with the last accepted edit winning.
 > - Stable codes: `edit.empty_batch`, `edit.too_many`, `edit.stale_revision`, `edit.invalid_position`, `edit.invalid_material`, `edit.duplicate_position`, `edit.overflow`, plus `edit.invalid_hash` and `edit.invalid_revision` for load-time shape checks.
 > - `MAX_EDIT_LOG` (262,144 edits) is a storage guard for the pure model, not a wire limit. Registry membership, placement existence, hash equality, and structure checks stay with the future server layer (§4).
+> - Current coverage: 31 unit tests pin the happy path, stale **and** future revision rejection, exact batch/log cap boundaries, zero and maximum coordinates, the rejection-without-mutation matrix, order-sensitive checksum, construction-path checksum equality, apply-then-revert effective volume, clone/equality, and load shape. `validate_loaded` rejects a non-empty log whose revision is `0`. Q-119 and Q-120 remain **Open**; no protocol, save, server, bridge, or Godot path is wired.
 
 
 ## 4. Wire contract (proposed, additive protocol v1)
