@@ -646,6 +646,8 @@ Multiplayer + modding is a trust problem. The server is the authority.
 
 No production change was required. Duplicate non-tag fields are currently collapsed last-wins by the `serde_json::Value` tag pass; the corpus pins that resolution (and conflicting duplicate tags still fail field validation) so a parser or serde upgrade cannot change it silently.
 
+A second command-level corpus (`crates/server/src/protocol_command_faults.rs`) covers the newer v1 commands: `player_list`, `settlement_list` paging, `settlement_at`, `server_status`, `audit_log` filters, the advisory lock commands, `chat`/`chat_since`, `found_settlement`, and the settlement mutations. It asserts stable decode/field codes, role/transport gates, paging clamps, extra-field tolerance, and unchanged tick/checksums/stores on rejection. It is in-memory and test-only.
+
 ## 13. Open questions
 
 - **Q-002:** Target player count and server type? Affects bandwidth, AOI, and simulation budgets.

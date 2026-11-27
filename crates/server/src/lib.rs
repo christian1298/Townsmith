@@ -14,6 +14,8 @@ pub mod placement;
 #[cfg(test)]
 mod player_faults;
 pub mod protocol;
+#[cfg(test)]
+mod protocol_command_faults;
 pub mod save;
 #[cfg(test)]
 mod save_crash;
