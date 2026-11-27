@@ -200,7 +200,7 @@ Mutation support is planned to refresh the same panel from the returned `settlem
 
 | Surface | Transport / authority | Purpose |
 |---|---|---|
-| `mp_world_client` + `--settlement-ui` | Real TCP protocol v1; authoritative server | Connected debug probe; readout now, scripted mutations planned |
+| `mp_world_client` + `--settlement-ui` | Real TCP protocol v1; authoritative server | Connected debug probe; readout plus scripted mutations |
 | Dashboard (`godot/world_placement.gd`) | Local `TownsmithCore` bridge; local world store | In-game settlement selector, district/policy/heatmap detail, and local developer write controls |
 | `settlement_editor.tscn` | Local `TownsmithCore` bridge; no server | Standalone developer CRUD over local records |
 | `district_panel.tscn` | Local `TownsmithCore` bridge; read-only | Standalone district overview |
@@ -235,8 +235,8 @@ No sleeps are used; readiness is the bounded server-log poll. The checksum is SH
 
 ## 7. Production UI plan
 
-> [!success] Shell implemented with local mutations and connected read/write
-> The standalone `godot/settlement_screen.tscn` implements the first **production settlement shell**. Local mode covers every mutation over the bridge; connected mode (`--connected`) reads `settlement_list`/`player_list` and wires rename/set-tax against the authoritative server.
+> [!success] Shell implemented with local and connected mutations
+> The standalone `godot/settlement_screen.tscn` implements the first **production settlement shell**. Local mode covers every mutation over the bridge; connected mode (`--connected`) reads paged `settlement_list`/`player_list` and wires claim, rename, transfer, release, invite, set-role, remove, and set-tax against the authoritative server. Every mutation re-reads the current `membership_revision`; server rejections keep the stable code and leave the local page cache untouched. Release stays visible for a Mayor so the server's `role.forbidden` is shown rather than hidden. The connected smoke seeds a second player, exercises all nine actions, and pins `SETTLEMENT_SCREEN_CONNECTED ... players=2 actions=9 accepted=8 rejected=1 checksum=...`.
 >
 > **Implemented**
 > - Cursor-paged list (`settlements_page(after_id, limit)`, 8 rows/page) with name, `#id`, owner name/`#id` or `unowned`, tax, membership revision, and member count. The cursor is the order; the client never re-sorts a page.
@@ -247,9 +247,9 @@ No sleeps are used; readiness is the bounded server-log poll. The checksum is SH
 > - EN/DE keys under `base.ui.settlement_screen.*` in `godot/world_i18n.gd`; numbers use `WorldI18n.format_int`/`format_float`.
 >
 > **Excluded on purpose**
-> - No claim, rename, transfer, release, invite, set-role, remove-member, or set-tax controls. No founding; founding stays in the placement flow.
-> - Connected mode deliberately exposes only rename and set-tax; claim/transfer/release/invite/set-role/remove remain local-only with a localized reason.
-> - No gamepad focus model, screen-reader announcements, or modal confirmation flow; §7.2 and §7.6 remain the target.
+> - No founding; founding stays in the placement flow.
+> - Connected mode now wires all nine actions; a Mayor's release attempt surfaces the server `role.forbidden` instead of hiding the control.
+> - No gamepad focus model, screen-reader announcements, or full modal confirmation flow; §7.2 and §7.6 remain the target.
 > - The dashboard, settlement editor, and `mp_world_client` probe are untouched.
 >
 > **Smoke**
@@ -258,9 +258,9 @@ No sleeps are used; readiness is the bounded server-log poll. The checksum is SH
 >
 > **Mutations wired locally:** claim, rename, set tax, invite, set role, remove member, transfer, and release, each re-reading the selected page for a fresh revision and showing a localized reason when unavailable. Destructive release/remove use a two-press confirmation; the owner cannot be removed or demoted. The smoke exercises 11 actions (8 accepted, 3 rejected) and prints `SETTLEMENT_SCREEN status=ok pages=3 settlements=23 selected=2 actions=11 accepted=8 rejected=3 checksum=<16hex>`.
 >
-> **Connected mode (initial).** `--connected --host H --port P --name NAME` uses `godot/settlement_screen_net.gd` for length-prefixed JSON hello, cursor-paged `settlement_list`, paged `player_list` name resolution, `settlement_rename`, and `settlement_set_tax`. It re-reads the selected record before each send, shows the server `world_checksum` and a `Connected` authority label, and leaves the local-only actions disabled with a localized reason. The smoke founds `Harbor`, reads one page and one player, renames, sets tax 0→5, and forces a stale-revision rejection; it prints `SETTLEMENT_SCREEN_CONNECTED status=ok settlements=1 players=1 rename=1 tax=1 checksum=<16hex>` twice.
+> **Connected mode.** `--connected --host H --port P --name NAME` uses `godot/settlement_screen_net.gd` for length-prefixed JSON hello, cursor-paged `settlement_list`, paged `player_list` name resolution, and every D-033 mutation: claim, rename, transfer, release, invite, set-role, remove-member, and set-tax. It re-reads the selected record before each send, shows the server `world_checksum` and a `Connected` authority label, and surfaces the stable server code on rejection. The smoke seeds a second player, founds `Harbor`, reads one page and two players, renames, sets tax 0→5, invites, cycles role twice, removes, re-invites, transfers, and proves a Mayor release rejects with `role.forbidden`; it prints `SETTLEMENT_SCREEN_CONNECTED status=ok settlements=1 players=2 rename=1 tax=1 actions=9 accepted=8 rejected=1 checksum=<16hex>` twice.
 >
-> **Remaining connected work** (target §7.1–§7.4, no new ADR): claim/transfer/release/invite/set-role/remove over the wire, the global-role ceiling and full server-rejection display, the connected modal/focus flow, and embedding the shell in the canonical Mayor/Architect navigation.
+> **Remaining connected work** (target §7.1–§7.4, no new ADR): embedding the shell in the canonical Mayor/Architect navigation, gamepad/screen-reader behavior, full destructive-confirmation dialogs, and a real connected roster picker beyond the next-registered-player rule.
 
 The rest of this section is the target **production settlement surface**. §1–§6 remain the developer probe, and the dashboard in [[57 - Dashboard and Advisor]] remains the current local settlement surface. The plan uses the existing D-033 commands, the `settlements_page` read in [[42 - World Placement Bridge]], and the EN/DE string rules in [[16 - Localization]]. It does not add a protocol command, wire field, save field, permission, or ADR.
 
