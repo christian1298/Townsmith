@@ -13,7 +13,7 @@ tags:
 # Phase 6 Remaining Work
 
 > [!abstract] Purpose
-> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `984f061` (2026-11-26). It is a plan, not an implementation claim.
+> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `264ad43` (2026-11-27). It is a plan, not an implementation claim.
 
 Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/D-032/D-033/D-035/D-038/D-039/D-040/D-041/D-042, [[09 - Open Questions]] Q-101/Q-117/Q-119/Q-120/Q-121/Q-122/Q-123/Q-124/Q-125/Q-126/Q-127/Q-128, [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]], [[81 - Settlement Tax Composition]], [[82 - Journal and Rollback]], [[83 - Remote Transport and Authentication]], [[84 - Content Registry Modes]].
 
@@ -44,6 +44,8 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 | ✅ Done | Optional-store save matrix, content-manifest corpus, connected settlement readout, content-identity corpus, district member names, settlement rejection corpus | #422–#427 |
 | ✅ Done | Settlement list paging, list benchmark, connected-settlement reference, connected-client mutation actions | #428–#431 |
 | ✅ Done | Bridge settlement paging, paging fault corpus, editor paging, bridge save/load composition matrix, connected-client transfer and paged lists | #433–#437 |
+| ✅ Done | Dashboard member cap, chat panel badge, `server_status`, production-UI plan, chat rejection corpus | #439–#443 |
+| ✅ Done | Server-status panel, paged player roster, shutdown save, content-registry benchmark, read-only production settlement shell | #445–#449 |
 | ⛔ Blocked | Q-101 human playtest; 1M/RTX 3060 render gate | person / reference hardware |
 
 ## 2. Dependency order
@@ -65,7 +67,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.1 Settlement write controls
 
-**Scope.** Dashboard and a connected client should found, claim, rename, transfer, invite, set role, remove, release (Admin), and set tax through the bridge/server commands that already exist. The dashboard has the `Shift+T` tax cycle (#356), `Shift+C` unowned claim (#382), `Shift+Y` transfer (#388), `Shift+X` release (#392), `Shift+R` rename (#401), and `Shift+I`/`Shift+M`/`Shift+Delete` invite/role/remove (#407); #370 adds full owner/member/permission rows to the read-only district panel; #381 adds local player selection and #387 release to the settlement editor; #424 adds the connected-client readout, #431 adds connected-client rename/set-tax/release/invite/set-role/remove/claim, and #428 adds server-side list paging. #437 adds connected-client transfer and paged lists, so the developer surface is complete; remaining is a production UI beyond the probe.
+**Scope.** Dashboard and a connected client should found, claim, rename, transfer, invite, set role, remove, release (Admin), and set tax through the bridge/server commands that already exist. The dashboard has the `Shift+T` tax cycle (#356), `Shift+C` unowned claim (#382), `Shift+Y` transfer (#388), `Shift+X` release (#392), `Shift+R` rename (#401), and `Shift+I`/`Shift+M`/`Shift+Delete` invite/role/remove (#407); #370 adds full owner/member/permission rows to the read-only district panel; #381 adds local player selection and #387 release to the settlement editor; #424 adds the connected-client readout, #431 adds connected-client rename/set-tax/release/invite/set-role/remove/claim, and #428 adds server-side list paging. #437 adds connected-client transfer and paged lists, and #446 adds the paged player roster; #449 adds the first read-only production settlement shell. Remaining: production mutations in that shell, beyond the developer probe.
 
 **Protocol/save.** No new command or save field. Reuse `settlement_*` v1 shapes and `settlement_updated`.
 
