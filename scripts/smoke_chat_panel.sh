@@ -37,13 +37,18 @@ fi
 SMOKE_DIR="$(mktemp -d)"
 trap 'rm -rf "$SMOKE_DIR"' EXIT
 
-CONTRACT='^CHAT_PANEL status=ok cases=23 checks=213 checksum=047b366f$'
+CONTRACT='^CHAT_PANEL status=ok cases=23 checks=241 checksum=06986775$'
 CATCHUP_CONTRACT='^MP_CHAT_CATCHUP status=ok added=[1-9][0-9]* skipped=[1-9][0-9]* last_seq=[0-9]+ unread=[0-9]+$'
 # Focus checks run after every render stage, so the 23 render cases and their
 # checksum stay at the pre-focus baseline; the focus block adds 47 checks.
 # Update all three pins together with any render or focus change.
 FOCUS_CONTRACT='^CHAT_PANEL_FOCUS status=ok checks=47$'
 GAMEPAD_CONTRACT='^CHAT_PANEL_GAMEPAD status=ok checks=14$'
+# Virtual-keyboard intent is counted headless; no display or platform keyboard
+# is required. This block adds no render case, so the CHAT_PANEL checksum pin
+# returns to the pre-gamepad baseline: the VK block's successful send clears
+# the empty-send error recorded by the earlier gamepad accept check.
+VK_CONTRACT='^CHAT_PANEL_VK status=ok checks=28$'
 
 run_usage_probe() {
 	local log="$1"
@@ -139,6 +144,16 @@ if [[ -z "$GAMEPAD_LINE" ]]; then
 fi
 if [[ ! "$GAMEPAD_LINE" =~ $GAMEPAD_CONTRACT ]]; then
 	echo "Chat panel smoke gamepad contract mismatch: $GAMEPAD_LINE" >&2
+	exit 1
+fi
+
+VK_LINE="$(grep '^CHAT_PANEL_VK status=' <<<"$FIRST" | tail -1 || true)"
+if [[ -z "$VK_LINE" ]]; then
+	echo "Chat panel smoke failed: no virtual-keyboard marker" >&2
+	exit 1
+fi
+if [[ ! "$VK_LINE" =~ $VK_CONTRACT ]]; then
+	echo "Chat panel smoke virtual-keyboard contract mismatch: $VK_LINE" >&2
 	exit 1
 fi
 

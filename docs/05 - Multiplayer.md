@@ -717,7 +717,9 @@ GODOT=/path/to/godot ./scripts/smoke_chat_panel.sh
 
 The deterministic `--smoke` mode uses a fixed identity, fixed entries, both rejected and accepted drafts, two accepted sends, `chat_since` polling after each advance, a `chat_log` merge with duplicates and out-of-order sequences, and the 64-line cap. The script runs the scene twice, diffs the `CHAT_PANEL` markers and checksum, and probes that a headless run without `--smoke` prints usage and exits 2.
 
-Limits: the panel is not wired into `mp_client.gd`, has no push/notification path, no autocomplete or moderation, and does not persist drafts or the transcript across reconnects.
+Under gamepad modality the panel navigates with `ui_up` / `ui_down` / `ui_accept` / `ui_cancel` plus the transcript page actions, and moving gamepad focus to the draft (or a rejected `ui_accept` that keeps it open) raises the platform virtual keyboard; a successful send, focus loss, panel hide, or a cancel that releases focus clears it. `focus_snapshot()` reports `vk_requested`, `vk_requests`, and `vk_clears`, so the headless smoke asserts request/clear intent deterministically, while `DisplayServer.virtual_keyboard_show` / `hide` are called only when the feature exists and the server is not headless. Keyboard and mouse focus never request the keyboard, and the panel's render logic is unchanged. The smoke's final checksum returns to the pre-gamepad baseline (`06986775`) because the VK block's successful send clears the empty-send error recorded by the earlier gamepad accept check.
+
+Limits: the panel is not wired into `mp_client.gd`, has no push/notification path, no autocomplete or moderation, and does not persist drafts or the transcript across reconnects. The virtual-keyboard path is intent-tested only: no headless run exercises a real platform keyboard, and no on-screen keyboard geometry, IME composition, or per-platform text input is validated.
 
 ### Interest filtering v1
 

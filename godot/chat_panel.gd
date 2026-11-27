@@ -137,6 +137,15 @@ var _transcript_page := 0
 var _trigger_left_held := false
 var _trigger_right_held := false
 
+## Platform virtual keyboard intent for the draft. Only gamepad modality asks
+## for it; keyboard and mouse focus never does. Request/clear intent is counted
+## on every platform so the headless smoke stays deterministic, while the
+## `DisplayServer` call is made only when the feature exists and the server is
+## not headless.
+var _vk_requested := false
+var _vk_requests := 0
+var _vk_clears := 0
+
 var _box: VBoxContainer
 var _title: Label
 var _badge: Label
@@ -351,6 +360,9 @@ func submit(text: String, origin: String = "draft") -> Dictionary:
 	if _draft_edit != null:
 		_draft_edit.text = ""
 		_refresh_counter()
+	# A sent message ends gamepad editing: the platform keyboard must not stay
+	# over the transcript while the draft focus returns to the field.
+	_sync_virtual_keyboard(false)
 	if had_focus:
 		_set_focus("draft", true)
 	var command: Dictionary = result["command"]
@@ -403,6 +415,9 @@ func focus_snapshot() -> Dictionary:
 		"draft": draft_text,
 		"can_send": bool(draft(draft_text).get("ok", false)),
 		"unread": _unread,
+		"vk_requested": _vk_requested,
+		"vk_requests": _vk_requests,
+		"vk_clears": _vk_clears,
 	}
 
 
@@ -459,7 +474,8 @@ func gamepad_footer() -> String:
 	return _gamepad_footer_text()
 
 
-## Release focus to the surrounding UI. The draft is untouched.
+## Release focus to the surrounding UI. The draft is untouched; a gamepad-owned
+## platform keyboard is cleared because the field no longer has focus.
 func focus_release() -> void:
 	if not _smoke_mode:
 		var control := _focus_control(_focus_id)
@@ -467,6 +483,7 @@ func focus_release() -> void:
 			control.release_focus()
 	_focus_id = ""
 	_gamepad_active = false
+	_sync_virtual_keyboard(false)
 	_update_focus_ring()
 
 
@@ -500,15 +517,23 @@ func _dispatch_gamepad(action: String) -> bool:
 
 func _gamepad_step(backwards: bool) -> bool:
 	focus_step(backwards)
+	_sync_virtual_keyboard(_focus_id == "draft")
 	return true
 
 
 ## `ui_accept` activates the focused control exactly once: the draft submits
 ## through the same guard as Enter, and the send button uses its pressed path.
+## A rejected draft keeps the field open (and the keyboard up); a sent message
+## clears it.
 func _gamepad_accept() -> bool:
 	match _focus_id:
 		"draft":
-			return _submit_from_draft()
+			var result := _submit_from_draft_result()
+			if result.is_empty():
+				return false
+			if not bool(result.get("ok", false)):
+				_sync_virtual_keyboard(true)
+			return true
 		"send":
 			_on_send_pressed()
 			return true
@@ -599,6 +624,9 @@ func _focus_control(target: String) -> Control:
 func _set_focus(target: String, grab: bool) -> void:
 	if not FOCUS_ORDER.has(target):
 		return
+	# Leaving the draft (keyboard, mouse, API, or gamepad) ends gamepad editing.
+	if target != "draft":
+		_sync_virtual_keyboard(false)
 	_focus_id = target
 	_gamepad_active = false
 	_update_focus_ring()
@@ -637,6 +665,8 @@ func _sync_focus_from_viewport() -> void:
 	if next == _focus_id:
 		return
 	_focus_id = next
+	if next != "draft":
+		_sync_virtual_keyboard(false)
 	_update_focus_ring()
 
 
@@ -651,6 +681,43 @@ func _update_focus_ring() -> void:
 	_focus_ring.position = rect.position - _overlay.get_global_rect().position
 	_focus_ring.size = rect.size
 	_focus_ring.visible = true
+
+
+## The platform keyboard is opt-in: headless and platforms without the feature
+## still count intent (for the deterministic smoke) but never call the server.
+func _virtual_keyboard_supported() -> bool:
+	if DisplayServer.get_name() == "headless":
+		return false
+	return DisplayServer.has_feature(DisplayServer.FEATURE_VIRTUAL_KEYBOARD)
+
+
+## Request or clear the platform keyboard for the draft. Every call counts
+## intent exactly once per transition; a repeat request or a clear that was
+## never requested is a no-op, so the counts are deterministic everywhere.
+func _sync_virtual_keyboard(show_keyboard: bool) -> void:
+	if show_keyboard:
+		if _vk_requested:
+			return
+		_vk_requested = true
+		_vk_requests += 1
+		if _virtual_keyboard_supported():
+			DisplayServer.virtual_keyboard_show(
+				_draft_edit.text if _draft_edit != null else ""
+			)
+		return
+	if not _vk_requested:
+		return
+	_vk_requested = false
+	_vk_clears += 1
+	if _virtual_keyboard_supported():
+		DisplayServer.virtual_keyboard_hide()
+
+
+## Hiding the panel ends gamepad editing; the focus ring is kept in sync too.
+func _on_visibility_changed() -> void:
+	_update_focus_ring()
+	if not visible:
+		_sync_virtual_keyboard(false)
 
 
 func _parse_args() -> void:
@@ -811,7 +878,7 @@ func _wire_focus_targets() -> void:
 			controls[(index - 1 + controls.size()) % controls.size()]
 		)
 	resized.connect(_update_focus_ring)
-	visibility_changed.connect(_update_focus_ring)
+	visibility_changed.connect(_on_visibility_changed)
 
 
 func _refresh_labels() -> void:
@@ -929,6 +996,16 @@ func _submit_from_draft() -> bool:
 	var text := _draft_edit.text if _draft_edit != null else ""
 	submit(text, "draft")
 	return true
+
+
+## Same guard as `_submit_from_draft`, but returns the `submit` result so
+## `ui_accept` can tell a send from a rejected draft. An empty dictionary means
+## the guard refused (focus elsewhere, exclusive modal, or IME composing).
+func _submit_from_draft_result() -> Dictionary:
+	if not _can_submit_from_draft():
+		return {}
+	var text := _draft_edit.text if _draft_edit != null else ""
+	return submit(text, "draft")
 
 
 ## First Escape clears a non-empty draft (and its error line); the next one
@@ -1714,14 +1791,93 @@ func _run_smoke() -> void:
 	else:
 		print("CHAT_PANEL_GAMEPAD status=fail checks=%d" % (_checks - gamepad_checks_before))
 
+	# --- Deterministic virtual-keyboard intent (draft + gamepad) ---
+	# Intent is counted on every platform; the DisplayServer call is skipped
+	# headless, so this block runs without a display. No render case is added,
+	# which keeps the CHAT_PANEL checksum at the pre-VK baseline.
+	var vk_failures := _failures
+	var vk_checks_before := _checks
+
+	# Keyboard modality never requests the platform keyboard for the draft.
+	focus_target("draft")
+	var vk := focus_snapshot()
+	_check(not bool(vk["vk_requested"]), "vk.keyboard.not_requested", JSON.stringify(vk))
+	_check(int(vk["vk_requests"]) == 0, "vk.keyboard.no_request", str(vk["vk_requests"]))
+	_check(int(vk["vk_clears"]) == 0, "vk.keyboard.no_clear", str(vk["vk_clears"]))
+
+	# Leaving the draft before any request must not count a clear.
+	vk = gamepad_action("ui_down")
+	_check(str(vk["focus"]) == "send", "vk.leave.focus", str(vk["focus"]))
+	_check(not bool(vk["vk_requested"]), "vk.leave.not_requested", JSON.stringify(vk))
+	_check(int(vk["vk_clears"]) == 0, "vk.leave.no_clear", str(vk["vk_clears"]))
+
+	# Gamepad navigation onto the draft requests it exactly once.
+	vk = gamepad_action("ui_up")
+	_check(str(vk["focus"]) == "draft", "vk.focus.draft", str(vk["focus"]))
+	_check(bool(vk["vk_requested"]), "vk.focus.requested", JSON.stringify(vk))
+	_check(int(vk["vk_requests"]) == 1, "vk.focus.requests", str(vk["vk_requests"]))
+	_check(int(vk["vk_clears"]) == 0, "vk.focus.no_clear", str(vk["vk_clears"]))
+
+	# A rejected `ui_accept` keeps the field open; a repeat request is a no-op.
+	vk = gamepad_action("ui_accept")
+	_check(str(vk["focus"]) == "draft", "vk.duplicate.draft", str(vk["focus"]))
+	_check(bool(vk["vk_requested"]), "vk.duplicate.requested", JSON.stringify(vk))
+	_check(int(vk["vk_requests"]) == 1, "vk.duplicate.requests", str(vk["vk_requests"]))
+	_check(_error_code == "chat.empty", "vk.duplicate.error", _error_code)
+	clear_error()
+
+	# A successful send clears the keyboard and returns focus to the draft.
+	_draft_edit.text = "vk send"
+	_refresh_counter()
+	var commands_before_vk := _commands.size()
+	vk = gamepad_action("ui_accept")
+	_check(_commands.size() == commands_before_vk + 1, "vk.send.emitted", str(_commands.size()))
+	_check(
+		_same_command(_commands[-1], {"type": "chat", "text": "vk send"}),
+		"vk.send.payload",
+		JSON.stringify(_commands[-1])
+	)
+	_check(str(vk["focus"]) == "draft", "vk.send.focus_draft", str(vk["focus"]))
+	_check(not bool(vk["vk_requested"]), "vk.send.cleared", JSON.stringify(vk))
+	_check(int(vk["vk_clears"]) == 1, "vk.send.clears", str(vk["vk_clears"]))
+
+	# Cancel from an empty draft releases focus and clears the keyboard.
+	gamepad_action("ui_down")
+	vk = gamepad_action("ui_up")
+	_check(bool(vk["vk_requested"]), "vk.reopen.requested", JSON.stringify(vk))
+	_check(int(vk["vk_requests"]) == 2, "vk.reopen.requests", str(vk["vk_requests"]))
+	vk = gamepad_action("ui_cancel")
+	_check(str(vk["focus"]) == "", "vk.cancel.focus_released", str(vk["focus"]))
+	_check(not bool(vk["vk_requested"]), "vk.cancel.cleared", JSON.stringify(vk))
+	_check(int(vk["vk_clears"]) == 2, "vk.cancel.clears", str(vk["vk_clears"]))
+
+	# Hiding the panel clears a requested keyboard.
+	vk = gamepad_action("ui_down")
+	_check(str(vk["focus"]) == "draft", "vk.hide.focus_draft", str(vk["focus"]))
+	_check(bool(vk["vk_requested"]), "vk.hide.requested", JSON.stringify(vk))
+	hide()
+	vk = focus_snapshot()
+	_check(not bool(vk["vk_requested"]), "vk.hide.cleared", JSON.stringify(vk))
+	_check(int(vk["vk_clears"]) == 3, "vk.hide.clears", str(vk["vk_clears"]))
+	show()
+
+	if _failures == vk_failures:
+		print("CHAT_PANEL_VK status=ok checks=%d" % (_checks - vk_checks_before))
+	else:
+		print("CHAT_PANEL_VK status=fail checks=%d errors=%d" % [
+			_checks - vk_checks_before, _failures - vk_failures,
+		])
+
 	_case("final")
 
-	_check(_commands.size() == 3, "final.command_count", str(_commands.size()))
-	_check(_same_command(_commands[-1], {"type": "chat", "text": "focus enter"}), "final.last_payload", JSON.stringify(_commands[-1]))
+	# The VK block contributes the fourth and last command ("vk send"); the
+	# render stages (and therefore the CHAT_PANEL checksum) are unchanged.
+	_check(_commands.size() == 4, "final.command_count", str(_commands.size()))
+	_check(_same_command(_commands[-1], {"type": "chat", "text": "vk send"}), "final.last_payload", JSON.stringify(_commands[-1]))
 	_check(_same_command(_commands[0], {"type": "chat", "text": "hello world"}), "final.first_payload", JSON.stringify(_commands[0]))
 
 	var checksum := _fnv32("\n".join(_stages))
-	if _failures == 0 and _commands.size() == 3:
+	if _failures == 0 and _commands.size() == 4:
 		print("CHAT_PANEL status=ok cases=%d checks=%d checksum=%s" % [_cases, _checks, checksum])
 		get_tree().quit(0)
 	else:
