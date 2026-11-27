@@ -13,7 +13,7 @@ tags:
 # Phase 6 Remaining Work
 
 > [!abstract] Purpose
-> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `0cef1fd` (2026-11-27). It is a plan, not an implementation claim.
+> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `9bad00f` (2026-11-27). It is a plan, not an implementation claim.
 
 Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/D-032/D-033/D-035/D-038/D-039/D-040/D-041/D-042, [[09 - Open Questions]] Q-101/Q-117/Q-119/Q-120/Q-121/Q-122/Q-123/Q-124/Q-125/Q-126/Q-127/Q-128, [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]], [[81 - Settlement Tax Composition]], [[82 - Journal and Rollback]], [[83 - Remote Transport and Authentication]], [[84 - Content Registry Modes]].
 
@@ -52,13 +52,15 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 | ✅ Done | Dashboard member cap, chat panel badge, `server_status`, production-UI plan, chat rejection corpus | #439–#443 |
 | ✅ Done | Server-status panel, paged player roster, shutdown save, content-registry benchmark, read-only production settlement shell | #445–#449 |
 | ✅ Done | Roster save matrix, status-watch faults, newer-command protocol corpus, transport resilience, production screen focus | #481–#485 |
+| ✅ Done | Production settlement shell, local/connected mutations, shared-core embedding, gamepad navigation | #449/#454/#465/#472/#488/#497 |
+| ✅ Done | Four-player checksum/save exit script (CI), concurrent status-watch load, lock-lease override | #493/#494/#496 |
 | ⛔ Blocked | Q-101 human playtest; 1M/RTX 3060 render gate | person / reference hardware |
 
 ## 2. Dependency order
 
 | # | Slice | Depends on | Why this order |
 |---:|---|---|---|
-| 1 | Production settlement UI | #343 bridge mutations, #356/#382/#388/#392/#401/#407/#416, #424, #428, #431, #437 | The developer probe is complete (readout, mutations, transfer, paging); the player-facing UI remains |
+| 1 | ~~Production settlement UI~~ **done** | #343, #449/#454/#465/#472/#488/#497 | The production shell, connected mutations, shared-core embedding, and gamepad navigation are complete |
 | 2 | Settlement tax treasury consumer after D-039 acceptance | D-030/D-031 | The pure helper exists, but the rate is data-only; applying it needs a precedence decision against district weights |
 | 3 | Blueprint lock reconnect-retention UX | #349 v0 locks, #363/#374 UI, #369 leases, #375 retention, #380 CLI, #393 player scope | Lease expiry, retention, CLI, and concurrent-session release are done; decide automatic renewal and client lock list |
 | 4 | Concurrent listener remote-load tuning | #269, #350, #373, #383, #389, #395, #402 | Slow readers, closed queues, shutdown, session cap, fan-out, and sustained load are covered; remote/network-latency tuning remains |
@@ -73,7 +75,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.1 Settlement write controls
 
-**Scope.** Dashboard and a connected client should found, claim, rename, transfer, invite, set role, remove, release (Admin), and set tax through the bridge/server commands that already exist. The dashboard has the `Shift+T` tax cycle (#356), `Shift+C` unowned claim (#382), `Shift+Y` transfer (#388), `Shift+X` release (#392), `Shift+R` rename (#401), and `Shift+I`/`Shift+M`/`Shift+Delete` invite/role/remove (#407); #370 adds full owner/member/permission rows to the read-only district panel; #381 adds local player selection and #387 release to the settlement editor; #424 adds the connected-client readout, #431 adds connected-client rename/set-tax/release/invite/set-role/remove/claim, and #428 adds server-side list paging. #437 adds connected-client transfer and paged lists, and #446 adds the paged player roster; #449 adds the first read-only production settlement shell. Remaining: production mutations in that shell, beyond the developer probe.
+**Scope.** Dashboard and a connected client should found, claim, rename, transfer, invite, set role, remove, release (Admin), and set tax through the bridge/server commands that already exist. The dashboard has the `Shift+T` tax cycle (#356), `Shift+C` unowned claim (#382), `Shift+Y` transfer (#388), `Shift+X` release (#392), `Shift+R` rename (#401), and `Shift+I`/`Shift+M`/`Shift+Delete` invite/role/remove (#407); #370 adds full owner/member/permission rows to the read-only district panel; #381 adds local player selection and #387 release to the settlement editor; #424 adds the connected-client readout, #431 adds connected-client rename/set-tax/release/invite/set-role/remove/claim, and #428 adds server-side list paging. #437 adds connected-client transfer and paged lists, and #446 adds the paged player roster; #449 adds the first read-only production settlement shell, #454 its local mutations, #465/#472 its connected read/paging and full mutation set, #488 embeds it with a shared core, and #497 adds gamepad navigation plus virtual-keyboard intent. No remaining work in this slice.
 
 **Protocol/save.** No new command or save field. Reuse `settlement_*` v1 shapes and `settlement_updated`.
 
@@ -111,7 +113,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.4 Concurrent listeners and outbound queue
 
-**Scope.** #373 adds a bounded `OutboundQueue`; #383 wires a per-connection writer thread; #389 runs every accepted socket on its own session thread against the shared world and closes only a backpressured recipient; #395/#402 add the stress matrix (fan-out, sustained load, shutdown with queued writes, ordering). Remaining: remote-load tuning with injected latency, not more local cases.
+**Scope.** #373 adds a bounded `OutboundQueue`; #383 wires a per-connection writer thread; #389 runs every accepted socket on its own session thread against the shared world and closes only a backpressured recipient; #395/#402 add the stress matrix (fan-out, sustained load, shutdown with queued writes, ordering); #493 adds four concurrent status watchers under chat traffic with an unchanged checksum. Remaining: remote-load tuning with injected latency, a stalled/non-reading watcher case, and more local cases only where they cover a distinct failure.
 
 **Protocol/save.** No wire-shape change. Add backpressure/closure codes and a bounded queue metric.
 
@@ -219,10 +221,9 @@ Prove, on reference hardware and with four players:
 
 ## 7. Immediate order
 
-1. Tax consumer after D-039 acceptance (§3.2); all dashboard settlement controls are done.
-2. Blueprint lock reconnect policy (§3.3); leases, retention, CLI, player-scoped release, and forced-unlock audit are done.
-3. Concurrent listener remote-load tuning (§3.4) and chat-panel reconnect presentation (§3.5); push/client listener/unread HUD/badge are done.
-4. Resource-pack registry policy after D-042/Q-127/Q-128 (§3.5/§3.9); the parser, opt-in server manifest path, and bridge reader exist.
-5. Accept or revise D-038; answer Q-119/Q-120; then voxel edit v1 (§3.6).
-7. Journal after D-040/Q-123/Q-124 (§3.7), schema freeze (§3.8), remote auth after D-041 (§3.9).
-8. Run the exit scenarios (§3.10) and the human/hardware gates.
+1. Tax consumer after D-039 acceptance (§3.2).
+2. Concurrent listener remote-load tuning and the stalled-watcher case (§3.4); the status-watch load path is covered.
+3. Resource-pack registry policy after D-042/Q-127/Q-128 (§3.5/§3.9); the parser, opt-in server manifest path, and bridge reader exist.
+4. Accept or revise D-038; answer Q-119/Q-120; then voxel edit v1 (§3.6).
+5. Journal after D-040/Q-123/Q-124 (§3.7), schema freeze (§3.8), remote auth after D-041 (§3.9).
+6. Extend the automated exit script (§3.10), then run the human/reference-hardware gates.
