@@ -11,7 +11,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,7 @@ const CONTENT_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123
 const BIN: &str = env!("CARGO_BIN_EXE_townsmith-server");
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
+static SERIAL: Mutex<()> = Mutex::new(());
 
 struct TempDir(PathBuf);
 
@@ -229,6 +230,7 @@ fn assert_closed(stream: &mut TcpStream) {
 #[cfg(unix)]
 #[test]
 fn sigterm_saves_with_four_active_clients_and_closes_them() {
+    let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
     let temp = TempDir::new();
     let save = temp.save();
     let mut server = Server::start(&save, &[]);
@@ -276,6 +278,7 @@ fn sigterm_saves_with_four_active_clients_and_closes_them() {
 #[cfg(unix)]
 #[test]
 fn sigterm_saves_while_one_client_is_not_reading() {
+    let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
     let temp = TempDir::new();
     let save = temp.save();
     let mut server = Server::start(&save, &[]);
@@ -309,6 +312,7 @@ fn sigterm_saves_while_one_client_is_not_reading() {
 #[cfg(unix)]
 #[test]
 fn sigterm_saves_with_a_client_mid_frame() {
+    let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
     let temp = TempDir::new();
     let save = temp.save();
     let mut server = Server::start(&save, &[]);
@@ -332,6 +336,7 @@ fn sigterm_saves_with_a_client_mid_frame() {
 
 #[test]
 fn sessions_one_disconnect_save_is_portable() {
+    let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
     let temp = TempDir::new();
     let save = temp.save();
     let mut server = Server::start(&save, &["--sessions", "1"]);
