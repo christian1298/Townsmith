@@ -145,6 +145,38 @@ found:Harbor|list|at:0,0|set_tax:12|rename:Port Harbor|invite:7:builder|set_role
 
 **Rejection handling.** A `reject { code, message }` is matched to the pending action. The client records the stable code, leaves the cached record unchanged, and continues with the next action (except the stale-revision rule above). The server decides every role and permission gate; the client does not pre-check the global dev role, and it never retries a rejected mutation automatically. Transport failure or a malformed response still ends the run through the existing `MP_WORLD_CLIENT status=fail error=...` path.
 
+### 3.3 Connected read-only probe
+
+`godot/settlement_mp_probe.tscn` is the standalone wire-level counterpart to the local settlement shell and dashboard. It opens a real TCP protocol v1 session, founds one deterministic `Harbor` fixture at `(0,0)` with radius 64 m as the Mayor session owner, then only reads. It renders a compact English detail panel (name, id, owner, revision, tax, member count, and the resolved roster count) and exits. It never opens a local `TownsmithCore`, never calls a bridge mutation, and never writes a world save. The production settlement screen and the existing clients are unchanged.
+
+```bash
+# Server
+cargo run --release -p townsmith-server -- --listen 47015 --once
+
+# Probe
+GODOT=/path/to/godot "${GODOT:-godot}" --path godot res://settlement_mp_probe.tscn -- --port 47015
+
+# Pinned two-run smoke (fresh server per run)
+GODOT=/path/to/godot ./scripts/smoke_settlement_mp_probe.sh
+```
+
+The wire sequence after `hello` is:
+
+1. `found_settlement { name: "Harbor", x: 0, z: 0, radius_m: 64 }`, waiting for `settlement_found`.
+2. `settlement_list { after_id: 0, limit: 8 }`; the first page must hold exactly one record.
+3. `settlement_list { after_id: <first page next_after>, limit: 8 }`; the walked page must be empty with `has_more: false`.
+4. `player_list { after_id: 0, limit: 8 }`; the owner id from the record must resolve to the hello display name.
+5. `settlement_at { x: 0, z: 0 }`; the containing record id must match the founded id.
+6. `disconnect`.
+
+The only mutation is the founding fixture itself. Every subsequent command is a Viewer read and the server remains authoritative. `--smoke` prints one additive marker:
+
+```text
+MP_SETTLEMENT_PROBE status=ok settlements=1 players=1 at=<id> owner=<id> revision=1 checksum=<16 hex>
+```
+
+The checksum is SHA-256 over ascending `id|name|owner_id|revision|tax|member_ids` lines, first 16 hex. A reject, timeout, malformed response, or mismatched read prints `MP_SETTLEMENT_PROBE status=fail code=...` and exits non-zero. The smoke harness starts a fresh `townsmith-server --listen PORT --once` per run, polls the `SERVER_LISTEN` line, runs the probe twice, and requires identical markers.
+
 ## 4. Panel and display
 
 The current panel is a right-side `PanelContainer`, hidden until at least one settlement record is known:
