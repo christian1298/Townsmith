@@ -2,7 +2,7 @@
 title: Connected Settlement Surface
 project: Townsmith
 status: active
-updated: 2026-11-26
+updated: 2026-11-27
 tags:
   - townsmith
   - multiplayer
@@ -17,7 +17,7 @@ tags:
 > The opt-in settlement probe in `godot/mp_world_client.gd`: the read-only client readout merged as **#424**, and the planned mutation actions that follow it. It is a connected-client debug surface over the existing D-033 protocol commands. It adds **no** protocol command, wire field, save field, or ADR. [[48 - Settlement Boundaries]] §3 is the command contract; [[05 - Multiplayer]] §5 is the server behavior.
 
 > [!success] Status: readout and scripted mutations implemented
-> `--settlement-ui` implements readout plus `rename`, `set_tax`, `release`, `invite`, `set_role`, `remove`, `claim`, and `transfer`, including settlement-list paging. They reuse the commands accepted by `ServerWorld`; the server remains authoritative. Without `--settlement-ui`, no settlement code runs. §7 is a planning section only: none of the production screens, input model, or localized states exist yet.
+> `--settlement-ui` implements readout plus `rename`, `set_tax`, `release`, `invite`, `set_role`, `remove`, `claim`, and `transfer`, including settlement-list paging. They reuse the commands accepted by `ServerWorld`; the server remains authoritative. Without `--settlement-ui`, no settlement code runs. §7's read-only local shell is now implemented (§7 status below); the connected transport, mutation controls, permission matrix, focus model, and canonical navigation remain planning.
 
 ## 1. Where it sits
 
@@ -203,8 +203,30 @@ No sleeps are used; readiness is the bounded server-log poll. The checksum is SH
 
 ## 7. Production UI plan
 
-> [!note] Planning only
-> This section is the target **production settlement surface**. None of it is implemented: §1–§6 remain the developer probe, and the dashboard in [[57 - Dashboard and Advisor]] remains the current local settlement surface. The plan uses the existing D-033 commands, the `settlements_page` read in [[42 - World Placement Bridge]], and the EN/DE string rules in [[16 - Localization]]. It does not add a protocol command, wire field, save field, permission, or ADR.
+> [!success] Shell implemented (read-only)
+> The standalone `godot/settlement_screen.tscn` implements the first **production settlement shell** slice over the local bridge. It is not connected to the server and it performs no mutation.
+>
+> **Implemented**
+> - Cursor-paged list (`settlements_page(after_id, limit)`, 8 rows/page) with name, `#id`, owner name/`#id` or `unowned`, tax, membership revision, and member count. The cursor is the order; the client never re-sorts a page.
+> - PageUp/PageDown, click and arrow-key selection, page-local number keys 1–8, and a `+N more` footer. Selection is preserved by id across a refresh, otherwise it resets to the first row.
+> - Read-only detail: identity, centre/radius, owner, tax, revision, and one row per member with a resolved name or the plain `#id` fallback, localized role, and localized permission tokens.
+> - `Projected local multiplier: xN.NN (preview, D-039 proposed)` from the stateless `tax_projection(rate)` helper.
+> - Localized empty, unavailable, and select-a-row states; header shows the `Local` authority mode.
+> - EN/DE keys under `base.ui.settlement_screen.*` in `godot/world_i18n.gd`; numbers use `WorldI18n.format_int`/`format_float`.
+>
+> **Excluded on purpose**
+> - No claim, rename, transfer, release, invite, set-role, remove-member, or set-tax controls. No founding; founding stays in the placement flow.
+> - No connected transport, permission matrix, conflicting-revision UI, or mutation request/response.
+> - No gamepad focus model, screen-reader announcements, or modal confirmation flow; §7.2 and §7.6 remain the target.
+> - The dashboard, settlement editor, and connected client are untouched.
+>
+> **Smoke**
+> `GODOT=/path/to/godot ./scripts/smoke_settlement_screen.sh` seeds 23 local settlements (one unowned, one owned with owner + manager + builder + member + an unregistered member, varied tax) and asserts 8/8/7 paging, page-local selection, name/`#id` fallbacks, projections at 0/5/100/invalid, EN/DE key coverage, and identical two-run output. Final marker:
+> `SETTLEMENT_SCREEN status=ok pages=3 settlements=23 selected=2 checksum=<16 hex>`
+>
+> **Remaining mutations** (target §7.1–§7.4, no new ADR): claim, rename, set tax, invite, set role, remove member, transfer, and release, each behind the permission/ceiling matrix and confirmation rules. The connected transport and a read-only roster/name source are prerequisites for member-name parity. `settlements_page` and `players_list` are already read-only; no bridge change is required for this slice.
+
+The rest of this section is the target **production settlement surface**. §1–§6 remain the developer probe, and the dashboard in [[57 - Dashboard and Advisor]] remains the current local settlement surface. The plan uses the existing D-033 commands, the `settlements_page` read in [[42 - World Placement Bridge]], and the EN/DE string rules in [[16 - Localization]]. It does not add a protocol command, wire field, save field, permission, or ADR.
 
 ### 7.1 Screens and surfaces
 
