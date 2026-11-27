@@ -968,6 +968,151 @@ fn the_session_cap_never_admits_the_next_connection() {
     }
 }
 
+struct OneByteReader<'a>(&'a mut TcpStream);
+
+impl std::io::Read for OneByteReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        self.0.read(&mut buf[..1])
+    }
+}
+
+fn framed(command: &ClientCommand) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    write_json_frame(&mut bytes, command).expect("encode frame");
+    bytes
+}
+
+#[test]
+fn one_byte_writes_and_reads_decode_exactly_once() {
+    let (listener, address) = bind();
+    let server = start_server(listener, 1);
+    let mut stream = connect(address);
+
+    let hello_bytes = framed(&hello("chunked"));
+    for byte in &hello_bytes {
+        std::io::Write::write_all(&mut stream, &[*byte]).expect("write hello byte");
+    }
+    let welcome: ServerMessage =
+        read_json_frame(&mut OneByteReader(&mut stream)).expect("read welcome byte-by-byte");
+    assert!(matches!(
+        welcome,
+        ServerMessage::Welcome {
+            tick: 0,
+            resumed: false,
+            ..
+        }
+    ));
+
+    let ping_bytes = framed(&ping(7));
+    for byte in &ping_bytes {
+        std::io::Write::write_all(&mut stream, &[*byte]).expect("write ping byte");
+    }
+    let pong: ServerMessage =
+        read_json_frame(&mut OneByteReader(&mut stream)).expect("read pong byte-by-byte");
+    assert_eq!(pong, ServerMessage::Pong { nonce: 7 });
+
+    let goodbye_bytes = framed(&ClientCommand::Disconnect);
+    for byte in &goodbye_bytes {
+        std::io::Write::write_all(&mut stream, &[*byte]).expect("write disconnect byte");
+    }
+    let goodbye: ServerMessage =
+        read_json_frame(&mut OneByteReader(&mut stream)).expect("read goodbye byte-by-byte");
+    assert_eq!(goodbye, ServerMessage::Goodbye);
+
+    let report = join_within(server);
+    assert_eq!(report.sessions, 1);
+    assert_eq!(report.commands, 3);
+    assert_untouched_world(&report);
+}
+
+#[test]
+fn truncated_frame_then_eof_applies_nothing() {
+    let (listener, address) = bind();
+    let server = start_server(listener, 1);
+    let mut stream = hello_client(address, "truncated");
+
+    let ping_bytes = framed(&ping(11));
+    std::io::Write::write_all(&mut stream, &ping_bytes[..5]).expect("write partial frame");
+    stream.shutdown(Shutdown::Write).expect("half-close write");
+
+    let result: Result<ServerMessage, FrameError> = read_json_frame(&mut stream);
+    assert!(
+        matches!(
+            result,
+            Err(FrameError::Truncated { .. }) | Err(FrameError::Io(_))
+        ),
+        "expected truncation/EOF, got {result:?}"
+    );
+
+    let report = join_within(server);
+    assert_eq!(report.sessions, 1);
+    assert_eq!(report.commands, 1, "only hello was complete");
+    assert_untouched_world(&report);
+}
+
+#[test]
+fn half_close_after_a_command_still_delivers_the_response() {
+    let (listener, address) = bind();
+    let server = start_server(listener, 1);
+    let mut stream = hello_client(address, "half-close");
+
+    std::io::Write::write_all(&mut stream, &framed(&ping(21))).expect("write ping");
+    stream.shutdown(Shutdown::Write).expect("half-close write");
+
+    let pong: ServerMessage = read_json_frame(&mut stream).expect("read pong after half-close");
+    assert_eq!(pong, ServerMessage::Pong { nonce: 21 });
+
+    let result: Result<ServerMessage, FrameError> = read_json_frame(&mut stream);
+    assert!(
+        matches!(
+            result,
+            Err(FrameError::Truncated { .. }) | Err(FrameError::Io(_))
+        ),
+        "expected EOF after the response, got {result:?}"
+    );
+
+    let report = join_within(server);
+    assert_eq!(report.commands, 2, "hello and one ping");
+    assert_untouched_world(&report);
+}
+
+#[test]
+fn coalesced_frames_apply_in_order_without_duplicates() {
+    let (listener, address) = bind();
+    let server = start_server(listener, 1);
+    let mut stream = hello_client(address, "coalesced");
+
+    let mut batch = framed(&ClientCommand::SetTax {
+        resident_rate: 12,
+        business_rate: 8,
+    });
+    batch.extend_from_slice(&framed(&ClientCommand::SetTax {
+        resident_rate: 13,
+        business_rate: 9,
+    }));
+    std::io::Write::write_all(&mut stream, &batch).expect("write coalesced frames");
+
+    for tick in 1..=2 {
+        match read_message(&mut stream) {
+            ServerMessage::Snapshot { tick: actual, .. } => assert_eq!(actual, tick),
+            other => panic!("expected snapshot {tick}, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        exchange(&mut stream, &ClientCommand::Disconnect).expect("disconnect"),
+        ServerMessage::Goodbye
+    );
+
+    let report = join_within(server);
+    assert_eq!(report.tick, 2);
+    assert_eq!(report.commands, 4, "hello, two set_tax, disconnect");
+    assert_eq!(report.saves, 0);
+    assert_ne!(report.checksum, fresh_checksum());
+}
+
 fn test_shared() -> SharedServer {
     SharedServer {
         world: Mutex::new(ServerWorld::new(LOOPBACK_SEED)),
