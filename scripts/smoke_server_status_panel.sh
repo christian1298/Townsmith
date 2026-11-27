@@ -3,12 +3,20 @@ set -euo pipefail
 
 # Read-only server-status panel smoke: Rust server `--listen` <-> Godot panel.
 #
-# Starts a fresh `townsmith-server --once` on an ephemeral loopback port, waits
-# for `SERVER_LISTEN`, runs the headless status panel, and asserts the
-# `SERVER_STATUS_PANEL status=ok ...` marker. The world is unmodified and the
-# same commands run against a second fresh server; both markers must match
-# byte for byte. Readiness and completion are bounded polls of the server log;
-# there are no fixed sleeps. The server is killed on exit.
+# Valid path: starts a fresh `townsmith-server --once` on an ephemeral loopback
+# port, waits for `SERVER_LISTEN`, runs the headless status panel, and asserts
+# the `SERVER_STATUS_PANEL status=ok ...` marker. The same command runs against
+# a second fresh server; both markers must match byte for byte.
+#
+# Fault paths (no fixed sleeps, all bounded):
+#   - a closed loopback port -> status.connect
+#   - a server pinned to a different --content-hash -> content_hash.mismatch
+#   - fixtures with a missing/wrong-typed field -> status.shape
+#   - a fixture with an unknown field -> tolerated (status=ok)
+#   - a fixture with valid zero counters -> status=ok tick=0 population=0 ...
+#
+# Readiness and completion are bounded polls of the server log. The server is
+# killed on exit.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GODOT_BIN="${GODOT:-godot}"
@@ -81,8 +89,16 @@ sys.exit(1)
 PY
 }
 
+fail() {
+	echo "Server status panel smoke failed ($1): $2" >&2
+	exit 1
+}
+
 SERVER_LOG="$(mktemp)"
+FIXTURE_DIR="$(mktemp -d)"
 SERVER_PID=""
+OUTPUT=""
+GODOT_STATUS=0
 
 stop_server() {
 	if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -97,47 +113,100 @@ stop_server() {
 cleanup() {
 	stop_server
 	rm -f "$SERVER_LOG"
+	rm -rf "$FIXTURE_DIR"
 }
 trap cleanup EXIT
 
-# run_panel LABEL -> prints the marker line on stdout.
+start_server() {
+	local port="$1"
+	shift
+	: >"$SERVER_LOG"
+	"$ROOT/target/debug/townsmith-server" --listen "$port" --once "$@" >"$SERVER_LOG" 2>&1 &
+	SERVER_PID=$!
+	wait_for_log "$SERVER_LOG" "$SERVER_PID" "SERVER_LISTEN status=ok address=" 10
+}
+
+# run_godot LABEL [panel args...]
 #
-# Each run gets its own server process, port, and in-memory world, so a second
-# run checks determinism rather than accumulating state.
+# Captures stdout/stderr in OUTPUT and the exit status in GODOT_STATUS.
+run_godot() {
+	local label="$1"
+	shift
+	set +e
+	OUTPUT="$(timeout 60s "$GODOT_BIN" --headless --path "$ROOT/godot" \
+		res://server_status_panel.tscn -- "$@" 2>&1)"
+	GODOT_STATUS=$?
+	set -e
+	printf '%s\n' "$OUTPUT" >&2
+}
+
+marker_line() {
+	grep "^SERVER_STATUS_PANEL " <<<"$OUTPUT" | tail -1 || true
+}
+
+assert_ok_marker() {
+	local label="$1"
+	local line="$2"
+	if [[ -z "$line" ]]; then
+		fail "$label" "no SERVER_STATUS_PANEL marker"
+	fi
+	if [[ ! "$line" =~ ^SERVER_STATUS_PANEL\ status=ok\ tick=[0-9]+\ population=[0-9]+\ settlements=[0-9]+\ checksum=[0-9a-f]{16}$ ]]; then
+		fail "$label" "bad marker: $line"
+	fi
+}
+
+# expect_fail LABEL CODE [panel args...]
+#
+# A matching `--expect-fail` turns the panel failure into exit 0; the marker
+# must still name the expected stable code.
+expect_fail() {
+	local label="$1"
+	local expected="$2"
+	shift 2
+	run_godot "$label" --expect-fail "$expected" "$@"
+	if [[ $GODOT_STATUS -ne 0 ]]; then
+		fail "$label" "Godot exited with status $GODOT_STATUS, expected $expected"
+	fi
+	local line
+	line="$(marker_line)"
+	if [[ "$line" != "SERVER_STATUS_PANEL status=fail code=$expected" ]]; then
+		fail "$label" "expected code=$expected, got: ${line:-<no marker>}"
+	fi
+}
+
+# expect_fixture_ok LABEL PATH EXPECTED_MARKER
+expect_fixture_ok() {
+	local label="$1"
+	local path="$2"
+	local expected="$3"
+	run_godot "$label" --smoke --fixture-json "$path"
+	if [[ $GODOT_STATUS -ne 0 ]]; then
+		fail "$label" "Godot exited with status $GODOT_STATUS"
+	fi
+	local line
+	line="$(marker_line)"
+	if [[ "$line" != "$expected" ]]; then
+		fail "$label" "expected '$expected', got: ${line:-<no marker>}"
+	fi
+}
+
+# Valid path: each run gets its own server process, port, and in-memory world,
+# so a second run checks determinism rather than accumulating state.
 run_panel() {
 	local label="$1"
 	local port
 	port="$(pick_port)"
 
-	: >"$SERVER_LOG"
-	"$ROOT/target/debug/townsmith-server" --listen "$port" --once >"$SERVER_LOG" 2>&1 &
-	SERVER_PID=$!
-	wait_for_log "$SERVER_LOG" "$SERVER_PID" "SERVER_LISTEN status=ok address=" 10
-
-	set +e
-	OUTPUT="$(timeout 60s "$GODOT_BIN" --headless --path "$ROOT/godot" \
-		res://server_status_panel.tscn -- \
-		--smoke --host 127.0.0.1 --port "$port" \
-		--name status-panel --timeout-ms 5000 2>&1)"
-	GODOT_STATUS=$?
-	set -e
-	printf '%s\n' "$OUTPUT" >&2
-
+	start_server "$port"
+	run_godot "$label" --smoke --host 127.0.0.1 --port "$port" \
+		--name status-panel --timeout-ms 5000
 	if [[ $GODOT_STATUS -ne 0 ]]; then
-		echo "Server status panel smoke failed ($label): Godot exited with status $GODOT_STATUS" >&2
-		exit 1
+		fail "$label" "Godot exited with status $GODOT_STATUS"
 	fi
 
 	local line
-	line="$(grep "^SERVER_STATUS_PANEL " <<<"$OUTPUT" | tail -1 || true)"
-	if [[ -z "$line" ]]; then
-		echo "Server status panel smoke failed ($label): no SERVER_STATUS_PANEL marker" >&2
-		exit 1
-	fi
-	if [[ ! "$line" =~ ^SERVER_STATUS_PANEL\ status=ok\ tick=[0-9]+\ population=[0-9]+\ settlements=[0-9]+\ checksum=[0-9a-f]{16}$ ]]; then
-		echo "Server status panel smoke failed ($label): bad marker: $line" >&2
-		exit 1
-	fi
+	line="$(marker_line)"
+	assert_ok_marker "$label" "$line"
 
 	# A requested disconnect is visible in the server report; wait for it so
 	# the process exits on its own rather than relying on cleanup.
@@ -159,6 +228,45 @@ run_panel() {
 	printf '%s\n' "$line"
 }
 
+python3 - "$FIXTURE_DIR" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+base = {
+    "type": "server_status",
+    "tick": 0,
+    "population": 0,
+    "balance": 0,
+    "roads": 0,
+    "buildings": 0,
+    "settlements": 0,
+    "placements": 0,
+    "online": 1,
+    "chat_seq": 0,
+    "locks": 0,
+    "checksum": "0000000000000000",
+}
+
+def write(name, data):
+    (root / name).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+write("zero.json", base)
+
+missing = dict(base)
+missing.pop("tick")
+write("missing_tick.json", missing)
+
+wrong_type = dict(base)
+wrong_type["tick"] = "0"
+write("wrong_type.json", wrong_type)
+
+extra = dict(base)
+extra["future_field"] = {"nested": True}
+write("extra_field.json", extra)
+PY
+
 FIRST_LINE="$(run_panel first)"
 SECOND_LINE="$(run_panel second)"
 
@@ -169,4 +277,32 @@ if [[ "$FIRST_LINE" != "$SECOND_LINE" ]]; then
 	exit 1
 fi
 
+# Connection refused (or a connect timeout): the port was just released and
+# nothing is listening on it.
+CLOSED_PORT="$(pick_port)"
+expect_fail "closed-port" "status.connect" \
+	--smoke --host 127.0.0.1 --port "$CLOSED_PORT" --timeout-ms 2000
+
+# The server pins a different content hash, so the hello is rejected with the
+# server's own stable code.
+PIN_HASH="$(python3 -c 'print("f" * 64)')"
+PIN_PORT="$(pick_port)"
+start_server "$PIN_PORT" --content-hash "$PIN_HASH"
+expect_fail "content-hash-pin" "content_hash.mismatch" \
+	--smoke --host 127.0.0.1 --port "$PIN_PORT" --name status-panel --timeout-ms 5000
+stop_server
+
+# Shape faults and forward-compatible extras are checked without a socket.
+expect_fail "fixture-missing-tick" "status.shape" \
+	--smoke --fixture-json "$FIXTURE_DIR/missing_tick.json"
+expect_fail "fixture-wrong-type" "status.shape" \
+	--smoke --fixture-json "$FIXTURE_DIR/wrong_type.json"
+
+# Zero values are valid and extras are ignored by the protocol; both must
+# render the same authoritative marker.
+ZERO_MARKER="SERVER_STATUS_PANEL status=ok tick=0 population=0 settlements=0 checksum=0000000000000000"
+expect_fixture_ok "fixture-zero" "$FIXTURE_DIR/zero.json" "$ZERO_MARKER"
+expect_fixture_ok "fixture-extra-field" "$FIXTURE_DIR/extra_field.json" "$ZERO_MARKER"
+
+echo "SERVER_STATUS_PANEL_FAULTS status=ok connect=1 reject=1 shape=2 fixture_ok=2"
 echo "SERVER_STATUS_PANEL_SMOKE status=ok runs=2 $FIRST_LINE"
