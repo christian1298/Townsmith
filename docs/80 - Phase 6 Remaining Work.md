@@ -182,6 +182,9 @@ Prove, on reference hardware and with four players:
 7. Bandwidth and tick time stay within target on the reference matrix.
 8. A missing/mismatched content pack fails closed with the documented read-only or blocked path.
 
+> [!note] Automated so far (2026-11-27)
+> `crates/server/tests/four_player_exit.rs` runs four real v1 TCP clients against the production `run_listen` on an ephemeral loopback port and scripts one city: distinct-player hello, settlement found/invite/set-role/set-tax, two-player advisory lock contention with an unchanged tick/checksum on rejection, one authoritative fixture placement plus an idempotent duplicate, a four-recipient chat broadcast, a 3–1 pause vote, one disconnect/resume, and a read-only tail. It pins tick `3` / checksum `cdbe19ba10ed8ec5`, asserts the save reloads to the same checksum with exactly one placement and no `.tmp`, and closes every session cleanly. Session roles remain process-wide under `run_listen` (all four sessions run as Mayor), so protocol-level role-forbidden paths, admin `time_control`/`settlement_release`/force-unlock, the one-hour soak, bandwidth/tick timing, and "edit while another places" beyond lock contention still need humans or reference hardware.
+
 ## 4. Cut lines
 
 **Cannot cut:** server authority, save reliability, reconnect, D-021 time semantics, D-032 placement authority, D-033 settlement enforcement, content mismatch failure, the 4-player proof.
