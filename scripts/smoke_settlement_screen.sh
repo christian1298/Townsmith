@@ -34,6 +34,7 @@ trap 'rm -rf "$SMOKE_DIR"' EXIT
 
 CONTRACT='^SETTLEMENT_SCREEN status=ok pages=3 settlements=23 selected=2 actions=11 accepted=8 rejected=3 checksum=[0-9a-f]{16}$'
 PAGES_CONTRACT='^SETTLEMENT_SCREEN_PAGES sizes=8/8/7 selected_last=23$'
+FOCUS_CONTRACT='^SETTLEMENT_SCREEN_FOCUS group=rows tab=paging shift=ok arrows=ok modal=trap esc=detail$'
 NAMES_CONTRACT='^SETTLEMENT_SCREEN_NAMES owner=Mayor#7 manager=Manager#11 builder=Builder#13 member=Member#12 fallback=#9001 owner_fallback=#9002$'
 PROJECTION_CONTRACT='^SETTLEMENT_SCREEN_PROJECTION tax0=x1\.00 tax5=x1\.05 tax100=x2\.00 invalid=tax\.projection\.rate_out_of_range$'
 LOCALE_CONTRACT='^SETTLEMENT_SCREEN_LOCALE en=ok de=ok$'
@@ -83,6 +84,7 @@ run_screen() {
 		local name contract_name
 		for pair in \
 			"SETTLEMENT_SCREEN_PAGES|$PAGES_CONTRACT" \
+			"SETTLEMENT_SCREEN_FOCUS|$FOCUS_CONTRACT" \
 			"SETTLEMENT_SCREEN_NAMES|$NAMES_CONTRACT" \
 			"SETTLEMENT_SCREEN_PROJECTION|$PROJECTION_CONTRACT" \
 			"SETTLEMENT_SCREEN_LOCALE|$LOCALE_CONTRACT"; do
@@ -101,7 +103,7 @@ run_screen() {
 		done
 	fi
 
-	grep -E '^SETTLEMENT_SCREEN(_PAGES|_NAMES|_PROJECTION|_LOCALE)? ' <<<"$output" | grep -v '^SETTLEMENT_SCREEN status=' >"$log" || true
+	grep -E '^SETTLEMENT_SCREEN(_PAGES|_FOCUS|_NAMES|_PROJECTION|_LOCALE)? ' <<<"$output" | grep -v '^SETTLEMENT_SCREEN status=' >"$log" || true
 	printf '%s\n' "$marker" >"$marker_file"
 }
 

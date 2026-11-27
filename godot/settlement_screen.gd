@@ -68,6 +68,32 @@ const ACTION_LABEL_KEYS := {
 	"release": "base.ui.settlement_screen.action.release",
 }
 
+## Fixed Tab order from docs/85 §7.2. Rows, detail, and members are skipped
+## while they have no content; tax and the action bar are always present.
+const FOCUS_GROUPS := ["header", "paging", "rows", "detail", "members", "tax", "actions"]
+## Actions reachable from the focus model's action group. Tax is its own stop.
+const FOCUS_ACTION_ORDER := [
+	"claim",
+	"rename",
+	"transfer",
+	"invite",
+	"cycle_role",
+	"remove_member",
+	"release",
+]
+const MODAL_EDIT := 0
+const MODAL_CANCEL := 1
+const MODAL_SAVE := 2
+const MODAL_FOCUS_ORDER := [MODAL_EDIT, MODAL_CANCEL, MODAL_SAVE]
+## Local rename codes are shape validation, not server rejection codes. They
+## map to the `rename.*` text keys instead of leaking the raw code.
+const RENAME_ERROR_KEYS := {
+	"empty_name": "base.ui.settlement_screen.rename.empty",
+	"name_too_long": "base.ui.settlement_screen.rename.too_long",
+	"name_unchanged": "base.ui.settlement_screen.rename.unchanged",
+	"invalid_name": "base.ui.settlement_screen.rename.invalid",
+}
+
 ## Permission bit -> localized token. Mirrors `SettlementPermission` in
 ## `core_city::settlement`; only granted tokens are rendered.
 const MEMBER_PERMISSION_KEYS := [
@@ -94,6 +120,8 @@ const FIXTURE_FALLBACK_MEMBER_ID := 9001
 
 const MUTED_COLOR := Color(0.66, 0.71, 0.78)
 const TEXT_COLOR := Color(0.88, 0.91, 0.95)
+const FOCUS_COLOR := Color(0.36, 0.78, 1.0, 0.95)
+const FOCUS_HALO_COLOR := Color(0.36, 0.78, 1.0, 0.3)
 
 const DEFAULT_HOST := "127.0.0.1"
 const DEFAULT_PORT := 47015
@@ -150,13 +178,28 @@ var _action_count := 0
 var _accepted_count := 0
 var _rejected_count := 0
 
+# Focus model. The screen owns focus explicitly so keyboard, mouse, and the
+# headless smoke all move through the same deterministic groups.
+var _focus_group := "header"
+var _focus_paging := 0
+var _focus_action := 0
+var _focus_member_index := 0
+var _modal_focus := MODAL_EDIT
+var _modal_opener_group := "actions"
+var _modal_opener_action := "rename"
+
 var _title_label: Label
 var _authority_label: Label
 var _world_checksum_label: Label
+var _header: HBoxContainer
+var _page_bar: HBoxContainer
+var _page_prev: Button
+var _page_next: Button
 var _page_label: Label
 var _list: ItemList
 var _more_label: Label
 var _help_label: Label
+var _detail_box: VBoxContainer
 var _detail_title: Label
 var _detail_center: Label
 var _detail_owner: Label
@@ -165,10 +208,12 @@ var _detail_revision: Label
 var _projection_label: Label
 var _members_title: Label
 var _members_box: VBoxContainer
+var _member_buttons: Array[Button] = []
 var _detail_empty: Label
 var _status_label: Label
 var _action_bar: HFlowContainer
 var _action_buttons: Dictionary = {}
+var _focus_ring: Control
 
 var _rename_overlay: Control
 var _rename_title: Label
@@ -257,6 +302,9 @@ func _build_ui() -> void:
 
 	var header := HBoxContainer.new()
 	header.add_theme_constant_override("separation", 12)
+	header.mouse_filter = Control.MOUSE_FILTER_STOP
+	header.gui_input.connect(_on_header_gui_input)
+	_header = header
 	_title_label = Label.new()
 	_title_label.add_theme_font_size_override("font_size", 22)
 	_title_label.add_theme_color_override("font_color", TEXT_COLOR)
@@ -287,15 +335,30 @@ func _build_ui() -> void:
 	left.add_theme_constant_override("separation", 6)
 	body.add_child(left)
 
+	_page_bar = HBoxContainer.new()
+	_page_bar.add_theme_constant_override("separation", 6)
+	left.add_child(_page_bar)
+	_page_prev = Button.new()
+	_page_prev.focus_mode = Control.FOCUS_NONE
+	_page_prev.pressed.connect(_on_page_prev_pressed)
+	_page_bar.add_child(_page_prev)
 	_page_label = Label.new()
 	_page_label.add_theme_color_override("font_color", MUTED_COLOR)
-	left.add_child(_page_label)
+	_page_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_page_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_page_bar.add_child(_page_label)
+	_page_next = Button.new()
+	_page_next.focus_mode = Control.FOCUS_NONE
+	_page_next.pressed.connect(_on_page_next_pressed)
+	_page_bar.add_child(_page_next)
 
 	_list = ItemList.new()
 	_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_list.custom_minimum_size = Vector2(0, PAGE_SIZE * 30 + 20)
 	_list.allow_reselect = true
+	_list.focus_mode = Control.FOCUS_NONE
 	_list.item_selected.connect(_on_item_selected)
+	_list.item_clicked.connect(_on_item_clicked)
 	left.add_child(_list)
 
 	_more_label = Label.new()
@@ -314,12 +377,17 @@ func _build_ui() -> void:
 	right.add_theme_constant_override("separation", 6)
 	body.add_child(right)
 
-	_detail_title = _detail_label(right, 20)
-	_detail_center = _detail_label(right)
-	_detail_owner = _detail_label(right)
-	_detail_tax = _detail_label(right)
-	_detail_revision = _detail_label(right)
-	_projection_label = _detail_label(right)
+	_detail_box = VBoxContainer.new()
+	_detail_box.add_theme_constant_override("separation", 6)
+	_detail_box.mouse_filter = Control.MOUSE_FILTER_STOP
+	_detail_box.gui_input.connect(_on_detail_gui_input)
+	right.add_child(_detail_box)
+	_detail_title = _detail_label(_detail_box, 20)
+	_detail_center = _detail_label(_detail_box)
+	_detail_owner = _detail_label(_detail_box)
+	_detail_tax = _detail_label(_detail_box)
+	_detail_revision = _detail_label(_detail_box)
+	_projection_label = _detail_label(_detail_box)
 	_projection_label.add_theme_color_override("font_color", MUTED_COLOR)
 	_members_title = _detail_label(right)
 	_members_title.add_theme_color_override("font_color", MUTED_COLOR)
@@ -345,7 +413,9 @@ func _build_ui() -> void:
 	for entry in ACTION_ORDER:
 		var name := str(entry[0])
 		var button := Button.new()
+		button.focus_mode = Control.FOCUS_NONE
 		button.pressed.connect(_on_action_pressed.bind(name))
+		button.gui_input.connect(_on_action_gui_input.bind(name))
 		_action_bar.add_child(button)
 		_action_buttons[name] = button
 
@@ -353,6 +423,15 @@ func _build_ui() -> void:
 	_status_label.add_theme_color_override("font_color", MUTED_COLOR)
 	_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	root.add_child(_status_label)
+
+	# Full-rect ring drawn above the screen content. It follows the explicit
+	# focus target, so mouse clicks, Tab, and render rebuilds agree.
+	_focus_ring = Control.new()
+	_focus_ring.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_focus_ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_focus_ring.z_index = 100
+	_focus_ring.draw.connect(_draw_focus_ring)
+	add_child(_focus_ring)
 
 	_build_rename_modal()
 
@@ -410,10 +489,12 @@ func _build_rename_modal() -> void:
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(spacer)
 	_rename_cancel = Button.new()
+	_rename_cancel.focus_mode = Control.FOCUS_NONE
 	_rename_cancel.text = _i18n.t("base.ui.settlement_screen.rename.cancel")
 	_rename_cancel.pressed.connect(_close_rename)
 	row.add_child(_rename_cancel)
 	_rename_save = Button.new()
+	_rename_save.focus_mode = Control.FOCUS_NONE
 	_rename_save.text = _i18n.t("base.ui.settlement_screen.rename.save")
 	_rename_save.pressed.connect(_save_rename)
 	row.add_child(_rename_save)
@@ -666,6 +747,7 @@ func _select_index(index: int) -> void:
 		_list.select(index)
 		_syncing_list = false
 	_render_detail()
+	_sync_focus_ring()
 
 
 ## A pending remove/release confirmation belongs to exactly the row and player
@@ -685,56 +767,478 @@ func _select_page_number(number: int) -> void:
 func _on_item_selected(index: int) -> void:
 	if _syncing_list:
 		return
+	_focus_group = "rows"
 	_select_index(index)
+	_sync_focus_ring()
 
 
-func _unhandled_key_input(event: InputEvent) -> void:
-	if not (event is InputEventKey):
+func _on_item_clicked(index: int, _at_position: Vector2, _mouse_button_index: int) -> void:
+	_focus_group = "rows"
+	_select_index(index)
+	_sync_focus_ring()
+
+
+func _on_page_prev_pressed() -> void:
+	if not _set_focus_group("paging"):
 		return
+	_focus_paging = 0
+	_page_up()
+
+
+func _on_page_next_pressed() -> void:
+	if not _set_focus_group("paging"):
+		return
+	_focus_paging = 1
+	_page_down()
+
+
+func _on_header_gui_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.pressed:
+		if (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
+			_set_focus_group("header")
+
+
+func _on_detail_gui_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.pressed:
+		if (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
+			_set_focus_group("detail")
+
+
+func _on_action_gui_input(event: InputEvent, action: String) -> void:
+	if event is InputEventMouseButton and event.pressed:
+		if (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
+			_focus_action_control(action)
+
+
+# --- Focus model -----------------------------------------------------------
+
+## Engine key path. The smoke calls `_handle_key` directly so the exact same
+## branch runs without a display or an Input singleton.
+func _input(event: InputEvent) -> void:
+	if _handle_key(event):
+		get_viewport().set_input_as_handled()
+
+
+func _process(_delta: float) -> void:
+	if _focus_ring != null:
+		_focus_ring.queue_redraw()
+
+
+func _handle_key(event: InputEvent) -> bool:
+	if not (event is InputEventKey):
+		return false
 	var key := event as InputEventKey
 	if not key.pressed or key.echo:
-		return
-	# The modal owns the keyboard while it is open. LineEdit consumes text
-	# keys; only explicit cancel and the submit event reach this handler.
+		return false
 	if _rename_open:
-		if key.keycode == KEY_ESCAPE:
-			_close_rename()
-			get_viewport().set_input_as_handled()
-		return
+		return _handle_modal_key(key)
+	if _line_edit_has_focus():
+		return false
+	return _handle_screen_key(key)
+
+
+func _line_edit_has_focus() -> bool:
+	var owner := get_viewport().gui_get_focus_owner()
+	return owner is LineEdit and owner.is_visible_in_tree()
+
+
+func _handle_modal_key(key: InputEventKey) -> bool:
 	match key.keycode:
+		KEY_ESCAPE:
+			_close_rename()
+			return true
+		KEY_TAB:
+			_cycle_modal_focus(-1 if key.shift_pressed else 1)
+			return true
+		KEY_HOME:
+			_set_modal_focus(MODAL_EDIT)
+			return true
+		KEY_END:
+			_set_modal_focus(MODAL_SAVE)
+			return true
+	if _modal_focus == MODAL_EDIT:
+		# The field owns text, Space, and Enter; text_submitted saves.
+		return false
+	match key.keycode:
+		KEY_UP, KEY_LEFT:
+			_cycle_modal_focus(-1)
+		KEY_DOWN, KEY_RIGHT:
+			_cycle_modal_focus(1)
+		KEY_ENTER, KEY_KP_ENTER, KEY_SPACE:
+			_activate_modal_focus()
+		_:
+			return false
+	return true
+
+
+func _handle_screen_key(key: InputEventKey) -> bool:
+	match key.keycode:
+		KEY_TAB:
+			_cycle_focus(-1 if key.shift_pressed else 1)
+		KEY_ESCAPE:
+			_handle_escape()
+		KEY_UP, KEY_LEFT:
+			return _move_focus(-1)
+		KEY_DOWN, KEY_RIGHT:
+			return _move_focus(1)
+		KEY_HOME:
+			return _focus_edge(true)
+		KEY_END:
+			return _focus_edge(false)
 		KEY_PAGEUP:
-			_page_up()
+			if _focus_group == "paging" or _focus_group == "rows":
+				_page_up()
 		KEY_PAGEDOWN:
-			_page_down()
-		KEY_UP:
-			_select_index(_selected_index - 1)
-		KEY_DOWN:
-			_select_index(_selected_index + 1)
+			if _focus_group == "paging" or _focus_group == "rows":
+				_page_down()
+		KEY_ENTER, KEY_KP_ENTER, KEY_SPACE:
+			_activate_focus()
 		KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7, KEY_8:
 			_select_page_number(key.keycode - KEY_0)
+			_set_focus_group("rows")
 		KEY_BRACKETLEFT:
-			_cycle_selected_member(-1)
+			if _set_focus_group("members"):
+				_cycle_selected_member(-1)
 		KEY_BRACKETRIGHT:
-			_cycle_selected_member(1)
+			if _set_focus_group("members"):
+				_cycle_selected_member(1)
 		KEY_C:
-			_claim_selected()
+			_on_action_pressed("claim")
 		KEY_N:
-			_open_rename()
+			_on_action_pressed("rename")
 		KEY_T:
-			_tax_selected()
+			_on_action_pressed("tax")
 		KEY_Y:
-			_transfer_selected()
+			_on_action_pressed("transfer")
 		KEY_I:
-			_invite_selected()
+			_on_action_pressed("invite")
 		KEY_M:
-			_cycle_role()
+			_on_action_pressed("cycle_role")
 		KEY_DELETE:
-			_remove_selected()
+			_on_action_pressed("remove_member")
 		KEY_X:
-			_release_selected()
+			_on_action_pressed("release")
 		_:
+			return false
+	return true
+
+
+## Esc returns to the list first; a second press clears the row selection.
+func _handle_escape() -> void:
+	if _focus_group != "rows":
+		if _set_focus_group("rows"):
 			return
-	get_viewport().set_input_as_handled()
+	if _selected_id > 0:
+		_clear_row_selection()
+
+
+func _clear_row_selection() -> void:
+	_selected_id = 0
+	_selected_index = -1
+	_selected_member = 0
+	_reset_pending()
+	_status_text = ""
+	_syncing_list = true
+	_list.deselect_all()
+	_syncing_list = false
+	_render_detail()
+	_sync_focus_ring()
+
+
+func _move_focus(direction: int) -> bool:
+	match _focus_group:
+		"paging":
+			_focus_paging = clampi(_focus_paging + direction, 0, 1)
+		"rows":
+			_move_row_focus(direction)
+		"members":
+			_move_member_focus(direction)
+		"actions":
+			_focus_action = clampi(_focus_action + direction, 0, FOCUS_ACTION_ORDER.size() - 1)
+		_:
+			return true
+	_sync_focus_ring()
+	return true
+
+
+func _focus_edge(first: bool) -> bool:
+	match _focus_group:
+		"paging":
+			_focus_paging = 0 if first else 1
+		"rows":
+			_select_index(0 if first else _rows.size() - 1)
+		"members":
+			_focus_member_edge(first)
+		"actions":
+			_focus_action = 0 if first else FOCUS_ACTION_ORDER.size() - 1
+		_:
+			return true
+	_sync_focus_ring()
+	return true
+
+
+func _move_row_focus(direction: int) -> void:
+	if _rows.is_empty():
+		return
+	if _selected_index < 0 or _selected_index >= _rows.size():
+		_select_index(0 if direction > 0 else _rows.size() - 1)
+		return
+	_select_index(clampi(_selected_index + direction, 0, _rows.size() - 1))
+
+
+func _move_member_focus(direction: int) -> void:
+	var members := _assignable_members(_current_record())
+	if members.is_empty():
+		_focus_group = "tax"
+		return
+	var index := _member_index_of(_selected_member, members)
+	_focus_selected_member(members, clampi(index + direction, 0, members.size() - 1))
+
+
+func _focus_member_edge(first: bool) -> void:
+	var members := _assignable_members(_current_record())
+	if members.is_empty():
+		return
+	_focus_selected_member(members, 0 if first else members.size() - 1)
+
+
+func _focus_selected_member(members: Array, index: int) -> void:
+	_selected_member = int((members[index] as Dictionary).get("player", 0))
+	_focus_member_index = index
+	_reset_pending()
+	_render_detail()
+	_sync_focus_ring()
+
+
+func _member_index_of(player: int, members: Array) -> int:
+	for index in members.size():
+		if int((members[index] as Dictionary).get("player", 0)) == player:
+			return index
+	return 0
+
+
+func _activate_focus() -> void:
+	match _focus_group:
+		"paging":
+			_activate_paging()
+		"rows":
+			if _selected_id > 0:
+				_set_focus_group("detail")
+		"detail":
+			if not _set_focus_group("members"):
+				_set_focus_group("tax")
+		"members":
+			_set_focus_group("tax")
+		"tax":
+			_on_action_pressed("tax")
+		"actions":
+			_on_action_pressed(_focused_action_name())
+
+
+func _activate_paging() -> void:
+	if _focus_paging == 0:
+		if _page_index > 0:
+			_page_up()
+	elif _has_more:
+		_page_down()
+
+
+func _focused_action_name() -> String:
+	if FOCUS_ACTION_ORDER.is_empty():
+		return ""
+	var index := clampi(_focus_action, 0, FOCUS_ACTION_ORDER.size() - 1)
+	return str(FOCUS_ACTION_ORDER[index])
+
+
+func _set_focus_group(group: String) -> bool:
+	if not FOCUS_GROUPS.has(group) or not _focus_group_available(group):
+		return false
+	_focus_group = group
+	match group:
+		"paging":
+			_focus_paging = clampi(_focus_paging, 0, 1)
+		"rows":
+			if _selected_id <= 0 and not _rows.is_empty():
+				_select_index(0)
+		"members":
+			var members := _assignable_members(_current_record())
+			_focus_member_index = _member_index_of(_selected_member, members)
+		"actions":
+			_focus_action = clampi(_focus_action, 0, FOCUS_ACTION_ORDER.size() - 1)
+	_sync_focus_ring()
+	return true
+
+
+func _focus_group_available(group: String) -> bool:
+	match group:
+		"rows":
+			return not _rows.is_empty()
+		"detail":
+			return _selected_id > 0
+		"members":
+			return not _assignable_members(_current_record()).is_empty()
+	return true
+
+
+func _cycle_focus(direction: int) -> void:
+	var start := FOCUS_GROUPS.find(_focus_group)
+	if start < 0:
+		start = 0
+	for step in range(1, FOCUS_GROUPS.size() + 1):
+		var index := posmod(start + direction * step, FOCUS_GROUPS.size())
+		var group := str(FOCUS_GROUPS[index])
+		if _focus_group_available(group):
+			_set_focus_group(group)
+			return
+
+
+func _focus_action_control(action: String) -> void:
+	if action == "tax":
+		_set_focus_group("tax")
+		return
+	var index := FOCUS_ACTION_ORDER.find(action)
+	if index < 0 or not _set_focus_group("actions"):
+		return
+	_focus_action = index
+	_sync_focus_ring()
+
+
+func _cycle_modal_focus(direction: int) -> void:
+	var index := MODAL_FOCUS_ORDER.find(_modal_focus)
+	if index < 0:
+		index = 0
+	_set_modal_focus(int(MODAL_FOCUS_ORDER[posmod(index + direction, MODAL_FOCUS_ORDER.size())]))
+
+
+func _set_modal_focus(value: int) -> void:
+	_modal_focus = clampi(value, MODAL_EDIT, MODAL_SAVE)
+	if _modal_focus == MODAL_EDIT:
+		_rename_edit.grab_focus()
+	else:
+		_rename_edit.release_focus()
+	_sync_focus_ring()
+
+
+func _activate_modal_focus() -> void:
+	match _modal_focus:
+		MODAL_CANCEL:
+			_close_rename()
+		MODAL_SAVE:
+			_save_rename()
+		_:
+			_rename_edit.grab_focus()
+
+
+func _restore_modal_opener() -> void:
+	if _modal_opener_group == "actions":
+		_focus_action_control(_modal_opener_action)
+	elif _modal_opener_group == "tax":
+		_set_focus_group("tax")
+	elif not _set_focus_group(_modal_opener_group):
+		if not _set_focus_group("rows"):
+			_set_focus_group("header")
+
+
+func _sync_focus_ring() -> void:
+	if _focus_ring != null:
+		_focus_ring.queue_redraw()
+
+
+func _focus_target() -> Control:
+	if _rename_open:
+		match _modal_focus:
+			MODAL_CANCEL:
+				return _rename_cancel
+			MODAL_SAVE:
+				return _rename_save
+			_:
+				return _rename_edit
+	match _focus_group:
+		"header":
+			return _header
+		"paging":
+			return _page_prev if _focus_paging == 0 else _page_next
+		"rows":
+			return _list
+		"detail":
+			return _detail_box
+		"members":
+			if _focus_member_index >= 0 and _focus_member_index < _member_buttons.size():
+				return _member_buttons[_focus_member_index]
+			return _members_box
+		"tax":
+			return _action_buttons.get("tax") as Control
+		"actions":
+			return _action_buttons.get(_focused_action_name()) as Control
+	return null
+
+
+func _draw_focus_ring() -> void:
+	var target := _focus_target()
+	if target == null or not is_instance_valid(target) or not target.is_visible_in_tree():
+		return
+	var rect := target.get_global_rect()
+	if rect.size.x <= 0.0 or rect.size.y <= 0.0:
+		return
+	var origin := _focus_ring.get_global_rect().position
+	var local := Rect2(rect.position - origin, rect.size).grow(2.0)
+	_focus_ring.draw_rect(local, FOCUS_COLOR, false, 2.0)
+	_focus_ring.draw_rect(local.grow(1.0), FOCUS_HALO_COLOR, false, 1.0)
+
+
+## Deterministic state for the headless smoke. `actions_enabled` means the
+## action bar currently accepts a mutation (never while a modal owns input).
+func _smoke_press(key: int, shift := false) -> void:
+	var event := InputEventKey.new()
+	event.keycode = key
+	event.physical_keycode = key
+	event.pressed = true
+	event.shift_pressed = shift
+	_handle_key(event)
+
+
+func focus_snapshot() -> Dictionary:
+	var any_enabled := false
+	if not _rename_open:
+		for button in _action_buttons.values():
+			if button is Button and not (button as Button).disabled:
+				any_enabled = true
+				break
+	return {
+		"focus": _focus_name(),
+		"group": "modal" if _rename_open else _focus_group,
+		"selected_id": _selected_id,
+		"page": _page_index + 1,
+		"has_modal": _rename_open,
+		"actions_enabled": any_enabled,
+	}
+
+
+func _focus_name() -> String:
+	if _rename_open:
+		match _modal_focus:
+			MODAL_CANCEL:
+				return "rename.cancel"
+			MODAL_SAVE:
+				return "rename.save"
+			_:
+				return "rename.edit"
+	match _focus_group:
+		"header":
+			return "header:authority"
+		"paging":
+			return "paging:prev" if _focus_paging == 0 else "paging:next"
+		"rows":
+			return ("rows:%d" % _selected_id) if _selected_id > 0 else "rows:none"
+		"detail":
+			return ("detail:%d" % _selected_id) if _selected_id > 0 else "detail:none"
+		"members":
+			return ("members:%d" % _selected_member) if _selected_member > 0 else "members:none"
+		"tax":
+			return "tax"
+		"actions":
+			return "actions:%s" % _focused_action_name()
+	return _focus_group
 
 
 # --- Actions ---------------------------------------------------------------
@@ -897,6 +1401,7 @@ func _cycle_selected_member(delta: int) -> void:
 				"revision": _i18n.format_int(_revision(record)),
 			}
 		)
+		_focus_action_control("cycle_role")
 		_render_detail()
 		return
 	var position := 0
@@ -939,10 +1444,26 @@ func _reason_text(code: String) -> String:
 
 
 func _local_rename_text(code: String) -> String:
-	var key := "base.ui.settlement_screen.rename.%s" % code
-	if _i18n.has_key(key, "en") or _i18n.has_key(key, "de"):
-		return _i18n.t(key)
-	return code
+	return _rename_error_text(code)
+
+
+## Every rename error shows a localized reason plus the stable code; a raw
+## code is never the whole message.
+func _rename_error_text(code: String) -> String:
+	if code.is_empty():
+		code = "error"
+	var reason := ""
+	var key := str(RENAME_ERROR_KEYS.get(code, ""))
+	if not key.is_empty() and (_i18n.has_key(key, "en") or _i18n.has_key(key, "de")):
+		reason = _i18n.t(key)
+	else:
+		reason = _reason_text(code)
+		if reason == code:
+			reason = _i18n.t("base.ui.settlement_screen.rename.rejected")
+	return _i18n.t(
+		"base.ui.settlement_screen.rename.error",
+		{"reason": reason, "code": code}
+	)
 
 
 ## Record one attempt, print the deterministic smoke line, and apply the result.
@@ -980,14 +1501,21 @@ func _finish_action(action: String, result: Dictionary, revision: int) -> Dictio
 		# Re-read the visible page in place; selection stays by id.
 		_load_page(_page_index)
 	else:
+		var code_text := code
+		if action == "rename":
+			code_text = _rename_error_text(code)
 		_status_text = _i18n.t(
 			"base.ui.settlement_screen.action.result_failed",
 			{
 				"action": _action_label(action),
-				"code": code,
+				"code": code_text,
 				"revision": _i18n.format_int(shown_revision),
 			}
 		)
+		if _rename_open:
+			_set_modal_focus(MODAL_EDIT)
+		else:
+			_focus_action_control(action)
 		_render_detail()
 	return result
 
@@ -1034,6 +1562,8 @@ func _open_rename() -> void:
 	if not bool(record.get("owned", false)):
 		_finish_action("rename", _error("settlement.unowned"), _revision(record))
 		return
+	_modal_opener_group = _focus_group
+	_modal_opener_action = "rename"
 	_rename_target_id = _record_id(record)
 	_rename_open = true
 	_rename_title.text = _i18n.t(
@@ -1050,16 +1580,25 @@ func _open_rename() -> void:
 	_rename_cancel.text = _i18n.t("base.ui.settlement_screen.rename.cancel")
 	_rename_save.text = _i18n.t("base.ui.settlement_screen.rename.save")
 	_rename_overlay.visible = true
+	_modal_focus = MODAL_EDIT
 	_rename_edit.grab_focus()
+	_sync_focus_ring()
+
+
+func _hide_rename_modal() -> void:
+	_rename_open = false
+	_rename_overlay.visible = false
+	_rename_target_id = 0
+	_rename_edit.release_focus()
+	_modal_focus = MODAL_EDIT
+	_restore_modal_opener()
 
 
 func _close_rename() -> void:
 	if not _rename_open:
 		return
-	_rename_open = false
-	_rename_overlay.visible = false
-	_rename_target_id = 0
 	_status_text = _i18n.t("base.ui.settlement_screen.action.cancelled")
+	_hide_rename_modal()
 	_render_detail()
 
 
@@ -1069,14 +1608,14 @@ func _save_rename() -> void:
 	# Fresh read again: the record may have changed while the field was open.
 	var record := _fresh_record(_rename_target_id)
 	if record.is_empty():
-		_rename_error.text = "settlement.unknown"
+		_rename_error.text = _rename_error_text("settlement.unknown")
 		_finish_action("rename", _error("settlement.unknown"), 0)
 		return
 	var revision := _revision(record)
 	var name := _rename_edit.text.strip_edges()
 	var local_code := _validate_rename(name, str(record.get("name", "")))
 	if not local_code.is_empty():
-		_rename_error.text = _local_rename_text(local_code)
+		_rename_error.text = _rename_error_text(local_code)
 		_finish_action("rename", _error(local_code), revision)
 		return
 	var result: Dictionary
@@ -1085,12 +1624,10 @@ func _save_rename() -> void:
 	else:
 		result = _core.settlement_rename(_rename_target_id, name, revision)
 	if not bool(result.get("ok", false)):
-		_rename_error.text = str(result.get("error_code", "error"))
+		_rename_error.text = _rename_error_text(str(result.get("error_code", "error")))
 		_finish_action("rename", result, revision)
 		return
-	_rename_open = false
-	_rename_overlay.visible = false
-	_rename_target_id = 0
+	_hide_rename_modal()
 	_finish_action("rename", result, revision)
 
 
@@ -1241,6 +1778,7 @@ func _remove_selected() -> void:
 				"revision": _i18n.format_int(_revision(_current_record())),
 			}
 		)
+		_focus_action_control("remove_member")
 		_render_detail()
 		return
 	var player := int(member.get("player", 0))
@@ -1293,6 +1831,7 @@ func _release_selected() -> void:
 					"revision": _i18n.format_int(_revision(cached)),
 				}
 			)
+			_focus_action_control("release")
 			_render_detail()
 			return
 		_pending_release_id = _selected_id
@@ -1326,6 +1865,7 @@ func _release_selected() -> void:
 
 
 func _on_action_pressed(action: String) -> void:
+	_focus_action_control(action)
 	match action:
 		"claim":
 			_claim_selected()
@@ -1483,10 +2023,16 @@ func _render_list() -> void:
 	_list.clear()
 	for row in _rows:
 		_list.add_item(_row_text(row as Dictionary))
-	if not _rows.is_empty():
+	if not _rows.is_empty() and _selected_index >= 0 and _selected_index < _rows.size():
 		_list.select(_selected_index)
+	else:
+		_list.deselect_all()
 	_syncing_list = false
 
+	_page_prev.text = _i18n.t("base.ui.settlement_screen.paging.prev")
+	_page_next.text = _i18n.t("base.ui.settlement_screen.paging.next")
+	_page_prev.disabled = _page_index <= 0
+	_page_next.disabled = not _has_more
 	_page_label.text = _i18n.t(
 		"base.ui.settlement_screen.page",
 		{
@@ -1508,7 +2054,7 @@ func _render_list() -> void:
 
 func _render_detail() -> void:
 	_clear_members()
-	if _rows.is_empty() or _selected_index >= _rows.size():
+	if _rows.is_empty() or _selected_index < 0 or _selected_index >= _rows.size():
 		_detail_title.text = ""
 		_detail_center.text = ""
 		_detail_owner.text = ""
@@ -1518,17 +2064,20 @@ func _render_detail() -> void:
 		_members_title.text = ""
 		_detail_empty.text = _i18n.t("base.ui.settlement_screen.detail_empty")
 		_detail_empty.visible = true
+		if _focus_group == "detail" or _focus_group == "members":
+			_focus_group = "rows" if not _rows.is_empty() else "header"
 		if _error_code.is_empty() and _status_text.is_empty():
 			_status_label.text = _i18n.t("base.ui.settlement_screen.empty")
 		else:
 			_status_label.text = _status_text
 		_update_action_bar({})
+		_sync_focus_ring()
 		return
 	_detail_empty.visible = false
 
 	var settlement: Dictionary = _rows[_selected_index]
 	var id := int(settlement.get("id", 0))
-	var name := str(settlement.get("name", ""))
+	var name := _display_name(settlement)
 	var center := _center(settlement)
 	var tax := clampi(int(settlement.get("tax_rate", 0)), 0, MAX_TAX_RATE)
 
@@ -1580,30 +2129,40 @@ func _render_detail() -> void:
 		var player := int(row.get("player", 0))
 		var button := Button.new()
 		button.flat = true
+		button.focus_mode = Control.FOCUS_NONE
 		button.alignment = HORIZONTAL_ALIGNMENT_LEFT
 		var prefix := "▸ " if player == _selected_member else "  "
 		button.text = prefix + _member_text(row)
 		button.pressed.connect(_on_member_pressed.bind(player))
 		_members_box.add_child(button)
+		_member_buttons.append(button)
 		rendered += 1
 	if rendered == 0:
 		var empty := Label.new()
 		empty.text = _i18n.t("base.ui.settlement_screen.detail_no_members")
 		empty.add_theme_color_override("font_color", MUTED_COLOR)
 		_members_box.add_child(empty)
+		if _focus_group == "members":
+			_focus_group = "tax"
+	else:
+		_focus_member_index = _member_index_of(_selected_member, assignable)
 	_update_action_bar(settlement)
 	_status_label.text = _status_text
+	_sync_focus_ring()
 
 
 func _on_member_pressed(player: int) -> void:
-	if player == _selected_member:
-		return
+	var members := _assignable_members(_current_record())
+	_focus_group = "members"
+	_focus_member_index = _member_index_of(player, members)
 	_selected_member = player
 	_reset_pending()
 	_render_detail()
+	_sync_focus_ring()
 
 
 func _clear_members() -> void:
+	_member_buttons.clear()
 	for child in _members_box.get_children():
 		_members_box.remove_child(child)
 		child.free()
@@ -1615,13 +2174,23 @@ func _row_text(settlement: Dictionary) -> String:
 	return _i18n.t(
 		"base.ui.settlement_screen.row",
 		{
-			"name": str(settlement.get("name", "")),
+			"name": _display_name(settlement),
 			"id": str(int(settlement.get("id", 0))),
 			"owner": _owner_text(settlement),
 			"tax": _i18n.format_int(int(settlement.get("tax_rate", 0))),
 			"revision": _i18n.format_int(int(settlement.get("membership_revision", 0))),
 			"members": _i18n.format_int(member_count),
 		}
+	)
+
+
+func _display_name(settlement: Dictionary) -> String:
+	var name := str(settlement.get("name", ""))
+	if not name.is_empty():
+		return name
+	return _i18n.t(
+		"base.ui.settlement.default_name",
+		{"index": _i18n.format_int(int(settlement.get("id", 0)))}
 	)
 
 
@@ -1738,6 +2307,9 @@ func _show_unavailable(code: String) -> void:
 	_selected_member = 0
 	_rename_open = false
 	_rename_overlay.visible = false
+	_rename_edit.release_focus()
+	_modal_focus = MODAL_EDIT
+	_focus_group = "header"
 	_list.clear()
 	_page_label.text = ""
 	_more_label.text = ""
@@ -1757,6 +2329,7 @@ func _show_unavailable(code: String) -> void:
 		"base.ui.settlement_screen.unavailable",
 		{"code": code}
 	)
+	_sync_focus_ring()
 
 
 # --- Smoke -----------------------------------------------------------------
@@ -1852,6 +2425,36 @@ func _run_smoke() -> void:
 	_expect(de_detail.contains("Prognostizierter lokaler Multiplikator: x1,05"), "DE projection", failures)
 	_switch_locale("en")
 
+	# Focus model: fixed groups, Tab/Shift+Tab, arrows/Home/End, page keys,
+	# Enter activation, modal trap and focus return.
+	_focus_group = "header"
+	_expect(focus_snapshot().get("group") == "header", "initial focus header", failures)
+	_smoke_press(KEY_TAB)
+	_expect(focus_snapshot().get("group") == "paging", "tab -> paging", failures)
+	_smoke_press(KEY_TAB)
+	_expect(focus_snapshot().get("group") == "rows", "tab -> rows", failures)
+	_smoke_press(KEY_TAB, true)
+	_expect(focus_snapshot().get("group") == "paging", "shift+tab -> paging", failures)
+	_smoke_press(KEY_TAB)
+	_select_page_number(1)
+	_smoke_press(KEY_DOWN)
+	_expect(_selected_id == 2, "arrow down selects 2, got %d" % _selected_id, failures)
+	_smoke_press(KEY_END)
+	_expect(_selected_id == 8, "end selects 8, got %d" % _selected_id, failures)
+	_smoke_press(KEY_HOME)
+	_expect(_selected_id == 1, "home selects 1, got %d" % _selected_id, failures)
+	_smoke_press(KEY_PAGEDOWN)
+	_expect(_page_index == 1 and _focus_group == "rows", "pagedown pages rows", failures)
+	_smoke_press(KEY_ENTER)
+	_expect(_focus_group == "detail", "enter row -> detail, got %s" % _focus_group, failures)
+	_open_rename()
+	_expect(bool(focus_snapshot().get("has_modal")), "rename opens modal", failures)
+	_smoke_press(KEY_TAB)
+	_expect(focus_snapshot().get("focus") == "rename.cancel", "modal tab -> cancel", failures)
+	_smoke_press(KEY_ESCAPE)
+	_expect(not bool(focus_snapshot().get("has_modal")), "esc closes modal", failures)
+	_expect(_focus_group == "detail", "esc returns to opener, got %s" % _focus_group, failures)
+
 	# Write surface: claim the unowned record, rename, tax, invite, role,
 	# remove, transfer, release, then exercise two rejections.
 	_load_page(0)
@@ -1880,6 +2483,7 @@ func _run_smoke() -> void:
 	var owner_record := _current_record()
 	_attempt_remove_member(owner_record, int(owner_record.get("owner_id", 0)))
 
+	print("SETTLEMENT_SCREEN_FOCUS group=rows tab=paging shift=ok arrows=ok modal=trap esc=detail")
 	print("SETTLEMENT_SCREEN_PAGES sizes=8/8/7 selected_last=23")
 	print("SETTLEMENT_SCREEN_NAMES owner=Mayor#7 manager=Manager#11 builder=Builder#13 member=Member#12 fallback=#9001 owner_fallback=#9002")
 	print("SETTLEMENT_SCREEN_PROJECTION tax0=x1.00 tax5=x1.05 tax100=x2.00 invalid=tax.projection.rate_out_of_range")
