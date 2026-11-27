@@ -202,9 +202,11 @@ impl PlacedBlueprintEdit {
     /// Validate a record that arrived from persistence or the wire.
     ///
     /// Checks the package hash shape, the retained-log cap, reserved materials,
-    /// and the empty-log/revision invariant. Bounds, registry membership,
-    /// placement existence, and hash equality with the placement record stay
-    /// with the caller because this module has no package or world context.
+    /// and the delta/revision invariant: an empty log must have revision `0`,
+    /// and a non-empty log must have a non-zero revision. Bounds, registry
+    /// membership, placement existence, and hash equality with the placement
+    /// record stay with the caller because this module has no package or world
+    /// context.
     ///
     /// # Errors
     ///
@@ -220,7 +222,12 @@ impl PlacedBlueprintEdit {
                 max: MAX_EDIT_LOG,
             });
         }
-        if self.edits.is_empty() && self.edit_revision != 0 {
+        let revision_matches_deltas = if self.edits.is_empty() {
+            self.edit_revision == 0
+        } else {
+            self.edit_revision != 0
+        };
+        if !revision_matches_deltas {
             return Err(EditBatchError::RevisionMismatch {
                 edit_revision: self.edit_revision,
             });
@@ -378,7 +385,7 @@ pub enum EditBatchError {
     InvalidEdit(VoxelEditError),
     /// A loaded record has a malformed package hash.
     InvalidBlueprintHash,
-    /// A loaded record has no edits but a non-zero revision.
+    /// A loaded record's revision is inconsistent with its delta log.
     RevisionMismatch {
         /// Revision found on the record.
         edit_revision: u32,
@@ -424,7 +431,10 @@ impl fmt::Display for EditBatchError {
             Self::InvalidEdit(error) => error.fmt(f),
             Self::InvalidBlueprintHash => f.write_str("blueprint hash is not canonical"),
             Self::RevisionMismatch { edit_revision } => {
-                write!(f, "edit log has no deltas but revision {edit_revision}")
+                write!(
+                    f,
+                    "edit log revision {edit_revision} does not match its deltas"
+                )
             }
         }
     }
@@ -506,6 +516,41 @@ mod tests {
             edit_revision: 0,
             edits: vec![edit(0, 0, 0, 1); len],
         }
+    }
+
+    /// FNV-1a over the effective volume, independent of the stored delta order.
+    fn volume_checksum(log: &PlacedBlueprintEdit, bounds: [u16; 3]) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for z in 0..bounds[2] {
+            for y in 0..bounds[1] {
+                for x in 0..bounds[0] {
+                    for byte in log.effective_voxel([x, y, z]).to_le_bytes() {
+                        hash ^= u64::from(byte);
+                        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                    }
+                }
+            }
+        }
+        hash
+    }
+
+    fn assert_rejected_without_mutation(
+        log: &mut PlacedBlueprintEdit,
+        expected_revision: u32,
+        edits: &[VoxelEdit],
+        expected: EditBatchError,
+    ) {
+        let before = log.clone();
+        let checksum = log.checksum();
+        let volume = volume_checksum(log, BOUNDS);
+        let error = log
+            .apply_batch(expected_revision, edits, BOUNDS)
+            .expect_err("batch must be rejected");
+        assert_eq!(error, expected);
+        assert_eq!(error.code(), expected.code());
+        assert_eq!(*log, before);
+        assert_eq!(log.checksum(), checksum);
+        assert_eq!(volume_checksum(log, BOUNDS), volume);
     }
 
     #[test]
@@ -614,6 +659,42 @@ mod tests {
         );
         assert_eq!(log, before);
         assert_eq!(log.checksum(), before.checksum());
+    }
+
+    #[test]
+    fn future_revision_is_rejected_with_the_stale_code() {
+        let mut log = record();
+        let before = log.clone();
+
+        let error = log
+            .apply_batch(1, &[edit(2, 2, 2, 7)], BOUNDS)
+            .expect_err("future revision");
+        assert_eq!(
+            error,
+            EditBatchError::StaleRevision {
+                expected: 1,
+                current: 0
+            }
+        );
+        assert_eq!(error.code(), "edit.stale_revision");
+        assert_eq!(log, before);
+    }
+
+    #[test]
+    fn revision_advances_once_per_accepted_batch() {
+        let mut log = record();
+        for (batch, material) in [5_u16, 6, 7].into_iter().enumerate() {
+            let before = log.edit_revision;
+            log.apply_batch(
+                before,
+                &[edit(u16::try_from(batch).expect("fits"), 1, 1, material)],
+                BOUNDS,
+            )
+            .expect("accepted batch");
+            assert_eq!(log.edit_revision, before + 1);
+            assert_eq!(log.delta_count(), batch + 1);
+        }
+        assert_eq!(log.edit_revision, 3);
     }
 
     #[test]
@@ -844,6 +925,261 @@ mod tests {
                 max: MAX_EDIT_LOG
             })
         );
+    }
+
+    #[test]
+    fn bounds_handle_zero_and_maximum_coordinates() {
+        assert!(validate_batch(&[edit(0, 0, 0, 1)], [1, 1, 1]).is_ok());
+
+        for bounds in [[0, 0, 0], [0, 8, 8], [8, 0, 8], [8, 8, 0]] {
+            assert_eq!(
+                validate_batch(&[edit(0, 0, 0, 1)], bounds),
+                Err(EditBatchError::InvalidEdit(
+                    VoxelEditError::InvalidPosition {
+                        pos: [0, 0, 0],
+                        bounds
+                    }
+                ))
+            );
+        }
+
+        let max_bounds = [u16::MAX; 3];
+        assert!(validate_batch(
+            &[edit(u16::MAX - 1, u16::MAX - 1, u16::MAX - 1, 1)],
+            max_bounds
+        )
+        .is_ok());
+        for pos in [[u16::MAX, 0, 0], [0, u16::MAX, 0], [0, 0, u16::MAX]] {
+            assert_eq!(
+                validate_batch(&[edit(pos[0], pos[1], pos[2], 1)], max_bounds),
+                Err(EditBatchError::InvalidEdit(
+                    VoxelEditError::InvalidPosition {
+                        pos,
+                        bounds: max_bounds
+                    }
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn every_rejected_batch_leaves_state_unchanged() {
+        let mut log = record();
+        log.apply_batch(0, &[edit(1, 1, 1, 5)], BOUNDS)
+            .expect("first batch");
+
+        assert_rejected_without_mutation(&mut log, 1, &[], EditBatchError::EmptyBatch);
+
+        let at_cap = vec![edit(0, 0, 0, 1); MAX_EDITS_PER_BATCH + 1];
+        assert_rejected_without_mutation(
+            &mut log,
+            1,
+            &at_cap,
+            EditBatchError::TooManyEdits {
+                count: MAX_EDITS_PER_BATCH + 1,
+                max: MAX_EDITS_PER_BATCH,
+            },
+        );
+
+        let out_of_bounds = [edit(8, 0, 0, 1)];
+        assert_rejected_without_mutation(
+            &mut log,
+            1,
+            &out_of_bounds,
+            EditBatchError::InvalidEdit(VoxelEditError::InvalidPosition {
+                pos: [8, 0, 0],
+                bounds: BOUNDS,
+            }),
+        );
+
+        let reserved = [edit(0, 0, 0, MATERIAL_RESERVED)];
+        assert_rejected_without_mutation(
+            &mut log,
+            1,
+            &reserved,
+            EditBatchError::InvalidEdit(VoxelEditError::InvalidMaterial {
+                material: MATERIAL_RESERVED,
+            }),
+        );
+
+        let duplicate = [edit(2, 2, 2, 1), edit(2, 2, 2, 2)];
+        assert_rejected_without_mutation(
+            &mut log,
+            1,
+            &duplicate,
+            EditBatchError::DuplicatePosition { pos: [2, 2, 2] },
+        );
+
+        assert_rejected_without_mutation(
+            &mut log,
+            0,
+            &[edit(3, 3, 3, 1)],
+            EditBatchError::StaleRevision {
+                expected: 0,
+                current: 1,
+            },
+        );
+
+        assert_eq!(log.edit_revision, 1);
+        assert_eq!(log.delta_count(), 1);
+    }
+
+    #[test]
+    fn oversized_batch_is_rejected_before_positions_are_scanned() {
+        let oversized = vec![edit(1, 1, 1, MATERIAL_RESERVED); MAX_EDITS_PER_BATCH * 4];
+        assert_eq!(oversized.len(), 4_096);
+        assert_eq!(
+            validate_batch(&oversized, BOUNDS),
+            Err(EditBatchError::TooManyEdits {
+                count: 4_096,
+                max: MAX_EDITS_PER_BATCH
+            })
+        );
+
+        let mut log = record();
+        assert_rejected_without_mutation(
+            &mut log,
+            0,
+            &oversized,
+            EditBatchError::TooManyEdits {
+                count: 4_096,
+                max: MAX_EDITS_PER_BATCH,
+            },
+        );
+    }
+
+    #[test]
+    fn removing_an_untouched_cell_records_a_remove_delta() {
+        let mut log = record();
+        log.apply_batch(0, &[edit(0, 0, 0, MATERIAL_EMPTY)], BOUNDS)
+            .expect("remove");
+
+        assert_eq!(log.delta_at([0, 0, 0]), Some(MATERIAL_EMPTY));
+        assert_eq!(log.effective_voxel([0, 0, 0]), MATERIAL_EMPTY);
+        assert_eq!(log.delta_count(), 1);
+        assert_eq!(log.edit_revision, 1);
+    }
+
+    #[test]
+    fn apply_then_revert_restores_the_effective_volume() {
+        let mut log = record();
+        log.apply_batch(0, &[edit(1, 1, 1, 5), edit(2, 1, 1, 6)], BOUNDS)
+            .expect("original volume");
+        let original_volume = volume_checksum(&log, BOUNDS);
+        let original_log = log.checksum();
+
+        log.apply_batch(
+            1,
+            &[edit(1, 1, 1, 9), edit(2, 1, 1, MATERIAL_EMPTY)],
+            BOUNDS,
+        )
+        .expect("forward edit");
+        assert_ne!(volume_checksum(&log, BOUNDS), original_volume);
+
+        log.apply_batch(2, &[edit(1, 1, 1, 5), edit(2, 1, 1, 6)], BOUNDS)
+            .expect("revert edit");
+        assert_eq!(volume_checksum(&log, BOUNDS), original_volume);
+        assert_eq!(log.edit_revision, 3);
+        assert_ne!(
+            log.checksum(),
+            original_log,
+            "the append-only log keeps both the forward and revert deltas"
+        );
+    }
+
+    #[test]
+    fn checksum_is_independent_of_construction_path() {
+        let mut applied = record();
+        applied
+            .apply_batch(0, &[edit(0, 0, 0, 1), edit(1, 0, 0, 2)], BOUNDS)
+            .expect("applied");
+
+        let manual = PlacedBlueprintEdit {
+            placement_id: 42,
+            blueprint_hash: HASH_A.to_owned(),
+            base_revision: 3,
+            edit_revision: 1,
+            edits: vec![edit(0, 0, 0, 1), edit(1, 0, 0, 2)],
+        };
+
+        assert_eq!(applied, manual);
+        assert_eq!(applied.checksum(), manual.checksum());
+    }
+
+    #[test]
+    fn clone_and_equality_are_stable() {
+        let mut log = record();
+        log.apply_batch(0, &[edit(1, 1, 1, 5)], BOUNDS)
+            .expect("batch");
+
+        let snapshot = log.clone();
+        assert_eq!(snapshot, log);
+        assert_eq!(snapshot.checksum(), log.checksum());
+
+        let mut changed_revision = snapshot.clone();
+        changed_revision.edit_revision += 1;
+        assert_ne!(changed_revision, snapshot);
+
+        let mut changed_edit = snapshot.clone();
+        changed_edit.edits[0].material = 6;
+        assert_ne!(changed_edit, snapshot);
+        assert_eq!(snapshot, log, "clone changes do not touch the original");
+    }
+
+    #[test]
+    fn placement_identity_extremes_do_not_alias_checksums() {
+        let zero = PlacedBlueprintEdit::new(0, HASH_A, 0);
+        let max = PlacedBlueprintEdit::new(u64::MAX, HASH_A, 0);
+        let max_base = PlacedBlueprintEdit::new(0, HASH_A, u32::MAX);
+
+        assert_eq!(zero.edit_revision, 0);
+        assert!(zero.is_empty());
+        assert!(zero.validate_loaded().is_ok());
+        assert_ne!(zero.checksum(), max.checksum());
+        assert_ne!(zero.checksum(), max_base.checksum());
+        assert_ne!(max.checksum(), max_base.checksum());
+    }
+
+    #[test]
+    fn serde_rejects_unknown_or_missing_edit_fields() {
+        assert!(
+            serde_json::from_str::<VoxelEdit>(r#"{"pos":[0,0,0],"material":1,"id":7}"#).is_err(),
+            "the model has no edit id field"
+        );
+        assert!(serde_json::from_str::<VoxelEdit>(r#"{"pos":[0,0,0]}"#).is_err());
+        assert!(serde_json::from_str::<VoxelEdit>(r#"{"material":1}"#).is_err());
+
+        let with_id = format!(
+            r#"{{"placement_id":42,"blueprint_hash":"{HASH_A}","base_revision":3,"edit_revision":0,"edits":[],"id":7}}"#
+        );
+        assert!(serde_json::from_str::<PlacedBlueprintEdit>(&with_id).is_err());
+    }
+
+    #[test]
+    fn validate_loaded_rejects_deltas_without_an_accepted_batch() {
+        let mut log = record();
+        log.edits.push(edit(0, 0, 0, 1));
+
+        assert_eq!(
+            log.validate_loaded(),
+            Err(EditBatchError::RevisionMismatch { edit_revision: 0 })
+        );
+    }
+
+    #[test]
+    fn validate_loaded_accepts_exactly_the_retention_cap() {
+        let mut at_cap = filled_log(MAX_EDIT_LOG);
+        at_cap.edit_revision = 1;
+        assert!(at_cap.validate_loaded().is_ok());
+
+        let mut filling = filled_log(MAX_EDIT_LOG - 1);
+        filling.edit_revision = 7;
+        filling
+            .apply_batch(7, &[edit(5, 5, 5, 1)], BOUNDS)
+            .expect("fills the log to the cap");
+        assert_eq!(filling.delta_count(), MAX_EDIT_LOG);
+        assert_eq!(filling.edit_revision, 8);
+        assert!(filling.validate_loaded().is_ok());
     }
 
     #[test]
