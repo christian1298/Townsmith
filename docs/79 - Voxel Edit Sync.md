@@ -2,7 +2,7 @@
 title: Voxel Edit Sync
 project: Townsmith
 status: proposed
-updated: 2026-11-25
+updated: 2026-11-27
 tags:
   - townsmith
   - multiplayer
@@ -78,6 +78,18 @@ VoxelEdit {
 The server owns the authoritative volume. In v1 it may materialize the package volume lazily on the first edit and keep only the delta log plus a small cache; a full volume is never sent to clients. The placement record's `blueprint_hash` stays the immutable identity of the source package, so a save can always explain which base the deltas apply to.
 
 The edit log is append-only for the life of the placement. Compaction (rewriting repeated edits to the same cell) is a storage optimization, not a semantic one; if added it must produce the same effective volume and checksum.
+
+> [!note] Core model landed (proposed)
+> `core_city::voxel_edit` implements the pure §3 model. D-038 remains **Proposed** and Q-119/Q-120 remain **Open**. There is no protocol, save, server, bridge, or Godot wiring; behavior is unchanged.
+>
+> - `VoxelEdit { pos: [u16; 3], material: u16 }`; material `0` removes, `65535` is reserved and rejected.
+> - `PlacedBlueprintEdit { placement_id, blueprint_hash, base_revision, edit_revision, edits }`, with `new`, `delta_count`, `is_empty`, `checksum`, `delta_at`, `effective_voxel`, `apply_batch`, and `validate_loaded`.
+> - `validate_batch(edits, volume_bounds)` enforces 1–1,024 edits, exclusive bounds (`pos[i] < bounds[i]`), non-reserved materials, and no in-batch duplicate positions.
+> - `apply_batch(expected_revision, edits, volume_bounds)` requires an exact revision match, appends in supplied order, and increments the revision once, saturating at `u32::MAX`. A rejection mutates nothing.
+> - `checksum()` is FNV-1a over placement id, hash, `base_revision`, `edit_revision`, and the ordered delta log; `effective_voxel` applies deltas in order with the last accepted edit winning.
+> - Stable codes: `edit.empty_batch`, `edit.too_many`, `edit.stale_revision`, `edit.invalid_position`, `edit.invalid_material`, `edit.duplicate_position`, `edit.overflow`, plus `edit.invalid_hash` and `edit.invalid_revision` for load-time shape checks.
+> - `MAX_EDIT_LOG` (262,144 edits) is a storage guard for the pure model, not a wire limit. Registry membership, placement existence, hash equality, and structure checks stay with the future server layer (§4).
+
 
 ## 4. Wire contract (proposed, additive protocol v1)
 

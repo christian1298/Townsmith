@@ -62,6 +62,7 @@ pub mod trades;
 pub mod traffic;
 pub mod tutorial;
 pub mod utilities;
+pub mod voxel_edit;
 
 use std::error::Error;
 use std::fmt;
@@ -210,6 +211,11 @@ pub use utilities::{
     DEFAULT_POWER_RADIUS_M, DEFAULT_WATER_RADIUS_M, MAX_UTILITY_CAPACITY, MAX_UTILITY_RADIUS_M,
     MAX_UTILITY_SITES, POWER_CAPACITY_PER_SITE, POWER_PER_RESIDENT, POWER_PER_WORKER,
     UTILITIES_FORMAT_VERSION, WATER_CAPACITY_PER_SITE, WATER_PER_RESIDENT,
+};
+pub use voxel_edit::{
+    in_bounds, is_canonical_blueprint_hash, validate_batch, EditBatchError, PlacedBlueprintEdit,
+    VoxelEdit, VoxelEditError, BLUEPRINT_HASH_HEX_LEN, BLUEPRINT_HASH_PREFIX, MATERIAL_EMPTY,
+    MATERIAL_RESERVED, MAX_EDITS_PER_BATCH, MAX_EDIT_LOG,
 };
 
 /// Floor-to-floor height used by the synthetic layout, in meters.
