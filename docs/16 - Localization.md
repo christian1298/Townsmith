@@ -2,7 +2,7 @@
 title: Localization
 project: Townsmith
 status: proposed
-updated: 2026-11-25
+updated: 2026-11-27
 tags:
   - townsmith
   - localization
@@ -16,7 +16,7 @@ tags:
 > Every user-facing string is externalized from the first implementation. English is the source language; German ships at launch. Additional languages are added through language packs, including community/mod packs later.
 
 > [!info] Coverage audit
-> [[69 - Localization Audit]] inventories the remaining hard-coded strings (HUD, dashboard shell and body, tutorial, content names, advisor, errors), separates player-facing from developer-only text, proposes key names and interpolation rules, and defines the phased migration and smoke/CI gate. It reflects the current inline 111-key editor table plus the 333-key `godot/world_i18n.gd` table; there is no `godot/locale/` at this commit. HUD shell/status/body, dashboard shell/body (including the settlement selector and compact policy editor), role-player modals, advisor titles/details, content names, and EN/DE number formatting are keyed; developer-only debug text remains English; content names resolve through the content table. The static gate (`scripts/check_locale.sh`) parses all three tables with independent floors (editor 111, world 333, content 34). The standalone developer chat panel uses the `base.ui.chat.*` keys, and the standalone settlement editor uses the `base.ui.settlement_editor.*` keys for its title, form/report labels, action/status/error lines, and empty/help text. The dashboard settlement tax control uses `base.ui.dashboard.settlement_tax.*`. The chat panel exposes `set_locale()` as a test hook that resolves `de_DE` to `de`, falls back to English for unsupported locales, and never touches entries or `last_seq`. Player names and message bodies stay raw. A separate data-only `godot/content_i18n.gd` table holds 34 EN / 34 DE display-name keys for starters, utilities, industries, services, and tutorial steps. The static gate parses it with a 34-key floor and the same parity/placeholder checks; the HUD, citizen panel, starter/industry/service modals, and 3D labels resolve through it; the scene smoke checks `content_ui=ok`. `WorldI18n.format_int`/`format_float` provide EN/DE grouping and decimal separators; HUD and dashboard quantities now use them, while ids, coordinates, seeds, advisor detail parameters, the citizen panel, and the loan modal stay raw. Smoke checks `number_i18n=ok` including a dashboard grouped value. The content schema gate validates **4 schema files / 32 entries** (`CONTENT_SCHEMA files=4 entries=32 status=ok`). There is no `godot/locale/` at this commit.
+> [[69 - Localization Audit]] inventories the remaining hard-coded strings (HUD, dashboard shell and body, tutorial, content names, advisor, errors), separates player-facing from developer-only text, proposes key names and interpolation rules, and defines the phased migration and smoke/CI gate. It reflects the current inline 111-key editor table plus the 458-key `godot/world_i18n.gd` table; there is no `godot/locale/` at this commit. HUD shell/status/body, dashboard shell/body (including the settlement selector and compact policy editor), role-player modals, advisor titles/details, content names, and EN/DE number formatting are keyed; developer-only debug text remains English; content names resolve through the content table. The static gate (`scripts/check_locale.sh`) parses all three tables with independent floors (editor 111, world 458, content 34). The standalone developer chat panel uses the `base.ui.chat.*` keys, and the standalone settlement editor uses the `base.ui.settlement_editor.*` keys for its title, form/report labels, action/status/error lines, and empty/help text. The dashboard settlement tax control uses `base.ui.dashboard.settlement_tax.*`. The chat panel exposes `set_locale()` as a test hook that resolves `de_DE` to `de`, falls back to English for unsupported locales, and never touches entries or `last_seq`. Player names and message bodies stay raw. A separate data-only `godot/content_i18n.gd` table holds 34 EN / 34 DE display-name keys for starters, utilities, industries, services, and tutorial steps. The static gate parses it with a 34-key floor and the same parity/placeholder checks; the HUD, citizen panel, starter/industry/service modals, and 3D labels resolve through it; the scene smoke checks `content_ui=ok`. `WorldI18n.format_int`/`format_float` provide EN/DE grouping and decimal separators; HUD and dashboard quantities now use them, while ids, coordinates, seeds, advisor detail parameters, the citizen panel, and the loan modal stay raw. Smoke checks `number_i18n=ok` including a dashboard grouped value. The content schema gate validates **4 schema files / 32 entries** (`CONTENT_SCHEMA files=4 entries=32 status=ok`). There is no `godot/locale/` at this commit.
 
 ## 1. Goals
 
@@ -25,6 +25,12 @@ tags:
 - Let each player choose their language independently, including in multiplayer.
 - Make language packs **data**, not code, so mods and community translators can add languages without rebuilding the game.
 - Keep the door open for more languages, right-to-left scripts, and voiceover later.
+
+### Production settlement surface
+
+The production settlement shell (`godot/settlement_screen.gd`) owns `base.ui.settlement_screen.*` in `world_i18n.gd` (67 keys, EN/DE): list/detail labels, member roles/permissions, tax projection, action names, localized disable reasons, rename validation, and destructive confirmations. Named placeholders are `{name}`, `{id}`, `{revision}`, `{code}`, `{person}`, and `{tax}`; numbers go through `WorldI18n.format_int`/`format_float`.
+
+Server and bridge rejection codes stay raw (`settlement.*`, `player.*`, `content.*`). The UI may show the code verbatim and pair it with a localized reason; it must not translate the code itself. Player names, settlement names, and chat bodies are data and stay raw. The standalone server-status panel and multiplayer probes are developer-only English and are not part of the launch string budget.
 
 ## 2. Non-goals for v1
 
@@ -181,7 +187,7 @@ Content data references keys, not display names:
 - **Missing-key lint:** every `*_key` reference exists in English.
 - **Duplicate-key lint:** no duplicate keys in a namespace.
 - **Placeholder lint:** placeholders match across languages.
-- **Pseudo-localization:** `scripts/check_pseudo_locale.py` generates accented, 130%-length text, preserves placeholders, checks EN/DE parity, and enforces a 120-character limit with a long-string allowlist. It is wired into default `scripts/check_locale.sh` and prints `PSEUDO_LOCALE editor=111 world=333 content=34 long=11 status=ok`.
+- **Pseudo-localization:** `scripts/check_pseudo_locale.py` generates accented, 130%-length text, preserves placeholders, checks EN/DE parity, and enforces a 120-character limit with a long-string allowlist. It is wired into default `scripts/check_locale.sh` and prints `PSEUDO_LOCALE editor=111 world=458 content=34 long=11 status=ok`.
 - **German UI pass:** screenshots of the main menus, build tools, city dashboard, and notifications.
 - **Plural tests:** 0/1/2/many for counts.
 - **No hard-coded strings:** a lint/review rule for GDScript/Rust UI code.

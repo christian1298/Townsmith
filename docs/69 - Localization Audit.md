@@ -2,7 +2,7 @@
 title: Localization Audit
 project: Townsmith
 status: active
-updated: 2026-11-23
+updated: 2026-11-27
 tags:
   - townsmith
   - localization
@@ -15,8 +15,8 @@ tags:
 > [!info] What this note is
 > A coverage audit of user-facing strings at the Phase 3 slice, plus a concrete expansion plan. It records the current state, separates player-facing text from developer-only text, proposes key conventions and interpolation rules, and defines the migration phases and the smoke/CI gate. No code or locale files were changed by this audit.
 
-> [!note] Current status (2026-11-23)
-> The runtime tables now hold **111 editor keys, 265 world keys, and 34 content keys**, each with full EN/DE parity. The world table covers the HUD, status, dashboard body, compact policy editing, role-player modals, advisor titles/details, and heatmap text; `content_i18n.gd` is wired into the HUD, panels, modals, and 3D labels; `WorldI18n.format_int`/`format_float` handle EN/DE numbers. `scripts/check_locale.sh` prints `LOCALE_CHECK editor=111 world=265 content=34 status=ok`, and the pseudo-locale gate prints `PSEUDO_LOCALE editor=111 world=265 content=34 long=11 status=ok`. Sections 2.1–2.6 below are the original audit snapshot; their "not wired" notes are historical. The current coverage table in §1 and the `*_i18n=ok` world-scene markers are authoritative.
+> [!note] Current status (2026-11-27)
+> The runtime tables now hold **111 editor keys, 458 world keys, and 34 content keys**, each with full EN/DE parity. The world table covers the HUD, status, dashboard body, compact policy editing, role-player modals, advisor titles/details, and heatmap text; `content_i18n.gd` is wired into the HUD, panels, modals, and 3D labels; `WorldI18n.format_int`/`format_float` handle EN/DE numbers. `scripts/check_locale.sh` prints `LOCALE_CHECK editor=111 world=458 content=34 status=ok`, and the pseudo-locale gate prints `PSEUDO_LOCALE editor=111 world=458 content=34 long=11 status=ok`. Sections 2.1–2.6 below are the original audit snapshot; their "not wired" notes are historical. The current coverage table in §1 and the `*_i18n=ok` world-scene markers are authoritative.
 
 > [!warning] Runtime layout differs from the original brief
 > There is **no `godot/locale/` directory** and no `en.json` / `de.json` at this commit. The only runtime table is inline in `godot/editor_i18n.gd` (`TABLES`), with **111 EN and 111 DE keys**. [[38 - Editor Localization]] documents this as a deliberate slice stand-in for the compiled pipeline in [[16 - Localization]]. The audit below targets the actual files, not the assumed layout.
@@ -26,14 +26,47 @@ tags:
 | Surface | Runtime source | EN keys | DE keys | Parity | Gate |
 |---|---|---:|---:|---|---|
 | First-person volume editor | `godot/editor_i18n.gd` | 111 | 111 | complete | `check_locale.sh` + `smoke_locale.sh` |
-| World HUD, dashboard, modals, advisor | `godot/world_i18n.gd` | 265 | 265 | complete | static gate + `WORLD_SCENE` |
-| Dashboard body | `world_i18n.gd` + Rust payload | 90 dashboard keys | 90 | complete | `dashboard_body_i18n=ok` |
+| World HUD, dashboard, modals, advisor | `godot/world_i18n.gd` | 458 | 458 | complete | static gate + `WORLD_SCENE` |
+| Dashboard body and controls | `world_i18n.gd` + Rust payload | 126 dashboard keys | 126 | complete | `dashboard_body_i18n=ok`, `dashboard_*` markers |
 | Advisor titles/details | `world_i18n.gd` + Rust codes | 22 codes | 22 | complete | `advisor_i18n=ok`, `advisor_detail_i18n=ok` |
 | Content display names | `godot/content_i18n.gd` | 34 | 34 | complete | static gate + `content_ui=ok` |
-| Player-visible modals/errors | `world_i18n.gd` | 114 modal keys | 114 | complete | `modal_i18n=ok`; raw codes developer-only |
+| Player-visible modals/errors | `world_i18n.gd` | 57 modal keys | 57 | complete | `modal_i18n=ok`; raw codes developer-only |
 | Tutorial titles | `content_i18n.gd` + Rust step IDs | 5 steps | 5 | complete | `content_ui=ok` |
+| Production settlement shell | `godot/world_i18n.gd` | 67 settlement-screen keys | 67 | complete | `SETTLEMENT_SCREEN` smoke |
+| Standalone settlement editor | `godot/world_i18n.gd` | 47 settlement-editor keys | 47 | complete | `SETTLEMENT_EDITOR` smoke |
+| Chat panel | `godot/world_i18n.gd` | 18 chat keys | 18 | complete | `CHAT_PANEL` smoke |
 
-Dashboard, advisor, and modal counts are subsets of the 265-key world table, not additional tables. The content table is a separate `DISPLAY` table parsed by the same gate.
+Dashboard, advisor, and modal counts are subsets of the 458-key world table, not additional tables. The content table is a separate `DISPLAY` table parsed by the same gate.
+
+### 1.1 Current world-table prefixes
+
+`godot/world_i18n.gd` holds **458** EN and 458 DE keys. The table reconciles exactly:
+
+| Prefix | Keys |
+|---|---:|
+| `base.ui.hud.*` | 49 |
+| `base.ui.citizen.*` | 19 |
+| `base.ui.dashboard.*` | 126 |
+| `base.ui.modal.*` | 57 |
+| `base.ui.settlement_screen.*` | 67 |
+| `base.ui.settlement_editor.*` | 47 |
+| `base.advisor.city.*` | 44 |
+| `base.ui.chat.*` | 18 |
+| `base.ui.heatmap.*` | 10 |
+| `base.ui.district.*` | 10 |
+| `base.ui.help.*` | 6 |
+| `base.ui.policies.*` | 5 |
+| **Total** | **458** |
+
+### 1.2 Known gaps and exceptions
+
+| Surface | String | Status |
+|---|---|---|
+| Settlement default name | `"Settlement %d"` in `world_placement.gd` | **Fix next**: player-facing literal flows into HUD, dashboard, founded modal, and 3D label; needs a `base.ui.settlement.default_name` key with an index placeholder. |
+| Settlement shell rename error | raw `settlement.unknown` in the rename message field | Consistency gap: server codes stay raw, but local validation text is localized; decide whether this field should use a reason key. |
+| Server status panel | field labels and connection text | Intentional developer-only English. |
+| `mp_world_client` / `mp_placement_ui` | debug HUD, script markers | Intentional developer-only English. |
+| Server rejections | `code` / `message` | Codes stay raw by contract; UI owns localized reason text. |
 
 Facts about the current table:
 
@@ -229,7 +262,7 @@ The current German editor uses a neutral infinitive/imperative style (“Klicken
 
 | Phase | Scope | Approx. keys | Exit criterion |
 |---|---|---:|---|
-| 1. HUD + dashboard shell/body | `_update_hud`, `_setup_ui`, dashboard title/hint/body | **done** — 265 world keys | HUD shell/status, dashboard shell/body, all role-player modals, and advisor titles/details keyed; EN/DE numbers wired |
+| 1. HUD + dashboard shell/body | `_update_hud`, `_setup_ui`, dashboard title/hint/body | **done** — 458 world keys | HUD shell/status, dashboard shell/body, all role-player modals, and advisor titles/details keyed; EN/DE numbers wired |
 | 2. Tutorial + content names | Tutorial titles/hints, starter/industry/service/tax names, `capitalize()` removal, structure names | **done** — 34 content keys | No `capitalize()` or raw content ID reaches a player label; `content_ui=ok` |
 | 3. Advisor + errors | Rust advisor title/detail keys, dashboard body labels, modal prefixes, error mapping | **done** — 22 codes, 114 modal keys | Advisor titles/details localized with params; modal text keyed with raw codes developer-only; `modal_i18n=ok` |
 
@@ -289,13 +322,13 @@ Acceptance checks:
 
 ### Static gate
 
-`scripts/check_locale.sh` parses the `TABLES` const in `godot/editor_i18n.gd` and `godot/world_i18n.gd`, plus the `DISPLAY` const in `godot/content_i18n.gd`, and checks key parity, per-file key floors, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. The floors ratchet independently: editor `111`, world `265` (currently 265 keys), content `34`. Default mode prints one line per table plus a summary:
+`scripts/check_locale.sh` parses the `TABLES` const in `godot/editor_i18n.gd` and `godot/world_i18n.gd`, plus the `DISPLAY` const in `godot/content_i18n.gd`, and checks key parity, per-file key floors, empty values, duplicate keys, and `{0}`/`{name}` placeholder parity. The floors ratchet independently: editor `111`, world `458` (currently 458 keys), content `34`. Default mode prints one line per table plus a summary:
 
 ```text
 LOCALE_CHECK file=godot/editor_i18n.gd keys=111 min=111 status=ok
-LOCALE_CHECK file=godot/world_i18n.gd keys=265 min=265 status=ok
+LOCALE_CHECK file=godot/world_i18n.gd keys=458 min=458 status=ok
 LOCALE_CHECK file=godot/content_i18n.gd keys=34 min=34 status=ok
-LOCALE_CHECK editor=111 world=265 content=34 status=ok
+LOCALE_CHECK editor=111 world=458 content=34 status=ok
 ```
 
 Single-file mode (`scripts/check_locale.sh [FILE]`) keeps the original `LOCALE_CHECK keys=N status=ok` marker and derives the floor from the file name (`world_i18n.gd` gets 143, `content_i18n.gd` gets 34, anything else 96). `--self-test` covers twelve cases: the six editor cases (valid, missing DE key, extra DE key, empty value, placeholder mismatch, too few keys), a world-style fixture pass, a too-few world table, a world EN/DE placeholder mismatch, and the same three checks for the `DISPLAY` content table. The gate runs in `scripts/check.sh` and the Rust CI job before the Godot locale smoke.
@@ -304,7 +337,7 @@ A pseudo-localization gate follows the table check in default mode:
 
 ```bash
 ./scripts/check_pseudo_locale.py
-PSEUDO_LOCALE editor=111 world=265 content=34 long=11 status=ok
+PSEUDO_LOCALE editor=111 world=458 content=34 long=11 status=ok
 ```
 
 It accents vowels, keeps `{name}`/`{0}` placeholders byte-for-byte, and expands text to 130% of the EN length with a `«…»` marker. It checks EN/DE parity both ways, duplicate/empty keys, placeholder parity, and a 120-character length limit with an explicit 11-key allowlist for long explanatory strings. This catches structural/layout risk before German QA; it is not a translation. `--self-test` covers 17 generator/check cases without writing repository files.
