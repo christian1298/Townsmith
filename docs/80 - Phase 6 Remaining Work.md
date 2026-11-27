@@ -13,7 +13,7 @@ tags:
 # Phase 6 Remaining Work
 
 > [!abstract] Purpose
-> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `9bad00f` (2026-11-27). It is a plan, not an implementation claim.
+> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `d859057` (2026-11-27). It is a plan, not an implementation claim.
 
 Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/D-032/D-033/D-035/D-038/D-039/D-040/D-041/D-042, [[09 - Open Questions]] Q-101/Q-117/Q-119/Q-120/Q-121/Q-122/Q-123/Q-124/Q-125/Q-126/Q-127/Q-128, [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]], [[81 - Settlement Tax Composition]], [[82 - Journal and Rollback]], [[83 - Remote Transport and Authentication]], [[84 - Content Registry Modes]].
 
@@ -60,7 +60,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 | # | Slice | Depends on | Why this order |
 |---:|---|---|---|
-| 1 | ~~Production settlement UI~~ **done** | #343, #449/#454/#465/#472/#488/#497 | The production shell, connected mutations, shared-core embedding, and gamepad navigation are complete |
+| 1 | ~~Production settlement UI~~ **done** | #343, #449/#454/#465/#472/#488/#497/#503 | The production shell, connected mutations, shared-core embedding, gamepad navigation, and modality footer are complete |
 | 2 | Settlement tax treasury consumer after D-039 acceptance | D-030/D-031 | The pure helper exists, but the rate is data-only; applying it needs a precedence decision against district weights |
 | 3 | Blueprint lock reconnect-retention UX | #349 v0 locks, #363/#374 UI, #369 leases, #375 retention, #380 CLI, #393 player scope | Lease expiry, retention, CLI, and concurrent-session release are done; decide automatic renewal and client lock list |
 | 4 | Concurrent listener remote-load tuning | #269, #350, #373, #383, #389, #395, #402 | Slow readers, closed queues, shutdown, session cap, fan-out, and sustained load are covered; remote/network-latency tuning remains |
@@ -113,7 +113,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.4 Concurrent listeners and outbound queue
 
-**Scope.** #373 adds a bounded `OutboundQueue`; #383 wires a per-connection writer thread; #389 runs every accepted socket on its own session thread against the shared world and closes only a backpressured recipient; #395/#402 add the stress matrix (fan-out, sustained load, shutdown with queued writes, ordering); #493 adds four concurrent status watchers under chat traffic with an unchanged checksum. Remaining: remote-load tuning with injected latency, a stalled/non-reading watcher case, and more local cases only where they cover a distinct failure.
+**Scope.** #373 adds a bounded `OutboundQueue`; #383 wires a per-connection writer thread; #389 runs every accepted socket on its own session thread against the shared world and closes only a backpressured recipient; #395/#402 add the stress matrix (fan-out, sustained load, shutdown with queued writes, ordering); #493 adds four concurrent status watchers under chat traffic with an unchanged checksum. #500 adds a stalled/non-reading watcher that queues frames below the cap while healthy clients complete; remaining: remote-load tuning with injected latency, and more local cases only where they cover a distinct failure.
 
 **Protocol/save.** No wire-shape change. Add backpressure/closure codes and a bounded queue metric.
 
@@ -160,6 +160,8 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 **Scope.** Freeze the schema for settlements, placement edits, journal, and locks before remote exposure. Add migration tests for every outer/store version pair.
 
 **Tests.** Golden v1/v2 fixtures, byte-identical no-op loads, reject unknown future versions, migration idempotence, content identity before any store.
+
+**Implemented (wired schemas).** #502 adds `crates/server/tests/save_version_matrix.rs` (v1 byte identity, outer v2/v3 fail-closed, per-store version rejection, repeated load/save stability, unknown `content` stripping) and fixes `load_from` so a future-version primary never downgrades to `.bak`. Placement-edit and journal schemas are not wired yet, so their migration fixtures wait on D-038/D-040.
 
 **Not bundled.** Auto-downgrade, cross-pack conversion, data repair heuristics.
 
@@ -222,8 +224,8 @@ Prove, on reference hardware and with four players:
 ## 7. Immediate order
 
 1. Tax consumer after D-039 acceptance (§3.2).
-2. Concurrent listener remote-load tuning and the stalled-watcher case (§3.4); the status-watch load path is covered.
+2. Concurrent listener remote-load tuning with injected latency (§3.4); the status-watch and stalled-watcher paths are covered.
 3. Resource-pack registry policy after D-042/Q-127/Q-128 (§3.5/§3.9); the parser, opt-in server manifest path, and bridge reader exist.
 4. Accept or revise D-038; answer Q-119/Q-120; then voxel edit v1 (§3.6).
-5. Journal after D-040/Q-123/Q-124 (§3.7), schema freeze (§3.8), remote auth after D-041 (§3.9).
+5. Journal after D-040/Q-123/Q-124 (§3.7), remote auth after D-041 (§3.9); the wired-schema version matrix is done in #502, while the edit/journal freeze waits on those schemas.
 6. Extend the automated exit script (§3.10), then run the human/reference-hardware gates.
