@@ -2,7 +2,7 @@
 title: Save Load Stress
 project: Townsmith
 status: active
-updated: 2026-11-26
+updated: 2026-11-27
 tags:
   - townsmith
   - testing
@@ -169,11 +169,36 @@ No error `code()` embeds a path. Absolute paths appear only in `Display` for `sa
 - unknown top-level/store/record fields are ignored and stripped on re-save;
 - outer `format_version: 2` is rejected even with a `content` object, v1 never emits `content`, and a legacy v1 baseline without optional stores stays byte-identical after load/re-save and a no-op file save.
 
+### 7.2 Server save version matrix
+
+`crates/server/tests/save_version_matrix.rs` pins the outer-version and
+per-store version boundary for the schemas wired today (docs/80 §3.8):
+
+- a v1 base-only load -> save is byte-identical, with no `.tmp`/`.bak` residue
+  and no `content` key;
+- an outer v2 document with a plausible bridge `content` block fails closed
+  with `save.unsupported_version`; the server save stays identity-free (D-034);
+- an unknown outer v3 fails closed with `save.unsupported_version` even when a
+  valid v1 `.bak` exists. A future-version primary is a refusal, not
+  corruption: `load_from` returns the stable code without downgrading to the
+  backup, and leaves the primary untouched;
+- `placements`, `construction`, `players`, and `settlements` are each covered
+  absent, valid, and with a malformed `format_version`, reporting their own
+  `save.invalid_*` code;
+- repeated load/save cycles keep normalized bytes, checksums, `next_id`, and
+  settlement `membership_revision`/`tax_rate` stable;
+- a v1 document with an unknown `content` field strips it and re-saves the
+  canonical base-only bytes.
+
+The bridge owns the D-034 outer-v2 content-envelope round-trip and verification
+order; those cases stay in `crates/godot_ext/src/content_identity.rs` and
+`save_composition_matrix.rs` and are not duplicated here.
+
 ## 8. Limits
 
 - Core stores only; it does not exercise the Godot `world_save`/`world_load` wrapper or `VarDictionary` payloads. Bridge atomic-write/`.bak` recovery is covered by `godot_ext` unit tests.
 - Terrain deltas are covered as a core encoded blob. The Godot bridge enforces `MAX_WORLD_SAVE_BYTES` (64 MiB); the core harness does not exercise that envelope.
-- No multiplayer, mod, or migration matrix.
+- No multiplayer or mod migration matrix beyond the server save version matrix in §7.2.
 - The combined JSON path can normalize f64 text; byte-stable checksums are asserted per store where possible.
 - Fixed seeded fixtures, not a mutation/fuzz corpus; the rejection suite covers representative corrupt inputs.
 - The economy is compared semantically rather than by checksum after the combined roundtrip.

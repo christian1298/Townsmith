@@ -418,6 +418,11 @@ impl ServerWorld {
 
     /// Load a world from `path`, falling back to `<path>.bak` when the primary
     /// is missing or corrupt.
+    ///
+    /// A future save version is **not** corruption: it fails closed with
+    /// [`SaveError::UnsupportedVersion`] and never downgrades to the backup,
+    /// so an older server cannot silently roll a newer save back to stale
+    /// data.
     pub fn load_from(path: impl AsRef<Path>) -> Result<LoadedWorld, SaveError> {
         let path = path.as_ref();
         let backup = backup_path(path);
@@ -435,6 +440,10 @@ impl ServerWorld {
                 });
             }
             Err(error) if error.is_not_found() && !backup.is_file() => return Err(error),
+            // A future-version save is a deliberate refusal, not corruption.
+            // Falling back to `.bak` would load stale state from an older
+            // schema; keep the stable code and the primary untouched.
+            Err(error @ SaveError::UnsupportedVersion(_)) => return Err(error),
             Err(_) => {}
         }
 
