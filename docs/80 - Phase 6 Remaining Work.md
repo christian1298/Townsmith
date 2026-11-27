@@ -99,7 +99,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.3 Blueprint locks: leases, retention, reconnect UX
 
-**Scope.** #349 ships advisory in-memory locks and player-wide release on disconnect; #363 adds the placement-UI lock badge and `L` toggle; #369 adds a lazy 300-tick lease (1–3600 clamp) and refreshes on same-holder lock; #374 shows the lease; #375 adds opt-in retention across disconnect; #380 adds the `--retain-locks` CLI and `SERVER_LOCKS retention=on|off` marker; #393 scopes release to the stable player id across concurrent sessions. Remaining: reconnect-retention UX (automatic renewal), a lock list in the connected client, and an optional lease override; #385 makes Admin force-unlock explicit and audits it.
+**Scope.** #349 ships advisory in-memory locks and player-wide release on disconnect; #363 adds the placement-UI lock badge and `L` toggle; #369 adds a lazy 300-tick lease (1–3600 clamp) and refreshes on same-holder lock; #374 shows the lease; #375 adds opt-in retention across disconnect; #380 adds the `--retain-locks` CLI and `SERVER_LOCKS retention=on|off` marker; #393 scopes release to the stable player id across concurrent sessions. The lease override is done: `--lock-lease-ticks N` (1–3600, default 300) is applied after any `--load` and echoes `SERVER_LOCK_LEASE ticks=N` only when supplied. Remaining: reconnect-retention UX (automatic renewal) and a lock list in the connected client; #385 makes Admin force-unlock explicit and audits it.
 
 **Protocol/save.** Additive fields on the existing lock responses; if locks become durable, a new optional `ServerSave` store and `save.invalid_blueprint_locks`. Do not make locks authoritative for package identity.
 

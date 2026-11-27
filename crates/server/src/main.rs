@@ -25,7 +25,7 @@ use townsmith_server::settlement_smoke::run_settlement_smoke;
 use townsmith_server::vote::run_time_vote_loopback;
 use townsmith_server::world::{
     run_authority_loopback, run_interest_loopback, run_resume_loopback, run_roles_loopback,
-    ClientRole, ServerWorld,
+    ClientRole, ServerWorld, MAX_BLUEPRINT_LOCK_LEASE_TICKS, MIN_BLUEPRINT_LOCK_LEASE_TICKS,
 };
 
 fn arg_value(name: &str) -> Option<String> {
@@ -74,6 +74,64 @@ fn has_flag(name: &str) -> bool {
 /// therefore does not survive a restart.
 fn retain_locks_requested(args: &[String]) -> bool {
     args.iter().any(|argument| argument == "--retain-locks")
+}
+
+/// Stable CLI code for an unusable `--lock-lease-ticks` value.
+const LOCK_LEASE_INVALID: &str = "lock_lease.invalid";
+
+/// Read `--lock-lease-ticks N` from an explicit argument list.
+///
+/// The value is space-separated, like every other key/value flag on this CLI,
+/// so the `--lock-lease-ticks=N` spelling is rejected explicitly instead of
+/// being silently ignored and leaving the default in place.
+///
+/// Out-of-range values are rejected here rather than clamped by
+/// [`ServerWorld::set_lock_lease_ticks`]: an operator asking for `0` or `9999`
+/// ticks gets an error, not a silent 1 or 3,600. A trailing flag with no value
+/// is an error too, unlike the lenient `--seed`-style readers.
+fn lock_lease_ticks_arg(args: &[String]) -> Result<Option<u64>, String> {
+    const FLAG: &str = "--lock-lease-ticks";
+    let prefixed = format!("{FLAG}=");
+    for (index, argument) in args.iter().enumerate() {
+        if argument.starts_with(&prefixed) {
+            return Err(format!(
+                "{FLAG} does not accept `=`, pass `{FLAG} N` instead of `{argument}`"
+            ));
+        }
+        if argument != FLAG {
+            continue;
+        }
+        let Some(raw) = args.get(index + 1) else {
+            return Err(format!(
+                "{FLAG} requires a value in {MIN_BLUEPRINT_LOCK_LEASE_TICKS}..={MAX_BLUEPRINT_LOCK_LEASE_TICKS}"
+            ));
+        };
+        let parsed = raw.parse::<u64>().map_err(|_| {
+            format!(
+                "{FLAG} must be an integer in {MIN_BLUEPRINT_LOCK_LEASE_TICKS}..={MAX_BLUEPRINT_LOCK_LEASE_TICKS}, got `{raw}`"
+            )
+        })?;
+        if !(MIN_BLUEPRINT_LOCK_LEASE_TICKS..=MAX_BLUEPRINT_LOCK_LEASE_TICKS).contains(&parsed) {
+            return Err(format!(
+                "{FLAG} must be an integer in {MIN_BLUEPRINT_LOCK_LEASE_TICKS}..={MAX_BLUEPRINT_LOCK_LEASE_TICKS}, got `{raw}`"
+            ));
+        }
+        return Ok(Some(parsed));
+    }
+    Ok(None)
+}
+
+/// Apply the CLI lock-lease choice to a served world.
+///
+/// Absent means "leave the `DEFAULT_BLUEPRINT_LOCK_LEASE_TICKS` default in
+/// place", so a run without the flag keeps the v0 lease. A supplied value is
+/// already range-checked by [`lock_lease_ticks_arg`]; this is still process
+/// configuration applied after any load, never a `ServerSave` field.
+fn apply_lock_lease_ticks(world: &mut ServerWorld, requested: Option<u64>) -> u64 {
+    if let Some(ticks) = requested {
+        world.set_lock_lease_ticks(ticks);
+    }
+    world.lock_lease_ticks
 }
 
 /// Read `--content-ids` from an explicit argument list.
@@ -356,6 +414,8 @@ fn print_usage() {
             "  --once                     Shorthand for --sessions 1\n",
             "  --autosave-ticks N         Autosave interval in ticks (0 disables)\n",
             "  --retain-locks             Keep blueprint locks across a disconnect\n",
+            "  --lock-lease-ticks N       Advisory lock lease in ticks (1..=3600, default 300)\n",
+            "                             Prints SERVER_LOCK_LEASE ticks=N at startup\n",
             "  --content-hash HEX         Require this 64-hex content-registry hash in hello\n",
             "  --content-ids IDS          Active content ids, comma-separated (default base)\n",
             "                             e.g. --content-ids base,mymod,mymod:pack\n",
@@ -650,6 +710,17 @@ fn run_listen_mode(port: &str) {
         None => has_flag("--once").then_some(1),
     };
 
+    // Validate the lease override before any load or bind so a bad value has no
+    // side effects and fails closed with a stable code.
+    let args: Vec<String> = std::env::args().collect();
+    let lock_lease = match lock_lease_ticks_arg(&args) {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("SERVER_LISTEN status=error code={LOCK_LEASE_INVALID} error={message}");
+            std::process::exit(2);
+        }
+    };
+
     let world = match &load_path {
         Some(path) => match ServerWorld::load_from(path) {
             Ok(loaded) => {
@@ -688,9 +759,12 @@ fn run_listen_mode(port: &str) {
     world.set_role(role);
     // Apply the CLI retention choice after any load so a loaded world follows
     // the process, not the save: the flag is not persisted.
-    let args: Vec<String> = std::env::args().collect();
     let retain_locks = retain_locks_requested(&args);
     world.set_retain_locks_on_disconnect(retain_locks);
+    // The lease override is the same kind of process configuration: applied
+    // after any load, never written to `ServerSave`, and absent means the
+    // built-in default lease.
+    let lock_lease_ticks = apply_lock_lease_ticks(&mut world, lock_lease);
     if let Some(hash) = arg_value("--content-hash") {
         if let Err(error) = world.set_content_hash(Some(&hash)) {
             eprintln!(
@@ -755,6 +829,11 @@ fn run_listen_mode(port: &str) {
         "SERVER_LOCKS retention={}",
         if retain_locks { "on" } else { "off" }
     );
+    // Only an explicit override is echoed, so startup lines without the flag
+    // keep the existing pinned order (the effective default is 300).
+    if lock_lease.is_some() {
+        println!("SERVER_LOCK_LEASE ticks={lock_lease_ticks}");
+    }
     println!(
         "SERVER_LISTEN status=ok address={address} seed={} tick={} checksum={} role={} save={} autosave_ticks={} sessions={}",
         world.seed,
@@ -967,6 +1046,7 @@ fn run_harness() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use townsmith_server::world::DEFAULT_BLUEPRINT_LOCK_LEASE_TICKS;
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
@@ -1015,6 +1095,105 @@ mod tests {
             checksum,
             "the retention flag stays outside the world checksum"
         );
+    }
+
+    #[test]
+    fn lock_lease_flag_parses_absent_present_and_boundaries() {
+        assert_eq!(
+            lock_lease_ticks_arg(&args(&["--listen", "0", "--once"])),
+            Ok(None)
+        );
+        assert_eq!(
+            lock_lease_ticks_arg(&args(&["--listen", "0", "--lock-lease-ticks", "600"])),
+            Ok(Some(600))
+        );
+        assert_eq!(
+            lock_lease_ticks_arg(&args(&["--lock-lease-ticks", "1"])),
+            Ok(Some(1)),
+            "the lower bound is accepted"
+        );
+        assert_eq!(
+            lock_lease_ticks_arg(&args(&["--lock-lease-ticks", "3600"])),
+            Ok(Some(3600)),
+            "the upper bound is accepted"
+        );
+    }
+
+    #[test]
+    fn lock_lease_flag_rejects_value_forms_and_dangling_flags() {
+        let equals = lock_lease_ticks_arg(&args(&["--lock-lease-ticks=600"])).unwrap_err();
+        assert!(equals.contains("does not accept `=`"), "{equals}");
+
+        let missing =
+            lock_lease_ticks_arg(&args(&["--listen", "0", "--lock-lease-ticks"])).unwrap_err();
+        assert!(missing.contains("requires a value"), "{missing}");
+    }
+
+    #[test]
+    fn lock_lease_flag_rejects_invalid_and_out_of_range_values() {
+        for raw in ["0", "-1", "abc", "3601"] {
+            let error = lock_lease_ticks_arg(&args(&["--lock-lease-ticks", raw])).unwrap_err();
+            assert!(
+                error.contains("1..=3600"),
+                "{raw:?} must name the accepted range: {error}"
+            );
+            assert!(error.contains(raw), "{raw:?} must be echoed: {error}");
+        }
+    }
+
+    #[test]
+    fn lock_lease_flag_keeps_the_world_default_when_absent() {
+        let mut world = ServerWorld::new(LOOPBACK_SEED);
+        assert_eq!(
+            world.lock_lease_ticks, DEFAULT_BLUEPRINT_LOCK_LEASE_TICKS,
+            "the v0 default lease"
+        );
+
+        let ticks = apply_lock_lease_ticks(
+            &mut world,
+            lock_lease_ticks_arg(&args(&["--listen", "0"])).expect("valid args"),
+        );
+        assert_eq!(ticks, DEFAULT_BLUEPRINT_LOCK_LEASE_TICKS);
+        assert_eq!(
+            world.lock_lease_ticks, DEFAULT_BLUEPRINT_LOCK_LEASE_TICKS,
+            "absence leaves the default"
+        );
+    }
+
+    #[test]
+    fn lock_lease_flag_applies_after_the_load_path() {
+        let mut world = ServerWorld::new(LOOPBACK_SEED);
+        let checksum = world.checksum();
+        let requested =
+            lock_lease_ticks_arg(&args(&["--listen", "0", "--lock-lease-ticks", "1200"]))
+                .expect("valid args");
+
+        let ticks = apply_lock_lease_ticks(&mut world, requested);
+        assert_eq!(ticks, 1200);
+        assert_eq!(world.lock_lease_ticks, 1200);
+        assert_eq!(
+            world.checksum(),
+            checksum,
+            "the lease stays outside the world checksum"
+        );
+    }
+
+    #[test]
+    fn lock_lease_flag_prints_a_stable_marker() {
+        let mut world = ServerWorld::new(LOOPBACK_SEED);
+        let ticks = apply_lock_lease_ticks(
+            &mut world,
+            lock_lease_ticks_arg(&args(&["--lock-lease-ticks", "600"])).expect("valid args"),
+        );
+        assert_eq!(
+            format!("SERVER_LOCK_LEASE ticks={ticks}"),
+            "SERVER_LOCK_LEASE ticks=600"
+        );
+    }
+
+    #[test]
+    fn lock_lease_flag_error_code_is_stable() {
+        assert_eq!(LOCK_LEASE_INVALID, "lock_lease.invalid");
     }
 
     #[test]
