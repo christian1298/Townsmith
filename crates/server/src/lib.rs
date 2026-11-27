@@ -10,6 +10,8 @@ mod chat_faults;
 pub mod chat_smoke;
 pub mod listen;
 pub mod placement;
+#[cfg(test)]
+mod player_faults;
 pub mod protocol;
 pub mod save;
 #[cfg(test)]
