@@ -747,6 +747,7 @@ fn run_listen_mode(port: &str) {
     );
 
     let config = ListenConfig {
+        shutdown_save: save_path.is_some(),
         save_path,
         autosave_ticks,
     };
