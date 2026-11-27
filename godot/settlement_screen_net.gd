@@ -92,6 +92,96 @@ func request(message: Dictionary) -> Dictionary:
 	return {"ok": true, "message": reply}
 
 
+## Send one settlement mutation and decode its `settlement_updated` reply.
+##
+## Returns `{ok: true, settlement, settlement_checksum, world_checksum}` or
+## `{ok: false, error_code: <stable code>}`. A reply of another type is a
+## protocol failure, not an accepted mutation.
+func mutation(message: Dictionary) -> Dictionary:
+	var response := request(message)
+	if not bool(response.get("ok", false)):
+		return response
+	var reply: Dictionary = response.get("message", {})
+	if str(reply.get("type", "")) != "settlement_updated":
+		return _fail("protocol.malformed")
+	var record = reply.get("settlement", {})
+	if not (record is Dictionary):
+		return _fail("protocol.malformed")
+	return {
+		"ok": true,
+		"settlement": record,
+		"settlement_checksum": str(reply.get("settlement_checksum", "")),
+		"world_checksum": str(reply.get("world_checksum", "")),
+	}
+
+
+## D-033 connected mutations. Each sends the freshly read `membership_revision`
+## and returns the decoded `settlement_updated` shape from `mutation`.
+func settlement_claim(
+	settlement_id: int, player_id: int, expected_revision: int
+) -> Dictionary:
+	return mutation({
+		"type": "settlement_claim",
+		"settlement_id": settlement_id,
+		"player_id": player_id,
+		"expected_revision": expected_revision,
+	})
+
+
+func settlement_transfer(
+	settlement_id: int, player_id: int, expected_revision: int
+) -> Dictionary:
+	return mutation({
+		"type": "settlement_transfer",
+		"settlement_id": settlement_id,
+		"player_id": player_id,
+		"expected_revision": expected_revision,
+	})
+
+
+func settlement_release(settlement_id: int, expected_revision: int) -> Dictionary:
+	return mutation({
+		"type": "settlement_release",
+		"settlement_id": settlement_id,
+		"expected_revision": expected_revision,
+	})
+
+
+func settlement_invite(
+	settlement_id: int, player_id: int, role: String, expected_revision: int
+) -> Dictionary:
+	return mutation({
+		"type": "settlement_invite",
+		"settlement_id": settlement_id,
+		"player_id": player_id,
+		"role": role,
+		"expected_revision": expected_revision,
+	})
+
+
+func settlement_set_role(
+	settlement_id: int, player_id: int, role: String, expected_revision: int
+) -> Dictionary:
+	return mutation({
+		"type": "settlement_set_role",
+		"settlement_id": settlement_id,
+		"player_id": player_id,
+		"role": role,
+		"expected_revision": expected_revision,
+	})
+
+
+func settlement_remove_member(
+	settlement_id: int, player_id: int, expected_revision: int
+) -> Dictionary:
+	return mutation({
+		"type": "settlement_remove_member",
+		"settlement_id": settlement_id,
+		"player_id": player_id,
+		"expected_revision": expected_revision,
+	})
+
+
 ## Send `disconnect`, wait briefly for `goodbye`, then close the socket.
 ## Never fails the caller: shutdown is best effort and bounded.
 func close() -> void:

@@ -22,13 +22,17 @@ extends Control
 ##
 ## Final smoke markers, printed twice with identical output:
 ##   SETTLEMENT_SCREEN status=ok pages=3 settlements=23 actions=13 accepted=8 rejected=5 checksum=<16 hex>
-##   SETTLEMENT_SCREEN_CONNECTED status=ok settlements=1 players=1 rename=1 tax=1 checksum=<16 hex>
+##   SETTLEMENT_SCREEN_CONNECTED status=ok settlements=1 players=2 actions=10 accepted=8 rejected=2 checksum=<16 hex>
 ##
 ## Connected mode is the server-authoritative slice: reads come from
-## `settlement_list`/`player_list`, and only rename and set-tax mutations are
-## wired. The remaining local bridge actions stay visible and disabled with the
-## localized `connected action not available yet` reason. Local mode is
-## unchanged.
+## `settlement_list`/`player_list`, and claim, rename, tax, invite, set-role,
+## remove, transfer, and release all send the D-033 commands through
+## `settlement_screen_net.gd`. Every mutation re-reads the selected record and
+## uses that fresh `membership_revision`; a reject keeps the cached row, the
+## selection, and the world checksum unchanged and shows the stable code.
+## Release is enabled for an owned record because the server owns the Admin
+## ceiling: a Mayor session gets `role.forbidden` back and shows the localized
+## `release requires Admin` reason. Local mode is unchanged.
 
 const WorldI18n = preload("res://world_i18n.gd")
 const SettlementScreenNet = preload("res://settlement_screen_net.gd")
@@ -91,13 +95,15 @@ const FIXTURE_FALLBACK_MEMBER_ID := 9001
 const MUTED_COLOR := Color(0.66, 0.71, 0.78)
 const TEXT_COLOR := Color(0.88, 0.91, 0.95)
 
-const CONNECTED_REASON := "connected_unavailable"
 const DEFAULT_HOST := "127.0.0.1"
 const DEFAULT_PORT := 47015
 const DEFAULT_PLAYER_NAME := "settlement-screen"
 const CONNECTED_FOUND_NAME := "Harbor"
 const CONNECTED_RENAMED_NAME := "Port Harbor"
 const CONNECTED_FOUND_RADIUS_M := 64
+## Smoke-only second session. The main Mayor session opens first, so the roster
+## is Mayor=1, Builder=2 before the screen reads it.
+const CONNECTED_SEED_PLAYER := "Builder"
 
 var smoke_mode := false
 var empty_mode := false
@@ -815,6 +821,15 @@ func _first_player_id() -> int:
 	return ids[0] if not ids.is_empty() else 0
 
 
+## Connected actor: the roster id whose name matches this session's player.
+## Falls back to the selected record's owner for a just-founded record.
+func _self_player_id() -> int:
+	for id in _registered_ids():
+		if str(_player_names.get(id, "")).to_lower() == _player_name.to_lower():
+			return id
+	return int(_current_record().get("owner_id", 0))
+
+
 ## Ascending registered player that is not the current owner.
 func _transfer_target(settlement: Dictionary) -> int:
 	var owner = settlement.get("owner_id")
@@ -989,22 +1004,7 @@ func _mutation_record(action: String) -> Dictionary:
 	return record
 
 
-## Local-only action in connected mode: no request is sent and the attempt is
-## not counted as an accepted/rejected mutation.
-func _block_connected_action(action: String) -> bool:
-	if not _connected_mode:
-		return false
-	_status_text = "%s: %s" % [
-		_action_label(action),
-		_reason_text(CONNECTED_REASON),
-	]
-	_render_detail()
-	return true
-
-
 func _claim_selected() -> void:
-	if _block_connected_action("claim"):
-		return
 	var record := _mutation_record("claim")
 	if record.is_empty():
 		return
@@ -1012,11 +1012,15 @@ func _claim_selected() -> void:
 	if bool(record.get("owned", false)):
 		_finish_action("claim", _error("settlement.already_owned"), revision)
 		return
-	var actor := _first_player_id()
+	var actor := _self_player_id() if _connected_mode else _first_player_id()
 	if actor <= 0:
 		_finish_action("claim", _error("no_player"), revision)
 		return
-	var result: Dictionary = _core.settlement_claim(_record_id(record), actor, revision)
+	var result: Dictionary
+	if _connected_mode:
+		result = _net.settlement_claim(_record_id(record), actor, revision)
+	else:
+		result = _core.settlement_claim(_record_id(record), actor, revision)
 	_finish_action("claim", result, revision)
 
 
@@ -1134,16 +1138,13 @@ func _tax_selected() -> void:
 func _connected_update(request: Dictionary) -> Dictionary:
 	if _net == null:
 		return _error("no_core")
-	var response: Dictionary = _net.request(request)
+	var response: Dictionary = _net.mutation(request)
 	if not bool(response.get("ok", false)):
 		return _error(str(response.get("error_code", "error")))
-	var message: Dictionary = response.get("message", {})
-	if str(message.get("type", "")) != "settlement_updated":
-		return _error("protocol.malformed")
-	var record = message.get("settlement", {})
+	var record = response.get("settlement", {})
 	if not (record is Dictionary):
 		return _error("protocol.malformed")
-	var world := str(message.get("world_checksum", ""))
+	var world := str(response.get("world_checksum", ""))
 	if _is_hex16(world):
 		_world_checksum = world
 	return {"ok": true, "settlement": record}
@@ -1167,8 +1168,6 @@ func _connected_set_tax(settlement_id: int, rate: int) -> Dictionary:
 
 
 func _transfer_selected() -> void:
-	if _block_connected_action("transfer"):
-		return
 	var record := _mutation_record("transfer")
 	if record.is_empty():
 		return
@@ -1180,13 +1179,15 @@ func _transfer_selected() -> void:
 	if target <= 0:
 		_finish_action("transfer", _error("no_recipient"), revision)
 		return
-	var result: Dictionary = _core.settlement_transfer(_record_id(record), target, revision)
+	var result: Dictionary
+	if _connected_mode:
+		result = _net.settlement_transfer(_record_id(record), target, revision)
+	else:
+		result = _core.settlement_transfer(_record_id(record), target, revision)
 	_finish_action("transfer", result, revision)
 
 
 func _invite_selected() -> void:
-	if _block_connected_action("invite"):
-		return
 	var record := _mutation_record("invite")
 	if record.is_empty():
 		return
@@ -1198,13 +1199,15 @@ func _invite_selected() -> void:
 	if target <= 0:
 		_finish_action("invite", _error("no_invitee"), revision)
 		return
-	var result: Dictionary = _core.settlement_invite(_record_id(record), target, "member", revision)
+	var result: Dictionary
+	if _connected_mode:
+		result = _net.settlement_invite(_record_id(record), target, "member", revision)
+	else:
+		result = _core.settlement_invite(_record_id(record), target, "member", revision)
 	_finish_action("invite", result, revision)
 
 
 func _cycle_role() -> void:
-	if _block_connected_action("cycle_role"):
-		return
 	var record := _mutation_record("cycle_role")
 	if record.is_empty():
 		return
@@ -1219,15 +1222,15 @@ func _cycle_role() -> void:
 	var player := int(member.get("player", 0))
 	_selected_member = player
 	var role := _next_role(str(member.get("role", "")))
-	var result: Dictionary = _core.settlement_set_role(
-		_record_id(record), player, role, revision
-	)
+	var result: Dictionary
+	if _connected_mode:
+		result = _net.settlement_set_role(_record_id(record), player, role, revision)
+	else:
+		result = _core.settlement_set_role(_record_id(record), player, role, revision)
 	_finish_action("cycle_role", result, revision)
 
 
 func _remove_selected() -> void:
-	if _block_connected_action("remove_member"):
-		return
 	var member := _selected_member_record(_current_record())
 	if member.is_empty():
 		_status_text = _i18n.t(
@@ -1268,15 +1271,15 @@ func _attempt_remove_member(record: Dictionary, player: int) -> Dictionary:
 		return _finish_action("remove_member", _error("invalid_player_id"), revision)
 	if int(record.get("owner_id", -1)) == player:
 		return _finish_action("remove_member", _error("settlement.owner_required"), revision)
-	var result: Dictionary = _core.settlement_remove_member(
-		_record_id(record), player, revision
-	)
+	var result: Dictionary
+	if _connected_mode:
+		result = _net.settlement_remove_member(_record_id(record), player, revision)
+	else:
+		result = _core.settlement_remove_member(_record_id(record), player, revision)
 	return _finish_action("remove_member", result, revision)
 
 
 func _release_selected() -> void:
-	if _block_connected_action("release"):
-		return
 	if _selected_id <= 0:
 		return
 	if _pending_release_id != _selected_id:
@@ -1312,9 +1315,13 @@ func _release_selected() -> void:
 	if not bool(record.get("owned", false)):
 		_finish_action("release", _error("settlement.unowned"), revision)
 		return
-	# Local/developer Admin override: the bridge applies the store's release
-	# rule, and this screen never claims a server role check happened.
-	var result: Dictionary = _core.settlement_release(_record_id(record), revision)
+	# Local/developer Admin override; connected mode asks the server and shows
+	# its role rejection instead of bypassing it.
+	var result: Dictionary
+	if _connected_mode:
+		result = _net.settlement_release(_record_id(record), revision)
+	else:
+		result = _core.settlement_release(_record_id(record), revision)
 	_finish_action("release", result, revision)
 
 
@@ -1352,16 +1359,24 @@ func _availability(settlement: Dictionary) -> Dictionary:
 			for entry in ACTION_ORDER:
 				reasons[str(entry[0])] = "no_selection"
 			return reasons
-		# Read-only inspection plus rename/set-tax. Every other bridge action
-		# stays visible and disabled until its connected mutation is wired.
-		for entry in ACTION_ORDER:
-			reasons[str(entry[0])] = CONNECTED_REASON
-		if bool(settlement.get("owned", false)):
+		var owned := bool(settlement.get("owned", false))
+		var actor := _self_player_id()
+		if owned:
+			reasons["claim"] = "settlement.already_owned"
 			reasons["rename"] = ""
 			reasons["tax"] = ""
+			reasons["release"] = ""
 		else:
-			reasons["rename"] = "settlement.unowned"
-			reasons["tax"] = "settlement.unowned"
+			reasons["claim"] = "" if actor > 0 else "no_player"
+			for action in ["rename", "tax", "transfer", "invite", "cycle_role", "remove_member", "release"]:
+				reasons[action] = "settlement.unowned"
+			return reasons
+		reasons["transfer"] = "" if _transfer_target(settlement) > 0 else "no_recipient"
+		reasons["invite"] = "" if _invite_target(settlement) > 0 else "no_invitee"
+		var member := _selected_member_record(settlement)
+		var member_reason := "" if not member.is_empty() else "no_member"
+		reasons["cycle_role"] = member_reason
+		reasons["remove_member"] = member_reason
 		return reasons
 	if _core == null:
 		for entry in ACTION_ORDER:
@@ -1993,25 +2008,60 @@ func _run_connected_smoke() -> void:
 	_expect(_world_checksum == before_checksum, "world checksum unchanged after reject", failures)
 	_expect(_checksum == before_list_checksum, "list checksum unchanged after reject", failures)
 
-	# Local-only actions are visible but disabled, and the shortcut guard does
-	# not send a request or count an action.
-	var reasons := _availability(_current_record())
-	_expect(str(reasons.get("rename", "x")) == "", "rename enabled", failures)
-	_expect(str(reasons.get("tax", "x")) == "", "tax enabled", failures)
-	for action in ["claim", "transfer", "invite", "cycle_role", "remove_member", "release"]:
-		_expect(
-			str(reasons.get(action, "")) == CONNECTED_REASON,
-			"%s disabled with connected reason" % action,
-			failures
-		)
-	var action_count_before := _action_count
+	# Register a second player so invite/transfer targets resolve.
+	var seed_net := SettlementScreenNet.new()
+	var seed_open: Dictionary = seed_net.open(_host, _port, CONNECTED_SEED_PLAYER)
+	_expect(bool(seed_open.get("ok", false)), "seed player open", failures)
+	seed_net.close()
+	_refresh_player_names()
+	_expect(_player_names.size() == 2, "players 2, got %d" % _player_names.size(), failures)
+
+	var before_actions := _action_count
 	_invite_selected()
-	_expect(_action_count == action_count_before, "disabled action sends nothing", failures)
+	_expect(_action_count > before_actions, "invite counted", failures)
+	var member := _selected_member_record(_current_record())
+	_expect(int(member.get("player", 0)) == 2, "member 2 invited", failures)
+	var revision_after_invite := _revision(_current_record())
+
+	_selected_member = 2
+	_cycle_role()
 	_expect(
-		_status_text.contains(_i18n.t("base.ui.settlement_screen.reason.connected_unavailable")),
-		"disabled reason localized: %s" % _status_text,
+		str(_selected_member_record(_current_record()).get("role", "")) == "builder",
+		"role promoted to builder",
 		failures
 	)
+	_cycle_role()
+	_expect(
+		str(_selected_member_record(_current_record()).get("role", "")) == "manager",
+		"role promoted to manager",
+		failures
+	)
+
+	_pending_remove_id = 0
+	_pending_remove_player = 0
+	_remove_selected()
+	_remove_selected()
+	_expect(
+		_selected_member_record(_current_record()).is_empty(),
+		"member 2 removed",
+		failures
+	)
+
+	_invite_selected()
+	_transfer_selected()
+	_expect(int(_current_record().get("owner_id", 0)) == 2, "ownership transferred to 2", failures)
+	_expect(
+		_revision(_current_record()) > revision_after_invite,
+		"revision advanced through mutations",
+		failures
+	)
+
+	# Mayor cannot release; the server rejection is surfaced, not bypassed.
+	_pending_release_id = 0
+	var rejected_before := _rejected_count
+	_release_selected()
+	_release_selected()
+	_expect(_rejected_count > rejected_before, "Mayor release rejected", failures)
 	_expect(not _all_text().contains("!base.ui."), "EN key leak", failures)
 
 	_switch_locale("de")
@@ -2033,12 +2083,15 @@ func _run_connected_smoke() -> void:
 		_connected_smoke_fail(failures)
 		return
 	print(
-		"SETTLEMENT_SCREEN_CONNECTED status=ok settlements=%d players=%d rename=%d tax=%d checksum=%s"
+		"SETTLEMENT_SCREEN_CONNECTED status=ok settlements=%d players=%d rename=%d tax=%d actions=%d accepted=%d rejected=%d checksum=%s"
 		% [
 			_matched,
 			_player_names.size(),
 			1 if rename_ok else 0,
 			1 if tax_ok else 0,
+			_action_count,
+			_accepted_count,
+			_rejected_count,
 			_world_checksum,
 		]
 	)

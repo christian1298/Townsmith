@@ -14,8 +14,8 @@ set -euo pipefail
 #         -> disconnect
 #
 # Each run must print exactly one persisted marker:
-#   SETTLEMENT_SCREEN_CONNECTED status=ok settlements=1 players=1
-#     rename=1 tax=1 checksum=<16 hex>
+#   SETTLEMENT_SCREEN_CONNECTED status=ok settlements=1 players=2
+#     rename=1 tax=1 actions=9 accepted=8 rejected=1 checksum=<16 hex>
 # and the two fresh-server runs must be byte-identical.
 #
 # Readiness is a bounded server-log poll; there are no fixed sleeps.
@@ -101,7 +101,7 @@ trap cleanup EXIT
 start_server() {
 	local port="$1"
 	: >"$SERVER_LOG"
-	"$ROOT/target/debug/townsmith-server" --listen "$port" --once >"$SERVER_LOG" 2>&1 &
+	"$ROOT/target/debug/townsmith-server" --listen "$port" --sessions 3 >"$SERVER_LOG" 2>&1 &
 	SERVER_PID=$!
 	wait_for_log "$SERVER_LOG" "$SERVER_PID" "SERVER_LISTEN status=ok address=" 10
 }
@@ -123,7 +123,7 @@ run_screen() {
 	output="$(timeout 60s env -u DISPLAY -u WAYLAND_DISPLAY \
 		"$GODOT_BIN" --headless --path "$ROOT/godot" \
 		res://settlement_screen.tscn -- \
-		--smoke --connected --host 127.0.0.1 --port "$port" 2>&1)"
+		--smoke --connected --host 127.0.0.1 --port "$port" --name Mayor 2>&1)"
 	status=$?
 	set -e
 	printf '%s\n' "$output" >&2
@@ -145,13 +145,13 @@ run_screen() {
 		exit 1
 	fi
 	marker="$(grep '^SETTLEMENT_SCREEN_CONNECTED status=ok ' <<<"$output" | tail -1)"
-	marker_re='^SETTLEMENT_SCREEN_CONNECTED status=ok settlements=1 players=1 rename=1 tax=1 checksum=[0-9a-f]{16}$'
+	marker_re='^SETTLEMENT_SCREEN_CONNECTED status=ok settlements=1 players=2 rename=1 tax=1 actions=[0-9]+ accepted=[0-9]+ rejected=[0-9]+ checksum=[0-9a-f]{16}$'
 	if [[ ! "$marker" =~ $marker_re ]]; then
 		echo "Connected settlement screen smoke ($name) marker mismatch: $marker" >&2
 		exit 1
 	fi
 	read_marker="$(grep '^SETTLEMENT_SCREEN_CONNECTED_READ ' <<<"$output" | tail -1 || true)"
-	read_re='^SETTLEMENT_SCREEN_CONNECTED_READ settles=1 players=1 owner=[^ ]+ checksum=[0-9a-f]{16}$'
+	read_re='^SETTLEMENT_SCREEN_CONNECTED_READ settles=1 players=2 owner=[^ ]+ checksum=[0-9a-f]{16}$'
 	if [[ ! "$read_marker" =~ $read_re ]]; then
 		echo "Connected settlement screen smoke ($name) read marker mismatch: $read_marker" >&2
 		exit 1
