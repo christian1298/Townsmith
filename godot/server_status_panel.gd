@@ -30,13 +30,22 @@ extends Control
 ##   godot --path godot res://server_status_panel.tscn -- --port 47015 --watch
 ##   godot --headless --path godot res://server_status_panel.tscn -- \
 ##     --smoke --watch --iterations 3 --interval-ms 50 --port 47015
-## `--iterations` defaults to 3 (clamped 1..100) and `--interval-ms` to 500
-## (clamped 50..5000). A watch run never reconnects: the first frame, shape, or
-## status error prints
+## `--iterations` defaults to 3 and `--interval-ms` to 500. When supplied, the
+## values must be integers in 1..100 and 50..5000; anything else (zero,
+## negative, non-numeric, out of range) is rejected before connecting with
+##   SERVER_STATUS_WATCH status=fail iteration=0 code=status.watch_args
+##     arg=<flag>
+## and exit 1. A watch run never reconnects: the first frame, shape, ordering,
+## timeout, closed, or reject error prints
 ##   SERVER_STATUS_WATCH status=fail iteration=<n> code=<stable>
-## and exits 1. `server_status` is read-only and repeatable and does not advance
-## the tick, so no `ping` keepalive is sent between polls. Without `--smoke`,
-## watch mode keeps polling until Esc/Q.
+## and exits 1. A status wait past its deadline fails with
+## `status.watch_timeout`; a connect or hello-handshake timeout stays
+## `status.connect`. A length prefix left without its full payload at EOF is
+## `status.frame`, not `status.closed`. Every failure path closes the one socket
+## exactly once and exits; no reconnect is attempted. `server_status` is
+## read-only and repeatable and does not advance the tick, so no `ping` keepalive
+## is sent between polls. Without `--smoke`, watch mode keeps polling until
+## Esc/Q.
 ##
 ## A clean watch run prints one aggregate marker:
 ##   SERVER_STATUS_WATCH status=ok iterations=N checksum=<16hex>
@@ -68,6 +77,7 @@ const WATCH_MAX_ITERATIONS := 100
 const WATCH_DEFAULT_INTERVAL_MS := 500
 const WATCH_MIN_INTERVAL_MS := 50
 const WATCH_MAX_INTERVAL_MS := 5000
+const WATCH_ARGS_CODE := "status.watch_args"
 # Same 64-character placeholder hash the Rust loopback harness uses.
 const CONTENT_HASH := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -85,6 +95,7 @@ const STATUS_FIELDS := [
 ]
 
 var _peer: StreamPeerTCP
+var _peer_closed := false
 var _phase: int = Phase.CONNECTING
 var _rx := PackedByteArray()
 var _deadline_ms := 0
@@ -106,6 +117,7 @@ var _next_poll_ms := 0
 var _watch_entries: Array = []
 var _watch_tick_first := 0
 var _watch_tick_last := 0
+var _watch_args_invalid := false
 
 var _frames_sent := 0
 var _frames_received := 0
@@ -123,19 +135,23 @@ func _ready() -> void:
 	_timeout_ms = _positive_int(_arg(args, "--timeout-ms", ""), STEP_TIMEOUT_MS)
 	_expect_fail = _arg(args, "--expect-fail", "")
 	_watch = args.has("--watch")
-	_watch_iterations = _bounded_int(
-		_arg(args, "--iterations", ""),
-		WATCH_DEFAULT_ITERATIONS,
-		WATCH_MIN_ITERATIONS,
-		WATCH_MAX_ITERATIONS
-	)
-	_watch_interval_ms = _bounded_int(
-		_arg(args, "--interval-ms", ""),
-		WATCH_DEFAULT_INTERVAL_MS,
-		WATCH_MIN_INTERVAL_MS,
-		WATCH_MAX_INTERVAL_MS
-	)
 	_build_ui()
+	if _watch:
+		# Argument errors are deterministic and must not open a socket.
+		var iterations_text := _arg(args, "--iterations", "")
+		if not iterations_text.is_empty():
+			if not _is_bounded_int(iterations_text, WATCH_MIN_ITERATIONS, WATCH_MAX_ITERATIONS):
+				_watch_args_invalid = true
+				_fail(WATCH_ARGS_CODE, "arg=--iterations")
+				return
+			_watch_iterations = iterations_text.to_int()
+		var interval_text := _arg(args, "--interval-ms", "")
+		if not interval_text.is_empty():
+			if not _is_bounded_int(interval_text, WATCH_MIN_INTERVAL_MS, WATCH_MAX_INTERVAL_MS):
+				_watch_args_invalid = true
+				_fail(WATCH_ARGS_CODE, "arg=--interval-ms")
+				return
+			_watch_interval_ms = interval_text.to_int()
 
 	var fixture_path := _arg(args, "--fixture-json", "")
 	if not fixture_path.is_empty():
@@ -174,9 +190,11 @@ func _run_fixture(path: String) -> void:
 	if text.is_empty():
 		_fail("status.fixture")
 		return
-	var parsed: Variant = JSON.parse_string(text)
+	var parsed: Variant = _parse_json_object(text)
 	if typeof(parsed) != TYPE_DICTIONARY:
-		_fail("status.shape")
+		# A fixture that is not one JSON object is a malformed frame payload,
+		# not a structurally valid status with missing fields.
+		_fail("status.frame")
 		return
 	_phase = Phase.STATUS_SENT
 	_on_server_status(parsed)
@@ -185,8 +203,7 @@ func _process(_delta: float) -> void:
 	if _finished:
 		return
 	if Time.get_ticks_msec() > _deadline_ms:
-		# Refused, lost, or silent: all mean the session never became usable.
-		_fail("status.connect")
+		_fail(_timeout_code())
 		return
 	if _peer == null:
 		_fail("status.connect")
@@ -210,7 +227,12 @@ func _process(_delta: float) -> void:
 		# Read the final goodbye/reject before treating FIN as a failure.
 		_drain()
 		if not _finished:
-			_fail("status.closed")
+			# A buffered length prefix or partial payload is a truncated frame,
+			# not a clean close between iterations.
+			if _rx.is_empty():
+				_fail("status.closed")
+			else:
+				_fail("status.frame")
 		return
 	# Watch mode keeps the socket open and polls on its own interval. A closed
 	# socket is checked above, so a peer that vanished between polls is fatal
@@ -256,7 +278,7 @@ func _drain() -> void:
 		var payload := _rx.slice(4, 4 + length)
 		_rx = _rx.slice(4 + length)
 		_frames_received += 1
-		var parsed: Variant = JSON.parse_string(payload.get_string_from_utf8())
+		var parsed: Variant = _parse_json_object(payload.get_string_from_utf8())
 		if typeof(parsed) != TYPE_DICTIONARY:
 			_fail("status.frame")
 			return
@@ -347,6 +369,11 @@ func _on_server_status(message: Dictionary) -> void:
 ## Records one successful watch poll, then either schedules the next request or
 ## (in smoke mode, after N polls) asks the server to close the session normally.
 func _on_watch_status() -> void:
+	var tick := int(_status["tick"])
+	if _polls_done > 0 and tick < _watch_tick_last:
+		# A server that advances the world never moves the tick backwards.
+		_fail("status.watch_order")
+		return
 	_record_poll()
 	if _smoke and _polls_done >= _watch_iterations:
 		_set_status("Watch complete; disconnecting.")
@@ -403,11 +430,14 @@ func _watch_checksum() -> String:
 func _finish_watch_ok() -> void:
 	if _finished:
 		return
+	if _smoke and _polls_done != _watch_iterations:
+		# The success marker promises exactly the configured number of polls.
+		_fail("status.watch_incomplete")
+		return
 	_finished = true
 	set_process(false)
 	_set_status("Watch complete.")
-	if _peer != null:
-		_peer.disconnect_from_host()
+	_close_peer()
 	print(
 		(
 			"SERVER_STATUS_WATCH status=ok iterations=%d checksum=%s"
@@ -482,8 +512,7 @@ func _finish_ok() -> void:
 	_finished = true
 	set_process(false)
 	_set_status("Disconnected.")
-	if _peer != null:
-		_peer.disconnect_from_host()
+	_close_peer()
 	if not _smoke:
 		print("SERVER_STATUS_PANEL status=ok rendered=true")
 	get_tree().quit(0)
@@ -516,14 +545,14 @@ func _fail(code: String, extra := "") -> void:
 	_finished = true
 	set_process(false)
 	_set_status("Failed: " + code)
-	if _peer != null:
-		_peer.disconnect_from_host()
+	_close_peer()
 	if _watch and not _fixture_mode:
 		# Watch mode never reconnects. The marker is the test surface: one
 		# stable line naming the iteration that failed and the stable code.
+		var suffix := (" " + extra) if not extra.is_empty() else ""
 		print(
-			"SERVER_STATUS_WATCH status=fail iteration=%d code=%s"
-			% [_watch_failure_iteration(), code]
+			"SERVER_STATUS_WATCH status=fail iteration=%d code=%s%s"
+			% [_watch_failure_iteration(), code, suffix]
 		)
 		get_tree().quit(1)
 		return
@@ -537,9 +566,29 @@ func _fail(code: String, extra := "") -> void:
 	# A matching --expect-fail is the test passing; otherwise a failure is fatal.
 	get_tree().quit(0 if not _expect_fail.is_empty() and _expect_fail == code else 1)
 
+## Connect/hello timeouts stay `status.connect`; once the handshake is done, a
+## watch poll or disconnect wait that runs out is its own stable code.
+func _timeout_code() -> String:
+	if _watch and not _fixture_mode:
+		if _phase != Phase.CONNECTING and _phase != Phase.WELCOME_WAIT:
+			return "status.watch_timeout"
+	return "status.connect"
+
+## Closes the single watch connection at most once. Every terminal path calls
+## this before quitting, so no socket is left behind.
+func _close_peer() -> void:
+	if _peer == null or _peer_closed:
+		return
+	_peer_closed = true
+	_peer.disconnect_from_host()
+	_peer = null
+
 ## Iteration (1-based) whose request failed. Smoke runs clamp to the configured
 ## count so a missing goodbye after the last answer still reports iteration=N.
+## Argument validation fails before iteration 1 and reports 0.
 func _watch_failure_iteration() -> int:
+	if _watch_args_invalid:
+		return 0
 	var iteration := _polls_done + 1
 	if _smoke:
 		return clampi(iteration, 1, _watch_iterations)
@@ -629,6 +678,14 @@ func _is_integer(value: Variant) -> bool:
 	var number := float(value)
 	return is_finite(number) and number == floor(number)
 
+## Parses one JSON value without emitting an engine error for malformed input.
+## Both a parse failure and a JSON `null` return null and fail the object check.
+func _parse_json_object(text: String) -> Variant:
+	var parser := JSON.new()
+	if parser.parse(text) != OK:
+		return null
+	return parser.data
+
 func _as_int(value: Variant) -> int:
 	return int(value) if _is_integer(value) else -1
 
@@ -656,10 +713,11 @@ func _positive_int(value: String, fallback: int) -> int:
 	var number := value.to_int()
 	return number if number > 0 else fallback
 
-func _bounded_int(value: String, fallback: int, minimum: int, maximum: int) -> int:
+func _is_bounded_int(value: String, minimum: int, maximum: int) -> bool:
 	if not value.is_valid_int():
-		return fallback
-	return clampi(value.to_int(), minimum, maximum)
+		return false
+	var number := value.to_int()
+	return number >= minimum and number <= maximum
 
 func _read_u32_be(buffer: PackedByteArray, offset: int) -> int:
 	return (
