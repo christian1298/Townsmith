@@ -96,6 +96,17 @@ const MODAL_EDIT := 0
 const MODAL_CANCEL := 1
 const MODAL_SAVE := 2
 const MODAL_FOCUS_ORDER := [MODAL_EDIT, MODAL_CANCEL, MODAL_SAVE]
+## Deterministic gamepad actions. Live joypad events resolve through the input
+## map first, then the local button fallbacks, so a stock map still works.
+const GAMEPAD_ACTIONS := [
+	"ui_up",
+	"ui_down",
+	"ui_left",
+	"ui_right",
+	"ui_accept",
+	"ui_cancel",
+]
+const STICK_DEADZONE := 0.5
 ## Local rename codes are shape validation, not server rejection codes. They
 ## map to the `rename.*` text keys instead of leaking the raw code.
 const RENAME_ERROR_KEYS := {
@@ -200,6 +211,16 @@ var _focus_member_index := 0
 var _modal_focus := MODAL_EDIT
 var _modal_opener_group := "actions"
 var _modal_opener_action := "rename"
+
+# Gamepad modality. This is presentation state only: every action routes through
+# the same focus groups and handlers as the keyboard, and it never mutates the
+# settlement store by itself.
+var _gamepad_active := false
+var _last_action := ""
+var _stick_held := false
+var _virtual_keyboard_requested := false
+var _virtual_keyboard_requests := 0
+var _virtual_keyboard_clears := 0
 
 var _title_label: Label
 var _authority_label: Label
@@ -801,12 +822,14 @@ func _select_page_number(number: int) -> void:
 func _on_item_selected(index: int) -> void:
 	if _syncing_list:
 		return
+	_clear_gamepad_modality()
 	_focus_group = "rows"
 	_select_index(index)
 	_sync_focus_ring()
 
 
 func _on_item_clicked(index: int, _at_position: Vector2, _mouse_button_index: int) -> void:
+	_clear_gamepad_modality()
 	_focus_group = "rows"
 	_select_index(index)
 	_sync_focus_ring()
@@ -829,18 +852,21 @@ func _on_page_next_pressed() -> void:
 func _on_header_gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.pressed:
 		if (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
+			_clear_gamepad_modality()
 			_set_focus_group("header")
 
 
 func _on_detail_gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.pressed:
 		if (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
+			_clear_gamepad_modality()
 			_set_focus_group("detail")
 
 
 func _on_action_gui_input(event: InputEvent, action: String) -> void:
 	if event is InputEventMouseButton and event.pressed:
 		if (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
+			_clear_gamepad_modality()
 			_focus_action_control(action)
 
 
@@ -868,6 +894,7 @@ func _handle_key(event: InputEvent) -> bool:
 	var key := event as InputEventKey
 	if not key.pressed or key.echo:
 		return false
+	_gamepad_active = false
 	if _rename_open:
 		return _handle_modal_key(key)
 	if _line_edit_has_focus():
@@ -966,13 +993,210 @@ func _handle_screen_key(key: InputEventKey) -> bool:
 	return true
 
 
+## Process one live joypad event. Keys are handled by `_input`; this only
+## handles pad buttons and the left stick, and consumes what it dispatches.
+func _unhandled_input(event: InputEvent) -> void:
+	var action := _gamepad_action_for_event(event)
+	if action.is_empty():
+		return
+	if _dispatch_gamepad(action):
+		get_viewport().set_input_as_handled()
+
+
+func _gamepad_action_for_event(event: InputEvent) -> String:
+	if event is InputEventJoypadButton:
+		var button := event as InputEventJoypadButton
+		if not button.pressed:
+			return ""
+		for action in GAMEPAD_ACTIONS:
+			if InputMap.event_is_action(button, action):
+				return action
+		match button.button_index:
+			JOY_BUTTON_A:
+				return "ui_accept"
+			JOY_BUTTON_B:
+				return "ui_cancel"
+			JOY_BUTTON_DPAD_UP:
+				return "ui_up"
+			JOY_BUTTON_DPAD_DOWN:
+				return "ui_down"
+			JOY_BUTTON_DPAD_LEFT:
+				return "ui_left"
+			JOY_BUTTON_DPAD_RIGHT:
+				return "ui_right"
+		return ""
+	if event is InputEventJoypadMotion:
+		var motion := event as InputEventJoypadMotion
+		if motion.axis != JOY_AXIS_LEFT_X and motion.axis != JOY_AXIS_LEFT_Y:
+			return ""
+		if absf(motion.axis_value) < STICK_DEADZONE:
+			_stick_held = false
+			return ""
+		if _stick_held:
+			return ""
+		_stick_held = true
+		if motion.axis == JOY_AXIS_LEFT_X:
+			return "ui_right" if motion.axis_value > 0.0 else "ui_left"
+		return "ui_down" if motion.axis_value > 0.0 else "ui_up"
+	return ""
+
+
+## Apply one named gamepad action and return the resulting snapshot. Unknown
+## actions are ignored and do not change the last action.
+func gamepad_action(action: String) -> Dictionary:
+	_dispatch_gamepad(action)
+	return gamepad_snapshot()
+
+
+func gamepad_snapshot() -> Dictionary:
+	return {
+		"active": _gamepad_active,
+		"last_action": _last_action,
+		"group": _focus_group,
+		"selected": _selected_id,
+		"focus_paging": _focus_paging,
+		"focus_action": _focus_action,
+		"modal": _rename_open,
+		"modal_focus": _modal_focus,
+		"vk_requested": _virtual_keyboard_requested,
+		"vk_requests": _virtual_keyboard_requests,
+		"vk_clears": _virtual_keyboard_clears,
+	}
+
+
+func _dispatch_gamepad(action: String) -> bool:
+	if _shared and not is_visible_in_tree():
+		return false
+	if not GAMEPAD_ACTIONS.has(action):
+		return false
+	_gamepad_active = true
+	_last_action = action
+	if _rename_open:
+		return _dispatch_modal_gamepad(action)
+	match action:
+		"ui_up":
+			return _gamepad_vertical(-1)
+		"ui_down":
+			return _gamepad_vertical(1)
+		"ui_left":
+			return _gamepad_horizontal(-1)
+		"ui_right":
+			return _gamepad_horizontal(1)
+		"ui_accept":
+			return _activate_focus()
+		"ui_cancel":
+			if _shared:
+				close_requested.emit()
+				return true
+			return _handle_escape()
+	return false
+
+
+func _dispatch_modal_gamepad(action: String) -> bool:
+	match action:
+		"ui_up", "ui_left":
+			_cycle_modal_focus(-1)
+		"ui_down", "ui_right":
+			_cycle_modal_focus(1)
+		"ui_accept":
+			_activate_modal_focus()
+		"ui_cancel":
+			_close_rename()
+		_:
+			return false
+	return true
+
+
+## Move within the focused group first; only at an edge move to the adjacent
+## group. This keeps row selection stable when crossing groups.
+func _gamepad_vertical(direction: int) -> bool:
+	var before := _gamepad_focus_key()
+	_move_focus(direction)
+	if _gamepad_focus_key() != before:
+		return true
+	return _gamepad_adjacent_group(direction)
+
+
+func _gamepad_horizontal(direction: int) -> bool:
+	match _focus_group:
+		"paging":
+			_focus_paging = 0 if direction < 0 else 1
+			_sync_focus_ring()
+			return true
+		"rows", "members":
+			return _gamepad_vertical(direction)
+		"actions":
+			_focus_action = clampi(
+				_focus_action + direction, 0, FOCUS_ACTION_ORDER.size() - 1
+			)
+			_sync_focus_ring()
+			return true
+	return false
+
+
+func _gamepad_focus_key() -> String:
+	match _focus_group:
+		"paging":
+			return "paging:%d" % _focus_paging
+		"rows":
+			return "rows:%d" % _selected_index
+		"members":
+			return "members:%d" % _focus_member_index
+		"actions":
+			return "actions:%d" % _focus_action
+	return _focus_group
+
+
+func _gamepad_adjacent_group(direction: int) -> bool:
+	var start := FOCUS_GROUPS.find(_focus_group)
+	if start < 0:
+		start = 0
+	for step in range(1, FOCUS_GROUPS.size() + 1):
+		var index := posmod(start + direction * step, FOCUS_GROUPS.size())
+		var group := str(FOCUS_GROUPS[index])
+		if _focus_group_available(group):
+			return _set_focus_group(group)
+	return false
+
+
+func _clear_gamepad_modality() -> void:
+	_gamepad_active = false
+
+
+func _virtual_keyboard_supported() -> bool:
+	if DisplayServer.get_name() == "headless":
+		return false
+	return DisplayServer.has_feature(DisplayServer.FEATURE_VIRTUAL_KEYBOARD)
+
+
+## Request or clear the platform keyboard for the rename field. Intent is
+## counted on every platform so the headless smoke stays deterministic; the
+## display-server call is made only when the feature exists.
+func _sync_virtual_keyboard(show_keyboard: bool) -> void:
+	if show_keyboard:
+		if _virtual_keyboard_requested:
+			return
+		_virtual_keyboard_requested = true
+		_virtual_keyboard_requests += 1
+		if _virtual_keyboard_supported():
+			DisplayServer.virtual_keyboard_show(_rename_edit.text)
+		return
+	if not _virtual_keyboard_requested:
+		return
+	_virtual_keyboard_requested = false
+	_virtual_keyboard_clears += 1
+	if _virtual_keyboard_supported():
+		DisplayServer.virtual_keyboard_hide()
+
+
 ## Esc returns to the list first; a second press clears the row selection.
-func _handle_escape() -> void:
+func _handle_escape() -> bool:
 	if _focus_group != "rows":
 		if _set_focus_group("rows"):
-			return
+			return true
 	if _selected_id > 0:
 		_clear_row_selection()
+	return true
 
 
 func _clear_row_selection() -> void:
@@ -1060,7 +1284,7 @@ func _member_index_of(player: int, members: Array) -> int:
 	return 0
 
 
-func _activate_focus() -> void:
+func _activate_focus() -> bool:
 	match _focus_group:
 		"paging":
 			_activate_paging()
@@ -1076,6 +1300,7 @@ func _activate_focus() -> void:
 			_on_action_pressed("tax")
 		"actions":
 			_on_action_pressed(_focused_action_name())
+	return true
 
 
 func _activate_paging() -> void:
@@ -1625,6 +1850,8 @@ func _open_rename() -> void:
 	_rename_overlay.visible = true
 	_modal_focus = MODAL_EDIT
 	_rename_edit.grab_focus()
+	if _gamepad_active:
+		_sync_virtual_keyboard(true)
 	_sync_focus_ring()
 
 
@@ -1634,6 +1861,7 @@ func _hide_rename_modal() -> void:
 	_rename_target_id = 0
 	_rename_edit.release_focus()
 	_modal_focus = MODAL_EDIT
+	_sync_virtual_keyboard(false)
 	_restore_modal_opener()
 
 
@@ -2529,6 +2757,47 @@ func _run_smoke() -> void:
 	var owner_record := _current_record()
 	_attempt_remove_member(owner_record, int(owner_record.get("owner_id", 0)))
 
+	# Gamepad navigation: same focus state as the keyboard, no store mutation.
+	_load_page(0)
+	_select_page_number(1)
+	_focus_group = "rows"
+	_gamepad_active = false
+	var pad := gamepad_action("ui_down")
+	_expect(_selected_id == 2, "gamepad down selects next row, got %d" % _selected_id, failures)
+	_expect(_focus_group == "rows", "gamepad down keeps row group", failures)
+	_expect(bool(pad.get("active", false)), "gamepad marks modality active", failures)
+	_expect(str(pad.get("last_action", "")) == "ui_down", "gamepad records last action", failures)
+	pad = gamepad_action("ui_up")
+	_expect(_selected_id == 1, "gamepad up returns to the first row", failures)
+	pad = gamepad_action("ui_up")
+	_expect(_focus_group == "paging", "gamepad up at the row edge enters paging", failures)
+	pad = gamepad_action("ui_down")
+	_expect(_focus_group == "paging" and _focus_paging == 1, "gamepad down moves paging focus", failures)
+	pad = gamepad_action("ui_down")
+	_expect(_focus_group == "rows", "gamepad down at the paging edge enters rows", failures)
+	pad = gamepad_action("ui_accept")
+	_expect(_focus_group == "detail", "gamepad accept opens detail", failures)
+	pad = gamepad_action("ui_accept")
+	_expect(_focus_group == "members" or _focus_group == "tax", "gamepad accept advances detail", failures)
+	pad = gamepad_action("ui_cancel")
+	_expect(_focus_group == "rows", "gamepad cancel returns to rows", failures)
+	pad = gamepad_action("ui_cancel")
+	_expect(_selected_id == 0, "gamepad cancel clears the selection", failures)
+	_focus_group = "rows"
+	_select_page_number(2)
+	_open_rename()
+	_expect(_rename_open, "gamepad modal opens", failures)
+	_expect(_virtual_keyboard_requests > 0, "gamepad rename requests the virtual keyboard", failures)
+	pad = gamepad_action("ui_down")
+	_expect(_modal_focus == MODAL_CANCEL, "gamepad modal down moves to cancel", failures)
+	pad = gamepad_action("ui_accept")
+	_expect(not _rename_open, "gamepad accept closes the modal", failures)
+	_expect(_virtual_keyboard_clears > 0, "gamepad modal clears the virtual keyboard", failures)
+	var last_action := str(gamepad_snapshot().get("last_action", ""))
+	pad = gamepad_action("bogus")
+	_expect(str(pad.get("last_action", "")) == last_action, "unknown gamepad action is ignored", failures)
+
+	print("SETTLEMENT_SCREEN_GAMEPAD status=ok checks=18")
 	print("SETTLEMENT_SCREEN_FOCUS group=rows tab=paging shift=ok arrows=ok modal=trap esc=detail")
 	print("SETTLEMENT_SCREEN_PAGES sizes=8/8/7 selected_last=23")
 	print("SETTLEMENT_SCREEN_NAMES owner=Mayor#7 manager=Manager#11 builder=Builder#13 member=Member#12 fallback=#9001 owner_fallback=#9002")
@@ -2795,6 +3064,8 @@ func embed_snapshot() -> Dictionary:
 func on_hidden() -> void:
 	_reset_pending()
 	_rename_open = false
+	_sync_virtual_keyboard(false)
+	_gamepad_active = false
 	if _rename_overlay != null:
 		_rename_overlay.visible = false
 	_status_text = ""

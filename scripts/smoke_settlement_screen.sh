@@ -38,6 +38,7 @@ FOCUS_CONTRACT='^SETTLEMENT_SCREEN_FOCUS group=rows tab=paging shift=ok arrows=o
 NAMES_CONTRACT='^SETTLEMENT_SCREEN_NAMES owner=Mayor#7 manager=Manager#11 builder=Builder#13 member=Member#12 fallback=#9001 owner_fallback=#9002$'
 PROJECTION_CONTRACT='^SETTLEMENT_SCREEN_PROJECTION tax0=x1\.00 tax5=x1\.05 tax100=x2\.00 invalid=tax\.projection\.rate_out_of_range$'
 LOCALE_CONTRACT='^SETTLEMENT_SCREEN_LOCALE en=ok de=ok$'
+GAMEPAD_CONTRACT='^SETTLEMENT_SCREEN_GAMEPAD status=ok checks=[0-9]+$'
 EMPTY_CONTRACT='^SETTLEMENT_SCREEN status=empty settlements=0$'
 UNAVAILABLE_CONTRACT='^SETTLEMENT_SCREEN status=unavailable code=no_core$'
 
@@ -87,7 +88,8 @@ run_screen() {
 			"SETTLEMENT_SCREEN_FOCUS|$FOCUS_CONTRACT" \
 			"SETTLEMENT_SCREEN_NAMES|$NAMES_CONTRACT" \
 			"SETTLEMENT_SCREEN_PROJECTION|$PROJECTION_CONTRACT" \
-			"SETTLEMENT_SCREEN_LOCALE|$LOCALE_CONTRACT"; do
+			"SETTLEMENT_SCREEN_LOCALE|$LOCALE_CONTRACT" \
+			"SETTLEMENT_SCREEN_GAMEPAD|$GAMEPAD_CONTRACT"; do
 			name="${pair%%|*}"
 			contract_name="${pair#*|}"
 			local line
@@ -103,7 +105,7 @@ run_screen() {
 		done
 	fi
 
-	grep -E '^SETTLEMENT_SCREEN(_PAGES|_FOCUS|_NAMES|_PROJECTION|_LOCALE)? ' <<<"$output" | grep -v '^SETTLEMENT_SCREEN status=' >"$log" || true
+	grep -E '^SETTLEMENT_SCREEN(_PAGES|_FOCUS|_NAMES|_PROJECTION|_LOCALE|_GAMEPAD)? ' <<<"$output" | grep -v '^SETTLEMENT_SCREEN status=' >"$log" || true
 	printf '%s\n' "$marker" >"$marker_file"
 }
 
