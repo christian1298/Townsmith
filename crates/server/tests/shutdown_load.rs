@@ -4,7 +4,9 @@
 //! exits 0, writes one atomic save, closes every socket, and leaves no temp
 //! file. The portable case uses `--sessions 1` and a normal disconnect.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader};
+#[cfg(unix)]
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
