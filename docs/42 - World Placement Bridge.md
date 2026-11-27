@@ -2,7 +2,7 @@
 title: World Placement Bridge
 project: Townsmith
 status: active
-updated: 2026-11-26
+updated: 2026-11-27
 tags:
   - townsmith
   - phase-2
@@ -73,6 +73,8 @@ Lot methods (`lot_validate`, `lot_add`, `lots`, `lot_count`, `lot_checksum`, `lo
 Content methods (`content_load_dir`, `content_registry_summary`, `content_registry_clear`) manage bridge state. The slot opens on `ContentRegistry::base()`, loads at most one absolute local mod directory at a time, and commits the merged registry only after the pack, namespace, path, size, UTF-8, and duplicate checks pass. Since D-034, `world_save` records only the summary identity of that one live pack (see §3); no content definition, namespace list, or path enters the save. `content_registry_clear` returns to base content but does not unpin a world that already recorded an identity. See [[06 - Modding and Resource Packs]] §5.1 and §5.3.
 
 The content-registry manifest reader (`content_registry_manifest`) is **stateless** and read-only: it opens one explicitly supplied absolute JSON path, bounded to 1 MiB, parses it with the D-042 core validator, and returns the catalog view above. It does not load, select, merge, or activate content, does not touch the live `content_load_dir` registry or any world/save checksum, and does not return the path or file bytes. A file/read failure is `content.registry_io`; schema and selection errors keep the core `content.invalid_registry` / `content.unsupported_registry_version` / `content.unknown_id` / `content.kind_mismatch` codes. D-042 remains Proposed.
+
+The manifest reader has a deterministic security/fault matrix (`content_manifest_faults`, 13 tests): missing/directory/empty/truncated/non-UTF-8/oversized files, the 1 MiB boundary, spaces in paths, Unix symlinks (valid, dangling, loop), permission-denied when the host enforces it, duplicate IDs/namespaces, explicit `base`, unsupported versions, malformed IDs/checksums/kinds, and repeated-read determinism. Every error uses a stable `content.*` code, never echoes the path or bytes, creates no files, and does not activate or mutate the live registry.
 
 Settlement paging (`settlements_page`) is a **read-only** view over the live store, matching the server's `settlement_list` cursor semantics. Pages are ordered by the stable ascending settlement id; `after_id` is exclusive, so the caller passes the previous `next_after` unchanged. `0` is the start cursor. `limit` accepts 1–256 and is clamped down to 256; an explicit `0` returns every remaining record. `count` is the page length, `matched` is the total after the cursor before the cap, and `has_more` says whether another page exists. `next_after` is the last returned id, or 0 for an empty page, so an empty page is terminal. Every page carries the full-store checksum, which does not change while paging. The method never mutates the settlement layer, never opens or writes a save, and returns no filesystem path; `settlements()` remains available unchanged for callers that want the whole layer in one call.
 

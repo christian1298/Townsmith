@@ -13124,6 +13124,9 @@ fn city_layout_to_dictionary(layout: &CityLayout) -> VarDictionary {
 mod content_identity_faults;
 
 #[cfg(test)]
+mod content_manifest_faults;
+
+#[cfg(test)]
 mod save_compat_tests;
 
 #[cfg(test)]
