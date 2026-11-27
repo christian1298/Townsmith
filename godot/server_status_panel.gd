@@ -24,13 +24,34 @@ extends Control
 ## and still prints the fail marker; a mismatch exits 1.
 ## `--fixture-json PATH` skips TCP and feeds one `server_status` object through
 ## the same parse/render path, so shape checks need no server.
+##
+## Opt-in watch mode keeps the one connection open and polls `server_status`
+## repeatedly, updating the labels in place:
+##   godot --path godot res://server_status_panel.tscn -- --port 47015 --watch
+##   godot --headless --path godot res://server_status_panel.tscn -- \
+##     --smoke --watch --iterations 3 --interval-ms 50 --port 47015
+## `--iterations` defaults to 3 (clamped 1..100) and `--interval-ms` to 500
+## (clamped 50..5000). A watch run never reconnects: the first frame, shape, or
+## status error prints
+##   SERVER_STATUS_WATCH status=fail iteration=<n> code=<stable>
+## and exits 1. `server_status` is read-only and repeatable and does not advance
+## the tick, so no `ping` keepalive is sent between polls. Without `--smoke`,
+## watch mode keeps polling until Esc/Q.
+##
+## A clean watch run prints one aggregate marker:
+##   SERVER_STATUS_WATCH status=ok iterations=N checksum=<16hex>
+##     tick_first=<n> tick_last=<n>
+## `checksum` is the first 16 hex characters of the SHA-256 over the ascending
+## `tick|population|settlements|checksum` lines (one LF per line). The one-shot
+## `SERVER_STATUS_PANEL` marker is unchanged.
 ## `scripts/smoke_server_status_panel.sh` covers the valid path twice plus the
-## connect/reject/shape fixtures.
+## connect/reject/shape fixtures and a two-run watch pass/fail matrix.
 
 enum Phase {
 	CONNECTING,
 	WELCOME_WAIT,
 	STATUS_SENT,
+	WATCH_WAIT,
 	DISCONNECT_SENT,
 }
 
@@ -41,6 +62,12 @@ const DEFAULT_PORT := 47015
 const DEFAULT_NAME := "status-panel"
 const CONNECT_TIMEOUT_MS := 5000
 const STEP_TIMEOUT_MS := 5000
+const WATCH_DEFAULT_ITERATIONS := 3
+const WATCH_MIN_ITERATIONS := 1
+const WATCH_MAX_ITERATIONS := 100
+const WATCH_DEFAULT_INTERVAL_MS := 500
+const WATCH_MIN_INTERVAL_MS := 50
+const WATCH_MAX_INTERVAL_MS := 5000
 # Same 64-character placeholder hash the Rust loopback harness uses.
 const CONTENT_HASH := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -71,6 +98,15 @@ var _timeout_ms := STEP_TIMEOUT_MS
 var _expect_fail := ""
 var _fixture_mode := false
 
+var _watch := false
+var _watch_iterations := WATCH_DEFAULT_ITERATIONS
+var _watch_interval_ms := WATCH_DEFAULT_INTERVAL_MS
+var _polls_done := 0
+var _next_poll_ms := 0
+var _watch_entries: Array = []
+var _watch_tick_first := 0
+var _watch_tick_last := 0
+
 var _frames_sent := 0
 var _frames_received := 0
 var _status: Dictionary = {}
@@ -86,6 +122,19 @@ func _ready() -> void:
 	_player_name = _arg(args, "--name", DEFAULT_NAME)
 	_timeout_ms = _positive_int(_arg(args, "--timeout-ms", ""), STEP_TIMEOUT_MS)
 	_expect_fail = _arg(args, "--expect-fail", "")
+	_watch = args.has("--watch")
+	_watch_iterations = _bounded_int(
+		_arg(args, "--iterations", ""),
+		WATCH_DEFAULT_ITERATIONS,
+		WATCH_MIN_ITERATIONS,
+		WATCH_MAX_ITERATIONS
+	)
+	_watch_interval_ms = _bounded_int(
+		_arg(args, "--interval-ms", ""),
+		WATCH_DEFAULT_INTERVAL_MS,
+		WATCH_MIN_INTERVAL_MS,
+		WATCH_MAX_INTERVAL_MS
+	)
 	_build_ui()
 
 	var fixture_path := _arg(args, "--fixture-json", "")
@@ -162,6 +211,12 @@ func _process(_delta: float) -> void:
 		_drain()
 		if not _finished:
 			_fail("status.closed")
+		return
+	# Watch mode keeps the socket open and polls on its own interval. A closed
+	# socket is checked above, so a peer that vanished between polls is fatal
+	# rather than something to reconnect.
+	if _phase == Phase.WATCH_WAIT and Time.get_ticks_msec() >= _next_poll_ms:
+		_request_status()
 
 func _on_connected() -> void:
 	_set_status("Connected; sending hello.")
@@ -176,13 +231,17 @@ func _on_connected() -> void:
 	_arm_deadline(_timeout_ms)
 
 func _drain() -> void:
-	var available := _peer.get_available_bytes()
-	if available > 0:
-		var result := _peer.get_partial_data(available)
-		if result[0] != OK:
-			_fail("status.closed")
-			return
-		_rx.append_array(result[1])
+	# A peer that already reported EOF can no longer be read; requesting the
+	# available byte count on a closed socket logs an engine error. Buffered
+	# frames in `_rx` are still parsed below.
+	if _peer != null and _peer.get_status() == StreamPeerTCP.STATUS_CONNECTED:
+		var available := _peer.get_available_bytes()
+		if available > 0:
+			var result := _peer.get_partial_data(available)
+			if result[0] != OK:
+				_fail("status.closed")
+				return
+			_rx.append_array(result[1])
 
 	while not _finished and _rx.size() >= 4:
 		var length := _read_u32_be(_rx, 0)
@@ -233,10 +292,21 @@ func _on_welcome(message: Dictionary) -> void:
 		_fail("status.frame")
 		return
 	_set_status("Welcome; requesting server status.")
-	if not _send({"type": "server_status"}):
+	if not _request_status():
 		return
+
+## Sends one `server_status` request and waits for its answer. Both one-shot and
+## watch mode use this path; watch mode schedules the next request after a reply.
+func _request_status() -> bool:
+	if _watch:
+		_set_status("Watching: request %d." % (_polls_done + 1))
+	elif _phase != Phase.WELCOME_WAIT:
+		_set_status("Requesting server status.")
+	if not _send({"type": "server_status"}):
+		return false
 	_phase = Phase.STATUS_SENT
 	_arm_deadline(_timeout_ms)
+	return true
 
 func _on_server_status(message: Dictionary) -> void:
 	if _phase != Phase.STATUS_SENT:
@@ -248,6 +318,10 @@ func _on_server_status(message: Dictionary) -> void:
 		return
 
 	_refresh_ui()
+	if _watch and not _fixture_mode:
+		_on_watch_status()
+		return
+
 	_set_status("Status received; disconnecting.")
 	if _expect_fail.is_empty():
 		print(
@@ -269,6 +343,96 @@ func _on_server_status(message: Dictionary) -> void:
 		return
 	_phase = Phase.DISCONNECT_SENT
 	_arm_deadline(_timeout_ms)
+
+## Records one successful watch poll, then either schedules the next request or
+## (in smoke mode, after N polls) asks the server to close the session normally.
+func _on_watch_status() -> void:
+	_record_poll()
+	if _smoke and _polls_done >= _watch_iterations:
+		_set_status("Watch complete; disconnecting.")
+		if not _send({"type": "disconnect"}):
+			return
+		_phase = Phase.DISCONNECT_SENT
+		_arm_deadline(_timeout_ms)
+		return
+	_next_poll_ms = Time.get_ticks_msec() + _watch_interval_ms
+	# A stalled frame longer than interval + step timeout is a failure, not a
+	# reason to reconnect.
+	_arm_deadline(_watch_interval_ms + _timeout_ms)
+	_set_status(
+		"Watching: %d poll(s), next in %d ms." % [_polls_done, _watch_interval_ms]
+	)
+	_phase = Phase.WATCH_WAIT
+
+func _record_poll() -> void:
+	var tick := int(_status["tick"])
+	var line := (
+		"%d|%d|%d|%s"
+		% [
+			tick,
+			int(_status["population"]),
+			int(_status["settlements"]),
+			_checksum,
+		]
+	)
+	_watch_entries.append({"tick": tick, "line": line})
+	if _polls_done == 0:
+		_watch_tick_first = tick
+	_watch_tick_last = tick
+	_polls_done += 1
+
+## First 16 hex of SHA-256 over ascending `tick|population|settlements|checksum`
+## lines, each terminated by LF. Ticks are sorted numerically; equal ticks keep
+## a deterministic line order.
+func _watch_checksum() -> String:
+	var ordered := _watch_entries.duplicate()
+	ordered.sort_custom(
+		func(a: Dictionary, b: Dictionary) -> bool:
+			if int(a["tick"]) != int(b["tick"]):
+				return int(a["tick"]) < int(b["tick"])
+			return str(a["line"]) < str(b["line"])
+	)
+	var text := ""
+	for entry in ordered:
+		text += str(entry["line"]) + "\n"
+	var context := HashingContext.new()
+	context.start(HashingContext.HASH_SHA256)
+	context.update(text.to_utf8_buffer())
+	return context.finish().hex_encode().substr(0, 16)
+
+func _finish_watch_ok() -> void:
+	if _finished:
+		return
+	_finished = true
+	set_process(false)
+	_set_status("Watch complete.")
+	if _peer != null:
+		_peer.disconnect_from_host()
+	print(
+		(
+			"SERVER_STATUS_WATCH status=ok iterations=%d checksum=%s"
+			+ " tick_first=%d tick_last=%d"
+		)
+		% [_polls_done, _watch_checksum(), _watch_tick_first, _watch_tick_last]
+	)
+	get_tree().quit(0)
+
+## Esc/Q stops an interactive watch run. It prints the same aggregate marker
+## using the polls completed so far.
+func _quit_watch() -> void:
+	if _finished:
+		return
+	_finish_watch_ok()
+
+func _input(event: InputEvent) -> void:
+	if not _watch or _smoke or _finished:
+		return
+	if event is InputEventKey:
+		var key_event := event as InputEventKey
+		if not key_event.pressed or key_event.echo:
+			return
+		if key_event.keycode == KEY_ESCAPE or key_event.keycode == KEY_Q:
+			_quit_watch()
 
 ## Validates and stores one `server_status` object. Returns "" on success or
 ## the stable failure code. Unknown fields are tolerated: the protocol is
@@ -301,7 +465,10 @@ func _read_status(message: Dictionary) -> String:
 
 func _on_goodbye() -> void:
 	if _phase == Phase.DISCONNECT_SENT:
-		_finish_ok()
+		if _watch and not _fixture_mode:
+			_finish_watch_ok()
+		else:
+			_finish_ok()
 		return
 	# The server closed before answering the status request.
 	_fail("status.closed")
@@ -351,6 +518,15 @@ func _fail(code: String, extra := "") -> void:
 	_set_status("Failed: " + code)
 	if _peer != null:
 		_peer.disconnect_from_host()
+	if _watch and not _fixture_mode:
+		# Watch mode never reconnects. The marker is the test surface: one
+		# stable line naming the iteration that failed and the stable code.
+		print(
+			"SERVER_STATUS_WATCH status=fail iteration=%d code=%s"
+			% [_watch_failure_iteration(), code]
+		)
+		get_tree().quit(1)
+		return
 	var suffix := (" " + extra) if not extra.is_empty() else ""
 	if not _expect_fail.is_empty() and _expect_fail != code:
 		print(
@@ -360,6 +536,14 @@ func _fail(code: String, extra := "") -> void:
 	print("SERVER_STATUS_PANEL status=fail code=%s%s" % [code, suffix])
 	# A matching --expect-fail is the test passing; otherwise a failure is fatal.
 	get_tree().quit(0 if not _expect_fail.is_empty() and _expect_fail == code else 1)
+
+## Iteration (1-based) whose request failed. Smoke runs clamp to the configured
+## count so a missing goodbye after the last answer still reports iteration=N.
+func _watch_failure_iteration() -> int:
+	var iteration := _polls_done + 1
+	if _smoke:
+		return clampi(iteration, 1, _watch_iterations)
+	return maxi(iteration, 1)
 
 func _build_ui() -> void:
 	var margin := MarginContainer.new()
@@ -471,6 +655,11 @@ func _positive_int(value: String, fallback: int) -> int:
 		return fallback
 	var number := value.to_int()
 	return number if number > 0 else fallback
+
+func _bounded_int(value: String, fallback: int, minimum: int, maximum: int) -> int:
+	if not value.is_valid_int():
+		return fallback
+	return clampi(value.to_int(), minimum, maximum)
 
 func _read_u32_be(buffer: PackedByteArray, offset: int) -> int:
 	return (
