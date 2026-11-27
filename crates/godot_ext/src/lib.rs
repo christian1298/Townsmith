@@ -13142,6 +13142,9 @@ mod player_registry_faults;
 mod settlement_mutation_faults;
 
 #[cfg(test)]
+mod settlement_parity_faults;
+
+#[cfg(test)]
 mod save_roster_faults;
 
 #[cfg(test)]
