@@ -13136,6 +13136,9 @@ mod save_composition_matrix;
 mod player_registry_faults;
 
 #[cfg(test)]
+mod settlement_mutation_faults;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
