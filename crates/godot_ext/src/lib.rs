@@ -13133,6 +13133,9 @@ mod save_compat_tests;
 mod save_composition_matrix;
 
 #[cfg(test)]
+mod save_composition_faults;
+
+#[cfg(test)]
 mod player_registry_faults;
 
 #[cfg(test)]
