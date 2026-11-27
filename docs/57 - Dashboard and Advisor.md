@@ -2,7 +2,7 @@
 title: Dashboard and Advisor
 project: Townsmith
 status: active
-updated: 2026-11-26
+updated: 2026-11-27
 tags:
   - townsmith
   - phase-3
@@ -442,6 +442,10 @@ The commit path trims the name, rejects empty (`settlement.name_empty`) and unch
 The selected settlement's detail block now lists the owner id and one row per member with the player id, role, and granted permission tokens, plus the three control hints. Rows come from the same read-only `settlements()` payload; an unowned record keeps the compact `Members — · revision N` fallback and never invents an owner. The detail block shows at most 8 member rows plus an overflow count (the full roster remains in the settlement editor).
 
 `Shift+I` invites the lowest registered local player that is not already a member as `member`, registering `Builder` when the roster only contains the owner. `Shift+M` cycles the lowest-id non-owner member through `member -> builder -> manager -> member`. `Shift+Delete` removes the lowest-id non-owner member with a two-press arm/confirm, cleared by any other key, selection change, or dashboard close. All three re-read `membership_revision` from the selected payload, call the bridge mutation, refresh the list/detail in place on success, and leave local state untouched on a bridge rejection. Member ids resolve to local bridge names when available and fall back to `#id`; the registry is local-only and is never used as server identity. The owner is never a candidate for role change or removal; core permissions, member limits, and revision checks remain authoritative. These are local developer controls, not a server identity claim.
+
+### 5.10 Embedded settlement screen (`F10`)
+
+`F10` opens the production settlement shell as a shared-core overlay. The host calls `configure_shared(core, SEED)` before adding the scene, so list paging, detail, names, mutations, and the D-039 tax projection all read the live world store; no second `TownsmithCore` is created. The overlay owns the keyboard while visible, `Esc` or `F10` closes it, and the dashboard refreshes after close. The standalone `settlement_screen.tscn` still creates its own core when launched directly. The shared-core lifecycle is covered by `scripts/smoke_settlement_embed.sh` (`SETTLEMENT_EMBED_SMOKE status=ok ...`), and the full world smoke remains green.
 
 ## 6. Smoke
 
