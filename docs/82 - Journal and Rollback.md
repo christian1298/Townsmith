@@ -262,6 +262,21 @@ Crash recovery: on startup, an unmatched `rollback_intent` is resolved by compar
 - Target resolution with paused equal-tick entries uses `seq`, not file order.
 - Epoch and rollback-floor rules reject an already-rolled-back target.
 
+### Current coverage — pure model (2026-11-27)
+
+`core_city::journal` now has **30 unit tests** (`cargo test -p core_city journal`), all deterministic with fixed fixtures and no wall clock. They cover:
+
+- sequence assignment plus duplicate, backward, gapped, and overflowing appends, each leaving the journal unchanged on failure;
+- load validation for duplicate/backward/zero/exhausted sequence edges, gaps, capacity, high-water drift, zero epoch, and tampered chain heads;
+- entry-cap behavior at exactly the cap and above it, zero/one capacity, and tick retention at inclusive boundaries with the high-water sequence preserved;
+- truncation at every retained boundary, including a cut below the retained floor (the helper clears and restarts at 1, which is why it is not a committed operation);
+- chain detection for each canonical field (`seq`, `tick`, `player_id`, `role`, `tag`, `command_checksum`, `accepted`, `result_code`), the epoch header, every stored chain byte, and each retained entry;
+- re-based chain verification after a trim and its binding to the epoch;
+- serde roundtrip and a partial-tail truncation with stale metadata (refused) versus a repaired prefix (accepted);
+- replay, gap, and validation idempotence, empty-journal helper no-ops, checksum stability across clones and independence from `max_entries`, and the documented non-enforcement of the 64-byte tag/result caps (the chain still covers bytes past the cap).
+
+Not covered because none of it is implemented: the writer, segments, malformed-record quarantine, payload capture/denylist, replay feed, snapshots, rollback commands/floors, protocol/save/GDExtension wiring, and the 100k-entry benchmark. Q-123 and Q-124 remain **Open**; D-040 remains **Proposed**, so no write path may consume this model.
+
 ### Integration
 
 - Reconnect after N accepted commands replays only the suffix; a gap forces snapshot resync; an expired window refuses resume.
@@ -292,6 +307,8 @@ Crash recovery: on startup, an unmatched `rollback_intent` is resolved by compar
 |---|---|
 | Q-123 | What are the default retention (entries and ticks), payload capture policy, and snapshot cadence? |
 | Q-124 | Who may authorize a rollback, and does it require a second Admin or a player quorum? |
+
+Both remain **Open** as of 2026-11-27. The pure record model and its unit tests do not answer either; Q-123 must be answered before any retention or payload default is committed, and Q-124 before any rollback command exists.
 
 ## 11. Review trigger
 

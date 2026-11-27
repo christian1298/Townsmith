@@ -228,7 +228,8 @@ impl Journal {
     /// Discard retained entries after `seq` and re-base the chain.
     ///
     /// This is a tail-discard helper for previews and tests. Sequences after
-    /// `seq` become assignable again, so a committed writer must never call it.
+    /// `seq` become assignable again, and clearing the whole retained window
+    /// restarts the helper at 1, so a committed writer must never call it.
     /// Returns the number of removed entries.
     pub fn truncate_after(&mut self, seq: u64) -> usize {
         let before = self.entries.len();
@@ -797,6 +798,491 @@ mod tests {
             loaded.validate_loaded().unwrap_err(),
             JournalError::ChainMismatch
         );
+    }
+
+    #[test]
+    fn append_rejects_duplicate_backward_and_gapped_sequence() {
+        let mut journal = Journal::new(1, 8);
+        journal.append(entry(0, 1)).unwrap();
+        journal.append(entry(0, 2)).unwrap();
+        let before = journal.clone();
+
+        for (found, expected) in [(2_u64, 3_u64), (1, 3), (5, 3)] {
+            let mut probe = journal.clone();
+            let err = probe.append(entry(found, 9)).unwrap_err();
+
+            assert_eq!(err, JournalError::InvalidSeq { expected, found });
+            assert_eq!(
+                probe, before,
+                "failed append must not mutate the journal (seq {found})"
+            );
+        }
+
+        assert_eq!(journal.append(entry(0, 3)).unwrap(), 3);
+        assert!(journal.validate_loaded().is_ok());
+    }
+
+    type Tamper = fn(&mut Journal);
+
+    fn move_seq(journal: &mut Journal) {
+        journal.entries[0].seq = 2;
+        journal.next_seq = 3;
+    }
+
+    fn bump_tick(journal: &mut Journal) {
+        journal.entries[0].tick += 1;
+    }
+
+    fn bump_player_id(journal: &mut Journal) {
+        journal.entries[0].player_id += 1;
+    }
+
+    fn change_role(journal: &mut Journal) {
+        journal.entries[0].role.push('!');
+    }
+
+    fn change_tag(journal: &mut Journal) {
+        journal.entries[0].tag.push('!');
+    }
+
+    fn bump_command_checksum(journal: &mut Journal) {
+        journal.entries[0].command_checksum ^= 1;
+    }
+
+    fn flip_accepted(journal: &mut Journal) {
+        journal.entries[0].accepted = !journal.entries[0].accepted;
+    }
+
+    fn change_result_code(journal: &mut Journal) {
+        journal.entries[0].result_code.push('!');
+    }
+
+    fn bump_epoch(journal: &mut Journal) {
+        journal.epoch += 1;
+    }
+
+    #[test]
+    fn chain_covers_every_canonical_field_and_stored_head() {
+        let mut base = Journal::new(1, 8);
+        base.append(entry(0, 10)).unwrap();
+        assert!(base.validate_loaded().is_ok());
+
+        let cases: [(&str, Tamper); 9] = [
+            ("seq", move_seq),
+            ("tick", bump_tick),
+            ("player_id", bump_player_id),
+            ("role", change_role),
+            ("tag", change_tag),
+            ("command_checksum", bump_command_checksum),
+            ("accepted", flip_accepted),
+            ("result_code", change_result_code),
+            ("epoch", bump_epoch),
+        ];
+        for (field, tamper) in cases {
+            let mut journal = base.clone();
+            tamper(&mut journal);
+            assert_eq!(
+                journal.validate_loaded(),
+                Err(JournalError::ChainMismatch),
+                "tamper of {field} must break the chain"
+            );
+        }
+
+        for byte in 0..32 {
+            let mut journal = base.clone();
+            journal.chain[byte] ^= 0x80;
+            assert_eq!(
+                journal.validate_loaded(),
+                Err(JournalError::ChainMismatch),
+                "tamper of stored chain byte {byte} must break the chain"
+            );
+        }
+
+        let mut tampered = base;
+        bump_tick(&mut tampered);
+        let snapshot = tampered.clone();
+        for _ in 0..2 {
+            assert_eq!(tampered.validate_loaded(), Err(JournalError::ChainMismatch));
+        }
+        assert_eq!(tampered, snapshot, "validation must not mutate the journal");
+    }
+
+    #[test]
+    fn chain_covers_each_retained_entry() {
+        let mut base = Journal::new(2, 8);
+        for tick in 1..=3 {
+            base.append(entry(0, tick)).unwrap();
+        }
+
+        for index in 0..base.len() {
+            let mut journal = base.clone();
+            journal.entries[index].tick += 1;
+            assert_eq!(
+                journal.validate_loaded(),
+                Err(JournalError::ChainMismatch),
+                "tamper of retained entry {index} must break the chain"
+            );
+        }
+    }
+
+    #[test]
+    fn truncate_after_every_retained_boundary_keeps_a_valid_prefix() {
+        for cut in 0..=5_u64 {
+            let mut journal = Journal::new(3, 8);
+            for tick in 1..=5 {
+                journal.append(entry(0, tick)).unwrap();
+            }
+            let before = journal.checksum();
+
+            let removed = journal.truncate_after(cut);
+
+            assert_eq!(removed, (5 - cut) as usize);
+            assert_eq!(journal.len(), cut as usize);
+            assert_eq!(
+                journal
+                    .entries()
+                    .iter()
+                    .map(|item| item.seq)
+                    .collect::<Vec<_>>(),
+                (1..=cut).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                journal.next_seq(),
+                if cut == 0 { 1 } else { cut + 1 },
+                "a cleared window resets the helper's next sequence"
+            );
+            assert!(journal.replay_after(cut).is_empty());
+            if cut < 5 {
+                assert_ne!(journal.checksum(), before);
+            } else {
+                assert_eq!(journal.checksum(), before);
+            }
+            assert!(journal.validate_loaded().is_ok());
+        }
+    }
+
+    #[test]
+    fn truncate_after_retained_prefix_boundaries() {
+        let cases = [(2_u64, 0_usize, 1_u64), (3, 1, 4), (4, 2, 5), (5, 3, 6)];
+        for (cut, expected_len, expected_next) in cases {
+            let mut journal = Journal::new(1, 3);
+            for tick in 1..=5 {
+                journal.append(entry(0, tick)).unwrap();
+            }
+            assert_eq!(journal.entries().first().unwrap().seq, 3);
+
+            assert_eq!(journal.truncate_after(cut), 3 - expected_len);
+            assert_eq!(journal.len(), expected_len);
+            assert_eq!(journal.next_seq(), expected_next);
+            assert!(journal.validate_loaded().is_ok());
+        }
+    }
+
+    #[test]
+    fn retention_drop_through_tick_boundaries_are_inclusive() {
+        let mut journal = Journal::new(1, 8);
+        for tick in [0, 5, 10, 15] {
+            journal.append(entry(0, tick)).unwrap();
+        }
+
+        let cases = [(0_u64, 1_usize), (4, 0), (5, 1), (9, 0), (10, 1), (14, 0)];
+        for (cut, expected_removed) in cases {
+            let before = journal.checksum();
+            assert_eq!(
+                journal.retention_drop_through(cut),
+                expected_removed,
+                "cut tick {cut}"
+            );
+            if expected_removed == 0 {
+                assert_eq!(journal.checksum(), before);
+            }
+            assert!(journal.validate_loaded().is_ok());
+        }
+
+        assert_eq!(
+            journal
+                .entries()
+                .iter()
+                .map(|item| item.seq)
+                .collect::<Vec<_>>(),
+            vec![4]
+        );
+        assert_eq!(journal.next_seq(), 5);
+        assert_eq!(journal.gap_after(0), Some(1));
+        assert_eq!(journal.gap_after(3), None);
+
+        assert_eq!(journal.retention_drop_through(u64::MAX), 1);
+        assert!(journal.is_empty());
+        assert_eq!(journal.next_seq(), 5);
+        assert!(journal.validate_loaded().is_ok());
+        assert_eq!(journal.append(entry(0, 99)).unwrap(), 5);
+    }
+
+    #[test]
+    fn trimmed_chain_stays_epoch_bound() {
+        let mut journal = Journal::new(7, 2);
+        for tick in 1..=4 {
+            journal.append(entry(0, tick)).unwrap();
+        }
+        assert_eq!(journal.entries().first().unwrap().seq, 3);
+        assert!(journal.validate_loaded().is_ok());
+
+        let mut other_epoch = journal.clone();
+        other_epoch.epoch = 8;
+
+        assert_eq!(
+            other_epoch.validate_loaded(),
+            Err(JournalError::ChainMismatch),
+            "a re-based chain must not validate under another epoch"
+        );
+        assert_ne!(other_epoch.checksum(), journal.checksum());
+    }
+
+    #[test]
+    fn checksum_is_stable_across_clone_and_max_entries() {
+        let mut base = Journal::new(3, 8);
+        base.append(entry(0, 10)).unwrap();
+        base.append(entry(0, 20)).unwrap();
+
+        let clone = base.clone();
+        assert_eq!(clone, base);
+        assert_eq!(clone.chain_hash(), base.chain_hash());
+        assert_eq!(clone.checksum(), base.checksum());
+
+        let mut roomy = Journal::new(3, 64);
+        roomy.append(entry(0, 10)).unwrap();
+        roomy.append(entry(0, 20)).unwrap();
+
+        assert_ne!(base.max_entries(), roomy.max_entries());
+        assert_eq!(roomy.entries(), base.entries());
+        assert_eq!(roomy.chain_hash(), base.chain_hash());
+        assert_eq!(
+            roomy.checksum(),
+            base.checksum(),
+            "the configured cap is not canonical data"
+        );
+    }
+
+    #[test]
+    fn oversized_tag_and_result_code_are_documented_as_unenforced() {
+        let tag_at_cap = "t".repeat(MAX_JOURNAL_TAG_BYTES);
+        let tag_over_cap = format!("{tag_at_cap}x");
+        let result_at_cap = "r".repeat(MAX_JOURNAL_RESULT_CODE_BYTES);
+        let result_over_cap = format!("{result_at_cap}y");
+
+        let mut journal = Journal::new(1, 8);
+        let mut at_cap = entry(0, 1);
+        at_cap.tag = tag_at_cap.clone();
+        at_cap.result_code = result_at_cap;
+        assert_eq!(journal.append(at_cap).unwrap(), 1);
+
+        let mut over_cap = entry(0, 2);
+        over_cap.tag = tag_over_cap.clone();
+        over_cap.result_code = result_over_cap;
+        assert_eq!(journal.append(over_cap).unwrap(), 2);
+
+        assert_eq!(journal.entries()[1].tag.len(), MAX_JOURNAL_TAG_BYTES + 1);
+        assert_eq!(
+            journal.entries()[1].result_code.len(),
+            MAX_JOURNAL_RESULT_CODE_BYTES + 1
+        );
+        assert!(
+            journal.validate_loaded().is_ok(),
+            "the model documents but does not enforce the 64-byte caps"
+        );
+
+        let mut prefix = Journal::new(1, 8);
+        let mut at_cap_only = entry(0, 1);
+        at_cap_only.tag = tag_at_cap;
+        prefix.append(at_cap_only).unwrap();
+
+        let mut whole = Journal::new(1, 8);
+        let mut over_cap_only = entry(0, 1);
+        over_cap_only.tag = tag_over_cap;
+        whole.append(over_cap_only).unwrap();
+
+        assert_ne!(
+            whole.chain_hash(),
+            prefix.chain_hash(),
+            "the chain must cover bytes past the documented cap, not truncate"
+        );
+    }
+
+    #[test]
+    fn replay_and_validation_are_idempotent() {
+        let mut journal = Journal::new(1, 8);
+        for tick in 1..=4 {
+            journal.append(entry(0, tick)).unwrap();
+        }
+        journal.retention_drop_through(2);
+        let snapshot = journal.clone();
+
+        for _ in 0..2 {
+            assert!(journal.validate_loaded().is_ok());
+        }
+        let first = journal.replay_after(2).to_vec();
+        let second = journal.replay_after(2).to_vec();
+        assert_eq!(first, second);
+        assert_eq!(
+            first.iter().map(|item| item.seq).collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+        assert!(journal.replay_after(4).is_empty());
+        assert!(journal.replay_after(u64::MAX).is_empty());
+        assert_eq!(journal.gap_after(0), Some(1));
+        assert_eq!(journal.gap_after(1), Some(2));
+        assert_eq!(journal.gap_after(2), None);
+
+        assert_eq!(journal, snapshot);
+        assert_eq!(journal.checksum(), snapshot.checksum());
+    }
+
+    #[test]
+    fn empty_journal_helpers_are_no_ops() {
+        let mut journal = Journal::new(2, 8);
+        let chain = journal.chain_hash();
+        let checksum = journal.checksum();
+
+        assert_eq!(journal.truncate_after(0), 0);
+        assert_eq!(journal.truncate_after(u64::MAX), 0);
+        assert_eq!(journal.retention_drop_through(0), 0);
+        assert_eq!(journal.retention_drop_through(u64::MAX), 0);
+
+        assert!(journal.is_empty());
+        assert_eq!(journal.next_seq(), 1);
+        assert_eq!(journal.chain_hash(), chain);
+        assert_eq!(journal.checksum(), checksum);
+        assert!(journal.replay_after(0).is_empty());
+        assert_eq!(journal.gap_after(0), None);
+        assert!(journal.validate_loaded().is_ok());
+        assert_eq!(
+            journal.checksum(),
+            Journal::new(2, 64).checksum(),
+            "the configured cap is not canonical data"
+        );
+    }
+
+    #[test]
+    fn serde_partial_tail_detects_stale_metadata_and_accepts_a_repaired_prefix() {
+        let mut journal = Journal::new(1, 8);
+        for tick in 1..=3 {
+            journal.append(entry(0, tick)).unwrap();
+        }
+        let full = serde_json::to_value(&journal).unwrap();
+
+        let mut dropped = full.clone();
+        assert!(dropped["entries"].as_array_mut().unwrap().pop().is_some());
+
+        let stale: Journal = serde_json::from_value(dropped.clone()).unwrap();
+        assert_eq!(
+            stale.validate_loaded(),
+            Err(JournalError::InvalidSeq {
+                expected: 3,
+                found: 4
+            }),
+            "a tail drop with stale high-water metadata is refused"
+        );
+
+        let mut repaired: Journal = serde_json::from_value(dropped).unwrap();
+        repaired.next_seq = 3;
+        repaired.rebase_chain();
+        assert!(repaired.validate_loaded().is_ok());
+
+        let reloaded: Journal =
+            serde_json::from_str(&serde_json::to_string(&repaired).unwrap()).unwrap();
+        assert_eq!(reloaded, repaired);
+        assert!(reloaded.validate_loaded().is_ok());
+    }
+
+    #[test]
+    fn validation_rejects_corrupt_sequence_edges() {
+        let mut duplicate = Journal::new(1, 8);
+        duplicate.entries.push(entry(1, 1));
+        duplicate.entries.push(entry(1, 2));
+        duplicate.next_seq = 2;
+        duplicate.rebase_chain();
+        assert_eq!(
+            duplicate.validate_loaded(),
+            Err(JournalError::Gap {
+                expected: 2,
+                found: 1
+            })
+        );
+
+        let mut backward = Journal::new(1, 8);
+        backward.entries.push(entry(2, 1));
+        backward.entries.push(entry(1, 2));
+        backward.next_seq = 2;
+        backward.rebase_chain();
+        assert_eq!(
+            backward.validate_loaded(),
+            Err(JournalError::Gap {
+                expected: 3,
+                found: 1
+            })
+        );
+
+        let mut zero_entry = Journal::new(1, 8);
+        zero_entry.entries.push(entry(0, 1));
+        zero_entry.next_seq = 1;
+        zero_entry.rebase_chain();
+        assert_eq!(
+            zero_entry.validate_loaded(),
+            Err(JournalError::InvalidSeq {
+                expected: 1,
+                found: 0
+            })
+        );
+
+        let mut zero_high_water = Journal::new(1, 8);
+        zero_high_water.next_seq = 0;
+        assert_eq!(
+            zero_high_water.validate_loaded(),
+            Err(JournalError::InvalidSeq {
+                expected: 1,
+                found: 0
+            })
+        );
+
+        let mut exhausted = Journal::new(1, 8);
+        exhausted.entries.push(entry(u64::MAX, 1));
+        exhausted.rebase_chain();
+        assert_eq!(exhausted.validate_loaded(), Err(JournalError::Overflow));
+    }
+
+    #[test]
+    fn cap_boundary_does_not_trim_at_exactly_max_entries() {
+        let mut journal = Journal::new(1, 3);
+        for tick in 1..=3 {
+            journal.append(entry(0, tick)).unwrap();
+        }
+
+        assert_eq!(journal.len(), 3);
+        assert_eq!(
+            journal
+                .entries()
+                .iter()
+                .map(|item| item.seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(journal.next_seq(), 4);
+        assert!(journal.validate_loaded().is_ok());
+
+        assert_eq!(journal.append(entry(0, 4)).unwrap(), 4);
+
+        assert_eq!(journal.len(), 3);
+        assert_eq!(
+            journal
+                .entries()
+                .iter()
+                .map(|item| item.seq)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+        assert_eq!(journal.next_seq(), 5);
+        assert_eq!(journal.gap_after(0), Some(1));
+        assert!(journal.validate_loaded().is_ok());
     }
 
     #[test]
