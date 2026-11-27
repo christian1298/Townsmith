@@ -2,7 +2,7 @@
 title: Content Registry Modes
 project: Townsmith
 status: proposed
-updated: 2026-11-26
+updated: 2026-11-27
 tags:
   - townsmith
   - modding
@@ -225,6 +225,7 @@ Integration:
 
 - Server startup prints `SERVER_CONTENT_REGISTRY` then `SERVER_CONTENT`, and exits 2 on every error; `--content-ids` alone still prints only `SERVER_CONTENT`.
 - `--check-content-registry` prints the same two lines and exits 0/2 without binding, loading, or creating a world; it ignores `--listen`, `--once`, and `--save` (covered by `crates/server/tests/content_registry_cli.rs`, including an occupied-port no-bind check).
+- `crates/server/tests/content_registry_startup.rs` pins the real-binary startup matrix: missing/directory/unreadable/symlinked/space/relative manifest paths, the 256-entry and 1 MiB caps, duplicate/kind/version/empty/base cases, `--content-ids` subset and blank-token normalization, an occupied port that fails closed without binding or saving, and a bounded clean-startup line-order check. Permission and symlink cases are Unix-only and skip when running as root.
 - Malformed, missing, oversized, and unsupported-version manifests fail before binding and leave the world base-only.
 - A package requiring a mod places when the mod is active; rejects with `MissingMod` when absent; rejects with `MissingResourcePack` when the ID exists only as a mod.
 - Namespace matching (`mymod` vs `mymod:pack`) works for both kinds.
