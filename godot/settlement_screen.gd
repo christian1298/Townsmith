@@ -107,6 +107,41 @@ const GAMEPAD_ACTIONS := [
 	"ui_cancel",
 ]
 const STICK_DEADZONE := 0.5
+
+## Compact names for the joypad controls read from the active InputMap. This
+## table only names the buttons; the footer reads the bindings themselves.
+const JOY_BUTTON_GLYPHS := {
+	JOY_BUTTON_A: "A",
+	JOY_BUTTON_B: "B",
+	JOY_BUTTON_X: "X",
+	JOY_BUTTON_Y: "Y",
+	JOY_BUTTON_LEFT_SHOULDER: "LB",
+	JOY_BUTTON_RIGHT_SHOULDER: "RB",
+	JOY_BUTTON_BACK: "Back",
+	JOY_BUTTON_START: "Start",
+	JOY_BUTTON_DPAD_UP: "D-pad Up",
+	JOY_BUTTON_DPAD_DOWN: "D-pad Down",
+	JOY_BUTTON_DPAD_LEFT: "D-pad Left",
+	JOY_BUTTON_DPAD_RIGHT: "D-pad Right",
+}
+const JOY_AXIS_GLYPHS := {
+	JOY_AXIS_LEFT_X: "Left Stick",
+	JOY_AXIS_LEFT_Y: "Left Stick",
+	JOY_AXIS_TRIGGER_LEFT: "LT",
+	JOY_AXIS_TRIGGER_RIGHT: "RT",
+}
+## Shape of the local button fallbacks in `_gamepad_action_for_event`. Used
+## only when the active InputMap has no joypad binding for an action, so the
+## footer never claims a control the pad cannot press.
+const JOY_ACTION_FALLBACK_GLYPHS := {
+	"ui_up": "D-pad Up/Left Stick",
+	"ui_down": "D-pad Down/Left Stick",
+	"ui_left": "D-pad Left/Left Stick",
+	"ui_right": "D-pad Right/Left Stick",
+	"ui_accept": "A",
+	"ui_cancel": "B",
+}
+
 ## Local rename codes are shape validation, not server rejection codes. They
 ## map to the `rename.*` text keys instead of leaking the raw code.
 const RENAME_ERROR_KEYS := {
@@ -217,6 +252,8 @@ var _modal_opener_action := "rename"
 # settlement store by itself.
 var _gamepad_active := false
 var _last_action := ""
+## Smoke-only count of the `SETTLEMENT_SCREEN_GAMEPAD` assertions.
+var _gamepad_checks := 0
 var _stick_held := false
 var _virtual_keyboard_requested := false
 var _virtual_keyboard_requests := 0
@@ -245,6 +282,8 @@ var _members_box: VBoxContainer
 var _member_buttons: Array[Button] = []
 var _detail_empty: Label
 var _status_label: Label
+var _footer_label: Label
+var _rename_hint: Label
 var _action_bar: HFlowContainer
 var _action_buttons: Dictionary = {}
 var _focus_ring: Control
@@ -471,6 +510,16 @@ func _build_ui() -> void:
 		_action_bar.add_child(button)
 		_action_buttons[name] = button
 
+	# Footer help. One line, always visible, and always the modality in use:
+	# gamepad glyphs from the active InputMap, or the keyboard keys. It never
+	# lists a shortcut the screen does not dispatch.
+	_footer_label = Label.new()
+	_footer_label.name = "FooterHelp"
+	_footer_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_footer_label.add_theme_font_size_override("font_size", 11)
+	_footer_label.add_theme_color_override("font_color", MUTED_COLOR)
+	root.add_child(_footer_label)
+
 	_status_label = Label.new()
 	_status_label.add_theme_color_override("font_color", MUTED_COLOR)
 	_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -528,6 +577,14 @@ func _build_rename_modal() -> void:
 	_rename_count = Label.new()
 	_rename_count.add_theme_color_override("font_color", MUTED_COLOR)
 	box.add_child(_rename_count)
+
+	# Modal help. The screen footer sits under the overlay, so the modal repeats
+	# the active modality line: commit/cancel and the virtual-keyboard intent.
+	_rename_hint = Label.new()
+	_rename_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_rename_hint.add_theme_font_size_override("font_size", 11)
+	_rename_hint.add_theme_color_override("font_color", MUTED_COLOR)
+	box.add_child(_rename_hint)
 
 	_rename_error = Label.new()
 	_rename_error.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -894,7 +951,7 @@ func _handle_key(event: InputEvent) -> bool:
 	var key := event as InputEventKey
 	if not key.pressed or key.echo:
 		return false
-	_gamepad_active = false
+	_clear_gamepad_modality()
 	if _rename_open:
 		return _handle_modal_key(key)
 	if _line_edit_has_focus():
@@ -1069,8 +1126,11 @@ func _dispatch_gamepad(action: String) -> bool:
 		return false
 	if not GAMEPAD_ACTIONS.has(action):
 		return false
+	var switched := not _gamepad_active
 	_gamepad_active = true
 	_last_action = action
+	if switched:
+		_render_footer()
 	if _rename_open:
 		return _dispatch_modal_gamepad(action)
 	match action:
@@ -1160,7 +1220,77 @@ func _gamepad_adjacent_group(direction: int) -> bool:
 
 
 func _clear_gamepad_modality() -> void:
+	if not _gamepad_active:
+		return
 	_gamepad_active = false
+	_render_footer()
+
+
+## Footer text of the current modality. The gamepad line is built from the
+## active InputMap bindings; `ui_accept`/`ui_cancel` stay in the text so the
+## headless smoke can pin the accept/back hints without a device.
+func gamepad_footer() -> String:
+	if _footer_label != null:
+		return _footer_label.text
+	return _footer_text()
+
+
+func _render_footer() -> void:
+	var text := _footer_text()
+	if _footer_label != null:
+		_footer_label.text = text
+		_footer_label.visible = true
+	if _rename_hint != null:
+		_rename_hint.text = text if _rename_open else ""
+
+
+func _footer_text() -> String:
+	if _rename_open:
+		if _gamepad_active:
+			return _i18n.t(
+				"base.ui.settlement_screen.footer.rename",
+				{
+					"bindings": _bindings_text(["ui_accept", "ui_cancel"]),
+					"save": _i18n.t("base.ui.settlement_screen.rename.save"),
+				}
+			)
+		return _i18n.t("base.ui.settlement_screen.footer.rename_keyboard")
+	if _gamepad_active:
+		return _i18n.t(
+			"base.ui.settlement_screen.footer.gamepad",
+			{"bindings": _bindings_text(GAMEPAD_ACTIONS)}
+		)
+	return _i18n.t("base.ui.settlement_screen.footer.keyboard")
+
+
+func _bindings_text(actions: Array) -> String:
+	var parts: Array[String] = []
+	for action in actions:
+		parts.append("%s=%s" % [str(action), _action_glyph(str(action))])
+	return "  ".join(parts)
+
+
+## Every joypad control bound to the action, de-duplicated in InputMap order.
+## An unbound action falls back to `action (local glyph)`, so the footer never
+## claims a control the pad cannot press.
+func _action_glyph(action: String) -> String:
+	var glyphs: Array[String] = []
+	for event in InputMap.action_get_events(action):
+		var glyph := ""
+		if event is InputEventJoypadButton:
+			var button := (event as InputEventJoypadButton).button_index
+			glyph = str(JOY_BUTTON_GLYPHS.get(button, "Button %d" % int(button)))
+		elif event is InputEventJoypadMotion:
+			var axis := (event as InputEventJoypadMotion).axis
+			if JOY_AXIS_GLYPHS.has(axis):
+				glyph = str(JOY_AXIS_GLYPHS[axis])
+		if not glyph.is_empty() and not glyphs.has(glyph):
+			glyphs.append(glyph)
+	if glyphs.is_empty():
+		return "%s (%s)" % [
+			action, str(JOY_ACTION_FALLBACK_GLYPHS.get(action, action))
+		]
+	return "/".join(glyphs)
 
 
 func _virtual_keyboard_supported() -> bool:
@@ -1852,6 +1982,7 @@ func _open_rename() -> void:
 	_rename_edit.grab_focus()
 	if _gamepad_active:
 		_sync_virtual_keyboard(true)
+	_render_footer()
 	_sync_focus_ring()
 
 
@@ -1863,6 +1994,7 @@ func _hide_rename_modal() -> void:
 	_modal_focus = MODAL_EDIT
 	_sync_virtual_keyboard(false)
 	_restore_modal_opener()
+	_render_footer()
 
 
 func _close_rename() -> void:
@@ -2267,6 +2399,7 @@ func _render_all() -> void:
 		)
 	_render_list()
 	_render_detail()
+	_render_footer()
 
 
 ## The authority mode is always visible. Connected also shows the server world
@@ -2761,43 +2894,105 @@ func _run_smoke() -> void:
 	_load_page(0)
 	_select_page_number(1)
 	_focus_group = "rows"
-	_gamepad_active = false
+	_clear_gamepad_modality()
+	_expect_pad(_footer_label.visible, "footer stays visible in keyboard mode", failures)
+	_expect_pad(_rename_hint.text.is_empty(), "modal hint is empty while closed", failures)
+	_expect_pad(
+		gamepad_footer() == _i18n.t("base.ui.settlement_screen.footer.keyboard"),
+		"keyboard footer text: %s" % gamepad_footer(), failures
+	)
 	var pad := gamepad_action("ui_down")
-	_expect(_selected_id == 2, "gamepad down selects next row, got %d" % _selected_id, failures)
-	_expect(_focus_group == "rows", "gamepad down keeps row group", failures)
-	_expect(bool(pad.get("active", false)), "gamepad marks modality active", failures)
-	_expect(str(pad.get("last_action", "")) == "ui_down", "gamepad records last action", failures)
+	_expect_pad(_selected_id == 2, "gamepad down selects next row, got %d" % _selected_id, failures)
+	_expect_pad(_focus_group == "rows", "gamepad down keeps row group", failures)
+	_expect_pad(bool(pad.get("active", false)), "gamepad marks modality active", failures)
+	_expect_pad(str(pad.get("last_action", "")) == "ui_down", "gamepad records last action", failures)
+	_expect_pad(gamepad_footer() == _footer_label.text, "footer label drives the text", failures)
+	_expect_pad(gamepad_footer().contains("ui_accept"), "footer shows ui_accept: %s" % gamepad_footer(), failures)
+	_expect_pad(gamepad_footer().contains("ui_cancel"), "footer shows ui_cancel", failures)
+	_expect_pad(
+		gamepad_footer().contains("ui_accept=%s" % _action_glyph("ui_accept")),
+		"footer shows the accept binding: %s" % gamepad_footer(), failures
+	)
 	pad = gamepad_action("ui_up")
-	_expect(_selected_id == 1, "gamepad up returns to the first row", failures)
+	_expect_pad(_selected_id == 1, "gamepad up returns to the first row", failures)
 	pad = gamepad_action("ui_up")
-	_expect(_focus_group == "paging", "gamepad up at the row edge enters paging", failures)
+	_expect_pad(_focus_group == "paging", "gamepad up at the row edge enters paging", failures)
 	pad = gamepad_action("ui_down")
-	_expect(_focus_group == "paging" and _focus_paging == 1, "gamepad down moves paging focus", failures)
+	_expect_pad(_focus_group == "paging" and _focus_paging == 1, "gamepad down moves paging focus", failures)
 	pad = gamepad_action("ui_down")
-	_expect(_focus_group == "rows", "gamepad down at the paging edge enters rows", failures)
+	_expect_pad(_focus_group == "rows", "gamepad down at the paging edge enters rows", failures)
 	pad = gamepad_action("ui_accept")
-	_expect(_focus_group == "detail", "gamepad accept opens detail", failures)
+	_expect_pad(_focus_group == "detail", "gamepad accept opens detail", failures)
 	pad = gamepad_action("ui_accept")
-	_expect(_focus_group == "members" or _focus_group == "tax", "gamepad accept advances detail", failures)
+	_expect_pad(_focus_group == "members" or _focus_group == "tax", "gamepad accept advances detail", failures)
 	pad = gamepad_action("ui_cancel")
-	_expect(_focus_group == "rows", "gamepad cancel returns to rows", failures)
+	_expect_pad(_focus_group == "rows", "gamepad cancel returns to rows", failures)
 	pad = gamepad_action("ui_cancel")
-	_expect(_selected_id == 0, "gamepad cancel clears the selection", failures)
+	_expect_pad(_selected_id == 0, "gamepad cancel clears the selection", failures)
 	_focus_group = "rows"
 	_select_page_number(2)
 	_open_rename()
-	_expect(_rename_open, "gamepad modal opens", failures)
-	_expect(_virtual_keyboard_requests > 0, "gamepad rename requests the virtual keyboard", failures)
+	_expect_pad(_rename_open, "gamepad modal opens", failures)
+	_expect_pad(_virtual_keyboard_requests > 0, "gamepad rename requests the virtual keyboard", failures)
+	_expect_pad(_rename_hint.text == gamepad_footer(), "modal repeats the footer line", failures)
+	_expect_pad(
+		gamepad_footer() == _i18n.t(
+			"base.ui.settlement_screen.footer.rename",
+			{
+				"bindings": _bindings_text(["ui_accept", "ui_cancel"]),
+				"save": _i18n.t("base.ui.settlement_screen.rename.save"),
+			}
+		),
+		"modal footer text: %s" % gamepad_footer(), failures
+	)
+	_expect_pad(
+		gamepad_footer().contains(_i18n.t("base.ui.settlement_screen.rename.save")),
+		"modal footer names the commit", failures
+	)
+	_expect_pad(
+		gamepad_footer().to_lower().contains("virtual keyboard"),
+		"modal footer names the virtual keyboard: %s" % gamepad_footer(), failures
+	)
 	pad = gamepad_action("ui_down")
-	_expect(_modal_focus == MODAL_CANCEL, "gamepad modal down moves to cancel", failures)
+	_expect_pad(_modal_focus == MODAL_CANCEL, "gamepad modal down moves to cancel", failures)
 	pad = gamepad_action("ui_accept")
-	_expect(not _rename_open, "gamepad accept closes the modal", failures)
-	_expect(_virtual_keyboard_clears > 0, "gamepad modal clears the virtual keyboard", failures)
+	_expect_pad(not _rename_open, "gamepad accept closes the modal", failures)
+	_expect_pad(_virtual_keyboard_clears > 0, "gamepad modal clears the virtual keyboard", failures)
+	_expect_pad(_rename_hint.text.is_empty(), "modal hint clears with the modal", failures)
+	_expect_pad(
+		gamepad_footer() == _i18n.t(
+			"base.ui.settlement_screen.footer.gamepad",
+			{"bindings": _bindings_text(GAMEPAD_ACTIONS)}
+		),
+		"footer returns to the gamepad line", failures
+	)
+	# A keyboard event clears the modality and the footer follows it back.
+	_smoke_press(KEY_TAB)
+	_expect_pad(not _gamepad_active, "keyboard clears the gamepad modality", failures)
+	_expect_pad(
+		gamepad_footer() == _i18n.t("base.ui.settlement_screen.footer.keyboard"),
+		"footer reverts to the keyboard line", failures
+	)
+	_expect_pad(not gamepad_footer().contains("ui_accept"), "keyboard footer has no pad bindings", failures)
+	_switch_locale("de")
+	_expect_pad(_footer_label.visible, "footer stays visible after a locale switch", failures)
+	_expect_pad(
+		gamepad_footer() == _i18n.t("base.ui.settlement_screen.footer.keyboard"),
+		"DE keyboard footer text", failures
+	)
+	_expect_pad(not gamepad_footer().contains("!base.ui."), "DE footer key leak", failures)
+	_expect_pad(gamepad_footer().begins_with("Tastatur:"), "DE footer prefix: %s" % gamepad_footer(), failures)
+	pad = gamepad_action("ui_cancel")
+	_expect_pad(
+		gamepad_footer().begins_with("Gamepad: ui_up=") and gamepad_footer().contains("ui_accept="),
+		"DE gamepad footer text: %s" % gamepad_footer(), failures
+	)
+	_switch_locale("en")
 	var last_action := str(gamepad_snapshot().get("last_action", ""))
 	pad = gamepad_action("bogus")
-	_expect(str(pad.get("last_action", "")) == last_action, "unknown gamepad action is ignored", failures)
+	_expect_pad(str(pad.get("last_action", "")) == last_action, "unknown gamepad action is ignored", failures)
 
-	print("SETTLEMENT_SCREEN_GAMEPAD status=ok checks=18")
+	print("SETTLEMENT_SCREEN_GAMEPAD status=ok checks=%d" % _gamepad_checks)
 	print("SETTLEMENT_SCREEN_FOCUS group=rows tab=paging shift=ok arrows=ok modal=trap esc=detail")
 	print("SETTLEMENT_SCREEN_PAGES sizes=8/8/7 selected_last=23")
 	print("SETTLEMENT_SCREEN_NAMES owner=Mayor#7 manager=Manager#11 builder=Builder#13 member=Member#12 fallback=#9001 owner_fallback=#9002")
@@ -3183,6 +3378,8 @@ func _all_text() -> String:
 		_page_label.text,
 		_more_label.text,
 		_help_label.text,
+		_footer_label.text,
+		_rename_hint.text,
 		_detail_empty.text,
 		_status_label.text,
 		_detail_text(),
@@ -3195,3 +3392,9 @@ func _all_text() -> String:
 func _expect(condition: bool, label: String, failures: Array) -> void:
 	if not condition:
 		failures.append(label)
+
+
+## Counted wrapper for the gamepad block; the marker prints the live total.
+func _expect_pad(condition: bool, label: String, failures: Array) -> void:
+	_gamepad_checks += 1
+	_expect(condition, label, failures)
