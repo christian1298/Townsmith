@@ -12,6 +12,7 @@ const EditorCamera = preload("res://editor_camera.gd")
 const MayorCamera = preload("res://mayor_camera.gd")
 const WorldI18n = preload("res://world_i18n.gd")
 const ContentI18n = preload("res://content_i18n.gd")
+const SettlementScreenScene = preload("res://settlement_screen.tscn")
 
 const SEED := 2026
 const FIXTURE_X := 169.0
@@ -325,6 +326,11 @@ var dashboard_visible := false
 var dashboard_title: Label
 var dashboard_hint: Label
 var dashboard_policy_hint: Label
+## Embedded production settlement screen (F10). One shared world core; the
+## host owns show/hide and the screen never frees the injected core.
+var settlement_screen_layer: CanvasLayer
+var settlement_screen
+var settlement_screen_visible := false
 var settlement_rename_panel: PanelContainer
 var settlement_rename_title: Label
 var settlement_rename_input: LineEdit
@@ -410,6 +416,8 @@ func _ready() -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 func _process(delta: float) -> void:
+	if settlement_screen_visible:
+		return
 	if dashboard_visible:
 		dashboard_refresh_accum += delta
 		if dashboard_refresh_accum >= DASHBOARD_REFRESH_SECONDS:
@@ -510,6 +518,13 @@ func _process(delta: float) -> void:
 	_refresh_preview(false)
 
 func _unhandled_input(event: InputEvent) -> void:
+	# The embedded settlement screen owns the keyboard while visible; F10 or
+	# Esc closes it, every other key is swallowed by the host.
+	if settlement_screen_visible:
+		if event is InputEventKey and event.pressed and not event.echo:
+			if event.physical_keycode == KEY_F10 or event.physical_keycode == KEY_ESCAPE:
+				_close_settlement_screen()
+		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		# The rename overlay owns the keyboard while it is open: Enter commits,
 		# Esc cancels, and every other game hotkey is swallowed.
@@ -697,6 +712,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					_save_world()
 				KEY_F9:
 					_load_world()
+				KEY_F10:
+					_toggle_settlement_screen()
 		else:
 			match event.physical_keycode:
 				KEY_F5:
@@ -3244,7 +3261,40 @@ func _update_citizen_panel() -> void:
 		}))
 	citizen_text.text = "\n".join(lines)
 
+func _toggle_settlement_screen() -> bool:
+	if settlement_screen == null:
+		settlement_screen_layer = CanvasLayer.new()
+		settlement_screen_layer.layer = 2
+		add_child(settlement_screen_layer)
+		settlement_screen = SettlementScreenScene.instantiate()
+		settlement_screen.configure_shared(core, SEED)
+		settlement_screen.close_requested.connect(_close_settlement_screen)
+		settlement_screen_layer.add_child(settlement_screen)
+	settlement_screen_visible = not settlement_screen_visible
+	settlement_screen.visible = settlement_screen_visible
+	if settlement_screen_visible:
+		if selected_settlement_id >= 0:
+			settlement_screen.focus_settlement(selected_settlement_id)
+		settlement_screen.refresh()
+		settlement_screen.grab_focus()
+	else:
+		settlement_screen.on_hidden()
+		_update_dashboard()
+	return settlement_screen_visible
+
+
+func _close_settlement_screen() -> void:
+	if settlement_screen == null:
+		return
+	settlement_screen_visible = false
+	settlement_screen.visible = false
+	settlement_screen.on_hidden()
+	_update_dashboard()
+
+
 func _toggle_dashboard() -> bool:
+	if settlement_screen_visible:
+		_close_settlement_screen()
 	dashboard_visible = not dashboard_visible
 	settlement_release_armed_id = -1
 	settlement_remove_armed_id = -1

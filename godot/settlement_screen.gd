@@ -1,5 +1,8 @@
 extends Control
 
+## Emitted when an embedded host should close the overlay (Esc in shared mode).
+signal close_requested
+
 ## Standalone production settlement screen shell (local bridge mutations).
 ##
 ## Implements `docs/85 - Connected Settlement Surface.md` §7 over the local
@@ -19,6 +22,14 @@ extends Control
 ##   godot --headless --path godot res://settlement_screen.tscn -- --smoke
 ##   godot --path godot res://settlement_screen.tscn -- --connected --host H --port P --name NAME
 ##   godot --headless --path godot res://settlement_screen.tscn -- --smoke --connected --port P
+##
+## Embedded mode (`world_placement.gd`, `F10`): the host calls
+## `configure_shared(core, seed)` before adding this scene, so the screen reads,
+## mutates, and projects tax over the live world core instead of creating a
+## second `TownsmithCore`. The screen never frees the injected core, emits
+## `close_requested` on `Esc`, and `is_visible_in_tree()` gates all input while
+## the host keeps the overlay hidden. The standalone launch path still creates
+## and owns its own local core.
 ##
 ## Final smoke markers, printed twice with identical output:
 ##   SETTLEMENT_SCREEN status=ok pages=3 settlements=23 actions=13 accepted=8 rejected=5 checksum=<16 hex>
@@ -140,6 +151,8 @@ var _connected_mode := false
 
 var _i18n
 var _core = null
+var _shared_core = null
+var _shared := false
 var _net = null
 var _seed := DEFAULT_SEED
 var _locale_override := ""
@@ -224,8 +237,21 @@ var _rename_cancel: Button
 var _rename_save: Button
 
 
+## Host entry point for embedded mode. Call before `add_child`; the screen
+## never frees or resets the injected core.
+func configure_shared(core: Object, seed: int) -> void:
+	_shared = true
+	_shared_core = core
+	_seed = seed
+
+
+func is_shared() -> bool:
+	return _shared
+
+
 func _ready() -> void:
-	_parse_args()
+	if not _shared:
+		_parse_args()
 	# The headless contract is pinned in English; `--locale de` previews the
 	# localized UI and the smoke switches locales itself.
 	var locale := _locale_override
@@ -233,6 +259,11 @@ func _ready() -> void:
 		locale = "en"
 	_i18n = WorldI18n.new(locale)
 	_build_ui()
+	if _shared:
+		_core = _shared_core
+		_refresh_player_names()
+		_load_page(0)
+		return
 	if _connected_mode:
 		if smoke_mode:
 			_run_connected_smoke()
@@ -513,7 +544,10 @@ func _detail_label(parent: Node, font_size: int = 16) -> Label:
 # --- Session / bridge reads ------------------------------------------------
 
 func _start_local_session() -> void:
-	_core = TownsmithCore.new()
+	if _shared and _shared_core != null:
+		_core = _shared_core
+	else:
+		_core = TownsmithCore.new()
 	_refresh_player_names()
 	_load_page(0)
 
@@ -820,11 +854,15 @@ func _input(event: InputEvent) -> void:
 
 
 func _process(_delta: float) -> void:
+	if _shared and not is_visible_in_tree():
+		return
 	if _focus_ring != null:
 		_focus_ring.queue_redraw()
 
 
 func _handle_key(event: InputEvent) -> bool:
+	if _shared and not is_visible_in_tree():
+		return false
 	if not (event is InputEventKey):
 		return false
 	var key := event as InputEventKey
@@ -872,6 +910,11 @@ func _handle_modal_key(key: InputEventKey) -> bool:
 
 
 func _handle_screen_key(key: InputEventKey) -> bool:
+	# In embedded mode Esc closes the overlay before the local detail-clearing
+	# behavior; the host owns the show/hide lifecycle.
+	if _shared and key.keycode == KEY_ESCAPE:
+		close_requested.emit()
+		return true
 	match key.keycode:
 		KEY_TAB:
 			_cycle_focus(-1 if key.shift_pressed else 1)
@@ -2336,7 +2379,10 @@ func _show_unavailable(code: String) -> void:
 
 func _run_smoke() -> void:
 	var failures: Array[String] = []
-	_core = TownsmithCore.new()
+	if _shared and _shared_core != null:
+		_core = _shared_core
+	else:
+		_core = TownsmithCore.new()
 	_seed = DEFAULT_SEED
 	# Open a world layer first: the bridge player registry needs an open-store
 	# seed before it will register names.
@@ -2701,6 +2747,65 @@ func _run_connected_smoke() -> void:
 	)
 	_net.close()
 	get_tree().quit(0)
+
+
+## Re-read the current page and names after the host world changes.
+func refresh() -> void:
+	if _connected_mode:
+		_load_page(_page_index)
+		return
+	if _core == null:
+		return
+	_refresh_player_names()
+	_load_page(_page_index)
+
+
+## Select a settlement by id when it is on the current page.
+func focus_settlement(id: int) -> bool:
+	if id <= 0:
+		return false
+	for index in _rows.size():
+		if _record_id(_rows[index]) == id:
+			_selected_index = index
+			_selected_id = id
+			_syncing_list = true
+			_list.select(index)
+			_syncing_list = false
+			_sync_focus_ring()
+			_render_detail()
+			return true
+	return false
+
+
+## Host-visible state for the smoke and embedding tests.
+func embed_snapshot() -> Dictionary:
+	return {
+		"ok": _core != null,
+		"shared": _shared,
+		"seed": _seed,
+		"page": _page_index,
+		"selected_id": _selected_id,
+		"rows": _rows.size(),
+		"matched": _matched,
+		"checksum": _checksum,
+	}
+
+
+## Hide/reset the screen when the host closes the overlay.
+func on_hidden() -> void:
+	_reset_pending()
+	_rename_open = false
+	if _rename_overlay != null:
+		_rename_overlay.visible = false
+	_status_text = ""
+	_focus_group = "header"
+	_sync_focus_ring()
+
+
+func _exit_tree() -> void:
+	# Never free the host's core; only drop the local reference.
+	_core = null
+	_shared_core = null
 
 
 func _connected_smoke_fail(failures: Array) -> void:

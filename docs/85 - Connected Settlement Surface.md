@@ -238,6 +238,8 @@ No sleeps are used; readiness is the bounded server-log poll. The checksum is SH
 > [!success] Shell implemented with local and connected mutations
 > The standalone `godot/settlement_screen.tscn` implements the first **production settlement shell**. Local mode covers every mutation over the bridge; connected mode (`--connected`) reads paged `settlement_list`/`player_list` and wires claim, rename, transfer, release, invite, set-role, remove, and set-tax against the authoritative server. Every mutation re-reads the current `membership_revision`; server rejections keep the stable code and leave the local page cache untouched. Release stays visible for a Mayor so the server's `role.forbidden` is shown rather than hidden. The connected smoke seeds a second player, exercises all nine actions, and pins `SETTLEMENT_SCREEN_CONNECTED ... players=2 actions=9 accepted=8 rejected=1 checksum=...`.
 >
+> **Embedded.** The Mayor dashboard opens this shell with `F10` through `configure_shared(core, seed)`: the screen uses the live world core, never creates or frees a second store, and `Esc`/`F10` returns to the dashboard. The standalone launch path still owns its core. `scripts/smoke_settlement_embed.sh` covers the shared-core lifecycle; the world smoke covers the host overlay.
+>
 > **Implemented**
 > - Cursor-paged list (`settlements_page(after_id, limit)`, 8 rows/page) with name, `#id`, owner name/`#id` or `unowned`, tax, membership revision, and member count. The cursor is the order; the client never re-sorts a page.
 > - PageUp/PageDown, click and arrow-key selection, page-local number keys 1–8, and a `+N more` footer. Selection is preserved by id across a refresh, otherwise it resets to the first row.
