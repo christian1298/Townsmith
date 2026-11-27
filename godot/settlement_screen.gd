@@ -17,11 +17,21 @@ extends Control
 ##   godot --path godot res://settlement_screen.tscn
 ##   godot --path godot res://settlement_screen.tscn -- --empty
 ##   godot --headless --path godot res://settlement_screen.tscn -- --smoke
+##   godot --path godot res://settlement_screen.tscn -- --connected --host H --port P --name NAME
+##   godot --headless --path godot res://settlement_screen.tscn -- --smoke --connected --port P
 ##
-## Final smoke marker, printed twice with identical output:
+## Final smoke markers, printed twice with identical output:
 ##   SETTLEMENT_SCREEN status=ok pages=3 settlements=23 actions=13 accepted=8 rejected=5 checksum=<16 hex>
+##   SETTLEMENT_SCREEN_CONNECTED status=ok settlements=1 players=1 rename=1 tax=1 checksum=<16 hex>
+##
+## Connected mode is the server-authoritative slice: reads come from
+## `settlement_list`/`player_list`, and only rename and set-tax mutations are
+## wired. The remaining local bridge actions stay visible and disabled with the
+## localized `connected action not available yet` reason. Local mode is
+## unchanged.
 
 const WorldI18n = preload("res://world_i18n.gd")
+const SettlementScreenNet = preload("res://settlement_screen_net.gd")
 
 const SUITE := "settlement_screen"
 const DEFAULT_SEED := 2026
@@ -81,14 +91,28 @@ const FIXTURE_FALLBACK_MEMBER_ID := 9001
 const MUTED_COLOR := Color(0.66, 0.71, 0.78)
 const TEXT_COLOR := Color(0.88, 0.91, 0.95)
 
+const CONNECTED_REASON := "connected_unavailable"
+const DEFAULT_HOST := "127.0.0.1"
+const DEFAULT_PORT := 47015
+const DEFAULT_PLAYER_NAME := "settlement-screen"
+const CONNECTED_FOUND_NAME := "Harbor"
+const CONNECTED_RENAMED_NAME := "Port Harbor"
+const CONNECTED_FOUND_RADIUS_M := 64
+
 var smoke_mode := false
 var empty_mode := false
 var unavailable_mode := false
+var _connected_mode := false
 
 var _i18n
 var _core = null
+var _net = null
 var _seed := DEFAULT_SEED
 var _locale_override := ""
+var _host := DEFAULT_HOST
+var _port := DEFAULT_PORT
+var _player_name := DEFAULT_PLAYER_NAME
+var _world_checksum := ""
 
 # Page model. The cursor stack holds the exclusive `after_id` for each visited
 # page; forward paging appends the response `next_after`, never an array index.
@@ -122,6 +146,7 @@ var _rejected_count := 0
 
 var _title_label: Label
 var _authority_label: Label
+var _world_checksum_label: Label
 var _page_label: Label
 var _list: ItemList
 var _more_label: Label
@@ -157,7 +182,12 @@ func _ready() -> void:
 		locale = "en"
 	_i18n = WorldI18n.new(locale)
 	_build_ui()
-	if smoke_mode:
+	if _connected_mode:
+		if smoke_mode:
+			_run_connected_smoke()
+		else:
+			_start_connected_session()
+	elif smoke_mode:
 		_run_smoke()
 	elif empty_mode:
 		_run_empty()
@@ -174,10 +204,23 @@ func _parse_args() -> void:
 		var arg: String = args[index]
 		if arg == "--smoke":
 			smoke_mode = true
+		elif arg == "--connected":
+			_connected_mode = true
 		elif arg == "--empty":
 			empty_mode = true
 		elif arg == "--unavailable":
 			unavailable_mode = true
+		elif arg == "--host" and index + 1 < args.size():
+			index += 1
+			_host = args[index]
+		elif arg == "--port" and index + 1 < args.size():
+			index += 1
+			var port_text: String = args[index]
+			if port_text.is_valid_int() and int(port_text) >= 1 and int(port_text) <= 65535:
+				_port = int(port_text)
+		elif arg == "--name" and index + 1 < args.size():
+			index += 1
+			_player_name = args[index]
 		elif arg == "--seed" and index + 1 < args.size():
 			index += 1
 			var raw: String = args[index]
@@ -219,6 +262,10 @@ func _build_ui() -> void:
 	_authority_label.add_theme_color_override("font_color", MUTED_COLOR)
 	_authority_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	header.add_child(_authority_label)
+	_world_checksum_label = Label.new()
+	_world_checksum_label.add_theme_color_override("font_color", MUTED_COLOR)
+	_world_checksum_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	header.add_child(_world_checksum_label)
 	root.add_child(header)
 	root.add_child(HSeparator.new())
 
@@ -384,6 +431,27 @@ func _start_local_session() -> void:
 	_load_page(0)
 
 
+func _start_connected_session() -> void:
+	_net = SettlementScreenNet.new()
+	var opened: Dictionary = _net.open(_host, _port, _player_name)
+	if not bool(opened.get("ok", false)):
+		_show_unavailable(str(opened.get("error_code", "connect_failed")))
+		_render_authority()
+		return
+	_refresh_player_names()
+	_load_page(0)
+	if _error_code.is_empty():
+		_status_text = _i18n.t(
+			"base.ui.settlement_screen.connected_status",
+			{
+				"host": _host,
+				"port": str(_port),
+				"name": _player_name,
+			}
+		)
+		_render_detail()
+
+
 func _run_empty() -> void:
 	_core = TownsmithCore.new()
 	_refresh_player_names()
@@ -409,6 +477,9 @@ func _run_unavailable() -> void:
 
 func _refresh_player_names() -> void:
 	_player_names = {}
+	if _connected_mode:
+		_refresh_connected_player_names()
+		return
 	if _core == null:
 		return
 	var result: Dictionary = _core.players_list()
@@ -426,7 +497,45 @@ func _refresh_player_names() -> void:
 			_player_names[id] = name
 
 
+## Connected name cache: page `player_list` from cursor 0 until `has_more`
+## clears. The registry is capped at 256 players, so 64 pages of 8 is bounded.
+func _refresh_connected_player_names() -> void:
+	if _net == null:
+		return
+	var after := 0
+	for _page in range(64):
+		var response: Dictionary = _net.request({
+			"type": "player_list",
+			"after_id": after,
+			"limit": PAGE_SIZE,
+		})
+		if not bool(response.get("ok", false)):
+			return
+		var message: Dictionary = response.get("message", {})
+		if str(message.get("type", "")) != "player_list":
+			return
+		var players = message.get("players", [])
+		if not (players is Array):
+			return
+		for record in players:
+			if not (record is Dictionary):
+				continue
+			var id := int(record.get("id", 0))
+			var name := str(record.get("name", ""))
+			if id > 0 and not name.is_empty():
+				_player_names[id] = name
+		if not bool(message.get("has_more", false)):
+			return
+		var next_after := int(message.get("next_after", 0))
+		if next_after <= after:
+			return
+		after = next_after
+
+
 func _load_page(index: int) -> void:
+	if _connected_mode:
+		_load_connected_page(index)
+		return
 	if _core == null:
 		_show_unavailable("no_core")
 		return
@@ -443,6 +552,49 @@ func _load_page(index: int) -> void:
 	_has_more = bool(response.get("has_more", false))
 	_next_after = int(response.get("next_after", 0))
 	_checksum = str(response.get("checksum", ""))
+	_apply_page(index)
+
+
+## Connected read: `settlement_list {after_id, limit}` with the same cursor
+## semantics as the local bridge page. A failed read leaves the cache intact
+## and shows the localized unavailable state.
+func _load_connected_page(index: int) -> void:
+	if _net == null:
+		_show_unavailable("no_core")
+		_render_authority()
+		return
+	if index < 0 or index >= _cursor_stack.size():
+		return
+	var after := int(_cursor_stack[index])
+	var response: Dictionary = _net.request({
+		"type": "settlement_list",
+		"after_id": after,
+		"limit": PAGE_SIZE,
+	})
+	if not bool(response.get("ok", false)):
+		_show_unavailable(str(response.get("error_code", "error")))
+		_render_authority()
+		return
+	var message: Dictionary = response.get("message", {})
+	if str(message.get("type", "")) != "settlement_list":
+		_show_unavailable("protocol.malformed")
+		_render_authority()
+		return
+	var rows = message.get("settlements", [])
+	if not (rows is Array):
+		_show_unavailable("protocol.malformed")
+		_render_authority()
+		return
+	_rows = rows
+	_matched = int(message.get("matched", 0))
+	_has_more = bool(message.get("has_more", false))
+	_next_after = int(message.get("next_after", 0))
+	_checksum = str(message.get("checksum", ""))
+	_apply_page(index)
+
+
+## Shared page application: cursor stack, selection by id, and render.
+func _apply_page(index: int) -> void:
 	_page_index = index
 	_error_code = ""
 	# Keep one forward cursor per page. A refresh that returns a different
@@ -591,6 +743,8 @@ func _current_record() -> Dictionary:
 ## Re-read the page that holds the selection and return the row by id.
 ## A mutation never uses the cached row for `membership_revision`.
 func _fresh_record(id: int) -> Dictionary:
+	if _connected_mode:
+		return _fresh_connected_record(id)
 	if _core == null or id <= 0:
 		return {}
 	var after := 0
@@ -604,6 +758,33 @@ func _fresh_record(id: int) -> Dictionary:
 		for row in rows:
 			if row is Dictionary and int((row as Dictionary).get("id", 0)) == id:
 				return row
+	return {}
+
+
+## Connected fresh read: current page only, no cache write. A failed read
+## returns `{}` and the caller records the rejection; rows stay untouched.
+func _fresh_connected_record(id: int) -> Dictionary:
+	if _net == null or id <= 0:
+		return {}
+	var after := 0
+	if _page_index >= 0 and _page_index < _cursor_stack.size():
+		after = int(_cursor_stack[_page_index])
+	var response: Dictionary = _net.request({
+		"type": "settlement_list",
+		"after_id": after,
+		"limit": PAGE_SIZE,
+	})
+	if not bool(response.get("ok", false)):
+		return {}
+	var message: Dictionary = response.get("message", {})
+	if str(message.get("type", "")) != "settlement_list":
+		return {}
+	var rows = message.get("settlements", [])
+	if not (rows is Array):
+		return {}
+	for row in rows:
+		if row is Dictionary and int((row as Dictionary).get("id", 0)) == id:
+			return row
 	return {}
 
 
@@ -798,7 +979,7 @@ func _finish_action(action: String, result: Dictionary, revision: int) -> Dictio
 
 ## Re-read before every mutation. Returns {} after recording the failure.
 func _mutation_record(action: String) -> Dictionary:
-	if _core == null:
+	if not _connected_mode and _core == null:
 		_finish_action(action, _error("no_core"), 0)
 		return {}
 	var record := _fresh_selected_record()
@@ -808,7 +989,22 @@ func _mutation_record(action: String) -> Dictionary:
 	return record
 
 
+## Local-only action in connected mode: no request is sent and the attempt is
+## not counted as an accepted/rejected mutation.
+func _block_connected_action(action: String) -> bool:
+	if not _connected_mode:
+		return false
+	_status_text = "%s: %s" % [
+		_action_label(action),
+		_reason_text(CONNECTED_REASON),
+	]
+	_render_detail()
+	return true
+
+
 func _claim_selected() -> void:
+	if _block_connected_action("claim"):
+		return
 	var record := _mutation_record("claim")
 	if record.is_empty():
 		return
@@ -879,7 +1075,11 @@ func _save_rename() -> void:
 		_rename_error.text = _local_rename_text(local_code)
 		_finish_action("rename", _error(local_code), revision)
 		return
-	var result: Dictionary = _core.settlement_rename(_rename_target_id, name, revision)
+	var result: Dictionary
+	if _connected_mode:
+		result = _connected_rename(_rename_target_id, name, revision)
+	else:
+		result = _core.settlement_rename(_rename_target_id, name, revision)
 	if not bool(result.get("ok", false)):
 		_rename_error.text = str(result.get("error_code", "error"))
 		_finish_action("rename", result, revision)
@@ -920,11 +1120,55 @@ func _tax_selected() -> void:
 		_finish_action("tax", _error("settlement.unowned"), revision)
 		return
 	var rate := _next_tax_rate(int(record.get("tax_rate", 0)))
-	var result: Dictionary = _core.settlement_set_tax(_record_id(record), rate)
+	var result: Dictionary
+	if _connected_mode:
+		result = _connected_set_tax(_record_id(record), rate)
+	else:
+		result = _core.settlement_set_tax(_record_id(record), rate)
 	_finish_action("tax", result, revision)
 
 
+## Connected mutations return the bridge-shaped `{ok, settlement}` result the
+## page renderer already understands. A reject keeps the stable server code and
+## never touches the page cache.
+func _connected_update(request: Dictionary) -> Dictionary:
+	if _net == null:
+		return _error("no_core")
+	var response: Dictionary = _net.request(request)
+	if not bool(response.get("ok", false)):
+		return _error(str(response.get("error_code", "error")))
+	var message: Dictionary = response.get("message", {})
+	if str(message.get("type", "")) != "settlement_updated":
+		return _error("protocol.malformed")
+	var record = message.get("settlement", {})
+	if not (record is Dictionary):
+		return _error("protocol.malformed")
+	var world := str(message.get("world_checksum", ""))
+	if _is_hex16(world):
+		_world_checksum = world
+	return {"ok": true, "settlement": record}
+
+
+func _connected_rename(settlement_id: int, name: String, revision: int) -> Dictionary:
+	return _connected_update({
+		"type": "settlement_rename",
+		"settlement_id": settlement_id,
+		"name": name,
+		"expected_revision": revision,
+	})
+
+
+func _connected_set_tax(settlement_id: int, rate: int) -> Dictionary:
+	return _connected_update({
+		"type": "settlement_set_tax",
+		"settlement_id": settlement_id,
+		"rate": rate,
+	})
+
+
 func _transfer_selected() -> void:
+	if _block_connected_action("transfer"):
+		return
 	var record := _mutation_record("transfer")
 	if record.is_empty():
 		return
@@ -941,6 +1185,8 @@ func _transfer_selected() -> void:
 
 
 func _invite_selected() -> void:
+	if _block_connected_action("invite"):
+		return
 	var record := _mutation_record("invite")
 	if record.is_empty():
 		return
@@ -957,6 +1203,8 @@ func _invite_selected() -> void:
 
 
 func _cycle_role() -> void:
+	if _block_connected_action("cycle_role"):
+		return
 	var record := _mutation_record("cycle_role")
 	if record.is_empty():
 		return
@@ -978,6 +1226,8 @@ func _cycle_role() -> void:
 
 
 func _remove_selected() -> void:
+	if _block_connected_action("remove_member"):
+		return
 	var member := _selected_member_record(_current_record())
 	if member.is_empty():
 		_status_text = _i18n.t(
@@ -1025,6 +1275,8 @@ func _attempt_remove_member(record: Dictionary, player: int) -> Dictionary:
 
 
 func _release_selected() -> void:
+	if _block_connected_action("release"):
+		return
 	if _selected_id <= 0:
 		return
 	if _pending_release_id != _selected_id:
@@ -1091,6 +1343,26 @@ func _availability(settlement: Dictionary) -> Dictionary:
 	var reasons: Dictionary = {}
 	for entry in ACTION_ORDER:
 		reasons[str(entry[0])] = ""
+	if _connected_mode:
+		if _net == null:
+			for entry in ACTION_ORDER:
+				reasons[str(entry[0])] = "no_core"
+			return reasons
+		if settlement.is_empty():
+			for entry in ACTION_ORDER:
+				reasons[str(entry[0])] = "no_selection"
+			return reasons
+		# Read-only inspection plus rename/set-tax. Every other bridge action
+		# stays visible and disabled until its connected mutation is wired.
+		for entry in ACTION_ORDER:
+			reasons[str(entry[0])] = CONNECTED_REASON
+		if bool(settlement.get("owned", false)):
+			reasons["rename"] = ""
+			reasons["tax"] = ""
+		else:
+			reasons["rename"] = "settlement.unowned"
+			reasons["tax"] = "settlement.unowned"
+		return reasons
 	if _core == null:
 		for entry in ACTION_ORDER:
 			reasons[str(entry[0])] = "no_core"
@@ -1152,11 +1424,10 @@ func _update_action_bar(settlement: Dictionary) -> void:
 
 func _render_all() -> void:
 	_title_label.text = _i18n.t("base.ui.settlement_screen.title")
-	_authority_label.text = _i18n.t(
-		"base.ui.settlement_screen.authority",
-		{"mode": _i18n.t("base.ui.settlement_screen.authority_local")}
+	_render_authority()
+	_help_label.text = _i18n.t(
+		"base.ui.settlement_screen.help_connected" if _connected_mode else "base.ui.settlement_screen.help"
 	)
-	_help_label.text = _i18n.t("base.ui.settlement_screen.help")
 	_rename_cancel.text = _i18n.t("base.ui.settlement_screen.rename.cancel")
 	_rename_save.text = _i18n.t("base.ui.settlement_screen.rename.save")
 	if _rename_open:
@@ -1170,6 +1441,26 @@ func _render_all() -> void:
 		)
 	_render_list()
 	_render_detail()
+
+
+## The authority mode is always visible. Connected also shows the server world
+## checksum once a mutation response has carried one (`-` before that).
+func _render_authority() -> void:
+	if _connected_mode:
+		_authority_label.text = _i18n.t(
+			"base.ui.settlement_screen.authority",
+			{"mode": _i18n.t("base.ui.settlement_screen.authority_connected")}
+		)
+		_world_checksum_label.text = _i18n.t(
+			"base.ui.settlement_screen.world_checksum",
+			{"checksum": _world_checksum if not _world_checksum.is_empty() else "-"}
+		)
+		return
+	_authority_label.text = _i18n.t(
+		"base.ui.settlement_screen.authority",
+		{"mode": _i18n.t("base.ui.settlement_screen.authority_local")}
+	)
+	_world_checksum_label.text = ""
 
 
 func _render_list() -> void:
@@ -1399,8 +1690,11 @@ func _center(settlement: Dictionary) -> Array:
 	return [0, 0]
 
 
-## D-039 preview. Stateless bridge helper; never mutates the store.
+## D-039 preview. Stateless bridge helper; never mutates the store. Connected
+## mode has no local editor state to preview from.
 func _projection_text(rate: int) -> String:
+	if _connected_mode:
+		return _i18n.t("base.ui.settlement_screen.projection_connected")
 	if _core == null:
 		return _i18n.t(
 			"base.ui.settlement_screen.projection_unavailable",
@@ -1587,6 +1881,194 @@ func _run_smoke() -> void:
 		for failure in failures:
 			print("SETTLEMENT_SCREEN_FAIL %s" % failure)
 		get_tree().quit(1)
+
+
+## Connected smoke: one fresh server, one Mayor session. Founds the
+## deterministic `Harbor` fixture, reads page 1 and `player_list`, renames,
+## changes tax, proves a stale revision rejects without touching the cache, and
+## proves a local-only action sends nothing. Prints one marker.
+func _run_connected_smoke() -> void:
+	var failures: Array[String] = []
+	_net = SettlementScreenNet.new()
+	var opened: Dictionary = _net.open(_host, _port, _player_name)
+	if not bool(opened.get("ok", false)):
+		failures.append("connect %s" % str(opened.get("error_code", "connect_failed")))
+		_connected_smoke_fail(failures)
+		return
+
+	var found_response: Dictionary = _net.request({
+		"type": "found_settlement",
+		"name": CONNECTED_FOUND_NAME,
+		"x": 0,
+		"z": 0,
+		"radius_m": CONNECTED_FOUND_RADIUS_M,
+	})
+	_expect(bool(found_response.get("ok", false)), "found accepted", failures)
+	if not bool(found_response.get("ok", false)):
+		_connected_smoke_fail(failures)
+		return
+	var found_message: Dictionary = found_response.get("message", {})
+	_expect(str(found_message.get("type", "")) == "settlement_found", "found response", failures)
+	var found_record = found_message.get("settlement", {})
+	_expect(found_record is Dictionary, "found record", failures)
+	if not (found_record is Dictionary):
+		_connected_smoke_fail(failures)
+		return
+	var settlement_id := int((found_record as Dictionary).get("id", 0))
+	_expect(settlement_id > 0, "found id", failures)
+	_world_checksum = str(found_message.get("world_checksum", ""))
+	_expect(_is_hex16(_world_checksum), "found world checksum %s" % _world_checksum, failures)
+
+	_refresh_player_names()
+	_load_page(0)
+	_expect(_matched == 1, "matched 1, got %d" % _matched, failures)
+	_expect(_rows.size() == 1, "page rows 1, got %d" % _rows.size(), failures)
+	if _rows.is_empty():
+		_connected_smoke_fail(failures)
+		return
+	var record := _current_record()
+	_expect(_record_id(record) == settlement_id, "selected founded id", failures)
+	_expect(str(record.get("name", "")) == CONNECTED_FOUND_NAME, "listed name", failures)
+	_expect(_player_names.size() == 1, "players 1, got %d" % _player_names.size(), failures)
+	var owner_id := int(record.get("owner_id", 0))
+	_expect(_player_names.has(owner_id), "owner name cached", failures)
+	var owner_name := str(_player_names.get(owner_id, ""))
+	_expect(not owner_name.is_empty(), "owner name non-empty", failures)
+	_expect(
+		_detail_owner.text.contains(owner_name),
+		"detail resolves owner name: %s" % _detail_owner.text,
+		failures
+	)
+	_expect(
+		_authority_label.text.contains(_i18n.t("base.ui.settlement_screen.authority_connected")),
+		"authority Connected: %s" % _authority_label.text,
+		failures
+	)
+	_expect(
+		_world_checksum_label.text.contains(_world_checksum),
+		"world checksum shown: %s" % _world_checksum_label.text,
+		failures
+	)
+	_expect(_is_hex16(_checksum), "list checksum %s" % _checksum, failures)
+
+	# Rename: the modal opens from the selected page record, Save re-reads and
+	# sends that fresh revision. Success refreshes the page in place.
+	_open_rename()
+	_expect(_rename_open, "rename modal open", failures)
+	if _rename_open:
+		_rename_edit.text = CONNECTED_RENAMED_NAME
+		_save_rename()
+	var rename_ok := (
+		not _rename_open
+		and not _rows.is_empty()
+		and str(_current_record().get("name", "")) == CONNECTED_RENAMED_NAME
+	)
+	_expect(rename_ok, "rename refreshed the page", failures)
+	_expect(_detail_title.text.contains(CONNECTED_RENAMED_NAME), "detail renamed", failures)
+
+	# Tax: fresh read, then `settlement_set_tax`; 0% steps to 5%.
+	_tax_selected()
+	var tax_ok := not _rows.is_empty() and int(_current_record().get("tax_rate", -1)) == 5
+	_expect(tax_ok, "tax stepped to 5", failures)
+	_expect(_detail_tax.text.contains("5"), "detail tax 5", failures)
+
+	# Rejection: a deliberately stale revision returns the stable code, and
+	# the cached row and world checksum stay exactly as they were.
+	var before_name := str(_current_record().get("name", ""))
+	var before_checksum := _world_checksum
+	var before_list_checksum := _checksum
+	var stale: Dictionary = _net.request({
+		"type": "settlement_rename",
+		"settlement_id": settlement_id,
+		"name": "Stale Harbor",
+		"expected_revision": _revision(_current_record()) + 1,
+	})
+	_expect(not bool(stale.get("ok", false)), "stale rename rejected", failures)
+	_expect(
+		str(stale.get("error_code", "")) == "settlement.revision_conflict",
+		"stale code %s" % str(stale.get("error_code", "")),
+		failures
+	)
+	_expect(str(_current_record().get("name", "")) == before_name, "cache unchanged after reject", failures)
+	_expect(_world_checksum == before_checksum, "world checksum unchanged after reject", failures)
+	_expect(_checksum == before_list_checksum, "list checksum unchanged after reject", failures)
+
+	# Local-only actions are visible but disabled, and the shortcut guard does
+	# not send a request or count an action.
+	var reasons := _availability(_current_record())
+	_expect(str(reasons.get("rename", "x")) == "", "rename enabled", failures)
+	_expect(str(reasons.get("tax", "x")) == "", "tax enabled", failures)
+	for action in ["claim", "transfer", "invite", "cycle_role", "remove_member", "release"]:
+		_expect(
+			str(reasons.get(action, "")) == CONNECTED_REASON,
+			"%s disabled with connected reason" % action,
+			failures
+		)
+	var action_count_before := _action_count
+	_invite_selected()
+	_expect(_action_count == action_count_before, "disabled action sends nothing", failures)
+	_expect(
+		_status_text.contains(_i18n.t("base.ui.settlement_screen.reason.connected_unavailable")),
+		"disabled reason localized: %s" % _status_text,
+		failures
+	)
+	_expect(not _all_text().contains("!base.ui."), "EN key leak", failures)
+
+	_switch_locale("de")
+	_expect(not _all_text().contains("!base.ui."), "DE key leak", failures)
+	_expect(
+		_authority_label.text.contains(_i18n.t("base.ui.settlement_screen.authority_connected")),
+		"DE authority Connected",
+		failures
+	)
+	_switch_locale("en")
+
+	print("SETTLEMENT_SCREEN_CONNECTED_READ settles=%d players=%d owner=%s checksum=%s" % [
+		_matched,
+		_player_names.size(),
+		owner_name,
+		_checksum,
+	])
+	if not failures.is_empty():
+		_connected_smoke_fail(failures)
+		return
+	print(
+		"SETTLEMENT_SCREEN_CONNECTED status=ok settlements=%d players=%d rename=%d tax=%d checksum=%s"
+		% [
+			_matched,
+			_player_names.size(),
+			1 if rename_ok else 0,
+			1 if tax_ok else 0,
+			_world_checksum,
+		]
+	)
+	_net.close()
+	get_tree().quit(0)
+
+
+func _connected_smoke_fail(failures: Array) -> void:
+	if _net != null:
+		_net.close()
+	print(
+		"SETTLEMENT_SCREEN_CONNECTED status=failed reason=%s"
+		% (str(failures[0]) if not failures.is_empty() else "unknown")
+	)
+	for failure in failures:
+		print("SETTLEMENT_SCREEN_FAIL %s" % failure)
+	get_tree().quit(1)
+
+
+func _is_hex16(value: String) -> bool:
+	if value.length() != 16:
+		return false
+	for index in range(value.length()):
+		var character := value[index]
+		if not (
+			(character >= "0" and character <= "9")
+			or (character >= "a" and character <= "f")
+		):
+			return false
+	return true
 
 
 func _register_fixture_players() -> void:
