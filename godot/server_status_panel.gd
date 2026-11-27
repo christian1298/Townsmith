@@ -12,10 +12,20 @@ extends Control
 ##   godot --headless --path godot res://server_status_panel.tscn -- \
 ##     --smoke --port 47015
 ##
-## `--smoke` prints one `SERVER_STATUS_PANEL` marker and exits non-zero on a
-## malformed/missing status, timeout, reject, or unexpected goodbye.
-## `scripts/smoke_server_status_panel.sh` starts a fresh `--once` server, runs
-## the panel twice, and compares the markers byte for byte.
+## `--smoke` prints one `SERVER_STATUS_PANEL` marker. A success prints
+## `status=ok ...` and exits 0. A failure prints `status=fail code=<stable>` and
+## exits 1, where the stable code is one of:
+##   status.connect  connection refused, lost while connecting, or a timeout
+##   status.frame    malformed frame (length, JSON, or unexpected message)
+##   status.shape    status object with missing/typed/out-of-range fields
+##   status.closed   goodbye/EOF before the status answer
+##   <server code>   a rejected handshake, e.g. content_hash.mismatch
+## `--expect-fail CODE` turns a matching failure into a passing test (exit 0)
+## and still prints the fail marker; a mismatch exits 1.
+## `--fixture-json PATH` skips TCP and feeds one `server_status` object through
+## the same parse/render path, so shape checks need no server.
+## `scripts/smoke_server_status_panel.sh` covers the valid path twice plus the
+## connect/reject/shape fixtures.
 
 enum Phase {
 	CONNECTING,
@@ -58,6 +68,8 @@ var _host := DEFAULT_HOST
 var _port := DEFAULT_PORT
 var _player_name := DEFAULT_NAME
 var _timeout_ms := STEP_TIMEOUT_MS
+var _expect_fail := ""
+var _fixture_mode := false
 
 var _frames_sent := 0
 var _frames_received := 0
@@ -73,7 +85,13 @@ func _ready() -> void:
 	_host = _arg(args, "--host", DEFAULT_HOST)
 	_player_name = _arg(args, "--name", DEFAULT_NAME)
 	_timeout_ms = _positive_int(_arg(args, "--timeout-ms", ""), STEP_TIMEOUT_MS)
+	_expect_fail = _arg(args, "--expect-fail", "")
 	_build_ui()
+
+	var fixture_path := _arg(args, "--fixture-json", "")
+	if not fixture_path.is_empty():
+		_run_fixture(fixture_path)
+		return
 
 	var port_text := _arg(args, "--port", str(DEFAULT_PORT))
 	if not port_text.is_valid_int():
@@ -90,19 +108,39 @@ func _ready() -> void:
 	_peer = StreamPeerTCP.new()
 	var error := _peer.connect_to_host(_host, _port)
 	if error != OK:
-		_fail("connect_start_%s" % error_string(error))
+		_fail("status.connect")
 		return
 	_arm_deadline(CONNECT_TIMEOUT_MS)
 	_set_status("Connecting to %s:%d..." % [_host, _port])
+
+## Feeds one status object through the live parse/render path without a socket.
+## Only the test harness sets `--fixture-json`; the default path is untouched.
+func _run_fixture(path: String) -> void:
+	_fixture_mode = true
+	_set_status("Loading fixture %s..." % path)
+	if not FileAccess.file_exists(path):
+		_fail("status.fixture")
+		return
+	var text := FileAccess.get_file_as_string(path)
+	if text.is_empty():
+		_fail("status.fixture")
+		return
+	var parsed: Variant = JSON.parse_string(text)
+	if typeof(parsed) != TYPE_DICTIONARY:
+		_fail("status.shape")
+		return
+	_phase = Phase.STATUS_SENT
+	_on_server_status(parsed)
 
 func _process(_delta: float) -> void:
 	if _finished:
 		return
 	if Time.get_ticks_msec() > _deadline_ms:
-		_fail("timeout_%s" % _phase_name())
+		# Refused, lost, or silent: all mean the session never became usable.
+		_fail("status.connect")
 		return
 	if _peer == null:
-		_fail("peer_missing")
+		_fail("status.connect")
 		return
 
 	_peer.poll()
@@ -111,9 +149,9 @@ func _process(_delta: float) -> void:
 			StreamPeerTCP.STATUS_CONNECTED:
 				_on_connected()
 			StreamPeerTCP.STATUS_ERROR:
-				_fail("connect_failed")
+				_fail("status.connect")
 			StreamPeerTCP.STATUS_NONE:
-				_fail("connect_lost")
+				_fail("status.connect")
 		return
 
 	_drain()
@@ -123,7 +161,7 @@ func _process(_delta: float) -> void:
 		# Read the final goodbye/reject before treating FIN as a failure.
 		_drain()
 		if not _finished:
-			_fail("connection_lost_%s" % _phase_name())
+			_fail("status.closed")
 
 func _on_connected() -> void:
 	_set_status("Connected; sending hello.")
@@ -142,17 +180,17 @@ func _drain() -> void:
 	if available > 0:
 		var result := _peer.get_partial_data(available)
 		if result[0] != OK:
-			_fail("recv_%s" % error_string(result[0]))
+			_fail("status.closed")
 			return
 		_rx.append_array(result[1])
 
 	while not _finished and _rx.size() >= 4:
 		var length := _read_u32_be(_rx, 0)
 		if length == 0:
-			_fail("frame.zero_length")
+			_fail("status.frame")
 			return
 		if length > MAX_FRAME_LEN:
-			_fail("frame.oversized")
+			_fail("status.frame")
 			return
 		if _rx.size() < 4 + length:
 			return
@@ -161,7 +199,7 @@ func _drain() -> void:
 		_frames_received += 1
 		var parsed: Variant = JSON.parse_string(payload.get_string_from_utf8())
 		if typeof(parsed) != TYPE_DICTIONARY:
-			_fail("frame.invalid_json")
+			_fail("status.frame")
 			return
 		_handle_message(parsed)
 
@@ -176,23 +214,23 @@ func _handle_message(message: Dictionary) -> void:
 			_on_goodbye()
 		"reject":
 			var code := str(message.get("code", ""))
-			_fail("reject", ("server_code=" + code) if not code.is_empty() else "")
+			_fail(code if not code.is_empty() else "status.reject")
 		_:
-			_fail("unexpected_message_%s" % (tag if tag != "" else "missing_type"))
+			_fail("status.frame")
 
 func _on_welcome(message: Dictionary) -> void:
 	if _phase != Phase.WELCOME_WAIT:
-		_fail("welcome_in_%s" % _phase_name())
+		_fail("status.frame")
 		return
 	var protocol_version := _as_int(message.get("protocol_version"))
 	if protocol_version != PROTOCOL_VERSION:
-		_fail("protocol_version_%s" % str(protocol_version))
+		_fail("status.frame")
 		return
 	if str(message.get("session_id", "")).is_empty():
-		_fail("welcome_session")
+		_fail("status.frame")
 		return
 	if bool(message.get("resumed", false)):
-		_fail("unexpected_resumed_welcome")
+		_fail("status.frame")
 		return
 	_set_status("Welcome; requesting server status.")
 	if not _send({"type": "server_status"}):
@@ -202,64 +240,77 @@ func _on_welcome(message: Dictionary) -> void:
 
 func _on_server_status(message: Dictionary) -> void:
 	if _phase != Phase.STATUS_SENT:
-		_fail("server_status_in_%s" % _phase_name())
+		_fail("status.frame")
 		return
+	var shape_error := _read_status(message)
+	if not shape_error.is_empty():
+		_fail(shape_error)
+		return
+
+	_refresh_ui()
+	_set_status("Status received; disconnecting.")
+	if _expect_fail.is_empty():
+		print(
+			(
+				"SERVER_STATUS_PANEL status=ok tick=%d population=%d"
+				+ " settlements=%d checksum=%s"
+			)
+			% [
+				int(_status["tick"]),
+				int(_status["population"]),
+				int(_status["settlements"]),
+				_checksum,
+			]
+		)
+	if _fixture_mode:
+		_finish_ok()
+		return
+	if not _send({"type": "disconnect"}):
+		return
+	_phase = Phase.DISCONNECT_SENT
+	_arm_deadline(_timeout_ms)
+
+## Validates and stores one `server_status` object. Returns "" on success or
+## the stable failure code. Unknown fields are tolerated: the protocol is
+## forward-compatible and the panel only renders the fields it knows.
+func _read_status(message: Dictionary) -> String:
 	var status: Dictionary = {}
 	for field in STATUS_FIELDS:
 		if not message.has(field):
-			_fail("malformed_status_missing_%s" % field)
-			return
+			return "status.shape"
 		var value: Variant = message[field]
 		if not _is_integer(value):
-			_fail("malformed_status_%s" % field)
-			return
+			return "status.shape"
 		status[field] = int(value)
 	# `balance` may be negative (debt); the counters cannot be.
 	for field in STATUS_FIELDS:
 		if field == "balance":
 			continue
 		if int(status[field]) < 0:
-			_fail("malformed_status_%s" % field)
-			return
+			return "status.shape"
 	if int(status["online"]) < 1:
-		_fail("malformed_status_online")
-		return
+		return "status.shape"
 
 	var checksum_value: Variant = message.get("checksum")
 	if typeof(checksum_value) != TYPE_STRING or not _is_hex16(str(checksum_value)):
-		_fail("malformed_status_checksum")
-		return
+		return "status.shape"
 
 	_status = status
 	_checksum = str(checksum_value)
-	_refresh_ui()
-	_set_status("Status received; disconnecting.")
-	print(
-		(
-			"SERVER_STATUS_PANEL status=ok tick=%d population=%d"
-			+ " settlements=%d checksum=%s"
-		)
-		% [
-			int(_status["tick"]),
-			int(_status["population"]),
-			int(_status["settlements"]),
-			_checksum,
-		]
-	)
-	if not _send({"type": "disconnect"}):
-		return
-	_phase = Phase.DISCONNECT_SENT
-	_arm_deadline(_timeout_ms)
+	return ""
 
 func _on_goodbye() -> void:
 	if _phase == Phase.DISCONNECT_SENT:
 		_finish_ok()
 		return
 	# The server closed before answering the status request.
-	_fail("goodbye")
+	_fail("status.closed")
 
 func _finish_ok() -> void:
 	if _finished:
+		return
+	if not _expect_fail.is_empty():
+		_fail("status.unexpected_ok")
 		return
 	_finished = true
 	set_process(false)
@@ -272,14 +323,14 @@ func _finish_ok() -> void:
 
 func _send(message: Dictionary) -> bool:
 	if _peer == null or _peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:
-		_fail("send_not_connected")
+		_fail("status.closed")
 		return false
 	var payload := JSON.stringify(message).to_utf8_buffer()
 	if payload.is_empty():
-		_fail("encode_empty")
+		_fail("status.frame")
 		return false
 	if payload.size() > MAX_FRAME_LEN:
-		_fail("encode_oversized")
+		_fail("status.frame")
 		return false
 	var frame := PackedByteArray()
 	frame.resize(4)
@@ -287,7 +338,7 @@ func _send(message: Dictionary) -> bool:
 	frame.append_array(payload)
 	var error := _peer.put_data(frame)
 	if error != OK:
-		_fail("send_%s" % error_string(error))
+		_fail("status.closed")
 		return false
 	_frames_sent += 1
 	return true
@@ -301,8 +352,14 @@ func _fail(code: String, extra := "") -> void:
 	if _peer != null:
 		_peer.disconnect_from_host()
 	var suffix := (" " + extra) if not extra.is_empty() else ""
+	if not _expect_fail.is_empty() and _expect_fail != code:
+		print(
+			"SERVER_STATUS_PANEL_EXPECT status=mismatch expected=%s actual=%s"
+			% [_expect_fail, code]
+		)
 	print("SERVER_STATUS_PANEL status=fail code=%s%s" % [code, suffix])
-	get_tree().quit(1)
+	# A matching --expect-fail is the test passing; otherwise a failure is fatal.
+	get_tree().quit(0 if not _expect_fail.is_empty() and _expect_fail == code else 1)
 
 func _build_ui() -> void:
 	var margin := MarginContainer.new()
@@ -376,19 +433,6 @@ func _refresh_ui() -> void:
 func _set_status(text: String) -> void:
 	if _status_label != null:
 		_status_label.text = text
-
-func _phase_name() -> String:
-	match _phase:
-		Phase.CONNECTING:
-			return "connecting"
-		Phase.WELCOME_WAIT:
-			return "welcome_wait"
-		Phase.STATUS_SENT:
-			return "status_wait"
-		Phase.DISCONNECT_SENT:
-			return "disconnect_wait"
-		_:
-			return "unknown"
 
 func _arm_deadline(duration_ms: int) -> void:
 	_deadline_ms = Time.get_ticks_msec() + duration_ms
