@@ -37,6 +37,7 @@ pub mod content_registry;
 pub mod district;
 pub mod economy;
 pub mod industry;
+pub mod journal;
 pub mod library;
 pub mod lot;
 pub mod manifest;
@@ -106,6 +107,10 @@ pub use industry::{
     FOOD_PER_FARM_WORKER_PER_DAY, FOOD_PER_HUNTER_WORKER_PER_DAY, FOOD_PER_RESIDENT_PER_DAY,
     HIDES_PER_HUNTER_WORKER_PER_DAY, INDUSTRY_FORMAT_VERSION, MAX_INDUSTRY_SITES,
     MAX_INDUSTRY_TICK_SECONDS, MAX_STOCK, WOOD_PER_LUMBERJACK_WORKER_PER_DAY,
+};
+pub use journal::{
+    Journal, JournalEntry, JournalError, DEFAULT_MAX_JOURNAL_ENTRIES, JOURNAL_FORMAT_VERSION,
+    MAX_JOURNAL_RESULT_CODE_BYTES, MAX_JOURNAL_TAG_BYTES,
 };
 pub use library::{
     available as available_starters, starter, starters, StarterBuilding, StarterCategory,
