@@ -2,7 +2,7 @@
 title: Journal and Rollback
 project: Townsmith
 status: proposed
-updated: 2026-11-25
+updated: 2026-11-27
 tags:
   - townsmith
   - multiplayer
@@ -14,7 +14,7 @@ tags:
 # 82 — Journal and Rollback
 
 > [!abstract] What this note is
-> A design proposal for the Phase 6 **authoritative command journal** and **admin rollback** path. It is planning only: no journal, replay, or rollback code exists. It does not change D-004, D-020, D-021, D-032, D-034, or D-038; it describes how those decisions can be observed and recovered without adding a second simulation state.
+> A design proposal for the Phase 6 **authoritative command journal** and **admin rollback** path. It is planning only: a pure, unwired record model now exists in `core_city::journal`, but there is no journal writer, replay, or rollback path. It does not change D-004, D-020, D-021, D-032, D-034, or D-038; it describes how those decisions can be observed and recovered without adding a second simulation state.
 
 Related: [[05 - Multiplayer]], [[10 - Decisions]] D-040, [[09 - Open Questions]] Q-123/Q-124, [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[75 - Save Load Stress]], [[79 - Voxel Edit Sync]], [[80 - Phase 6 Remaining Work]], [[78 - Code Audit Findings]].
 
@@ -72,6 +72,19 @@ Each stored record adds a `chain` field:
 
 - `chain = BLAKE3(prev_chain || canonical_entry_bytes)`, where `prev_chain` is the previous record's `chain` and the first record chains from the journal header checksum.
 - The chain detects accidental corruption and naive edits. It is **not** a signature: an attacker with write access to the journal can rewrite the whole chain. The server remains the authority (D-004).
+
+> [!note] Core model landed (proposed)
+> A pure, unwired record model now exists in `crates/core_city/src/journal.rs` and is re-exported from `core_city::journal`.
+>
+> - `JournalEntry { seq, tick, player_id, role, tag, command_checksum, accepted, result_code }`.
+> - `Journal::new(epoch, max_entries)`, `append`, `replay_after`, `gap_after`, `truncate_after`, `retention_drop_through`, `validate_loaded`, `checksum`, `chain_hash`, `len`, `is_empty`, plus `epoch`/`entries`/`next_seq`/`max_entries` accessors.
+> - `JournalError` with stable codes `journal.invalid_seq`, `journal.invalid_epoch`, `journal.chain_mismatch`, `journal.gap`, `journal.overflow`, and `journal.capacity`, each with `code()`, `Display`, and `std::error::Error`.
+>
+> Sequence is assigned from 1 by the journal; `0` on input means unassigned. The retained window trims the oldest entries above the cap and re-bases its chain; a high-water `next_seq` survives full retention so a committed sequence is never reused. `truncate_after` is an explicit tail-discard helper only.
+>
+> The chain uses four FNV-1a-64 lanes over the previous head plus canonical fields (32-byte `chain_hash`), and `checksum` folds that head with epoch and length into a `u64`. FNV is a dependency-free choice for corruption and naive-edit detection; it is not a signature. Retention re-bases the chain over the retained window; a fully drained window seeds from the epoch.
+>
+> Deliberate limits: no server, protocol, save, GDExtension, or bridge wiring; no segments, disk I/O, snapshots, payload capture, replay feed, or rollback command. The entry carries a 64-bit command fingerprint rather than the proposed 64-hex BLAKE3 value, and the 64-byte tag/result-code caps are documented (`MAX_JOURNAL_TAG_BYTES`, `MAX_JOURNAL_RESULT_CODE_BYTES`) but not enforced by the model. D-040 remains **Proposed**; Q-123 and Q-124 remain **Open**, and the §11 review trigger still gates any write path.
 
 Rejected commands are journaled so the audit trail shows what the server refused and why. Replay applies **accepted** entries only; rejected entries affect no state.
 
