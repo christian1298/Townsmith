@@ -775,8 +775,15 @@ fn library_references_and_content_identity_resolve_first_and_fail_closed() {
     assert_eq!(loaded.loaded.solid_by_id.get(&1), Some(&16));
     assert_eq!(loaded.loaded.solid_by_id.get(&2), Some(&16));
     assert_eq!(loaded.loaded.solid_by_id.get(&3), Some(&16));
+    let canonical_root = std::fs::canonicalize(&library_root).expect("canonical library root");
     for path in loaded.loaded.resolved_paths.values() {
-        assert!(path.contains(&library_root), "{path}");
+        let canonical = std::fs::canonicalize(path).expect("canonical resolved path");
+        assert!(
+            canonical.starts_with(&canonical_root),
+            "{} is outside {}",
+            canonical.display(),
+            canonical_root.display()
+        );
     }
 
     // Inspecting without the pack stays read-only but still resolves refs.
