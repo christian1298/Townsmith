@@ -12,9 +12,9 @@
 //! proves the read-only status polling and the chats left the authoritative
 //! world untouched.
 //!
-//! Limits: this is IPv4 loopback in one process, not remote latency, TLS, or a
-//! stalled/non-reading watcher. The stalled-reader case remains uncovered by
-//! this test.
+//! Limits: this is IPv4 loopback in one process, not remote latency or TLS. A
+//! stalled/non-reading watcher is covered separately by
+//! `tests/stalled_watcher.rs`, which keeps its workload under the outbound cap.
 
 use std::collections::BTreeSet;
 use std::io;
