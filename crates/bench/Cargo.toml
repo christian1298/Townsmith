@@ -46,3 +46,7 @@ serde_json.workspace = true
 [[bin]]
 name = "cohort_1m"
 path = "src/bin/cohort_1m.rs"
+
+[[bin]]
+name = "content_registry"
+path = "src/bin/content_registry.rs"
