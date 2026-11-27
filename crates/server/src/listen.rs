@@ -28,7 +28,7 @@ use crate::protocol::{
     codes, configure_stream, decode_client_command, read_frame, read_json_frame, write_json_frame,
     ClientCommand, FrameError, ServerMessage, LOOPBACK_SEED, PROTOCOL_VERSION, SESSION_IO_TIMEOUT,
 };
-use crate::save::{temp_path, SaveReport};
+use crate::save::{codes as save_codes, temp_path, SaveReport};
 use crate::world::ServerWorld;
 
 // Bounded per-connection outbound queue drained by the session writer thread.
@@ -43,6 +43,12 @@ pub struct ListenConfig {
     pub save_path: Option<PathBuf>,
     /// Save after this many accepted tick changes. `0` disables periodic saves.
     pub autosave_ticks: u64,
+    /// Install a one-shot SIGINT/SIGTERM handler that saves and exits.
+    ///
+    /// Defaults to `false`. The binary enables it when `--save` is configured;
+    /// tests and library callers keep it off so no process-global signal handler
+    /// is installed.
+    pub shutdown_save: bool,
 }
 
 /// Summary of one listen run.
@@ -87,6 +93,10 @@ pub fn run_listen(
         }),
         config,
     });
+
+    if shared.config.shutdown_save {
+        install_shutdown_save(Arc::clone(&shared));
+    }
 
     let mut sessions = 0u64;
     let mut commands = 0u64;
@@ -541,6 +551,78 @@ fn save_world(shared: &SharedServer, reason: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Save path and tick written by a shutdown save.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShutdownSaveReport {
+    /// File that received the atomic save.
+    path: PathBuf,
+    /// Authoritative tick written to that file.
+    tick: u64,
+}
+
+/// Save the shared world from a shutdown handler and report what was written.
+///
+/// This is the same atomic save and lock order as [`save_world`], without any
+/// signal handling, so it is directly testable. The handler may wait for an
+/// in-flight save; both paths take the save mutex before the world mutex.
+fn save_on_shutdown(
+    shared: &SharedServer,
+    reason: &str,
+) -> Result<ShutdownSaveReport, PersistError> {
+    let Some(path) = shared.config.save_path.clone() else {
+        return Err(PersistError {
+            code: save_codes::IO,
+            message: "no save path configured".to_string(),
+        });
+    };
+    let mut save = shared.save.lock().map_err(|_| PersistError {
+        code: save_codes::IO,
+        message: "listen save mutex poisoned".to_string(),
+    })?;
+    let world = shared.lock_world().map_err(|error| PersistError {
+        code: save_codes::IO,
+        message: error.to_string(),
+    })?;
+    persist(&world, &path, reason)?;
+    save.last_saved_tick = world.tick;
+    save.saves = save.saves.saturating_add(1);
+    Ok(ShutdownSaveReport {
+        path,
+        tick: world.tick,
+    })
+}
+
+/// Install the one-shot SIGINT/SIGTERM save-and-exit handler.
+///
+/// The closure runs on the `ctrlc` signal thread, not in an async-signal
+/// context, so it can take the existing mutexes. A handler that cannot be
+/// installed leaves the server running without shutdown-save protection.
+fn install_shutdown_save(shared: Arc<SharedServer>) {
+    let handler = move || {
+        let code = match save_on_shutdown(&shared, "shutdown") {
+            Ok(report) => {
+                eprintln!(
+                    "SERVER_SHUTDOWN save=ok path={} tick={}",
+                    report.path.display(),
+                    report.tick
+                );
+                0
+            }
+            Err(error) => {
+                eprintln!(
+                    "SERVER_SHUTDOWN save=error code={} error={error}",
+                    error.code
+                );
+                1
+            }
+        };
+        std::process::exit(code);
+    };
+    if let Err(error) = ctrlc::try_set_handler(handler) {
+        eprintln!("SERVER_SHUTDOWN install=unavailable error={error}");
+    }
+}
+
 /// Run the configured periodic save when enough accepted ticks have elapsed.
 fn autosave_world(shared: &SharedServer) -> io::Result<()> {
     if shared.config.autosave_ticks == 0 {
@@ -744,10 +826,32 @@ fn session_ended(error: &io::Error) -> bool {
     )
 }
 
-fn persist(world: &ServerWorld, path: &Path, reason: &str) -> io::Result<SaveReport> {
-    let report = world
-        .save_to(path)
-        .map_err(|error| io::Error::other(error.to_string()))?;
+/// A failed save with its stable save error code preserved.
+#[derive(Debug)]
+struct PersistError {
+    code: &'static str,
+    message: String,
+}
+
+impl std::fmt::Display for PersistError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PersistError {}
+
+impl From<PersistError> for io::Error {
+    fn from(error: PersistError) -> Self {
+        io::Error::other(error.message)
+    }
+}
+
+fn persist(world: &ServerWorld, path: &Path, reason: &str) -> Result<SaveReport, PersistError> {
+    let report = world.save_to(path).map_err(|error| PersistError {
+        code: error.code(),
+        message: error.to_string(),
+    })?;
     println!(
         "SERVER_SAVE status=ok action=save reason={reason} path={} bytes={} tick={} checksum={} backup_rotated={}",
         path.display(),
@@ -790,6 +894,7 @@ pub fn run_save_load_smoke() -> io::Result<SaveSmokeReport> {
     let config = ListenConfig {
         save_path: Some(path.clone()),
         autosave_ticks: 0,
+        shutdown_save: false,
     };
 
     let server = thread::spawn(move || {
@@ -922,6 +1027,40 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_save_writes_the_current_tick_without_a_signal() {
+        let directory = temp_dir();
+        let path = directory.join("shutdown.json");
+        let mut world = ServerWorld::new(LOOPBACK_SEED);
+        world.tick = 7;
+        let expected = world.checksum();
+        let shared = SharedServer {
+            world: Mutex::new(world),
+            registry: Mutex::new(SessionRegistry::default()),
+            save: Mutex::new(SaveState {
+                last_saved_tick: 0,
+                saves: 0,
+            }),
+            config: ListenConfig {
+                save_path: Some(path.clone()),
+                autosave_ticks: 0,
+                shutdown_save: true,
+            },
+        };
+
+        let report = save_on_shutdown(&shared, "shutdown").expect("shutdown save");
+        assert_eq!(report.path, path);
+        assert_eq!(report.tick, 7);
+        assert_eq!(shared.save.lock().expect("save").saves, 1);
+        assert!(
+            !crate::save::temp_path(&path).exists(),
+            "atomic temp removed"
+        );
+        let loaded = ServerWorld::load_from(&path).expect("load");
+        assert_eq!(loaded.world.tick, 7);
+        assert_eq!(loaded.world.checksum(), expected);
+    }
+
+    #[test]
     fn disconnect_saves_and_reload_resumes_the_tick() {
         let directory = temp_dir();
         let path = directory.join("world.json");
@@ -930,6 +1069,7 @@ mod tests {
         let config = ListenConfig {
             save_path: Some(path.clone()),
             autosave_ticks: 0,
+            shutdown_save: false,
         };
 
         let server = thread::spawn(move || {
@@ -989,6 +1129,7 @@ mod tests {
         let config = ListenConfig {
             save_path: Some(path.clone()),
             autosave_ticks: 1,
+            shutdown_save: false,
         };
 
         let server = thread::spawn(move || {

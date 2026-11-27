@@ -762,6 +762,7 @@ fn autosave_fires_exactly_at_the_tick_boundary() {
     let directory = temp_dir();
     let path = directory.join("world.json");
     let config = ListenConfig {
+        shutdown_save: false,
         save_path: Some(path.clone()),
         autosave_ticks: 2,
     };
