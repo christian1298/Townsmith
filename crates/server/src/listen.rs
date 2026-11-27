@@ -618,8 +618,9 @@ fn install_shutdown_save(shared: Arc<SharedServer>) {
         };
         std::process::exit(code);
     };
-    if let Err(error) = ctrlc::try_set_handler(handler) {
-        eprintln!("SERVER_SHUTDOWN install=unavailable error={error}");
+    match ctrlc::try_set_handler(handler) {
+        Ok(()) => eprintln!("SERVER_SHUTDOWN install=ready"),
+        Err(error) => eprintln!("SERVER_SHUTDOWN install=unavailable error={error}"),
     }
 }
 
