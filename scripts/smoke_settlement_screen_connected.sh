@@ -150,6 +150,11 @@ run_screen() {
 		echo "Connected settlement screen smoke ($name) marker mismatch: $marker" >&2
 		exit 1
 	fi
+	a11y_marker="$(grep '^SETTLEMENT_SCREEN_A11Y ' <<<"$output" | tail -1 || true)"
+	if [[ ! "$a11y_marker" =~ ^SETTLEMENT_SCREEN_A11Y\ status=ok\ checks=[0-9]+$ ]]; then
+		echo "Connected settlement screen smoke ($name) a11y marker mismatch: $a11y_marker" >&2
+		exit 1
+	fi
 	roster_marker="$(grep '^SETTLEMENT_SCREEN_ROSTER ' <<<"$output" | tail -1 || true)"
 	if [[ ! "$roster_marker" =~ ^SETTLEMENT_SCREEN_ROSTER\ status=ok\ checks=[0-9]+$ ]]; then
 		echo "Connected settlement screen smoke ($name) roster marker mismatch: $roster_marker" >&2

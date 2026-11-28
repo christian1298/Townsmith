@@ -96,6 +96,13 @@ const MODAL_EDIT := 0
 const MODAL_CANCEL := 1
 const MODAL_SAVE := 2
 const MODAL_FOCUS_ORDER := [MODAL_EDIT, MODAL_CANCEL, MODAL_SAVE]
+
+## `Control.accessibility_live` values (Godot 4.7 exposes the property but not
+## named constants). The list and detail use polite announcements; errors and
+## rejections use assertive.
+const A11Y_LIVE_OFF := 0
+const A11Y_LIVE_POLITE := 1
+const A11Y_LIVE_ASSERTIVE := 2
 ## Deterministic gamepad actions. Live joypad events resolve through the input
 ## map first, then the local button fallbacks, so a stock map still works.
 const GAMEPAD_ACTIONS := [
@@ -231,6 +238,10 @@ var _pending_remove_id := 0
 var _pending_remove_player := 0
 var _pending_release_id := 0
 var _status_text := ""
+## True while `_status_text` carries a rejection or unavailable reason. Drives
+## the assertive live role without changing the rendered text or the smoke
+## counters.
+var _status_error := false
 var _rename_open := false
 var _rename_target_id := 0
 var _action_count := 0
@@ -319,6 +330,7 @@ var _picker_focus_cancel := true
 var _picker_opener_group := "actions"
 var _picker_opener_action := "invite"
 var _picker_checks := 0
+var _a11y_checks := 0
 
 
 ## Host entry point for embedded mode. Call before `add_child`; the screen
@@ -731,6 +743,7 @@ func _start_connected_session() -> void:
 	_refresh_player_names()
 	_load_page(0)
 	if _error_code.is_empty():
+		_status_error = false
 		_status_text = _i18n.t(
 			"base.ui.settlement_screen.connected_status",
 			{
@@ -887,6 +900,7 @@ func _load_connected_page(index: int) -> void:
 func _apply_page(index: int) -> void:
 	_page_index = index
 	_error_code = ""
+	_status_error = false
 	# Keep one forward cursor per page. A refresh that returns a different
 	# `next_after` discards the stale deeper pages.
 	if _has_more:
@@ -1434,6 +1448,7 @@ func _clear_row_selection() -> void:
 	_selected_member = 0
 	_reset_pending()
 	_status_text = ""
+	_status_error = false
 	_syncing_list = true
 	_list.deselect_all()
 	_syncing_list = false
@@ -1685,6 +1700,7 @@ func _close_picker(cancelled := true) -> void:
 	_picker_selected = 0
 	_picker_focus_cancel = true
 	if cancelled:
+		_status_error = false
 		_status_text = _i18n.t("base.ui.settlement_screen.action.cancelled")
 	_restore_focus_to(_picker_opener_group, _picker_opener_action)
 	_render_footer()
@@ -1858,6 +1874,7 @@ func _render_picker() -> void:
 	_picker_cancel.text = _i18n.t("base.ui.settlement_screen.roster.cancel")
 	_picker_hint.text = _picker_hint_text()
 	_sync_focus_ring()
+	_refresh_accessibility()
 
 
 func _picker_row_text(row: Dictionary) -> String:
@@ -1892,6 +1909,391 @@ func picker_snapshot() -> Dictionary:
 		"focus": "cancel" if _picker_focus_cancel else "row",
 		"focus_group": _focus_group,
 	}
+
+
+# --- Screen-reader semantics -----------------------------------------------
+
+## One control's semantic entry. Names and descriptions resolve through
+## `WorldI18n`; live modes are stable strings and the role is derived from the
+## control's job on this screen.
+func _a11y_entry(control: Control, role: String) -> Dictionary:
+	if control == null:
+		return {
+			"name": "",
+			"description": "",
+			"role": role,
+			"class": "",
+			"live": "off",
+			"visible": false,
+			"focus_mode": "none",
+			"reachable": false,
+		}
+	var live := "off"
+	if control.accessibility_live == A11Y_LIVE_POLITE:
+		live = "polite"
+	elif control.accessibility_live == A11Y_LIVE_ASSERTIVE:
+		live = "assertive"
+	var focus_mode := "none"
+	if control.focus_mode == Control.FOCUS_ALL:
+		focus_mode = "all"
+	elif control.focus_mode == Control.FOCUS_CLICK:
+		focus_mode = "click"
+	return {
+		"name": control.accessibility_name,
+		"description": control.accessibility_description,
+		"role": role,
+		"class": control.get_class(),
+		"live": live,
+		"visible": control.visible,
+		"focus_mode": focus_mode,
+		"reachable": (
+			control.is_inside_tree()
+			and control.visible
+			and control.focus_mode == Control.FOCUS_ALL
+		),
+	}
+
+
+## Deterministic snapshot for the headless smoke: every labelled control plus
+## counts, current row text, and the live-region roles. Read-only.
+func accessibility_snapshot() -> Dictionary:
+	var entries := {
+		"title": _a11y_entry(_title_label, "heading"),
+		"header": _a11y_entry(_authority_label, "status"),
+		"list": _a11y_entry(_list, "list"),
+		"paging_prev": _a11y_entry(_page_prev, "button"),
+		"paging_next": _a11y_entry(_page_next, "button"),
+		"page": _a11y_entry(_page_label, "status"),
+		"detail": _a11y_entry(_detail_box, "group"),
+		"status": _a11y_entry(_status_label, "status"),
+		"footer": _a11y_entry(_footer_label, "label"),
+		"rename_title": _a11y_entry(_rename_title, "heading"),
+		"rename_edit": _a11y_entry(_rename_edit, "text_field"),
+		"rename_count": _a11y_entry(_rename_count, "status"),
+		"rename_error": _a11y_entry(_rename_error, "status"),
+		"rename_cancel": _a11y_entry(_rename_cancel, "button"),
+		"rename_save": _a11y_entry(_rename_save, "button"),
+		"rename_hint": _a11y_entry(_rename_hint, "label"),
+		"picker_title": _a11y_entry(_picker_title, "heading"),
+		"picker_list": _a11y_entry(_picker_list, "list"),
+		"picker_page": _a11y_entry(_picker_page_label, "status"),
+		"picker_empty": _a11y_entry(_picker_empty, "status"),
+		"picker_hint": _a11y_entry(_picker_hint, "label"),
+		"picker_cancel": _a11y_entry(_picker_cancel, "button"),
+	}
+	var actions := {}
+	for entry in ACTION_ORDER:
+		var action := str(entry[0])
+		actions[action] = _a11y_entry(_action_buttons.get(action) as Control, "button")
+	var member_rows: Array = []
+	for button in _member_buttons:
+		member_rows.append(_a11y_entry(button, "row"))
+	var rows: Array = []
+	for index in _list.item_count:
+		rows.append(_list.get_item_text(index))
+	var total := entries.size() + actions.size() + member_rows.size()
+	var unlabelled: Array[String] = []
+	for key in entries.keys():
+		if not _a11y_labelled(entries[key]):
+			unlabelled.append(str(key))
+	for key in actions.keys():
+		if not _a11y_labelled(actions[key]):
+			unlabelled.append("action.%s" % str(key))
+	for index in member_rows.size():
+		if not _a11y_labelled(member_rows[index]):
+			unlabelled.append("member.%d" % index)
+	return {
+		"locale": _i18n.locale(),
+		"entries": entries,
+		"actions": actions,
+		"member_rows": member_rows,
+		"rows": rows,
+		"row_count": rows.size(),
+		"live": {
+			"list": str(entries["list"]["live"]),
+			"detail": str(entries["detail"]["live"]),
+			"status": str(entries["status"]["live"]),
+			"rename_error": str(entries["rename_error"]["live"]),
+			"picker_list": str(entries["picker_list"]["live"]),
+			"picker_empty": str(entries["picker_empty"]["live"]),
+		},
+		"counts": {
+			"total": total,
+			"labelled": total - unlabelled.size(),
+			"unlabelled": unlabelled,
+		},
+		"has_modal": _rename_open,
+		"has_picker": _picker_open,
+	}
+
+
+func _a11y_labelled(entry: Dictionary) -> bool:
+	return not str(entry.get("name", "")).is_empty() and not str(
+		entry.get("description", "")
+	).is_empty()
+
+
+## Whether every localized name/description resolved (no `!base.ui.*!` fallback
+## leaked from `WorldI18n`). Shared by the EN and DE smoke assertions.
+func _a11y_no_leak(a11y: Dictionary) -> bool:
+	for key in (a11y["entries"] as Dictionary).keys():
+		var entry: Dictionary = (a11y["entries"] as Dictionary)[key]
+		for field in ["name", "description"]:
+			if str(entry[field]).contains("!base.ui."):
+				return false
+	for key in (a11y["actions"] as Dictionary).keys():
+		var entry: Dictionary = (a11y["actions"] as Dictionary)[key]
+		for field in ["name", "description"]:
+			if str(entry[field]).contains("!base.ui."):
+				return false
+	for entry in a11y["member_rows"]:
+		for field in ["name", "description"]:
+			if str((entry as Dictionary)[field]).contains("!base.ui."):
+				return false
+	return true
+
+
+## Localized screen-reader names, descriptions, and live modes for every part
+## of the screen, including the closed modal/picker controls so a label is
+## always present before either opens.
+func _refresh_accessibility() -> void:
+	if _title_label == null:
+		return
+	_title_label.accessibility_name = _i18n.t("base.ui.settlement_screen.title")
+	_title_label.accessibility_description = _i18n.t(
+		"base.ui.settlement_screen.a11y.title_description"
+	)
+	var header_parts: Array[String] = []
+	if _authority_label != null and not _authority_label.text.is_empty():
+		header_parts.append(_authority_label.text)
+	if _world_checksum_label != null and not _world_checksum_label.text.is_empty():
+		header_parts.append(_world_checksum_label.text)
+	if _authority_label != null:
+		_authority_label.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.header"
+		)
+		_authority_label.accessibility_description = (
+			" ".join(header_parts)
+			if not header_parts.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.header_idle")
+		)
+	if _list != null:
+		_list.accessibility_name = _i18n.t("base.ui.settlement_screen.a11y.list")
+		var record := _current_record()
+		_list.accessibility_description = (
+			_i18n.t(
+				"base.ui.settlement_screen.a11y.list_selected",
+				{"row": _row_text(record)}
+			)
+			if not record.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.list_description")
+		)
+		_list.accessibility_live = A11Y_LIVE_POLITE
+	if _page_prev != null:
+		_page_prev.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.paging_prev"
+		)
+		_page_prev.accessibility_description = _i18n.t(
+			"base.ui.settlement_screen.a11y.paging_prev_hint"
+		)
+	if _page_next != null:
+		_page_next.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.paging_next"
+		)
+		_page_next.accessibility_description = _i18n.t(
+			"base.ui.settlement_screen.a11y.paging_next_hint"
+		)
+	if _page_label != null:
+		_page_label.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.page"
+		)
+		_page_label.accessibility_description = (
+			_page_label.text
+			if not _page_label.text.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.page_idle")
+		)
+	if _detail_box != null:
+		_detail_box.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.detail"
+		)
+		var detail := _detail_text()
+		_detail_box.accessibility_description = (
+			detail
+			if not _current_record().is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.detail_empty")
+		)
+		_detail_box.accessibility_live = A11Y_LIVE_POLITE
+	for button in _member_buttons:
+		if button == null:
+			continue
+		button.accessibility_name = (button as Button).text.trim_prefix("▸ ").strip_edges()
+		button.accessibility_description = _i18n.t(
+			"base.ui.settlement_screen.a11y.member_hint"
+		)
+	var reasons := _availability(_current_record())
+	for entry in ACTION_ORDER:
+		var action := str(entry[0])
+		var button: Button = _action_buttons.get(action)
+		if button == null:
+			continue
+		var reason := str(reasons.get(action, ""))
+		button.accessibility_name = _action_label(action)
+		button.accessibility_description = (
+			_i18n.t(
+				"base.ui.settlement_screen.a11y.action_hint",
+				{"action": _action_label(action)}
+			)
+			if reason.is_empty()
+			else _i18n.t(
+				"base.ui.settlement_screen.a11y.action_disabled",
+				{"action": _action_label(action), "reason": _reason_text(reason)}
+			)
+		)
+	if _status_label != null:
+		_status_label.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.status"
+		)
+		_status_label.accessibility_description = (
+			_status_label.text
+			if not _status_label.text.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.status_idle")
+		)
+		_status_label.accessibility_live = (
+			A11Y_LIVE_ASSERTIVE if _status_error else A11Y_LIVE_POLITE
+		)
+	if _footer_label != null:
+		_footer_label.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.footer"
+		)
+		_footer_label.accessibility_description = (
+			_footer_label.text
+			if not _footer_label.text.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.footer_idle")
+		)
+	if _rename_title != null:
+		_rename_title.accessibility_name = (
+			_rename_title.text
+			if not _rename_title.text.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.rename.dialog")
+		)
+		_rename_title.accessibility_description = _i18n.t(
+			"base.ui.settlement_screen.a11y.rename.dialog_description"
+		)
+	if _rename_edit != null:
+		_rename_edit.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.rename.field"
+		)
+		_rename_edit.accessibility_description = _i18n.t(
+			"base.ui.settlement_screen.a11y.rename.field_description"
+		)
+	if _rename_count != null:
+		_rename_count.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.rename.count"
+		)
+		_rename_count.accessibility_description = (
+			_rename_count.text
+			if not _rename_count.text.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.rename.count_idle")
+		)
+	if _rename_error != null:
+		_rename_error.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.rename.error"
+		)
+		_rename_error.accessibility_description = (
+			_rename_error.text
+			if not _rename_error.text.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.rename.no_error")
+		)
+		_rename_error.accessibility_live = A11Y_LIVE_ASSERTIVE
+	if _rename_cancel != null:
+		_rename_cancel.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.rename.cancel"
+		)
+		_rename_cancel.accessibility_description = _i18n.t(
+			"base.ui.settlement_screen.a11y.rename.cancel_hint"
+		)
+	if _rename_save != null:
+		_rename_save.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.rename.save"
+		)
+		_rename_save.accessibility_description = _i18n.t(
+			"base.ui.settlement_screen.a11y.rename.save_hint"
+		)
+	if _rename_hint != null:
+		_rename_hint.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.rename.hint"
+		)
+		_rename_hint.accessibility_description = (
+			_rename_hint.text
+			if not _rename_hint.text.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.rename.hint_idle")
+		)
+	if _picker_title != null:
+		_picker_title.accessibility_name = (
+			_picker_title.text
+			if not _picker_title.text.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.roster.dialog")
+		)
+		_picker_title.accessibility_description = _i18n.t(
+			"base.ui.settlement_screen.a11y.roster.dialog_description"
+		)
+	if _picker_list != null:
+		_picker_list.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.roster.list"
+		)
+		var picked: Dictionary = (
+			_picker_rows[_picker_selected]
+			if (
+				not _picker_focus_cancel
+				and _picker_selected >= 0
+				and _picker_selected < _picker_rows.size()
+			)
+			else {}
+		)
+		_picker_list.accessibility_description = (
+			_i18n.t(
+				"base.ui.settlement_screen.a11y.roster.selected",
+				{"row": _picker_row_text(picked)}
+			)
+			if not picked.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.roster.list_description")
+		)
+		_picker_list.accessibility_live = A11Y_LIVE_POLITE
+	if _picker_page_label != null:
+		_picker_page_label.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.roster.count"
+		)
+		_picker_page_label.accessibility_description = (
+			_picker_page_label.text
+			if not _picker_page_label.text.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.roster.count_idle")
+		)
+	if _picker_empty != null:
+		_picker_empty.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.roster.empty"
+		)
+		_picker_empty.accessibility_description = (
+			_picker_empty.text
+			if not _picker_empty.text.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.roster.empty_idle")
+		)
+		_picker_empty.accessibility_live = A11Y_LIVE_POLITE
+	if _picker_hint != null:
+		_picker_hint.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.roster.hint"
+		)
+		_picker_hint.accessibility_description = (
+			_picker_hint.text
+			if not _picker_hint.text.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.roster.hint_idle")
+		)
+	if _picker_cancel != null:
+		_picker_cancel.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.roster.cancel"
+		)
+		_picker_cancel.accessibility_description = _i18n.t(
+			"base.ui.settlement_screen.a11y.roster.cancel_hint"
+		)
 
 
 func _sync_focus_ring() -> void:
@@ -2172,6 +2574,7 @@ func _cycle_selected_member(delta: int) -> void:
 	var record := _current_record()
 	var members := _assignable_members(record)
 	if members.is_empty():
+		_status_error = true
 		_status_text = _i18n.t(
 			"base.ui.settlement_screen.action.result_failed",
 			{
@@ -2260,6 +2663,7 @@ func _finish_action(action: String, result: Dictionary, revision: int) -> Dictio
 		updated = raw
 		shown_revision = int(updated.get("membership_revision", revision))
 	_action_count += 1
+	_status_error = not ok
 	if ok:
 		_accepted_count += 1
 	else:
@@ -2365,6 +2769,7 @@ func _open_rename() -> void:
 		_sync_virtual_keyboard(true)
 	_render_footer()
 	_sync_focus_ring()
+	_refresh_accessibility()
 
 
 func _hide_rename_modal() -> void:
@@ -2376,11 +2781,13 @@ func _hide_rename_modal() -> void:
 	_sync_virtual_keyboard(false)
 	_restore_modal_opener()
 	_render_footer()
+	_refresh_accessibility()
 
 
 func _close_rename() -> void:
 	if not _rename_open:
 		return
+	_status_error = false
 	_status_text = _i18n.t("base.ui.settlement_screen.action.cancelled")
 	_hide_rename_modal()
 	_render_detail()
@@ -2434,6 +2841,7 @@ func _on_rename_text_changed(_text: String) -> void:
 		"base.ui.settlement_screen.rename.count",
 		{"count": _i18n.format_int(_rename_edit.text.length())}
 	)
+	_refresh_accessibility()
 
 
 func _tax_selected() -> void:
@@ -2554,6 +2962,7 @@ func _cycle_role() -> void:
 func _remove_selected() -> void:
 	var member := _selected_member_record(_current_record())
 	if member.is_empty():
+		_status_error = true
 		_status_text = _i18n.t(
 			"base.ui.settlement_screen.action.result_failed",
 			{
@@ -2571,6 +2980,7 @@ func _remove_selected() -> void:
 		_pending_remove_id = _selected_id
 		_pending_remove_player = player
 		_pending_release_id = 0
+		_status_error = false
 		_status_text = _i18n.t(
 			"base.ui.settlement_screen.action.confirm_remove",
 			{"person": _person_text(player)}
@@ -2607,6 +3017,7 @@ func _release_selected() -> void:
 	if _pending_release_id != _selected_id:
 		var cached := _current_record()
 		if cached.is_empty() or not bool(cached.get("owned", false)):
+			_status_error = true
 			_status_text = _i18n.t(
 				"base.ui.settlement_screen.action.result_failed",
 				{
@@ -2621,6 +3032,7 @@ func _release_selected() -> void:
 		_pending_release_id = _selected_id
 		_pending_remove_id = 0
 		_pending_remove_player = 0
+		_status_error = false
 		_status_text = _i18n.t(
 			"base.ui.settlement_screen.action.confirm_release",
 			{
@@ -2789,6 +3201,7 @@ func _render_all() -> void:
 	_render_footer()
 	if _picker_open:
 		_render_picker()
+	_refresh_accessibility()
 
 
 ## The authority mode is always visible. Connected also shows the server world
@@ -2865,6 +3278,7 @@ func _render_detail() -> void:
 			_status_label.text = _status_text
 		_update_action_bar({})
 		_sync_focus_ring()
+		_refresh_accessibility()
 		return
 	_detail_empty.visible = false
 
@@ -2942,6 +3356,7 @@ func _render_detail() -> void:
 	_update_action_bar(settlement)
 	_status_label.text = _status_text
 	_sync_focus_ring()
+	_refresh_accessibility()
 
 
 func _on_member_pressed(player: int) -> void:
@@ -3091,6 +3506,7 @@ func _projection_text(rate: int) -> String:
 
 func _show_unavailable(code: String) -> void:
 	_error_code = code
+	_status_error = true
 	_status_text = ""
 	_rows = []
 	_matched = 0
@@ -3127,6 +3543,7 @@ func _show_unavailable(code: String) -> void:
 		{"code": code}
 	)
 	_sync_focus_ring()
+	_refresh_accessibility()
 
 
 # --- Smoke -----------------------------------------------------------------
@@ -3385,6 +3802,7 @@ func _run_smoke() -> void:
 	pad = gamepad_action("bogus")
 	_expect_pad(str(pad.get("last_action", "")) == last_action, "unknown gamepad action is ignored", failures)
 
+	_run_a11y_checks(failures, false)
 	print("SETTLEMENT_SCREEN_GAMEPAD status=ok checks=%d" % _gamepad_checks)
 	print("SETTLEMENT_SCREEN_FOCUS group=rows tab=paging shift=ok arrows=ok modal=trap esc=detail")
 	print("SETTLEMENT_SCREEN_PAGES sizes=8/8/7 selected_last=23")
@@ -3617,6 +4035,7 @@ func _run_connected_smoke() -> void:
 	)
 	_switch_locale("en")
 
+	_run_a11y_checks(failures, true)
 	print("SETTLEMENT_SCREEN_CONNECTED_READ settles=%d players=%d owner=%s checksum=%s" % [
 		_matched,
 		_player_names.size(),
@@ -3837,3 +4256,88 @@ func _expect_pick(condition: bool, label: String, failures: Array) -> void:
 func _expect_pad(condition: bool, label: String, failures: Array) -> void:
 	_gamepad_checks += 1
 	_expect(condition, label, failures)
+
+
+func _expect_a11y(condition: bool, label: String, failures: Array) -> void:
+	_a11y_checks += 1
+	_expect(condition, "a11y." + label, failures)
+
+
+## Read-only screen-reader audit shared by the local and connected smokes.
+## Opens and closes the modal/picker without issuing a mutation or changing
+## selection, action counters, or checksums.
+func _run_a11y_checks(failures: Array, with_picker: bool) -> void:
+	var before := failures.size()
+	_refresh_accessibility()
+	var snap := accessibility_snapshot()
+	var counts: Dictionary = snap["counts"]
+	_expect_a11y(int(counts["total"]) > 0, "counts.total", failures)
+	_expect_a11y((counts["unlabelled"] as Array).is_empty(), "counts.unlabelled", failures)
+	_expect_a11y(int(counts["labelled"]) == int(counts["total"]), "counts.labelled", failures)
+	_expect_a11y(_a11y_no_leak(snap), "no_key_leak", failures)
+	for key in ["title", "header", "list", "page", "detail", "status", "footer"]:
+		var entry: Dictionary = (snap["entries"] as Dictionary)[key]
+		_expect_a11y(
+			not str(entry["name"]).is_empty() and not str(entry["description"]).is_empty(),
+			"entry." + key,
+			failures
+		)
+	var live: Dictionary = snap["live"]
+	_expect_a11y(str(live["list"]) == "polite", "live.list", failures)
+	_expect_a11y(str(live["detail"]) == "polite", "live.detail", failures)
+	_expect_a11y(
+		["polite", "assertive"].has(str(live["status"])),
+		"live.status_valid",
+		failures
+	)
+	_status_error = false
+	_refresh_accessibility()
+	_expect_a11y(
+		str((accessibility_snapshot()["live"] as Dictionary)["status"]) == "polite",
+		"live.status",
+		failures
+	)
+	for item in ACTION_ORDER:
+		var action := str(item[0])
+		var entry: Dictionary = (snap["actions"] as Dictionary)[action]
+		_expect_a11y(
+			not str(entry["name"]).is_empty() and not str(entry["description"]).is_empty(),
+			"action." + action,
+			failures
+		)
+	_open_rename()
+	_refresh_accessibility()
+	snap = accessibility_snapshot()
+	_expect_a11y(bool(snap["has_modal"]), "modal.open", failures)
+	for key in ["rename_title", "rename_edit", "rename_count", "rename_error", "rename_cancel", "rename_save", "rename_hint"]:
+		var entry: Dictionary = (snap["entries"] as Dictionary)[key]
+		_expect_a11y(
+			not str(entry["name"]).is_empty() and not str(entry["description"]).is_empty(),
+			"entry." + key,
+			failures
+		)
+	_expect_a11y(str((snap["live"] as Dictionary)["rename_error"]) == "assertive", "live.rename_error", failures)
+	_status_error = true
+	_refresh_accessibility()
+	snap = accessibility_snapshot()
+	_expect_a11y(str((snap["live"] as Dictionary)["status"]) == "assertive", "live.status_assertive", failures)
+	_status_error = false
+	_hide_rename_modal()
+	if with_picker:
+		_open_picker("invite")
+		_refresh_accessibility()
+		snap = accessibility_snapshot()
+		_expect_a11y(bool(snap["has_picker"]), "picker.open", failures)
+		for key in ["picker_title", "picker_list", "picker_page", "picker_empty", "picker_hint", "picker_cancel"]:
+			var entry: Dictionary = (snap["entries"] as Dictionary)[key]
+			_expect_a11y(
+				not str(entry["name"]).is_empty() and not str(entry["description"]).is_empty(),
+				"entry." + key,
+				failures
+			)
+		_expect_a11y(str((snap["live"] as Dictionary)["picker_list"]) == "polite", "live.picker_list", failures)
+		_expect_a11y(str((snap["live"] as Dictionary)["picker_empty"]) == "polite", "live.picker_empty", failures)
+		_close_picker()
+		_refresh_accessibility()
+	var status := "ok" if failures.size() == before else "failed"
+	print("SETTLEMENT_SCREEN_A11Y status=%s checks=%d" % [status, _a11y_checks])
