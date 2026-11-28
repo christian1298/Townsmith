@@ -783,6 +783,8 @@ The Godot client draws the `interest_view` road list in a flat top-down `Control
 
 **Pause state.** Every `snapshot` carries the additive `paused` flag. The HUD renders it as `state=RUNNING` or `state=PAUSED` beside tick, population, and balance. A missing field is decoded as `false` for older servers; a non-boolean value fails the run with `snapshot_paused_type` rather than being coerced. When a `time_vote_panel` is attached, `set_paused()` mirrors the same authoritative value for display only; the panel still sends votes through its existing commands, and the client adds no vote path. The base smoke prints `MP_WORLD_PAUSE status=ok checks=6 paused=<live>` after the main marker and covers live, synthetic true/false, legacy-missing, non-boolean, and panel-mirror cases.
 
+**Screen-reader semantics.** Every persistent HUD field — connection/error status, session, tick/population/balance, the authoritative pause state, interest viewport, road/building counts, rendered instances, world checksum, render checksums, placement details, and the chat unread badge — exposes an `accessibility_name` and a bounded `accessibility_description`. The pause state is a polite live region so a transition is announced, while a failed or disconnected status is assertive. `accessibility_snapshot()` mirrors those properties and the base smoke prints `MP_WORLD_A11Y status=ok checks=9`, covering the running, paused, legacy missing-`paused`, restored, unread, and error states without changing the visible HUD text, any `MP_WORLD_*` marker, the frame counts, or a checksum.
+
 **Smoke.** `scripts/smoke_mp_world_client.sh` starts a fresh server per run, runs the scene headlessly, and requires two identical runs (including all `MP_WORLD_CLIENT*` lines):
 
 ```bash

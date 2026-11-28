@@ -32,6 +32,17 @@ extends Node3D
 ## when one is attached, receives the same value through `set_paused`, so the
 ## panel and the HUD cannot disagree; this client adds no vote command path.
 ##
+## Screen-reader semantics: every persistent HUD field (status/error, session,
+## tick/population/balance, pause state, interest viewport, counts, rendered
+## instances, world checksum, render checksums, placement details, and the chat
+## unread badge) exposes an `accessibility_name` and a bounded
+## `accessibility_description`. Transparent, non-focusable proxy labels carry
+## those semantics so the visible HUD text, layout, markers, and checksums stay
+## unchanged. Pause transitions are a polite live region; a failed or
+## disconnected status is assertive. `accessibility_snapshot()` exposes the
+## property state, and the base smoke prints
+## `MP_WORLD_A11Y status=ok checks=<n>` after `MP_WORLD_PAUSE`.
+##
 ## Placement is opt-in: only `--place-hash <blake3:…|64 hex>` sends the D-032
 ## command after the zero-view probe. The box uses the authoritative
 ## `placement.center`, `placement.footprint_m`, and `placement.bounds_m` on the
@@ -176,6 +187,35 @@ const SNAPSHOT_PAUSED_TYPE := "snapshot_paused_type"
 # Number of deterministic pause checks the smoke covers: live HUD, paused true,
 # paused false, legacy missing field, wrong type, and the panel mirror.
 const PAUSE_CHECKS := 6
+# Screen-reader semantics. `Control.accessibility_live` values (Godot 4.7
+# exposes the property but not named enum constants). The pause state is polite
+# so a transition is announced; the status/error line is assertive on failure.
+const A11Y_LIVE_OFF := 0
+const A11Y_LIVE_POLITE := 1
+const A11Y_LIVE_ASSERTIVE := 2
+# Bounded single-sentence descriptions, matching the other screen-reader
+# surfaces in this repository.
+const A11Y_MAX_DESCRIPTION := 160
+# Number of deterministic a11y checks the smoke covers: field completeness,
+# running, paused, legacy missing field, error, restore, unread set/clear, and
+# tick/checksum agreement.
+const A11Y_CHECKS := 9
+const A11Y_KEYS := [
+	"hud",
+	"status",
+	"session",
+	"tick",
+	"state",
+	"pause",
+	"interest",
+	"counts",
+	"rendered",
+	"checksum",
+	"render_checksums",
+	"placement",
+	"chat_unread",
+	"error",
+]
 # Same 64-character placeholder hash the Rust loopback harness uses.
 const CONTENT_HASH := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -280,6 +320,9 @@ var _phase: int = Phase.CONNECTING
 var _rx := PackedByteArray()
 var _deadline_ms := 0
 var _finished := false
+# True once `_fail` runs, so the status/error live region can switch from polite
+# to assertive without changing the visible text or the failure marker.
+var _failed := false
 var _status_text := "Connecting..."
 
 var _smoke := false
@@ -307,6 +350,19 @@ var _visible_roads := -1
 var _container: Node3D
 var _hud_layer: CanvasLayer
 var _hud_label: Label
+# Screen-reader-only proxies. Each transparent, non-focusable Label mirrors one
+# persistent HUD field, so the visible `_hud_label` block keeps its exact text
+# and layout while a screen reader gets per-field names and descriptions.
+var _a11y_status: Label
+var _a11y_session: Label
+var _a11y_tick: Label
+var _a11y_state: Label
+var _a11y_interest: Label
+var _a11y_counts: Label
+var _a11y_rendered: Label
+var _a11y_checksum: Label
+var _a11y_render_checksums: Label
+var _a11y_placement: Label
 # Optional developer time-vote panel. It is never created or mounted by this
 # client: an owning scene may attach one, and every accepted snapshot then
 # pushes the authoritative `paused` value into it. No vote command is sent.
@@ -1331,6 +1387,8 @@ func _on_interest_view(message: Dictionary) -> void:
 		if _smoke:
 			if not _run_pause_checks():
 				return
+			if not _run_a11y_checks():
+				return
 			_set_status("Main view rendered; probing the zero-viewport case.")
 			if not _send({
 				"type": "set_interest",
@@ -1531,6 +1589,13 @@ func _refresh_chat_unread_hud() -> void:
 		return
 	_chat_unread_label.text = "Chat: %d new" % _chat_unread
 	_chat_unread_label.visible = _chat_unread > 0
+	_chat_unread_label.accessibility_name = "Chat unread"
+	_chat_unread_label.accessibility_description = (
+		"%d unread chat messages." % _chat_unread
+		if _chat_unread > 0
+		else "No unread chat messages."
+	)
+	_chat_unread_label.accessibility_live = A11Y_LIVE_POLITE
 
 ## Prove the panel mirror kept up with the owner after every push and print one
 ## deterministic line per update. `hidden` is true only while the badge is
@@ -3178,6 +3243,7 @@ func _fail(reason: String) -> void:
 	if _finished:
 		return
 	_finished = true
+	_failed = true
 	set_process(false)
 	_set_status("3D world client failed: " + reason)
 	if _peer != null:
@@ -3309,6 +3375,317 @@ func _run_pause_checks() -> bool:
 		"true" if live else "false",
 	])
 	return true
+
+## Deterministic smoke coverage for the HUD's screen-reader semantics. Mutates
+## only local display state, restores it, and never sends a command, so the
+## frame counts, markers, and checksums are unchanged. Covers the complete
+## running, paused, legacy missing-`paused`, restored, unread, and error states.
+func _run_a11y_checks() -> bool:
+	var live_paused := _last_paused
+	var live_status := _status_text
+	var live_failed := _failed
+	var live_unread := _chat_unread
+	var checks := 0
+
+	var snapshot := accessibility_snapshot()
+	if not _a11y_entries_valid(snapshot):
+		_fail("a11y_fields")
+		return false
+	checks += 1
+
+	_last_paused = false
+	_refresh_hud()
+	snapshot = accessibility_snapshot()
+	if str(snapshot["state"]["description"]) != _expected_state_description():
+		_fail("a11y_running")
+		return false
+	if str(snapshot["state"]["live"]) != "polite":
+		_fail("a11y_running_live")
+		return false
+	checks += 1
+
+	_last_paused = true
+	_refresh_hud()
+	snapshot = accessibility_snapshot()
+	if str(snapshot["state"]["description"]) != "Simulation paused; the server clock is frozen.":
+		_fail("a11y_paused")
+		return false
+	if str(snapshot["state"]["live"]) != "polite":
+		_fail("a11y_paused_live")
+		return false
+	checks += 1
+
+	var legacy := _read_paused({"tick": 0})
+	if not bool(legacy.get("ok", false)) or bool(legacy.get("value", true)):
+		_fail("a11y_legacy_parse")
+		return false
+	_last_paused = bool(legacy.get("value", true))
+	_refresh_hud()
+	snapshot = accessibility_snapshot()
+	if str(snapshot["state"]["description"]) != _expected_state_description():
+		_fail("a11y_legacy")
+		return false
+	checks += 1
+
+	_failed = true
+	_set_status("3D world client failed: a11y_probe")
+	snapshot = accessibility_snapshot()
+	if str(snapshot["status"]["live"]) != "assertive":
+		_fail("a11y_error_live")
+		return false
+	if str(snapshot["error"]["live"]) != "assertive":
+		_fail("a11y_error_alias")
+		return false
+	if not str(snapshot["status"]["description"]).contains("a11y_probe"):
+		_fail("a11y_error_description")
+		return false
+	checks += 1
+
+	_failed = live_failed
+	_status_text = live_status
+	_last_paused = live_paused
+	_refresh_hud()
+	snapshot = accessibility_snapshot()
+	var expected_live := "assertive" if live_failed else "polite"
+	if str(snapshot["status"]["live"]) != expected_live:
+		_fail("a11y_status_restore")
+		return false
+	if str(snapshot["state"]["description"]) != _expected_state_description():
+		_fail("a11y_state_restore")
+		return false
+	checks += 1
+
+	_chat_unread = 3
+	_refresh_chat_unread_hud()
+	snapshot = accessibility_snapshot()
+	if str(snapshot["chat_unread"]["description"]) != "3 unread chat messages.":
+		_fail("a11y_chat_unread")
+		return false
+	if (
+		str(snapshot["chat_unread"]["live"]) != "polite"
+		or not bool(snapshot["chat_unread"]["visible"])
+	):
+		_fail("a11y_chat_unread_live")
+		return false
+	checks += 1
+
+	_chat_unread = 0
+	_refresh_chat_unread_hud()
+	snapshot = accessibility_snapshot()
+	if str(snapshot["chat_unread"]["description"]) != "No unread chat messages.":
+		_fail("a11y_chat_unread_clear")
+		return false
+	if bool(snapshot["chat_unread"]["visible"]):
+		_fail("a11y_chat_unread_hidden")
+		return false
+	_chat_unread = live_unread
+	_refresh_chat_unread_hud()
+	checks += 1
+
+	snapshot = accessibility_snapshot()
+	if not str(snapshot["tick"]["description"]).contains("Tick %d" % _last_tick):
+		_fail("a11y_tick")
+		return false
+	if not str(snapshot["checksum"]["description"]).contains(_last_checksum):
+		_fail("a11y_checksum")
+		return false
+	checks += 1
+
+	if checks != A11Y_CHECKS:
+		_fail("a11y_check_count_%d" % checks)
+		return false
+	print("MP_WORLD_A11Y status=ok checks=%d" % checks)
+	return true
+
+## Read-only screen-reader contract: every persistent HUD field's name,
+## description, live mode, role, and structural reachability. `pause` aliases the
+## authoritative state line and `error` aliases the status/error line.
+func accessibility_snapshot() -> Dictionary:
+	return {
+		"hud": _a11y_entry(_hud_label, "group"),
+		"status": _a11y_entry(_a11y_status, "status"),
+		"session": _a11y_entry(_a11y_session, "status"),
+		"tick": _a11y_entry(_a11y_tick, "status"),
+		"state": _a11y_entry(_a11y_state, "status"),
+		"pause": _a11y_entry(_a11y_state, "status"),
+		"interest": _a11y_entry(_a11y_interest, "status"),
+		"counts": _a11y_entry(_a11y_counts, "status"),
+		"rendered": _a11y_entry(_a11y_rendered, "status"),
+		"checksum": _a11y_entry(_a11y_checksum, "status"),
+		"render_checksums": _a11y_entry(_a11y_render_checksums, "status"),
+		"placement": _a11y_entry(_a11y_placement, "status"),
+		"chat_unread": _a11y_entry(_chat_unread_label, "status"),
+		"error": _a11y_entry(_a11y_status, "status"),
+	}
+
+## English screen-reader copy for every persistent field. The visible block stays
+## one Label, so these proxies are the only per-field semantics; none of them is
+## focusable or draws anything. The pause line is polite; a failure makes the
+## status/error line assertive so the stable error code interrupts.
+func _refresh_accessibility() -> void:
+	if _hud_label != null:
+		_hud_label.accessibility_name = "World client HUD"
+		_hud_label.accessibility_description = (
+			"Debug 3D multiplayer world client status panel."
+		)
+	if _a11y_status != null:
+		_a11y_status.accessibility_name = "Connection status"
+		_a11y_status.accessibility_description = _bounded_description(_status_text)
+		_a11y_status.accessibility_live = (
+			A11Y_LIVE_ASSERTIVE if _failed else A11Y_LIVE_POLITE
+		)
+	if _a11y_session != null:
+		_a11y_session.accessibility_name = "Session"
+		_a11y_session.accessibility_description = (
+			"Session %s." % _session_id
+			if not _session_id.is_empty()
+			else "No session established yet."
+		)
+	if _a11y_tick != null:
+		_a11y_tick.accessibility_name = "Tick and population"
+		_a11y_tick.accessibility_description = (
+			"Tick %d, population %d, balance %d."
+			% [_last_tick, _last_population, _last_balance]
+			if _last_tick >= 0
+			else "No snapshot received yet."
+		)
+	if _a11y_state != null:
+		_a11y_state.accessibility_name = "Simulation state"
+		_a11y_state.accessibility_description = _expected_state_description()
+		_a11y_state.accessibility_live = A11Y_LIVE_POLITE
+	if _a11y_interest != null:
+		_a11y_interest.accessibility_name = "Interest viewport"
+		_a11y_interest.accessibility_description = (
+			"Interest viewport centred at %.1f, %.1f with radius %.1f metres."
+			% [_view_center.x, _view_center.y, _view_radius_m]
+			if _has_view
+			else "No interest view received yet."
+		)
+	if _a11y_counts != null:
+		_a11y_counts.accessibility_name = "Interest counts"
+		_a11y_counts.accessibility_description = (
+			"%d roads, %d buildings; truncated %s, buildings truncated %s."
+			% [
+				_roads.size(),
+				_buildings.size(),
+				"true" if _truncated else "false",
+				"true" if _buildings_truncated else "false",
+			]
+			if _has_view
+			else "No view counts received yet."
+		)
+	if _a11y_rendered != null:
+		_a11y_rendered.accessibility_name = "Rendered instances"
+		_a11y_rendered.accessibility_description = (
+			"Rendered %d road instances and %d building instances; %d grid lines; camera %s."
+			% [
+				_road_count(),
+				_building_count(),
+				_grid_lines,
+				"ready" if _camera != null else "not ready",
+			]
+		)
+	if _a11y_checksum != null:
+		_a11y_checksum.accessibility_name = "World checksum"
+		_a11y_checksum.accessibility_description = (
+			"World checksum %s." % _last_checksum
+			if not _last_checksum.is_empty()
+			else "No world checksum yet."
+		)
+	if _a11y_render_checksums != null:
+		_a11y_render_checksums.accessibility_name = "Render checksums"
+		_a11y_render_checksums.accessibility_description = (
+			"Road checksum %s, building checksum %s."
+			% [
+				_road_checksum if not _road_checksum.is_empty() else "-",
+				_building_checksum if not _building_checksum.is_empty() else "-",
+			]
+		)
+	if _a11y_placement != null:
+		_a11y_placement.accessibility_name = "Placement details"
+		_a11y_placement.accessibility_description = _placement_a11y_text()
+
+func _expected_state_description() -> String:
+	if _last_tick < 0:
+		return "Simulation state unknown until the first snapshot."
+	if _last_paused:
+		return "Simulation paused; the server clock is frozen."
+	return "Simulation running."
+
+## Placement details only exist on the opt-in paths; keep one bounded line so the
+## snapshot contract never depends on a long lock list.
+func _placement_a11y_text() -> String:
+	if _has_placement:
+		return (
+			"Placement %d with hash %s; centre %.1f, %.1f; world checksum %s."
+			% [
+				_placement_id,
+				_placement_hash,
+				_placement_center.x,
+				_placement_center.y,
+				_placement_world_checksum,
+			]
+		)
+	if _place_ui:
+		return (
+			"Placement UI ready; %d catalogue entries, %d accepted, %d rejected."
+			% [_ui_entries.size(), _ui_accepted, _ui_rejected]
+		)
+	return "No placement details."
+
+func _bounded_description(text: String) -> String:
+	var trimmed := text.strip_edges()
+	if trimmed.is_empty():
+		return "No status yet."
+	if trimmed.length() <= A11Y_MAX_DESCRIPTION:
+		return trimmed
+	return trimmed.substr(0, A11Y_MAX_DESCRIPTION - 3) + "..."
+
+## Every A11Y_KEYS entry must have a non-empty name, a non-empty sentence, and
+## stay within the bounded length. Named separately so a regression reports a
+## stable failure code instead of a marker diff.
+func _a11y_entries_valid(snapshot: Dictionary) -> bool:
+	for key in A11Y_KEYS:
+		var entry: Dictionary = snapshot.get(key, {})
+		if str(entry.get("name", "")).strip_edges().is_empty():
+			return false
+		var description := str(entry.get("description", "")).strip_edges()
+		if description.is_empty() or description.length() > A11Y_MAX_DESCRIPTION:
+			return false
+	return true
+
+func _a11y_entry(control: Control, role: String) -> Dictionary:
+	if control == null:
+		return {
+			"name": "",
+			"description": "",
+			"role": role,
+			"class": "",
+			"live": "off",
+			"visible": false,
+			"focus_mode": "none",
+			"reachable": false,
+		}
+	var live := "off"
+	if control.accessibility_live == A11Y_LIVE_POLITE:
+		live = "polite"
+	elif control.accessibility_live == A11Y_LIVE_ASSERTIVE:
+		live = "assertive"
+	var focus_mode := "none"
+	if control.focus_mode == Control.FOCUS_ALL:
+		focus_mode = "all"
+	elif control.focus_mode == Control.FOCUS_CLICK:
+		focus_mode = "click"
+	return {
+		"name": control.accessibility_name,
+		"description": control.accessibility_description,
+		"role": role,
+		"class": control.get_class(),
+		"live": live,
+		"visible": control.visible,
+		"focus_mode": focus_mode,
+		"reachable": control.is_inside_tree() and control.visible,
+	}
 
 ## Validate and build the scene from one interest view. Returns false after
 ## calling `_fail` on an invalid viewport or render setup.
@@ -4034,8 +4411,37 @@ func _build_hud() -> void:
 	_chat_unread_label.add_theme_font_size_override("font_size", 16)
 	_hud_layer.add_child(_chat_unread_label)
 
+	_build_a11y_proxies()
 	_refresh_chat_unread_hud()
 	_refresh_hud()
+
+## Transparent, non-focusable Labels that carry the screen-reader semantics for
+## each persistent HUD field. They are direct CanvasLayer children (so they do
+## not participate in the panel's layout), fully transparent, and never receive
+## input: the visible block above keeps its exact text and size.
+func _build_a11y_proxies() -> void:
+	_a11y_status = _make_a11y_proxy("WorldClientA11yStatus")
+	_a11y_session = _make_a11y_proxy("WorldClientA11ySession")
+	_a11y_tick = _make_a11y_proxy("WorldClientA11yTick")
+	_a11y_state = _make_a11y_proxy("WorldClientA11yState")
+	_a11y_interest = _make_a11y_proxy("WorldClientA11yInterest")
+	_a11y_counts = _make_a11y_proxy("WorldClientA11yCounts")
+	_a11y_rendered = _make_a11y_proxy("WorldClientA11yRendered")
+	_a11y_checksum = _make_a11y_proxy("WorldClientA11yChecksum")
+	_a11y_render_checksums = _make_a11y_proxy("WorldClientA11yRenderChecksums")
+	_a11y_placement = _make_a11y_proxy("WorldClientA11yPlacement")
+
+func _make_a11y_proxy(node_name: String) -> Label:
+	var label := Label.new()
+	label.name = node_name
+	label.visible = true
+	label.modulate = Color(1.0, 1.0, 1.0, 0.0)
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	label.focus_mode = Control.FOCUS_NONE
+	label.position = Vector2.ZERO
+	label.size = Vector2(1.0, 1.0)
+	_hud_layer.add_child(label)
+	return label
 
 func _refresh_hud() -> void:
 	if _hud_label == null:
@@ -4114,6 +4520,7 @@ func _refresh_hud() -> void:
 		for lock_line in _ui_locks_hud_lines():
 			text += "\n" + lock_line
 	_hud_label.text = text
+	_refresh_accessibility()
 
 func _set_status(text: String) -> void:
 	_status_text = text
