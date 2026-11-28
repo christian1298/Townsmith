@@ -743,6 +743,8 @@ GODOT=/path/to/godot ./scripts/smoke_server_status_panel.sh
 
 The smoke keeps `SERVER_STATUS_PANEL status=ok rendered=true` (and the one-shot `SERVER_STATUS_PANEL status=ok tick=…` line) unchanged and adds `SERVER_STATUS_PANEL_PAUSED status=ok paused=true running=false`, plus its `paused=false running=true` counterpart. It covers paused `true`, paused `false`, and a legacy payload with no `paused` on both the fixture path and the live wire path (the real server reports `false`; one-shot stubs serve `true`, `false`, and the pre-pause shape), rejects a non-boolean `paused` with `status.shape`, and compares two steady watch stubs whose counters are identical and whose `paused` flips versus stays false: the aggregate lines must match, and watch mode must never print the one-shot pause marker.
 
+The panel also exposes screen-reader semantics: every value row (including Time) and the status line has an `accessibility_name`/bounded `accessibility_description`, and `accessibility_snapshot()` mirrors them. Tick/snapshot updates are a polite live region; failures are assertive. `SERVER_STATUS_PANEL_A11Y status=ok checks=44` is emitted on every one-shot, fixture, watch, and failure path (repeated for start/stop), without changing any existing marker or the watch checksum.
+
 Limits: read-only developer tool. It has no reconnect, write path, or typed per-field model beyond the status shape checks; it is not wired into `mp_client.gd` and is not a benchmark gate.
 
 ### Interest filtering v1
