@@ -63,7 +63,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 | 1 | ~~Production settlement UI~~ **done** | #343, #449/#454/#465/#472/#488/#497/#503 | The production shell, connected mutations, shared-core embedding, gamepad navigation, and modality footer are complete |
 | 2 | Settlement tax treasury consumer after D-039 acceptance | D-030/D-031 | The pure helper exists, but the rate is data-only; applying it needs a precedence decision against district weights |
 | 3 | Blueprint lock reconnect-retention UX | #349 v0 locks, #363/#374 UI, #369 leases, #375 retention, #380 CLI, #393 player scope | Lease expiry, retention, CLI, and concurrent-session release are done; decide automatic renewal and client lock list |
-| 4 | Concurrent listener remote-load tuning | #269, #350, #373, #383, #389, #395, #402 | Slow readers, closed queues, shutdown, session cap, fan-out, and sustained load are covered; remote/network-latency tuning remains |
+| 4 | Concurrent listener remote-load tuning | #269, #350, #373, #383, #389, #395, #402 | Slow readers, closed queues, shutdown, session cap, fan-out, sustained load, status watchers, and step-count latency injection are covered; remote WAN jitter/loss benchmarking remains |
 | 5 | Chat reconnect/catch-up presentation | #389, #394, #395, #398, #406 | Server push, passive listener, HUD unread, and panel badge are done; remaining is reconnect catch-up presentation |
 | 6 | Voxel edit sync v1 | D-038 accepted, Q-119/Q-120, 3, 4 | The largest slice; do not start before the conflict/lease decisions |
 | 7 | Journal/rollback v1 after D-040/Q-123/Q-124 | 6 | Needs the edit command stream and a crash-safe boundary |
@@ -113,7 +113,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.4 Concurrent listeners and outbound queue
 
-**Scope.** #373 adds a bounded `OutboundQueue`; #383 wires a per-connection writer thread; #389 runs every accepted socket on its own session thread against the shared world and closes only a backpressured recipient; #395/#402 add the stress matrix (fan-out, sustained load, shutdown with queued writes, ordering); #493 adds four concurrent status watchers under chat traffic with an unchanged checksum. #500 adds a stalled/non-reading watcher that queues frames below the cap while healthy clients complete, and #509 adds a deterministic byte-fragmented proxy with direct/proxied peers, resume, and truncated-frame coverage. Remaining: wall-clock latency injection, and more local cases only where they cover a distinct failure.
+**Scope.** #373 adds a bounded `OutboundQueue`; #383 wires a per-connection writer thread; #389 runs every accepted socket on its own session thread against the shared world and closes only a backpressured recipient; #395/#402 add the stress matrix (fan-out, sustained load, shutdown with queued writes, ordering); #493 adds four concurrent status watchers under chat traffic with an unchanged checksum. #500 adds a stalled/non-reading watcher that queues frames below the cap while healthy clients complete, and #509 adds a deterministic byte-fragmented proxy with direct/proxied peers, resume, and truncated-frame coverage. A step-count proxy now withholds whole frames without sleeps (this change); remote WAN jitter/loss benchmarking and real network latency remain operator/reference-hardware work.
 
 **Protocol/save.** No wire-shape change. Add backpressure/closure codes and a bounded queue metric.
 
@@ -224,7 +224,7 @@ Prove, on reference hardware and with four players:
 ## 7. Immediate order
 
 1. Tax consumer after D-039 acceptance (§3.2).
-2. Concurrent listener remote-load tuning with wall-clock latency injection (§3.4); the status-watch, stalled-watcher, and segmented-transport paths are covered.
+2. Concurrent listener remote-load tuning (§3.4); the status-watch, stalled-watcher, segmented-transport, and step-count latency-injection paths are covered. Real WAN jitter/loss remains operator/hardware work.
 3. Resource-pack registry policy after D-042/Q-127/Q-128 (§3.5/§3.9); the parser, opt-in server manifest path, and bridge reader exist.
 4. Accept or revise D-038; answer Q-119/Q-120; then voxel edit v1 (§3.6).
 5. Journal after D-040/Q-123/Q-124 (§3.7), remote auth after D-041 (§3.9); the wired-schema version matrix is done in #502, while the edit/journal freeze waits on those schemas.
