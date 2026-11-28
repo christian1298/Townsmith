@@ -150,6 +150,11 @@ run_screen() {
 		echo "Connected settlement screen smoke ($name) marker mismatch: $marker" >&2
 		exit 1
 	fi
+	roster_marker="$(grep '^SETTLEMENT_SCREEN_ROSTER ' <<<"$output" | tail -1 || true)"
+	if [[ ! "$roster_marker" =~ ^SETTLEMENT_SCREEN_ROSTER\ status=ok\ checks=[0-9]+$ ]]; then
+		echo "Connected settlement screen smoke ($name) roster marker mismatch: $roster_marker" >&2
+		exit 1
+	fi
 	read_marker="$(grep '^SETTLEMENT_SCREEN_CONNECTED_READ ' <<<"$output" | tail -1 || true)"
 	read_re='^SETTLEMENT_SCREEN_CONNECTED_READ settles=1 players=2 owner=[^ ]+ checksum=[0-9a-f]{16}$'
 	if [[ ! "$read_marker" =~ $read_re ]]; then
