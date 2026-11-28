@@ -887,6 +887,12 @@ pub enum ServerMessage {
         /// Excluded from `checksum`; fetch retained lines with `chat_since`.
         #[serde(default)]
         chat_seq: u64,
+        /// Authoritative pause state at send time.
+        ///
+        /// Part of the snapshot envelope, **not** of `checksum`. Older
+        /// payloads without the field decode as paused (`false`).
+        #[serde(default)]
+        paused: bool,
     },
     /// Read-only authoritative server status for connected clients.
     ///
@@ -917,6 +923,12 @@ pub enum ServerMessage {
         chat_seq: u64,
         /// Live advisory blueprint locks after lazy expiry.
         locks: u32,
+        /// Authoritative pause state at read time.
+        ///
+        /// Not part of the world checksum. Older payloads without the field
+        /// decode as paused (`false`).
+        #[serde(default)]
+        paused: bool,
         /// World checksum at `tick`.
         checksum: String,
     },
@@ -1741,6 +1753,9 @@ impl Session {
             visible_roads: self.roads,
             // The transport-only session has no chat log.
             chat_seq: 0,
+            // The transport-only session has no time control, so it is never
+            // paused.
+            paused: false,
         }
     }
 }
@@ -3257,6 +3272,17 @@ mod tests {
             _ => unreachable!(),
         }
         assert_eq!(session.tick(), 1);
+    }
+
+    #[test]
+    fn transport_snapshot_is_never_paused() {
+        let session = Session::new(LOOPBACK_SEED);
+        match session.snapshot() {
+            ServerMessage::Snapshot { paused, .. } => {
+                assert!(!paused, "the transport session has no time control");
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
     }
 
     #[test]
