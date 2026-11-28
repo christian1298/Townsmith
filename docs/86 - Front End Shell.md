@@ -39,7 +39,7 @@ The menu forwards `--smoke`, `--volume-smoke`, and `--world-placement-smoke` to 
 - Esc / east face: close the settings overlay, or return focus to New City.
 - The Settings overlay is a placeholder and says so; it does not write a config file.
 
-All strings are keyed through `world_i18n.gd` in English and German. The menu adds 18 world keys; the locale table reports **492** world keys.
+All strings are keyed through `world_i18n.gd` in English and German. The menu adds 18 world keys; the suite currently reports **511** world keys after the chat and settlement accessibility additions.
 
 ## 3. Smoke
 
