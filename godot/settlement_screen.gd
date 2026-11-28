@@ -96,6 +96,11 @@ const MODAL_EDIT := 0
 const MODAL_CANCEL := 1
 const MODAL_SAVE := 2
 const MODAL_FOCUS_ORDER := [MODAL_EDIT, MODAL_CANCEL, MODAL_SAVE]
+## Destructive confirmation modal focus. Cancel is the default so a stray
+## accept never sends the command.
+const CONFIRM_FOCUS_CANCEL := 0
+const CONFIRM_FOCUS_ACCEPT := 1
+const CONFIRM_FOCUS_ORDER := [CONFIRM_FOCUS_CANCEL, CONFIRM_FOCUS_ACCEPT]
 
 ## `Control.accessibility_live` values (Godot 4.7 exposes the property but not
 ## named constants). The list and detail use polite announcements; errors and
@@ -237,6 +242,22 @@ var _selected_member := 0
 var _pending_remove_id := 0
 var _pending_remove_player := 0
 var _pending_release_id := 0
+# Destructive confirmation modal. `_confirm_action` is release, transfer, or
+# remove_member; the pending ids above mirror the target while it is open and
+# are cleared with it. Confirm always re-reads the record and re-opens the
+# dialog when the revision moved instead of mutating blindly.
+var _confirm_open := false
+var _confirm_action := ""
+var _confirm_settlement_id := 0
+var _confirm_settlement_name := ""
+var _confirm_settlement_display := ""
+var _confirm_owner_text := ""
+var _confirm_target_id := 0
+var _confirm_target_text := ""
+var _confirm_revision := 0
+var _confirm_focus := CONFIRM_FOCUS_CANCEL
+var _confirm_opener_group := "actions"
+var _confirm_opener_action := "release"
 var _status_text := ""
 ## True while `_status_text` carries a rejection or unavailable reason. Drives
 ## the assertive live role without changing the rendered text or the smoke
@@ -330,7 +351,16 @@ var _picker_focus_cancel := true
 var _picker_opener_group := "actions"
 var _picker_opener_action := "invite"
 var _picker_checks := 0
+var _confirm_checks := 0
 var _a11y_checks := 0
+
+var _confirm_overlay: Control
+var _confirm_title: Label
+var _confirm_body: Label
+var _confirm_consequence: Label
+var _confirm_hint: Label
+var _confirm_cancel: Button
+var _confirm_accept: Button
 
 
 ## Host entry point for embedded mode. Call before `add_child`; the screen
@@ -572,6 +602,7 @@ func _build_ui() -> void:
 
 	_build_rename_modal()
 	_build_picker_modal()
+	_build_confirm_modal()
 
 
 func _build_rename_modal() -> void:
@@ -710,6 +741,74 @@ func _build_picker_modal() -> void:
 	_picker_cancel.text = _i18n.t("base.ui.settlement_screen.roster.cancel")
 	_picker_cancel.pressed.connect(_close_picker)
 	row.add_child(_picker_cancel)
+
+
+## Destructive confirmation modal. Names the settlement, the current owner, and
+## the target/consequence; Cancel is the default focus and the accept button
+## repeats the action verb. Mouse, keyboard, and gamepad all route through the
+## same `_confirm_focus` state.
+func _build_confirm_modal() -> void:
+	_confirm_overlay = Control.new()
+	_confirm_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_confirm_overlay.visible = false
+	_confirm_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(_confirm_overlay)
+
+	var shade := ColorRect.new()
+	shade.set_anchors_preset(Control.PRESET_FULL_RECT)
+	shade.color = Color(0.02, 0.03, 0.05, 0.72)
+	shade.mouse_filter = Control.MOUSE_FILTER_STOP
+	_confirm_overlay.add_child(shade)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_confirm_overlay.add_child(center)
+
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(460, 0)
+	center.add_child(panel)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 8)
+	panel.add_child(box)
+
+	_confirm_title = Label.new()
+	_confirm_title.add_theme_font_size_override("font_size", 18)
+	_confirm_title.add_theme_color_override("font_color", TEXT_COLOR)
+	box.add_child(_confirm_title)
+
+	_confirm_body = Label.new()
+	_confirm_body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_confirm_body.add_theme_color_override("font_color", TEXT_COLOR)
+	box.add_child(_confirm_body)
+
+	_confirm_consequence = Label.new()
+	_confirm_consequence.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_confirm_consequence.add_theme_color_override("font_color", Color(0.95, 0.72, 0.48))
+	box.add_child(_confirm_consequence)
+
+	_confirm_hint = Label.new()
+	_confirm_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_confirm_hint.add_theme_font_size_override("font_size", 11)
+	_confirm_hint.add_theme_color_override("font_color", MUTED_COLOR)
+	box.add_child(_confirm_hint)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	box.add_child(row)
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(spacer)
+	_confirm_cancel = Button.new()
+	_confirm_cancel.focus_mode = Control.FOCUS_NONE
+	_confirm_cancel.text = _i18n.t("base.ui.settlement_screen.confirm.cancel")
+	_confirm_cancel.pressed.connect(_close_confirm)
+	row.add_child(_confirm_cancel)
+	_confirm_accept = Button.new()
+	_confirm_accept.focus_mode = Control.FOCUS_NONE
+	_confirm_accept.text = _i18n.t("base.ui.settlement_screen.confirm.accept.release")
+	_confirm_accept.pressed.connect(_activate_confirm)
+	row.add_child(_confirm_accept)
 
 
 func _detail_label(parent: Node, font_size: int = 16) -> Label:
@@ -973,6 +1072,10 @@ func _reset_pending() -> void:
 	_pending_remove_id = 0
 	_pending_remove_player = 0
 	_pending_release_id = 0
+	if _confirm_open:
+		_confirm_open = false
+		if _confirm_overlay != null:
+			_confirm_overlay.visible = false
 
 
 func _select_page_number(number: int) -> void:
@@ -1059,6 +1162,8 @@ func _handle_key(event: InputEvent) -> bool:
 	_clear_gamepad_modality()
 	if _picker_open:
 		return _handle_picker_key(key)
+	if _confirm_open:
+		return _handle_confirm_key(key)
 	if _rename_open:
 		return _handle_modal_key(key)
 	if _line_edit_has_focus():
@@ -1240,6 +1345,8 @@ func _dispatch_gamepad(action: String) -> bool:
 		_render_footer()
 	if _picker_open:
 		return _dispatch_picker_gamepad(action)
+	if _confirm_open:
+		return _dispatch_confirm_gamepad(action)
 	if _rename_open:
 		return _dispatch_modal_gamepad(action)
 	match action:
@@ -1351,6 +1458,8 @@ func _render_footer() -> void:
 		_footer_label.visible = true
 	if _rename_hint != null:
 		_rename_hint.text = text if _rename_open else ""
+	if _confirm_hint != null:
+		_confirm_hint.text = _confirm_hint_text() if _confirm_open else ""
 	if _picker_hint != null and _picker_open:
 		_picker_hint.text = _picker_hint_text()
 
@@ -1358,6 +1467,13 @@ func _render_footer() -> void:
 func _footer_text() -> String:
 	if _picker_open:
 		return _picker_hint_text()
+	if _confirm_open:
+		if _gamepad_active:
+			return _i18n.t(
+				"base.ui.settlement_screen.footer.confirm",
+				{"bindings": _bindings_text(["ui_accept", "ui_cancel"])}
+			)
+		return _i18n.t("base.ui.settlement_screen.footer.confirm_keyboard")
 	if _rename_open:
 		if _gamepad_active:
 			return _i18n.t(
@@ -1810,6 +1926,11 @@ func _picker_activate() -> void:
 	var target := int(row.get("id", 0))
 	var action := _picker_action
 	_close_picker(false)
+	if action == "transfer":
+		var record := _fresh_record(_selected_id)
+		if not record.is_empty():
+			_open_confirm_for("transfer", record, target)
+		return
 	_send_picker_target(action, target)
 
 
@@ -1911,6 +2032,298 @@ func picker_snapshot() -> Dictionary:
 	}
 
 
+# --- Destructive confirmation modal ---------------------------------------
+
+## Open the modal for release, transfer, or remove-member. The record is the
+## candidate already read by the caller; confirm re-reads it before sending.
+## Returns false when the action is unavailable or the modal is already open.
+func _open_confirm_for(action: String, record: Dictionary, target: int) -> bool:
+	if _confirm_open or record.is_empty():
+		return false
+	if action != "release" and action != "transfer" and action != "remove_member":
+		return false
+	var id := _record_id(record)
+	_confirm_action = action
+	_confirm_settlement_id = id
+	_confirm_settlement_name = str(record.get("name", ""))
+	_confirm_settlement_display = _display_name(record)
+	_confirm_owner_text = _owner_text(record)
+	_confirm_target_id = target
+	if action == "transfer":
+		_confirm_target_text = _person_text(target) if target > 0 else ""
+	elif action == "remove_member":
+		_confirm_target_text = _person_text(target) if target > 0 else ""
+	else:
+		_confirm_target_text = ""
+	_confirm_revision = _revision(record)
+	_confirm_opener_group = _focus_group
+	_confirm_opener_action = action
+	# Mirror the target in the existing pending ids so a refresh/reset clears
+	# both views together.
+	_pending_release_id = id if action == "release" else 0
+	_pending_remove_id = id if action == "remove_member" else 0
+	_pending_remove_player = target if action == "remove_member" else 0
+	_confirm_focus = CONFIRM_FOCUS_CANCEL
+	_confirm_open = true
+	_confirm_overlay.visible = true
+	_render_confirm()
+	_render_footer()
+	_sync_focus_ring()
+	_refresh_accessibility()
+	return true
+
+
+## Update the visible record after a stale-revision re-read, staying open for an
+## explicit second confirm. Never sends while doing this.
+func _refresh_confirm_record(record: Dictionary) -> void:
+	_confirm_settlement_name = str(record.get("name", ""))
+	_confirm_settlement_display = _display_name(record)
+	_confirm_owner_text = _owner_text(record)
+	_confirm_revision = _revision(record)
+	_render_confirm()
+
+
+## Close the modal and restore the opener. `cancelled` writes the localized
+## cancel status; an accepted or re-opened flow leaves the result status alone.
+func _close_confirm(cancelled := true) -> void:
+	if not _confirm_open:
+		return
+	var opener_group := _confirm_opener_group
+	var opener_action := _confirm_opener_action
+	_confirm_open = false
+	_confirm_overlay.visible = false
+	_confirm_action = ""
+	_confirm_settlement_id = 0
+	_confirm_settlement_name = ""
+	_confirm_settlement_display = ""
+	_confirm_owner_text = ""
+	_confirm_target_id = 0
+	_confirm_target_text = ""
+	_confirm_revision = 0
+	_confirm_focus = CONFIRM_FOCUS_CANCEL
+	_pending_remove_id = 0
+	_pending_remove_player = 0
+	_pending_release_id = 0
+	if cancelled:
+		_status_error = false
+		_status_text = _i18n.t("base.ui.settlement_screen.action.cancelled")
+	_restore_focus_to(opener_group, opener_action)
+	_render_footer()
+	_render_detail()
+	_refresh_accessibility()
+
+
+## Confirm: re-read the record once, refuse a stale revision without sending,
+## otherwise send exactly one existing bridge/server command and close.
+func _activate_confirm() -> void:
+	if not _confirm_open:
+		return
+	var action := _confirm_action
+	var settlement_id := _confirm_settlement_id
+	var target := _confirm_target_id
+	var record := _fresh_record(settlement_id)
+	if record.is_empty():
+		_close_confirm(false)
+		_finish_action(action, _error("settlement.unknown"), 0)
+		return
+	var revision := _revision(record)
+	if revision != _confirm_revision:
+		_refresh_confirm_record(record)
+		_status_error = false
+		_status_text = _i18n.t(
+			"base.ui.settlement_screen.confirm.reconfirm",
+			{"revision": _i18n.format_int(revision)}
+		)
+		_render_detail()
+		return
+	if not bool(record.get("owned", false)):
+		_close_confirm(false)
+		_finish_action(action, _error("settlement.unowned"), revision)
+		return
+	var owner_id = record.get("owner_id")
+	if action == "release":
+		var release_result: Dictionary
+		if _connected_mode:
+			release_result = _net.settlement_release(settlement_id, revision)
+		else:
+			release_result = _core.settlement_release(settlement_id, revision)
+		_close_confirm(false)
+		_finish_action("release", release_result, revision)
+		return
+	if action == "transfer":
+		var transfer_target := _validated_confirm_target(action, record, target)
+		if transfer_target <= 0:
+			_close_confirm(false)
+			_finish_action("transfer", _error("no_recipient"), revision)
+			return
+		var transfer_result: Dictionary
+		if _connected_mode:
+			transfer_result = _net.settlement_transfer(settlement_id, transfer_target, revision)
+		else:
+			transfer_result = _core.settlement_transfer(settlement_id, transfer_target, revision)
+		_close_confirm(false)
+		_finish_action("transfer", transfer_result, revision)
+		return
+	if action == "remove_member":
+		var member_target := _validated_confirm_target(action, record, target)
+		if member_target <= 0:
+			_close_confirm(false)
+			_finish_action("remove_member", _error("no_member"), revision)
+			return
+		if owner_id != null and int(owner_id) == member_target:
+			_close_confirm(false)
+			_finish_action("remove_member", _error("settlement.owner_required"), revision)
+			return
+		var remove_result: Dictionary
+		if _connected_mode:
+			remove_result = _net.settlement_remove_member(settlement_id, member_target, revision)
+		else:
+			remove_result = _core.settlement_remove_member(settlement_id, member_target, revision)
+		_close_confirm(false)
+		_finish_action("remove_member", remove_result, revision)
+
+
+## A confirm target must still be valid on the freshly read record: transfer
+## excludes the owner, remove must name a current non-owner member.
+func _validated_confirm_target(action: String, record: Dictionary, target: int) -> int:
+	if target <= 0:
+		return 0
+	var owner = record.get("owner_id")
+	if owner != null and int(owner) == target:
+		return 0
+	if action == "transfer":
+		for id in _registered_ids():
+			if id == target:
+				return target
+		return 0
+	if action == "remove_member":
+		var members = record.get("members", [])
+		if members is Array:
+			for member in members:
+				if member is Dictionary and int((member as Dictionary).get("player", 0)) == target:
+					return target
+	return 0
+
+
+func _render_confirm() -> void:
+	if _confirm_title == null or _confirm_action.is_empty():
+		return
+	var id_text: String = _i18n.format_int(_confirm_settlement_id)
+	_confirm_title.text = _i18n.t(
+		"base.ui.settlement_screen.confirm.title.%s" % _confirm_action,
+		{"id": id_text}
+	)
+	var body_parts: Array[String] = [
+		_i18n.t(
+			"base.ui.settlement_screen.confirm.settlement",
+			{"name": _confirm_settlement_display, "id": id_text}
+		),
+		_i18n.t(
+			"base.ui.settlement_screen.confirm.owner",
+			{"owner": _confirm_owner_text}
+		),
+	]
+	if not _confirm_target_text.is_empty():
+		var target_key := (
+			"base.ui.settlement_screen.confirm.target"
+			if _confirm_action == "transfer"
+			else "base.ui.settlement_screen.confirm.member"
+		)
+		body_parts.append(_i18n.t(target_key, {"target": _confirm_target_text}))
+	_confirm_body.text = "\n".join(body_parts)
+	_confirm_consequence.text = _i18n.t(
+		"base.ui.settlement_screen.confirm.consequence.%s" % _confirm_action
+	)
+	_confirm_cancel.text = _i18n.t("base.ui.settlement_screen.confirm.cancel")
+	_confirm_accept.text = _i18n.t(
+		"base.ui.settlement_screen.confirm.accept.%s" % _confirm_action
+	)
+	_confirm_hint.text = _confirm_hint_text()
+	_sync_focus_ring()
+
+
+func _confirm_hint_text() -> String:
+	if _gamepad_active:
+		return _i18n.t(
+			"base.ui.settlement_screen.confirm.hint_gamepad",
+			{"bindings": _bindings_text(["ui_accept", "ui_cancel"])}
+		)
+	return _i18n.t("base.ui.settlement_screen.confirm.hint")
+
+
+func _handle_confirm_key(key: InputEventKey) -> bool:
+	match key.keycode:
+		KEY_ESCAPE:
+			_close_confirm()
+			return true
+		KEY_TAB:
+			_set_confirm_focus(
+				_next_confirm_focus(-1 if key.shift_pressed else 1)
+			)
+			return true
+		KEY_DOWN, KEY_RIGHT:
+			_set_confirm_focus(_next_confirm_focus(1))
+			return true
+		KEY_UP, KEY_LEFT:
+			_set_confirm_focus(_next_confirm_focus(-1))
+			return true
+		KEY_HOME:
+			_set_confirm_focus(CONFIRM_FOCUS_CANCEL)
+			return true
+		KEY_END:
+			_set_confirm_focus(CONFIRM_FOCUS_ACCEPT)
+			return true
+		KEY_ENTER, KEY_KP_ENTER, KEY_SPACE:
+			_activate_confirm_focus()
+			return true
+	return false
+
+
+func _dispatch_confirm_gamepad(action: String) -> bool:
+	match action:
+		"ui_up", "ui_down", "ui_left", "ui_right":
+			_set_confirm_focus(_next_confirm_focus(-1 if action == "ui_up" or action == "ui_left" else 1))
+		"ui_accept":
+			_activate_confirm_focus()
+		"ui_cancel":
+			_close_confirm()
+		_:
+			return false
+	return true
+
+
+func _next_confirm_focus(direction: int) -> int:
+	return CONFIRM_FOCUS_ACCEPT if _confirm_focus == CONFIRM_FOCUS_CANCEL else CONFIRM_FOCUS_CANCEL
+
+
+func _set_confirm_focus(value: int) -> void:
+	_confirm_focus = clampi(value, CONFIRM_FOCUS_CANCEL, CONFIRM_FOCUS_ACCEPT)
+	_sync_focus_ring()
+
+
+func _activate_confirm_focus() -> void:
+	if _confirm_focus == CONFIRM_FOCUS_CANCEL:
+		_close_confirm()
+	else:
+		_activate_confirm()
+
+
+func confirm_snapshot() -> Dictionary:
+	return {
+		"open": _confirm_open,
+		"action": _confirm_action,
+		"settlement": _confirm_settlement_id,
+		"name": _confirm_settlement_display,
+		"owner": _confirm_owner_text,
+		"target": _confirm_target_id,
+		"target_text": _confirm_target_text,
+		"focus": "cancel" if _confirm_focus == CONFIRM_FOCUS_CANCEL else "accept",
+		"body": _confirm_body.text if _confirm_body != null else "",
+		"consequence": _confirm_consequence.text if _confirm_consequence != null else "",
+		"accept": _confirm_accept.text if _confirm_accept != null else "",
+	}
+
+
 # --- Screen-reader semantics -----------------------------------------------
 
 ## One control's semantic entry. Names and descriptions resolve through
@@ -1980,6 +2393,12 @@ func accessibility_snapshot() -> Dictionary:
 		"picker_empty": _a11y_entry(_picker_empty, "status"),
 		"picker_hint": _a11y_entry(_picker_hint, "label"),
 		"picker_cancel": _a11y_entry(_picker_cancel, "button"),
+		"confirm_title": _a11y_entry(_confirm_title, "heading"),
+		"confirm_body": _a11y_entry(_confirm_body, "group"),
+		"confirm_consequence": _a11y_entry(_confirm_consequence, "status"),
+		"confirm_hint": _a11y_entry(_confirm_hint, "label"),
+		"confirm_cancel": _a11y_entry(_confirm_cancel, "button"),
+		"confirm_accept": _a11y_entry(_confirm_accept, "button"),
 	}
 	var actions := {}
 	for entry in ACTION_ORDER:
@@ -2016,6 +2435,7 @@ func accessibility_snapshot() -> Dictionary:
 			"rename_error": str(entries["rename_error"]["live"]),
 			"picker_list": str(entries["picker_list"]["live"]),
 			"picker_empty": str(entries["picker_empty"]["live"]),
+			"confirm_consequence": str(entries["confirm_consequence"]["live"]),
 		},
 		"counts": {
 			"total": total,
@@ -2024,6 +2444,7 @@ func accessibility_snapshot() -> Dictionary:
 		},
 		"has_modal": _rename_open,
 		"has_picker": _picker_open,
+		"has_confirm": _confirm_open,
 	}
 
 
@@ -2294,6 +2715,57 @@ func _refresh_accessibility() -> void:
 		_picker_cancel.accessibility_description = _i18n.t(
 			"base.ui.settlement_screen.a11y.roster.cancel_hint"
 		)
+	if _confirm_title != null:
+		_confirm_title.accessibility_name = (
+			_confirm_title.text
+			if not _confirm_title.text.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.confirm.dialog")
+		)
+		_confirm_title.accessibility_description = _i18n.t(
+			"base.ui.settlement_screen.a11y.confirm.dialog_description"
+		)
+	if _confirm_body != null:
+		_confirm_body.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.confirm.body"
+		)
+		_confirm_body.accessibility_description = (
+			_confirm_body.text
+			if not _confirm_body.text.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.confirm.body_idle")
+		)
+	if _confirm_consequence != null:
+		_confirm_consequence.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.confirm.consequence"
+		)
+		_confirm_consequence.accessibility_description = (
+			_confirm_consequence.text
+			if not _confirm_consequence.text.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.confirm.consequence_idle")
+		)
+		_confirm_consequence.accessibility_live = A11Y_LIVE_ASSERTIVE
+	if _confirm_hint != null:
+		_confirm_hint.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.confirm.hint"
+		)
+		_confirm_hint.accessibility_description = (
+			_confirm_hint.text
+			if not _confirm_hint.text.is_empty()
+			else _i18n.t("base.ui.settlement_screen.a11y.confirm.hint_idle")
+		)
+	if _confirm_cancel != null:
+		_confirm_cancel.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.confirm.cancel"
+		)
+		_confirm_cancel.accessibility_description = _i18n.t(
+			"base.ui.settlement_screen.a11y.confirm.cancel_hint"
+		)
+	if _confirm_accept != null:
+		_confirm_accept.accessibility_name = _i18n.t(
+			"base.ui.settlement_screen.a11y.confirm.accept"
+		)
+		_confirm_accept.accessibility_description = _i18n.t(
+			"base.ui.settlement_screen.a11y.confirm.accept_hint"
+		)
 
 
 func _sync_focus_ring() -> void:
@@ -2358,23 +2830,35 @@ func _smoke_press(key: int, shift := false) -> void:
 
 func focus_snapshot() -> Dictionary:
 	var any_enabled := false
-	if not _rename_open and not _picker_open:
+	if not _rename_open and not _picker_open and not _confirm_open:
 		for button in _action_buttons.values():
 			if button is Button and not (button as Button).disabled:
 				any_enabled = true
 				break
+	var group := _focus_group
+	if _picker_open:
+		group = "picker"
+	elif _confirm_open:
+		group = "confirm"
+	elif _rename_open:
+		group = "modal"
 	return {
 		"focus": _focus_name(),
-		"group": "picker" if _picker_open else ("modal" if _rename_open else _focus_group),
+		"group": group,
 		"selected_id": _selected_id,
 		"page": _page_index + 1,
 		"has_modal": _rename_open,
 		"has_picker": _picker_open,
+		"has_confirm": _confirm_open,
 		"actions_enabled": any_enabled,
 	}
 
 
 func _focus_name() -> String:
+	if _confirm_open:
+		if _confirm_focus == CONFIRM_FOCUS_CANCEL:
+			return "confirm.cancel"
+		return "confirm.accept"
 	if _picker_open:
 		if _picker_focus_cancel:
 			return "picker.cancel"
@@ -2897,7 +3381,11 @@ func _connected_set_tax(settlement_id: int, rate: int) -> Dictionary:
 
 
 func _transfer_selected() -> void:
-	var record := _mutation_record("transfer")
+	if _confirm_open:
+		if _confirm_action == "transfer":
+			_activate_confirm()
+		return
+	var record := _fresh_record(_selected_id)
 	if record.is_empty():
 		return
 	var revision := _revision(record)
@@ -2908,6 +3396,8 @@ func _transfer_selected() -> void:
 	if target <= 0:
 		_finish_action("transfer", _error("no_recipient"), revision)
 		return
+	_open_confirm_for("transfer", record, target)
+	return
 	var result: Dictionary
 	if _connected_mode:
 		result = _net.settlement_transfer(_record_id(record), target, revision)
@@ -2960,6 +3450,24 @@ func _cycle_role() -> void:
 
 
 func _remove_selected() -> void:
+	if _confirm_open:
+		if _confirm_action == "remove_member":
+			_activate_confirm()
+		return
+	var fresh := _fresh_record(_selected_id)
+	var fresh_member := _selected_member_record(fresh)
+	if fresh_member.is_empty():
+		_status_error = true
+		_status_text = _i18n.t(
+			"base.ui.settlement_screen.action.result_failed",
+			{"action": _action_label("remove_member"), "code": "no_member",
+			 "revision": _i18n.format_int(_revision(fresh))}
+		)
+		_focus_action_control("remove_member")
+		_render_detail()
+		return
+	_open_confirm_for("remove_member", fresh, int(fresh_member.get("player", 0)))
+	return
 	var member := _selected_member_record(_current_record())
 	if member.is_empty():
 		_status_error = true
@@ -3014,6 +3522,18 @@ func _attempt_remove_member(record: Dictionary, player: int) -> Dictionary:
 func _release_selected() -> void:
 	if _selected_id <= 0:
 		return
+	if _confirm_open:
+		if _confirm_action == "release":
+			_activate_confirm()
+		return
+	var fresh := _fresh_record(_selected_id)
+	if fresh.is_empty():
+		return
+	if not bool(fresh.get("owned", false)):
+		_finish_action("release", _error("settlement.unowned"), _revision(fresh))
+		return
+	_open_confirm_for("release", fresh, 0)
+	return
 	if _pending_release_id != _selected_id:
 		var cached := _current_record()
 		if cached.is_empty() or not bool(cached.get("owned", false)):
@@ -3198,6 +3718,8 @@ func _render_all() -> void:
 		)
 	_render_list()
 	_render_detail()
+	if _confirm_open:
+		_render_confirm()
 	_render_footer()
 	if _picker_open:
 		_render_picker()
@@ -3690,6 +4212,7 @@ func _run_smoke() -> void:
 	_remove_selected()
 	_remove_selected()
 	_transfer_selected()
+	_transfer_selected()
 	_release_selected()
 	_release_selected()
 
@@ -3803,6 +4326,7 @@ func _run_smoke() -> void:
 	_expect_pad(str(pad.get("last_action", "")) == last_action, "unknown gamepad action is ignored", failures)
 
 	_run_a11y_checks(failures, false)
+	_run_confirm_checks(failures)
 	print("SETTLEMENT_SCREEN_GAMEPAD status=ok checks=%d" % _gamepad_checks)
 	print("SETTLEMENT_SCREEN_FOCUS group=rows tab=paging shift=ok arrows=ok modal=trap esc=detail")
 	print("SETTLEMENT_SCREEN_PAGES sizes=8/8/7 selected_last=23")
@@ -4010,6 +4534,8 @@ func _run_connected_smoke() -> void:
 	_smoke_press(KEY_DOWN)
 	_smoke_press(KEY_ENTER)
 	_expect_pick(not _picker_open, "transfer selection closes the picker", failures)
+	if _confirm_open:
+		_transfer_selected()
 	_expect(_action_count == transfer_before + 1, "transfer counted", failures)
 	_expect(int(_current_record().get("owner_id", 0)) == 2, "ownership transferred to 2", failures)
 	_expect(
@@ -4036,6 +4562,7 @@ func _run_connected_smoke() -> void:
 	_switch_locale("en")
 
 	_run_a11y_checks(failures, true)
+	_run_confirm_checks(failures)
 	print("SETTLEMENT_SCREEN_CONNECTED_READ settles=%d players=%d owner=%s checksum=%s" % [
 		_matched,
 		_player_names.size(),
@@ -4266,6 +4793,67 @@ func _expect_a11y(condition: bool, label: String, failures: Array) -> void:
 ## Read-only screen-reader audit shared by the local and connected smokes.
 ## Opens and closes the modal/picker without issuing a mutation or changing
 ## selection, action counters, or checksums.
+## Read-only confirmation-modal audit: open, inspect, cancel. Every open is
+## closed without sending, so action counters and bridge state stay unchanged.
+func _run_confirm_checks(failures: Array) -> void:
+	var before_actions := _action_count
+	var checks := 0
+	_load_page(0)
+	_select_page_number(2)
+	var record := _fresh_record(_selected_id)
+	if record.is_empty():
+		_select_page_number(1)
+		record = _fresh_record(_selected_id)
+	var ok := true
+	var failed := PackedStringArray()
+	checks += 1
+	if not _open_confirm_for("release", record, 0):
+		ok = false
+		failed.append("open")
+	checks += 1
+	if not _confirm_open or _confirm_focus != CONFIRM_FOCUS_CANCEL:
+		ok = false
+		failed.append("focus")
+	checks += 1
+	if not _confirm_title.text.contains("Release") or _confirm_body.text.is_empty():
+		ok = false
+		failed.append("title:" + _confirm_title.text + "|" + _confirm_body.text)
+	checks += 1
+	if _confirm_consequence.text.is_empty():
+		ok = false
+		failed.append("consequence")
+	checks += 1
+	if str(confirm_snapshot().get("focus", "")) != "cancel":
+		ok = false
+		failed.append("snapshot")
+	checks += 1
+	_close_confirm()
+	if _confirm_open or _action_count != before_actions:
+		ok = false
+		failed.append("cancel")
+	checks += 1
+	if not _open_confirm_for("remove_member", record, 11):
+		ok = false
+		failed.append("remove_open")
+	checks += 1
+	if not _confirm_title.text.contains("Remove"):
+		ok = false
+		failed.append("remove_title")
+	_close_confirm()
+	checks += 1
+	if _confirm_open:
+		ok = false
+		failed.append("remove_close")
+	var confirm_line := "SETTLEMENT_SCREEN_CONFIRM status=%s checks=%d" % [
+		"ok" if ok else "failed", checks,
+	]
+	if not failed.is_empty():
+		confirm_line += " failed=" + ",".join(failed)
+	print(confirm_line)
+	if not ok:
+		failures.append("confirm")
+
+
 func _run_a11y_checks(failures: Array, with_picker: bool) -> void:
 	var before := failures.size()
 	_refresh_accessibility()
