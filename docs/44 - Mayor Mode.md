@@ -102,7 +102,7 @@ The mode switch:
 - returns to the exact Mayor camera state on `M`/`Esc`.
 
 Actual voxel editing remains in the workshop editor:
-`GODOT=/path/to/godot ./scripts/run_godot.sh` opens `main.tscn`; `editor.tscn` is the authoring space. A scene handoff with the selected blueprint is the next slice.
+`GODOT=/path/to/godot ./scripts/run_godot.sh` opens the start menu; choose **New City** for `world_placement.tscn`, or open it directly. `editor.tscn` is the authoring space. A scene handoff with the selected blueprint is the next slice.
 
 ## 6. Headless smoke
 

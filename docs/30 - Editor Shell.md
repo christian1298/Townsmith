@@ -32,11 +32,11 @@ The pad is a non-voxel `BoxMesh` **16 × 2 × 16 m** whose top face is the `Y = 
 ```bash
 # Build the extension, then run the editor scene explicitly.
 ./scripts/build_godot_ext.sh
-GODOT=/path/to/godot ./scripts/run_godot.sh   # defaults to main.tscn
+GODOT=/path/to/godot ./scripts/run_godot.sh   # opens the start menu
 /path/to/godot --path godot res://editor.tscn
 ```
 
-`run_godot.sh` keeps `main.tscn` as the project's default scene (the Phase 0 benchmark entry point). Use the explicit scene argument for the editor; the default is intentionally unchanged.
+`run_godot.sh` now opens the start menu (`main_menu.tscn`); choose **Blueprint Editor**, or pass the explicit scene argument, for the editor. The terrain demo remains `main.tscn` and is reachable from the menu.
 
 ## 3. Controls
 

@@ -558,6 +558,27 @@ const TABLES := {
 		"base.ui.settlement_editor.members.none": "none",
 		"base.ui.settlement_editor.owned.yes": "yes",
 		"base.ui.settlement_editor.owned.no": "no",
+
+		# Front-end shell (docs/86). The menu only names destinations; hints stay
+		# short and say when a destination is a developer scene or needs a server.
+		"base.ui.menu.title": "Townsmith",
+		"base.ui.menu.subtitle": "Voxel city builder · pre-production shell",
+		"base.ui.menu.new_city": "New City",
+		"base.ui.menu.blueprint_editor": "Blueprint Editor",
+		"base.ui.menu.terrain_preview": "Terrain Preview",
+		"base.ui.menu.multiplayer": "Multiplayer",
+		"base.ui.menu.settings": "Settings",
+		"base.ui.menu.quit": "Quit",
+		"base.ui.menu.hint.new_city": "World placement preview: streamed terrain, ghost, placement.",
+		"base.ui.menu.hint.blueprint_editor": "Voxel blueprint editor.",
+		"base.ui.menu.hint.terrain_preview": "Phase 0 terrain streaming demo.",
+		"base.ui.menu.hint.multiplayer": "Needs a running server: start townsmith-server --listen PORT first.",
+		"base.ui.menu.hint.settings": "Not implemented yet; this build only shows a placeholder.",
+		"base.ui.menu.hint.quit": "Closes the game.",
+		"base.ui.menu.settings.title": "Settings",
+		"base.ui.menu.settings.body": "Settings are not implemented yet. No save, audio, input, or graphics options in this build.",
+		"base.ui.menu.settings.close": "Close",
+		"base.ui.menu.footer": "Up/Down or D-pad: focus · Enter/A: open · Esc/B: back",
 	},
 	"de": {
 		# Bürgerpanel.
@@ -1087,6 +1108,26 @@ const TABLES := {
 		"base.ui.settlement_editor.members.none": "keine",
 		"base.ui.settlement_editor.owned.yes": "ja",
 		"base.ui.settlement_editor.owned.no": "nein",
+
+		# Startmenü (docs/86).
+		"base.ui.menu.title": "Townsmith",
+		"base.ui.menu.subtitle": "Voxel-Städtebau · Vorproduktions-Hülle",
+		"base.ui.menu.new_city": "Neue Stadt",
+		"base.ui.menu.blueprint_editor": "Bauplan-Editor",
+		"base.ui.menu.terrain_preview": "Geländevorschau",
+		"base.ui.menu.multiplayer": "Mehrspieler",
+		"base.ui.menu.settings": "Einstellungen",
+		"base.ui.menu.quit": "Beenden",
+		"base.ui.menu.hint.new_city": "Weltplatzierungs-Vorschau: gestreamtes Gelände, Vorschau, Platzieren.",
+		"base.ui.menu.hint.blueprint_editor": "Voxel-Bauplan-Editor.",
+		"base.ui.menu.hint.terrain_preview": "Gelände-Streaming-Demo aus Phase 0.",
+		"base.ui.menu.hint.multiplayer": "Braucht einen laufenden Server: zuerst townsmith-server --listen PORT starten.",
+		"base.ui.menu.hint.settings": "Noch nicht umgesetzt; dieser Build zeigt nur einen Platzhalter.",
+		"base.ui.menu.hint.quit": "Beendet das Spiel.",
+		"base.ui.menu.settings.title": "Einstellungen",
+		"base.ui.menu.settings.body": "Einstellungen sind noch nicht umgesetzt. Keine Speicher-, Audio-, Eingabe- oder Grafikoptionen in diesem Build.",
+		"base.ui.menu.settings.close": "Schließen",
+		"base.ui.menu.footer": "Hoch/Runter oder Steuerkreuz: Fokus · Enter/A: öffnen · Esc/B: zurück",
 	},
 }
 
