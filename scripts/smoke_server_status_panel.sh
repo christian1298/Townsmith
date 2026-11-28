@@ -51,6 +51,14 @@ set -euo pipefail
 #   - two watch stubs with identical counters and flipped vs constant `paused`
 #     must print the same aggregate checksum (pause is not in the checksum)
 #
+# Screen-reader semantics:
+#   - one-shot, fixture, legacy-no-paused, and watch start/stop runs each print
+#     SERVER_STATUS_PANEL_A11Y status=ok checks=44; a success prints one after
+#     the first rendered snapshot and one at the stop, so those runs carry two
+#   - a failed run prints the same a11y line once (the status line is assertive)
+#   - the existing SERVER_STATUS_PANEL, PAUSED, WATCH, and failure-code lines do
+#     not move; only the new marker is added to the contract
+#
 # Readiness and completion are bounded polls of the server/stub log. The
 # server, stub, and kill proxy are all killed on exit.
 
@@ -576,6 +584,55 @@ paused_marker_line() {
 	grep "^SERVER_STATUS_PANEL_PAUSED " <<<"$OUTPUT" | tail -1 || true
 }
 
+# One stable line: the panel's own self-check of names, descriptions, live
+# modes, and the Time row. `checks` is fixed, so it never tracks the counters.
+A11Y_LINE="SERVER_STATUS_PANEL_A11Y status=ok checks=44"
+
+a11y_marker_lines() {
+	grep "^SERVER_STATUS_PANEL_A11Y " <<<"$OUTPUT" || true
+}
+
+# assert_a11y_marker LABEL EXPECTED_COUNT
+#
+# Every a11y line in the captured run must be the stable ok line, and exactly
+# EXPECTED_COUNT of them must be present.
+assert_a11y_marker() {
+	local label="$1"
+	local expected="$2"
+	local lines
+	lines="$(a11y_marker_lines)"
+	local count=0
+	if [[ -n "$lines" ]]; then
+		count="$(grep -c . <<<"$lines")"
+	fi
+	if [[ "$count" -ne "$expected" ]]; then
+		fail "$label" "expected $expected a11y markers, got $count: ${lines:-<none>}"
+	fi
+	local unexpected
+	unexpected="$(grep -vx "$A11Y_LINE" <<<"$lines" || true)"
+	if [[ -n "$unexpected" ]]; then
+		fail "$label" "unexpected a11y marker: $unexpected"
+	fi
+}
+
+# assert_a11y_present LABEL
+#
+# Watch failures can fault before or after the first snapshot, so only the line
+# shape and presence are pinned.
+assert_a11y_present() {
+	local label="$1"
+	local lines
+	lines="$(a11y_marker_lines)"
+	if [[ -z "$lines" ]]; then
+		fail "$label" "no SERVER_STATUS_PANEL_A11Y marker"
+	fi
+	local unexpected
+	unexpected="$(grep -vx "$A11Y_LINE" <<<"$lines" || true)"
+	if [[ -n "$unexpected" ]]; then
+		fail "$label" "unexpected a11y marker: $unexpected"
+	fi
+}
+
 watch_marker_line() {
 	grep "^SERVER_STATUS_WATCH " <<<"$OUTPUT" | tail -1 || true
 }
@@ -619,6 +676,9 @@ expect_fail() {
 	if [[ "$line" != "SERVER_STATUS_PANEL status=fail code=$expected" ]]; then
 		fail "$label" "expected code=$expected, got: ${line:-<no marker>}"
 	fi
+	# A failure switches the status live region to assertive; the self-check
+	# still reports ok and runs once, since no snapshot was rendered.
+	assert_a11y_marker "$label" 1
 }
 
 # expect_watch_fail LABEL EXPECTED [panel args...]
@@ -639,6 +699,7 @@ expect_watch_fail() {
 		fail "$label" "expected '$expected', got: ${line:-<no marker>}"
 	fi
 	LAST_WATCH_LINE="$line"
+	assert_a11y_present "$label"
 	printf '%s\n' "$line"
 }
 
@@ -664,6 +725,7 @@ expect_fixture_ok() {
 			fail "$label" "expected paused '$expected_paused', got: ${paused_line:-<no marker>}"
 		fi
 	fi
+	assert_a11y_marker "$label" 2
 }
 
 # run_status_stub LABEL MODE EXPECTED_PAUSED_MARKER
@@ -695,6 +757,7 @@ run_status_stub() {
 	if grep -q "STUB_ERROR" "$STUB_LOG"; then
 		fail "$label" "stub protocol error"
 	fi
+	assert_a11y_marker "$label" 2
 	printf '%s\n' "$paused_line"
 }
 
@@ -725,6 +788,7 @@ run_watch_stub_steady() {
 	wait_for_log "$STUB_LOG" "$STUB_PID" "STUB_DONE mode=$mode requests=3 accepts=1" 10
 	wait_for_exit "$STUB_PID" 10
 	stop_stub
+	assert_a11y_marker "$label" 2
 	printf '%s\n' "$line"
 }
 
@@ -752,6 +816,7 @@ run_panel() {
 	if [[ "$paused_line" != "SERVER_STATUS_PANEL_PAUSED status=ok paused=false running=true" ]]; then
 		fail "$label" "expected a running server, got: ${paused_line:-<no marker>}"
 	fi
+	assert_a11y_marker "$label" 2
 
 	# A requested disconnect is visible in the server report; wait for it so
 	# the process exits on its own rather than relying on cleanup.
@@ -809,6 +874,7 @@ run_watch() {
 	if [[ -n "$(paused_marker_line)" ]]; then
 		fail "$label" "watch mode must not print the one-shot pause marker"
 	fi
+	assert_a11y_marker "$label" 2
 
 	wait_for_log "$SERVER_LOG" "$SERVER_PID" "SERVER_LISTEN status=ok sessions=1 " 10
 	wait_for_exit "$SERVER_PID" 10
@@ -877,6 +943,7 @@ run_watch_advance() {
 	wait_for_exit "$STUB_PID" 10
 	stop_stub
 	LAST_WATCH_LINE="$line"
+	assert_a11y_marker "$label" 2
 	printf '%s\n' "$line"
 }
 

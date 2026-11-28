@@ -68,6 +68,16 @@ extends Control
 ## the aggregate marker never moves when the world pauses or resumes.
 ## `scripts/smoke_server_status_panel.sh` covers the valid path twice plus the
 ## connect/reject/shape fixtures and a two-run watch pass/fail matrix.
+##
+## Screen-reader semantics: the title, every value row, and the status line
+## carry `accessibility_name`/`accessibility_description`. The status line is a
+## polite live region while snapshots tick and becomes assertive on failure.
+## `accessibility_snapshot()` exposes the property state for the smoke. The
+## panel self-checks that copy on the first rendered snapshot (watch start) and
+## on every terminal path, printing one stable line:
+##   SERVER_STATUS_PANEL_A11Y status=ok checks=44
+## A regression in the panel's own copy prints `status=fail check=<id>` and
+## fails the run with `status.a11y`; no protocol input can trigger that check.
 
 enum Phase {
 	CONNECTING,
@@ -107,6 +117,54 @@ const STATUS_FIELDS := [
 	"locks",
 ]
 
+## `Control.accessibility_live` values (Godot 4.7 exposes the property but not
+## named enum constants). The ticking status snapshot is polite; a failure
+## interrupts as assertive.
+const A11Y_LIVE_OFF := 0
+const A11Y_LIVE_POLITE := 1
+const A11Y_LIVE_ASSERTIVE := 2
+
+## Guards a description from re-reading a long value line. The row's own label
+## already carries the number; the description stays a short sentence.
+const A11Y_MAX_DESCRIPTION := 160
+
+## Screen-reader copy for the value rows, keyed by the visible row id. Entry 0
+## is the control name, entry 1 the sentence used before a status arrives, and
+## entry 2 the same sentence with the rendered value. The panel is English-only
+## like its visible labels, so this stays a literal table with no locale key.
+const A11Y_ROWS := {
+	"Tick": ["Tick", "Server tick.", "Server tick, currently %s."],
+	"Population": ["Population", "Residents tracked by the server.", "Population, currently %s."],
+	"Balance": ["Balance", "Treasury balance.", "Treasury balance, currently %s."],
+	"Roads": ["Roads", "Road records in the world.", "Roads, currently %s."],
+	"Buildings": ["Buildings", "Building records in the world.", "Buildings, currently %s."],
+	"Settlements": ["Settlements", "Settlements in the world.", "Settlements, currently %s."],
+	"Placements": ["Placements", "Blueprint placements recorded.", "Placements, currently %s."],
+	"Online": ["Online players", "Players connected right now.", "Online players, currently %s."],
+	"Chat seq": ["Chat sequence", "Chat message sequence number.", "Chat seq, currently %s."],
+	"Locks": ["Locks", "Edit locks currently held.", "Locks, currently %s."],
+	"Checksum": ["Checksum", "Stable world checksum for this snapshot; the row shows the full value.", "Stable world checksum for this snapshot; the row shows the full value."],
+}
+
+## Deterministic snapshot and self-check order: the heading, every value row,
+## then the status line.
+const A11Y_KEYS := [
+	"title",
+	"tick",
+	"population",
+	"balance",
+	"roads",
+	"buildings",
+	"settlements",
+	"placements",
+	"online",
+	"chat_seq",
+	"locks",
+	"time",
+	"checksum",
+	"status",
+]
+
 var _peer: StreamPeerTCP
 var _peer_closed := false
 var _phase: int = Phase.CONNECTING
@@ -140,6 +198,10 @@ var _paused := false
 
 var _status_label: Label
 var _value_labels: Dictionary = {}
+var _title: Label
+var _a11y_assertive := false
+var _a11y_start_emitted := false
+var _a11y_in_emit := false
 
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
@@ -354,6 +416,12 @@ func _on_server_status(message: Dictionary) -> void:
 		return
 
 	_refresh_ui()
+	# The first rendered snapshot is the watch start (and the only snapshot of a
+	# one-shot or fixture run); later polls update the polite live region without
+	# printing another marker.
+	if not _a11y_start_emitted:
+		_a11y_start_emitted = true
+		_emit_a11y()
 	if _watch and not _fixture_mode:
 		_on_watch_status()
 		return
@@ -455,9 +523,14 @@ func _finish_watch_ok() -> void:
 		# The success marker promises exactly the configured number of polls.
 		_fail("status.watch_incomplete")
 		return
-	_finished = true
 	set_process(false)
 	_set_status("Watch complete.")
+	# Terminal a11y self-check (the watch stop line). It may fail the run, so
+	# only mark the run finished afterwards.
+	_emit_a11y()
+	if _finished:
+		return
+	_finished = true
 	_close_peer()
 	print(
 		(
@@ -541,9 +614,14 @@ func _finish_ok() -> void:
 	if not _expect_fail.is_empty():
 		_fail("status.unexpected_ok")
 		return
-	_finished = true
 	set_process(false)
 	_set_status("Disconnected.")
+	# Terminal a11y self-check (the stop line for a one-shot or fixture run).
+	# It may fail the run, so only mark the run finished afterwards.
+	_emit_a11y()
+	if _finished:
+		return
+	_finished = true
 	_close_peer()
 	if not _smoke:
 		print("SERVER_STATUS_PANEL status=ok rendered=true")
@@ -576,7 +654,11 @@ func _fail(code: String, extra := "") -> void:
 		return
 	_finished = true
 	set_process(false)
+	# A failure is the assertive state for the status live region; the terminal
+	# self-check asserts that mode and the fallback row copy.
+	_a11y_assertive = true
 	_set_status("Failed: " + code)
+	_emit_a11y()
 	_close_peer()
 	if _watch and not _fixture_mode:
 		# Watch mode never reconnects. The marker is the test surface: one
@@ -639,10 +721,10 @@ func _build_ui() -> void:
 	root.add_theme_constant_override("separation", 8)
 	margin.add_child(root)
 
-	var title := Label.new()
-	title.text = "Server status"
-	title.add_theme_font_size_override("font_size", 18)
-	root.add_child(title)
+	_title = Label.new()
+	_title.text = "Server status"
+	_title.add_theme_font_size_override("font_size", 18)
+	root.add_child(_title)
 
 	_status_label = Label.new()
 	_status_label.text = "Starting..."
@@ -698,10 +780,163 @@ func _refresh_ui() -> void:
 		_value_labels["Time"].text = "Paused" if _paused else "Running"
 	if _value_labels.has("Checksum"):
 		_value_labels["Checksum"].text = _checksum
+	_refresh_accessibility()
 
 func _set_status(text: String) -> void:
 	if _status_label != null:
 		_status_label.text = text
+		_refresh_accessibility()
+
+
+## Screen-reader state for the deterministic smoke. Each value row exposes the
+## name and concise description a screen reader would announce; `status` also
+## exposes whether the ticking snapshot is polite or an assertive failure.
+func accessibility_snapshot() -> Dictionary:
+	return {
+		"title": _a11y_entry(_title, "heading"),
+		"tick": _a11y_entry(_value_labels.get("Tick"), "status"),
+		"population": _a11y_entry(_value_labels.get("Population"), "status"),
+		"balance": _a11y_entry(_value_labels.get("Balance"), "status"),
+		"roads": _a11y_entry(_value_labels.get("Roads"), "status"),
+		"buildings": _a11y_entry(_value_labels.get("Buildings"), "status"),
+		"settlements": _a11y_entry(_value_labels.get("Settlements"), "status"),
+		"placements": _a11y_entry(_value_labels.get("Placements"), "status"),
+		"online": _a11y_entry(_value_labels.get("Online"), "status"),
+		"chat_seq": _a11y_entry(_value_labels.get("Chat seq"), "status"),
+		"locks": _a11y_entry(_value_labels.get("Locks"), "status"),
+		"time": _a11y_entry(_value_labels.get("Time"), "status"),
+		"checksum": _a11y_entry(_value_labels.get("Checksum"), "status"),
+		"status": _a11y_entry(_status_label, "status"),
+	}
+
+
+## English screen-reader copy for every visible part. The panel has no locale
+## table, so names and descriptions stay literals next to its visible labels.
+## The status line is a polite live region while snapshots tick; a failure
+## switches it to assertive so the stable error code interrupts.
+func _refresh_accessibility() -> void:
+	if _title != null:
+		_title.accessibility_name = "Server status"
+		_title.accessibility_description = (
+			"Read-only snapshot of the authoritative server counters."
+		)
+	for field in A11Y_ROWS:
+		if not _value_labels.has(field):
+			continue
+		var value_label: Label = _value_labels[field]
+		var copy: Array = A11Y_ROWS[field]
+		value_label.accessibility_name = str(copy[0])
+		value_label.accessibility_description = _a11y_row_description(field, copy)
+	if _value_labels.has("Time"):
+		var time_label: Label = _value_labels["Time"]
+		time_label.accessibility_name = "Time"
+		if _status.is_empty():
+			time_label.accessibility_description = (
+				"Server clock state is not known yet."
+			)
+		else:
+			time_label.accessibility_description = (
+				"Server clock is paused; simulation is frozen."
+				if _paused
+				else "Server clock is running; simulation advances."
+			)
+	if _status_label != null:
+		_status_label.accessibility_name = "Server status"
+		_status_label.accessibility_description = _status_label.text
+		_status_label.accessibility_live = (
+			A11Y_LIVE_ASSERTIVE if _a11y_assertive else A11Y_LIVE_POLITE
+		)
+
+
+func _a11y_row_description(field: String, copy: Array) -> String:
+	if field == "Checksum" or _status.is_empty():
+		return str(copy[1])
+	return str(copy[2]) % str(_value_labels[field].text)
+
+
+## Self-check behind `SERVER_STATUS_PANEL_A11Y`. Returns the first failing
+## `<entry>.<property>` id, or "" when every name/description is present and
+## bounded, the Time row agrees with the rendered pause state, and the status
+## live mode matches success (polite) or failure (assertive).
+func _a11y_verify() -> String:
+	var snapshot := accessibility_snapshot()
+	for key in A11Y_KEYS:
+		var entry: Dictionary = snapshot[key]
+		if str(entry["name"]).strip_edges().is_empty():
+			return "%s.name" % key
+		var description := str(entry["description"]).strip_edges()
+		if description.is_empty():
+			return "%s.description" % key
+		if description.length() > A11Y_MAX_DESCRIPTION:
+			return "%s.length" % key
+	var status_entry: Dictionary = snapshot["status"]
+	var expected_live := "assertive" if _a11y_assertive else "polite"
+	if str(status_entry["live"]) != expected_live:
+		return "status.live"
+	var time_entry: Dictionary = snapshot["time"]
+	var time_text := str(time_entry["description"]).to_lower()
+	if _status.is_empty():
+		if not time_text.contains("not known"):
+			return "time.state"
+	elif not time_text.contains("paused" if _paused else "running"):
+		return "time.state"
+	return ""
+
+
+## 3 checks per snapshot entry (name, description, bounded length) plus the
+## status live mode and the Time row state. `checks` stays a fixed number so the
+## marker never depends on the world's counters.
+func _a11y_check_count() -> int:
+	return A11Y_KEYS.size() * 3 + 2
+
+
+## Prints one stable a11y marker. Called on the first rendered snapshot (watch
+## start) and on every terminal path (one-shot stop, watch stop, failure). An
+## internal copy regression fails the run with `status.a11y`; a re-entrant call
+## from `_fail()` is suppressed so only one fail line is printed.
+func _emit_a11y() -> void:
+	if _a11y_in_emit:
+		return
+	_a11y_in_emit = true
+	_refresh_accessibility()
+	var failure := _a11y_verify()
+	if failure.is_empty():
+		print("SERVER_STATUS_PANEL_A11Y status=ok checks=%d" % _a11y_check_count())
+	else:
+		print(
+			"SERVER_STATUS_PANEL_A11Y status=fail check=%s checks=%d"
+			% [failure, _a11y_check_count()]
+		)
+		if not _finished:
+			_fail("status.a11y")
+	_a11y_in_emit = false
+
+
+func _a11y_entry(control: Control, role: String) -> Dictionary:
+	if control == null:
+		return {
+			"name": "",
+			"description": "",
+			"role": role,
+			"class": "",
+			"live": "off",
+			"visible": false,
+			"reachable": false,
+		}
+	var live := "off"
+	if control.accessibility_live == A11Y_LIVE_POLITE:
+		live = "polite"
+	elif control.accessibility_live == A11Y_LIVE_ASSERTIVE:
+		live = "assertive"
+	return {
+		"name": control.accessibility_name,
+		"description": control.accessibility_description,
+		"role": role,
+		"class": control.get_class(),
+		"live": live,
+		"visible": control.visible,
+		"reachable": control.is_inside_tree() and control.visible,
+	}
 
 func _arm_deadline(duration_ms: int) -> void:
 	_deadline_ms = Time.get_ticks_msec() + duration_ms
