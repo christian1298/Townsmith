@@ -296,6 +296,30 @@ var _rename_error: Label
 var _rename_cancel: Button
 var _rename_save: Button
 
+# Connected roster picker. Rows are a filtered view of `_player_names`, so the
+# existing paged name cache is the only roster read. Focus starts on Cancel and
+# the opener's focus group/action is restored on close.
+var _picker_open := false
+var _picker_action := ""
+var _picker_target_id := 0
+var _picker_target_name := ""
+var _picker_self_id := 0
+var _picker_owner_id := 0
+var _picker_title: Label
+var _picker_list: ItemList
+var _picker_page_label: Label
+var _picker_empty: Label
+var _picker_hint: Label
+var _picker_cancel: Button
+var _picker_overlay: Control
+var _picker_container: VBoxContainer
+var _picker_rows: Array = []
+var _picker_selected := 0
+var _picker_focus_cancel := true
+var _picker_opener_group := "actions"
+var _picker_opener_action := "invite"
+var _picker_checks := 0
+
 
 ## Host entry point for embedded mode. Call before `add_child`; the screen
 ## never frees or resets the injected core.
@@ -535,6 +559,7 @@ func _build_ui() -> void:
 	add_child(_focus_ring)
 
 	_build_rename_modal()
+	_build_picker_modal()
 
 
 func _build_rename_modal() -> void:
@@ -607,6 +632,72 @@ func _build_rename_modal() -> void:
 	_rename_save.text = _i18n.t("base.ui.settlement_screen.rename.save")
 	_rename_save.pressed.connect(_save_rename)
 	row.add_child(_rename_save)
+
+
+func _build_picker_modal() -> void:
+	_picker_overlay = Control.new()
+	_picker_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_picker_overlay.visible = false
+	_picker_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(_picker_overlay)
+
+	var shade := ColorRect.new()
+	shade.set_anchors_preset(Control.PRESET_FULL_RECT)
+	shade.color = Color(0.02, 0.03, 0.05, 0.72)
+	shade.mouse_filter = Control.MOUSE_FILTER_STOP
+	_picker_overlay.add_child(shade)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_picker_overlay.add_child(center)
+
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(460, 0)
+	center.add_child(panel)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 8)
+	panel.add_child(box)
+	_picker_container = box
+
+	_picker_title = Label.new()
+	_picker_title.add_theme_font_size_override("font_size", 18)
+	_picker_title.add_theme_color_override("font_color", TEXT_COLOR)
+	box.add_child(_picker_title)
+
+	_picker_page_label = Label.new()
+	_picker_page_label.add_theme_color_override("font_color", MUTED_COLOR)
+	box.add_child(_picker_page_label)
+
+	_picker_list = ItemList.new()
+	_picker_list.custom_minimum_size = Vector2(0, PAGE_SIZE * 30 + 10)
+	_picker_list.focus_mode = Control.FOCUS_NONE
+	_picker_list.item_selected.connect(_on_picker_item_selected)
+	_picker_list.item_clicked.connect(_on_picker_item_clicked)
+	box.add_child(_picker_list)
+
+	_picker_empty = Label.new()
+	_picker_empty.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_picker_empty.add_theme_color_override("font_color", MUTED_COLOR)
+	box.add_child(_picker_empty)
+
+	_picker_hint = Label.new()
+	_picker_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_picker_hint.add_theme_font_size_override("font_size", 11)
+	_picker_hint.add_theme_color_override("font_color", MUTED_COLOR)
+	box.add_child(_picker_hint)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	box.add_child(row)
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(spacer)
+	_picker_cancel = Button.new()
+	_picker_cancel.focus_mode = Control.FOCUS_NONE
+	_picker_cancel.text = _i18n.t("base.ui.settlement_screen.roster.cancel")
+	_picker_cancel.pressed.connect(_close_picker)
+	row.add_child(_picker_cancel)
 
 
 func _detail_label(parent: Node, font_size: int = 16) -> Label:
@@ -952,6 +1043,8 @@ func _handle_key(event: InputEvent) -> bool:
 	if not key.pressed or key.echo:
 		return false
 	_clear_gamepad_modality()
+	if _picker_open:
+		return _handle_picker_key(key)
 	if _rename_open:
 		return _handle_modal_key(key)
 	if _line_edit_has_focus():
@@ -1131,6 +1224,8 @@ func _dispatch_gamepad(action: String) -> bool:
 	_last_action = action
 	if switched:
 		_render_footer()
+	if _picker_open:
+		return _dispatch_picker_gamepad(action)
 	if _rename_open:
 		return _dispatch_modal_gamepad(action)
 	match action:
@@ -1242,9 +1337,13 @@ func _render_footer() -> void:
 		_footer_label.visible = true
 	if _rename_hint != null:
 		_rename_hint.text = text if _rename_open else ""
+	if _picker_hint != null and _picker_open:
+		_picker_hint.text = _picker_hint_text()
 
 
 func _footer_text() -> String:
+	if _picker_open:
+		return _picker_hint_text()
 	if _rename_open:
 		if _gamepad_active:
 			return _i18n.t(
@@ -1528,13 +1627,271 @@ func _activate_modal_focus() -> void:
 
 
 func _restore_modal_opener() -> void:
-	if _modal_opener_group == "actions":
-		_focus_action_control(_modal_opener_action)
-	elif _modal_opener_group == "tax":
+	_restore_focus_to(_modal_opener_group, _modal_opener_action)
+
+
+func _restore_focus_to(group: String, action: String) -> void:
+	if group == "actions":
+		_focus_action_control(action)
+	elif group == "tax":
 		_set_focus_group("tax")
-	elif not _set_focus_group(_modal_opener_group):
+	elif not _set_focus_group(group):
 		if not _set_focus_group("rows"):
 			_set_focus_group("header")
+
+
+# --- Connected roster picker ----------------------------------------------
+
+## The picker is a connected-only overlay. Local invite/transfer keep their
+## existing next-registered-player behavior and never open it.
+func _open_picker(action: String) -> void:
+	if not _connected_mode or _net == null:
+		return
+	if action != "invite" and action != "transfer":
+		return
+	var record := _fresh_selected_record()
+	if record.is_empty():
+		_finish_action(action, _error("settlement.unknown"), 0)
+		return
+	if not bool(record.get("owned", false)):
+		_finish_action(action, _error("settlement.unowned"), _revision(record))
+		return
+	_picker_opener_group = _focus_group
+	_picker_opener_action = action
+	_picker_action = action
+	_picker_target_id = _record_id(record)
+	_picker_target_name = _display_name(record)
+	_picker_self_id = _self_player_id()
+	var owner = record.get("owner_id")
+	_picker_owner_id = int(owner) if owner != null else 0
+	_picker_open = true
+	_picker_focus_cancel = true
+	_picker_selected = 0
+	_build_picker_rows()
+	_picker_overlay.visible = true
+	_render_picker()
+	_render_footer()
+	_sync_focus_ring()
+
+
+## Close and restore the opener. `cancelled` keeps the existing cancel status;
+## selecting a row clears the status before the mutation result replaces it.
+func _close_picker(cancelled := true) -> void:
+	if not _picker_open:
+		return
+	_picker_open = false
+	_picker_overlay.visible = false
+	_picker_rows = []
+	_picker_selected = 0
+	_picker_focus_cancel = true
+	if cancelled:
+		_status_text = _i18n.t("base.ui.settlement_screen.action.cancelled")
+	_restore_focus_to(_picker_opener_group, _picker_opener_action)
+	_render_footer()
+	_render_detail()
+
+
+## Rows are a filtered view of the cached `player_list` names. Self is always
+## excluded; transfer also excludes the current owner.
+func _build_picker_rows() -> void:
+	_picker_rows = []
+	for id in _registered_ids():
+		if id <= 0:
+			continue
+		if _picker_self_id > 0 and id == _picker_self_id:
+			continue
+		if _picker_action == "transfer" and _picker_owner_id > 0 and id == _picker_owner_id:
+			continue
+		_picker_rows.append({"id": id, "name": str(_player_names.get(id, ""))})
+	# Keep the selection on the previous id when it is still a candidate.
+	var keep := _picker_selected
+	if keep >= 0 and keep < _picker_rows.size():
+		return
+	_picker_selected = 0
+
+
+func _handle_picker_key(key: InputEventKey) -> bool:
+	match key.keycode:
+		KEY_ESCAPE:
+			_close_picker()
+			return true
+		KEY_UP:
+			_picker_move(-1)
+			return true
+		KEY_DOWN:
+			_picker_move(1)
+			return true
+		KEY_TAB:
+			_picker_move(1)
+			return true
+		KEY_ENTER, KEY_KP_ENTER, KEY_SPACE:
+			_picker_activate()
+			return true
+	return false
+
+
+func _dispatch_picker_gamepad(action: String) -> bool:
+	match action:
+		"ui_up":
+			_picker_move(-1)
+		"ui_down":
+			_picker_move(1)
+		"ui_accept":
+			_picker_activate()
+		"ui_cancel":
+			_close_picker()
+		"ui_left", "ui_right":
+			return false
+		_:
+			return false
+	return true
+
+
+## Focus starts on Cancel. Up/Down moves between Cancel and the rows; the rows
+## wrap back to Cancel at both ends so no direction is a dead stop.
+func _picker_move(direction: int) -> void:
+	if _picker_rows.is_empty():
+		_picker_focus_cancel = true
+		_sync_focus_ring()
+		return
+	if _picker_focus_cancel:
+		_picker_focus_cancel = false
+		_picker_selected = 0 if direction > 0 else _picker_rows.size() - 1
+		_render_picker()
+		return
+	_picker_selected += direction
+	if _picker_selected < 0:
+		_picker_selected = 0
+		_picker_focus_cancel = true
+	elif _picker_selected >= _picker_rows.size():
+		_picker_selected = _picker_rows.size() - 1
+		_picker_focus_cancel = true
+	_render_picker()
+
+
+func _picker_select_index(index: int) -> void:
+	if index < 0 or index >= _picker_rows.size():
+		return
+	_picker_selected = index
+	_picker_focus_cancel = false
+	_render_picker()
+
+
+func _on_picker_item_selected(index: int) -> void:
+	_picker_select_index(index)
+
+
+func _on_picker_item_clicked(index: int, _at_position: Vector2, _button: int) -> void:
+	_picker_select_index(index)
+	_picker_activate()
+
+
+func _picker_activate() -> void:
+	if _picker_focus_cancel or _picker_rows.is_empty():
+		_close_picker()
+		return
+	var row: Dictionary = _picker_rows[_picker_selected]
+	var target := int(row.get("id", 0))
+	var action := _picker_action
+	_close_picker(false)
+	_send_picker_target(action, target)
+
+
+## Re-read the selected settlement before sending, then use the existing
+## connected invite/transfer command and result path.
+func _send_picker_target(action: String, target: int) -> void:
+	if action != "invite" and action != "transfer":
+		return
+	var record := _mutation_record(action)
+	if record.is_empty():
+		return
+	var revision := _revision(record)
+	if not bool(record.get("owned", false)):
+		_finish_action(action, _error("settlement.unowned"), revision)
+		return
+	if target <= 0:
+		_finish_action(action, _error("no_recipient" if action == "transfer" else "no_invitee"), revision)
+		return
+	var result: Dictionary
+	if action == "invite":
+		result = _net.settlement_invite(_record_id(record), target, "member", revision)
+	else:
+		result = _net.settlement_transfer(_record_id(record), target, revision)
+	_finish_action(action, result, revision)
+
+
+func _render_picker() -> void:
+	if _picker_title == null:
+		return
+	var key := (
+		"base.ui.settlement_screen.roster.title_transfer"
+		if _picker_action == "transfer"
+		else "base.ui.settlement_screen.roster.title_invite"
+	)
+	_picker_title.text = _i18n.t(
+		key,
+		{
+			"name": _picker_target_name,
+			"id": _i18n.format_int(_picker_target_id),
+		}
+	)
+	_picker_list.clear()
+	for row in _picker_rows:
+		_picker_list.add_item(_picker_row_text(row as Dictionary))
+	if not _picker_focus_cancel and _picker_selected < _picker_list.item_count:
+		_picker_list.select(_picker_selected)
+	else:
+		_picker_list.deselect_all()
+	_picker_page_label.text = _i18n.t(
+		"base.ui.settlement_screen.roster.count",
+		{
+			"count": _i18n.format_int(_picker_rows.size()),
+			"total": _i18n.format_int(_player_names.size()),
+		}
+	)
+	_picker_empty.visible = _picker_rows.is_empty()
+	_picker_empty.text = (
+		_i18n.t("base.ui.settlement_screen.roster.empty")
+		if _picker_rows.is_empty()
+		else ""
+	)
+	_picker_cancel.text = _i18n.t("base.ui.settlement_screen.roster.cancel")
+	_picker_hint.text = _picker_hint_text()
+	_sync_focus_ring()
+
+
+func _picker_row_text(row: Dictionary) -> String:
+	var id := int(row.get("id", 0))
+	var name := str(row.get("name", ""))
+	if name.is_empty():
+		name = _i18n.t("base.ui.settlement_screen.person_unknown", {"id": str(id)})
+	return _i18n.t(
+		"base.ui.settlement_screen.roster.row",
+		{"name": name, "id": str(id)}
+	)
+
+
+func _picker_hint_text() -> String:
+	if _gamepad_active:
+		return _i18n.t(
+			"base.ui.settlement_screen.roster.hint_gamepad",
+			{"bindings": _bindings_text(["ui_up", "ui_down", "ui_accept", "ui_cancel"])}
+		)
+	return _i18n.t("base.ui.settlement_screen.roster.hint")
+
+
+func picker_snapshot() -> Dictionary:
+	return {
+		"open": _picker_open,
+		"action": _picker_action,
+		"target": _picker_target_id,
+		"self": _picker_self_id,
+		"owner": _picker_owner_id,
+		"rows": _picker_rows.size(),
+		"selected": _picker_selected,
+		"focus": "cancel" if _picker_focus_cancel else "row",
+		"focus_group": _focus_group,
+	}
 
 
 func _sync_focus_ring() -> void:
@@ -1543,6 +1900,8 @@ func _sync_focus_ring() -> void:
 
 
 func _focus_target() -> Control:
+	if _picker_open:
+		return _picker_cancel if _picker_focus_cancel else _picker_list
 	if _rename_open:
 		match _modal_focus:
 			MODAL_CANCEL:
@@ -1597,22 +1956,29 @@ func _smoke_press(key: int, shift := false) -> void:
 
 func focus_snapshot() -> Dictionary:
 	var any_enabled := false
-	if not _rename_open:
+	if not _rename_open and not _picker_open:
 		for button in _action_buttons.values():
 			if button is Button and not (button as Button).disabled:
 				any_enabled = true
 				break
 	return {
 		"focus": _focus_name(),
-		"group": "modal" if _rename_open else _focus_group,
+		"group": "picker" if _picker_open else ("modal" if _rename_open else _focus_group),
 		"selected_id": _selected_id,
 		"page": _page_index + 1,
 		"has_modal": _rename_open,
+		"has_picker": _picker_open,
 		"actions_enabled": any_enabled,
 	}
 
 
 func _focus_name() -> String:
+	if _picker_open:
+		if _picker_focus_cancel:
+			return "picker.cancel"
+		if _picker_selected >= 0 and _picker_selected < _picker_rows.size():
+			return "picker.row:%d" % int((_picker_rows[_picker_selected] as Dictionary).get("id", 0))
+		return "picker.none"
 	if _rename_open:
 		match _modal_focus:
 			MODAL_CANCEL:
@@ -1757,6 +2123,21 @@ func _invite_target(settlement: Dictionary) -> int:
 			continue
 		return id
 	return 0
+
+
+## Connected picker eligibility: any registered player except this session and,
+## for transfer, the current owner. Existing members stay selectable; the
+## server owns the duplicate-member code.
+func _picker_target_exists(action: String, settlement: Dictionary) -> bool:
+	var self_id := _self_player_id()
+	var owner = settlement.get("owner_id")
+	for id in _registered_ids():
+		if self_id > 0 and id == self_id:
+			continue
+		if action == "transfer" and owner != null and id == int(owner):
+			continue
+		return true
+	return false
 
 
 ## Members that can be targets: the owner is an ownership state, not a member
@@ -2277,9 +2658,15 @@ func _on_action_pressed(action: String) -> void:
 		"tax":
 			_tax_selected()
 		"transfer":
-			_transfer_selected()
+			if _connected_mode:
+				_open_picker("transfer")
+			else:
+				_transfer_selected()
 		"invite":
-			_invite_selected()
+			if _connected_mode:
+				_open_picker("invite")
+			else:
+				_invite_selected()
 		"cycle_role":
 			_cycle_role()
 		"remove_member":
@@ -2314,8 +2701,8 @@ func _availability(settlement: Dictionary) -> Dictionary:
 			for action in ["rename", "tax", "transfer", "invite", "cycle_role", "remove_member", "release"]:
 				reasons[action] = "settlement.unowned"
 			return reasons
-		reasons["transfer"] = "" if _transfer_target(settlement) > 0 else "no_recipient"
-		reasons["invite"] = "" if _invite_target(settlement) > 0 else "no_invitee"
+		reasons["transfer"] = "" if _picker_target_exists("transfer", settlement) else "no_recipient"
+		reasons["invite"] = "" if _picker_target_exists("invite", settlement) else "no_invitee"
 		var member := _selected_member_record(settlement)
 		var member_reason := "" if not member.is_empty() else "no_member"
 		reasons["cycle_role"] = member_reason
@@ -2400,6 +2787,8 @@ func _render_all() -> void:
 	_render_list()
 	_render_detail()
 	_render_footer()
+	if _picker_open:
+		_render_picker()
 
 
 ## The authority mode is always visible. Connected also shows the server world
@@ -2713,6 +3102,10 @@ func _show_unavailable(code: String) -> void:
 	_rename_overlay.visible = false
 	_rename_edit.release_focus()
 	_modal_focus = MODAL_EDIT
+	_picker_open = false
+	_picker_overlay.visible = false
+	_picker_rows = []
+	_picker_focus_cancel = true
 	_focus_group = "header"
 	_list.clear()
 	_page_label.text = ""
@@ -3130,9 +3523,30 @@ func _run_connected_smoke() -> void:
 	_refresh_player_names()
 	_expect(_player_names.size() == 2, "players 2, got %d" % _player_names.size(), failures)
 
+	# Roster picker: open from the invite action, prove default focus is Cancel
+	# and self is excluded, cancel with Esc, reopen and select the other player.
+	_focus_action_control("invite")
+	_on_action_pressed("invite")
+	var pick := picker_snapshot()
+	_expect_pick(bool(pick.get("open", false)), "picker opens from invite", failures)
+	_expect_pick(str(pick.get("focus", "")) == "cancel", "picker defaults to Cancel", failures)
+	_expect_pick(int(pick.get("rows", 0)) == 1, "picker excludes self, got %d rows" % int(pick.get("rows", 0)), failures)
+	_expect_pick(_picker_rows.size() == 1, "picker row count", failures)
+	if _picker_rows.size() == 1:
+		_expect_pick(int((_picker_rows[0] as Dictionary).get("id", 0)) == 2, "picker row is player 2", failures)
+	_picker_checks += 1
+	_smoke_press(KEY_ESCAPE)
+	_expect_pick(not _picker_open, "esc closes the picker", failures)
+	_expect_pick(_focus_group == "actions" and _focus_name() == "actions:invite", "esc restores action focus", failures)
+
+	_on_action_pressed("invite")
+	_expect_pick(_picker_open and _picker_focus_cancel, "reopened picker defaults to Cancel", failures)
+	_smoke_press(KEY_DOWN)
+	_expect_pick(not _picker_focus_cancel, "down focuses a row", failures)
 	var before_actions := _action_count
-	_invite_selected()
-	_expect(_action_count > before_actions, "invite counted", failures)
+	_smoke_press(KEY_ENTER)
+	_expect_pick(not _picker_open, "enter selects and closes the picker", failures)
+	_expect(_action_count == before_actions + 1, "invite counted", failures)
 	var member := _selected_member_record(_current_record())
 	_expect(int(member.get("player", 0)) == 2, "member 2 invited", failures)
 	var revision_after_invite := _revision(_current_record())
@@ -3161,8 +3575,24 @@ func _run_connected_smoke() -> void:
 		failures
 	)
 
-	_invite_selected()
-	_transfer_selected()
+	_on_action_pressed("invite")
+	_expect_pick(_picker_open, "reinvite picker opens", failures)
+	_smoke_press(KEY_DOWN)
+	_smoke_press(KEY_ENTER)
+	_expect(int(_selected_member_record(_current_record()).get("player", 0)) == 2, "member 2 re-invited", failures)
+
+	var transfer_before := _action_count
+	_on_action_pressed("transfer")
+	var transfer_pick := picker_snapshot()
+	_expect_pick(bool(transfer_pick.get("open", false)), "transfer picker opens", failures)
+	_expect_pick(int(transfer_pick.get("rows", 0)) == 1, "transfer excludes self and owner", failures)
+	_expect_pick(str(transfer_pick.get("focus", "")) == "cancel", "transfer defaults to Cancel", failures)
+	if _picker_rows.size() == 1:
+		_expect_pick(int((_picker_rows[0] as Dictionary).get("id", 0)) == 2, "transfer row is player 2", failures)
+	_smoke_press(KEY_DOWN)
+	_smoke_press(KEY_ENTER)
+	_expect_pick(not _picker_open, "transfer selection closes the picker", failures)
+	_expect(_action_count == transfer_before + 1, "transfer counted", failures)
 	_expect(int(_current_record().get("owner_id", 0)) == 2, "ownership transferred to 2", failures)
 	_expect(
 		_revision(_current_record()) > revision_after_invite,
@@ -3196,6 +3626,7 @@ func _run_connected_smoke() -> void:
 	if not failures.is_empty():
 		_connected_smoke_fail(failures)
 		return
+	print("SETTLEMENT_SCREEN_ROSTER status=ok checks=%d" % _picker_checks)
 	print(
 		"SETTLEMENT_SCREEN_CONNECTED status=ok settlements=%d players=%d rename=%d tax=%d actions=%d accepted=%d rejected=%d checksum=%s"
 		% [
@@ -3259,10 +3690,13 @@ func embed_snapshot() -> Dictionary:
 func on_hidden() -> void:
 	_reset_pending()
 	_rename_open = false
+	_picker_open = false
 	_sync_virtual_keyboard(false)
 	_gamepad_active = false
 	if _rename_overlay != null:
 		_rename_overlay.visible = false
+	if _picker_overlay != null:
+		_picker_overlay.visible = false
 	_status_text = ""
 	_focus_group = "header"
 	_sync_focus_ring()
@@ -3395,6 +3829,11 @@ func _expect(condition: bool, label: String, failures: Array) -> void:
 
 
 ## Counted wrapper for the gamepad block; the marker prints the live total.
+func _expect_pick(condition: bool, label: String, failures: Array) -> void:
+	_picker_checks += 1
+	_expect(condition, label, failures)
+
+
 func _expect_pad(condition: bool, label: String, failures: Array) -> void:
 	_gamepad_checks += 1
 	_expect(condition, label, failures)
