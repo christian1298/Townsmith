@@ -9,9 +9,14 @@
 # target, invite by the selected name's id, cap/invalid-name rejection) and the
 # client-side paging path (23 records over 8-row pages: empty/one-page hidden,
 # PageDown/PageUp, off-page selection fallback, number-key page indexing,
-# selection survives refresh, every id reachable once). Every
-# `SETTLEMENT_EDITOR*` line is diffed between runs so the state checksum and
-# the action sequence are proven deterministic. No display or server is needed.
+# selection survives refresh, every id reachable once), the screen-reader audit
+# (`SETTLEMENT_EDITOR_A11Y status=ok checks=N`: labelled title/picker/list/
+# detail/paging/actions/modal/status, polite list+detail, assertive errors and
+# EN/DE key parity) and the gamepad walk (`SETTLEMENT_EDITOR_PAD status=ok
+# checks=N`: rows, paging, toolbar, actions, modal focus trap, keyboard
+# modality reset). Every `SETTLEMENT_EDITOR*` line is diffed between runs so
+# the state checksum and the action sequence are proven deterministic. No
+# display or server is needed.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -43,6 +48,9 @@ fi
 SMOKE_DIR="$(mktemp -d)"
 trap 'rm -rf "$SMOKE_DIR"' EXIT
 
+A11Y_CONTRACT='^SETTLEMENT_EDITOR_A11Y status=ok checks=[0-9]+$'
+PAD_CONTRACT='^SETTLEMENT_EDITOR_PAD status=ok checks=[0-9]+$'
+
 run_editor() {
 	local log="$1"
 	local marker_file="$2"
@@ -68,6 +76,15 @@ run_editor() {
 	fi
 	if [[ ! "$marker" =~ ^SETTLEMENT_EDITOR\ status=ok\ actions=[0-9]+\ checksum=[0-9a-f]{16}$ ]]; then
 		echo "Settlement editor smoke contract mismatch: $marker" >&2
+		exit 1
+	fi
+
+	if ! grep -Eq "$A11Y_CONTRACT" <<<"$output"; then
+		echo "Settlement editor smoke failed: missing or failed SETTLEMENT_EDITOR_A11Y marker" >&2
+		exit 1
+	fi
+	if ! grep -Eq "$PAD_CONTRACT" <<<"$output"; then
+		echo "Settlement editor smoke failed: missing or failed SETTLEMENT_EDITOR_PAD marker" >&2
 		exit 1
 	fi
 

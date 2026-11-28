@@ -15,6 +15,14 @@ extends Control
 ## mutations apply to the visible page only. Paging is display state: it never
 ## calls the bridge, persists anything, or changes the protocol.
 ##
+## Screen-reader semantics: every control exposes an `accessibility_name` and
+## `accessibility_description` from `base.ui.settlement_editor.*`. The list and
+## detail are polite live regions, the message line is assertive on errors, and
+## `accessibility_snapshot()` is the read-only smoke contract. Gamepad
+## navigation walks the toolbar, rows, paging, and actions with
+## up/down/left/right/accept/cancel; the release confirmation is a modal that
+## traps focus until Cancel/Release. No new bridge command is involved.
+##
 ## Run:
 ##   godot --path godot res://settlement_editor.tscn
 ##   godot --headless --path godot res://settlement_editor.tscn -- --smoke
@@ -27,8 +35,13 @@ extends Control
 ## owned record through the two-press confirmation and rejects a second
 ## release. Every mutation re-reads the record's `membership_revision` first and
 ## re-reads `settlements()` after success. Final
-## marker:
+## markers:
 ##   SETTLEMENT_EDITOR status=ok actions=<n> checksum=<16 hex>
+##   SETTLEMENT_EDITOR_A11Y status=ok checks=<n>
+##   SETTLEMENT_EDITOR_PAD status=ok checks=<n>
+##
+## The a11y and gamepad checks use their own counters, so the pinned
+## `SETTLEMENT_EDITOR` actions/checksum contract stays byte-identical.
 ##
 ## The page also uses the local bridge player registry (`players_register`,
 ## `players_list`) as a developer address book: the header shows the roster,
@@ -86,6 +99,44 @@ const DEFAULT_CENTERS := [
 
 const ROLES := ["manager", "builder", "member"]
 
+## `Control.accessibility_live` values (Godot 4.7 exposes the property but not
+## named enum constants). Selection and detail changes are polite; errors and
+## rejections are assertive.
+const A11Y_LIVE_OFF := 0
+const A11Y_LIVE_POLITE := 1
+const A11Y_LIVE_ASSERTIVE := 2
+
+## Deterministic gamepad focus order, top to bottom. The form fields stay
+## keyboard/mouse targets: the pad walks the toolbar, rows, paging, and actions,
+## and the release modal traps focus while it is open.
+const FOCUS_GROUPS := ["toolbar", "rows", "paging", "actions"]
+const TOOLBAR_ORDER := ["found", "fixture", "refresh", "new_session"]
+const ACTION_ORDER := [
+	"claim",
+	"rename",
+	"transfer",
+	"invite",
+	"set_role",
+	"remove_member",
+	"set_tax",
+	"release",
+	"register_player",
+	"cycle_target",
+]
+const MODAL_FOCUS_ORDER := ["cancel", "confirm"]
+const MODAL_CANCEL := 0
+const MODAL_CONFIRM := 1
+
+const GAMEPAD_ACTIONS := [
+	"ui_up",
+	"ui_down",
+	"ui_left",
+	"ui_right",
+	"ui_accept",
+	"ui_cancel",
+]
+const STICK_DEADZONE := 0.5
+
 const OK_COLOR := Color(0.36, 0.86, 0.55)
 const ERROR_COLOR := Color(0.96, 0.42, 0.38)
 const MUTED_COLOR := Color(0.66, 0.71, 0.78)
@@ -105,14 +156,18 @@ var _actions := 0
 var _failures := 0
 
 var _title_label: Label
+var _subtitle_label: Label
 var _state_label: Label
 var _roster_label: Label
 var _target_label: Label
 var _message_label: Label
+var _detail_title: Label
 var _detail_label: Label
 var _page_label: Label
 var _list: ItemList
 var _form_title: Label
+var _help_label: Label
+var _footer_label: Label
 
 var _name_edit: LineEdit
 var _x_spin: SpinBox
@@ -128,6 +183,39 @@ var _target_player_name := ""
 # Set by the first release press; a second press on the same record confirms.
 var _pending_release_id := 0
 
+# Message severity drives the assertive/polite live region.
+var _message_error := false
+
+# Read-only smoke counters. They never feed `_actions`, so the pinned
+# `SETTLEMENT_EDITOR` marker stays byte-identical.
+var _a11y_checks := 0
+var _gamepad_checks := 0
+
+# Gamepad focus model (logical, engine-focus independent).
+var _toolbar_buttons: Dictionary = {}
+var _action_buttons: Dictionary = {}
+var _page_prev: Button
+var _page_next: Button
+var _device_label: Label
+var _focus_ring: Panel
+var _focus_group := "rows"
+var _focus_toolbar := 0
+var _focus_paging := 0
+var _focus_action := 0
+var _gamepad_active := false
+var _last_action := ""
+var _stick_held := false
+
+# Release confirmation modal. It traps focus and never mutates until confirmed.
+var _modal_open := false
+var _modal_focus := MODAL_CANCEL
+var _modal_dim: ColorRect
+var _modal_title: Label
+var _modal_body: Label
+var _modal_error: Label
+var _modal_cancel: Button
+var _modal_confirm: Button
+
 
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
@@ -137,6 +225,8 @@ func _ready() -> void:
 		_i18n.set_locale("de")
 	_build_ui()
 	_reset_session(true)
+	_refresh_accessibility()
+	_sync_focus_ring()
 	if smoke_mode:
 		_run_smoke()
 
@@ -185,6 +275,7 @@ func _refresh_players() -> void:
 	_sync_target_name()
 	_refresh_roster_label()
 	_refresh_target_label()
+	_refresh_accessibility()
 
 
 func _sync_target_name() -> void:
@@ -640,12 +731,19 @@ func _rebuild_list() -> void:
 	_refresh_page_label()
 	_refresh_state_label()
 	_refresh_detail()
+	_refresh_accessibility()
 
 
 func _refresh_page_label() -> void:
 	if _page_label == null:
 		return
 	_page_label.visible = _page_count > 1
+	if _page_prev != null:
+		_page_prev.visible = _page_count > 1
+		_page_prev.disabled = _page <= 0
+	if _page_next != null:
+		_page_next.visible = _page_count > 1
+		_page_next.disabled = _page >= _page_count - 1
 	if _page_count <= 1:
 		_page_label.text = ""
 		return
@@ -709,10 +807,12 @@ func _refresh_detail() -> void:
 
 
 func _set_message(text: String, is_error: bool) -> void:
+	_message_error = is_error
 	if _message_label == null:
 		return
 	_message_label.text = text
 	_message_label.add_theme_color_override("font_color", ERROR_COLOR if is_error else OK_COLOR)
+	_refresh_accessibility()
 
 
 func _select(id: int) -> void:
@@ -743,6 +843,7 @@ func _select(id: int) -> void:
 			_list.select(index)
 			break
 	_refresh_detail()
+	_refresh_accessibility()
 
 
 func _select_number(index: int) -> void:
@@ -816,11 +917,12 @@ func _on_remove_member_pressed() -> void:
 		_remove_member(id, int(_player_spin.value))
 
 
-## Shift+X: first press arms, a second press on the same record confirms.
+## Opens the release confirmation modal. The modal is the two-press contract's
+## UI: nothing is released until Release is confirmed.
 func _on_release_pressed() -> void:
-	var id := _selected_or_message("release")
+	var id := _selected_or_message(_i18n.t("base.ui.settlement_editor.button.release"))
 	if id != 0:
-		_release(id, _pending_release_id == id)
+		_open_release_modal()
 
 
 func _on_set_tax_pressed() -> void:
@@ -847,6 +949,16 @@ func _on_cycle_target_pressed() -> void:
 
 
 func _on_list_selected(index: int) -> void:
+	_clear_gamepad_modality()
+	_select_visible_index(index)
+
+
+## Select one visible row without changing the input modality. Gamepad row
+## movement and accept call this directly so the pad focus stays active.
+func _select_visible_index(index: int) -> void:
+	if _list == null or index < 0 or index >= _list.item_count:
+		return
+	_focus_group = "rows"
 	_select(int(_list.get_item_metadata(index)))
 
 
@@ -865,6 +977,37 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	var key := event as InputEventKey
 	if key == null or not key.pressed or key.echo:
 		return
+	_clear_gamepad_modality()
+	if _modal_open:
+		# Focus trap: the modal owns every key until it closes.
+		_handle_modal_key(key)
+		get_viewport().set_input_as_handled()
+		return
+	match key.keycode:
+		KEY_UP:
+			_dispatch_action("ui_up", false)
+			get_viewport().set_input_as_handled()
+			return
+		KEY_DOWN:
+			_dispatch_action("ui_down", false)
+			get_viewport().set_input_as_handled()
+			return
+		KEY_LEFT:
+			_dispatch_action("ui_left", false)
+			get_viewport().set_input_as_handled()
+			return
+		KEY_RIGHT:
+			_dispatch_action("ui_right", false)
+			get_viewport().set_input_as_handled()
+			return
+		KEY_ENTER, KEY_KP_ENTER:
+			_dispatch_action("ui_accept", false)
+			get_viewport().set_input_as_handled()
+			return
+		KEY_ESCAPE:
+			_dispatch_action("ui_cancel", false)
+			get_viewport().set_input_as_handled()
+			return
 	var handled := true
 	match key.keycode:
 		KEY_PAGEUP:
@@ -903,6 +1046,805 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		_: handled = false
 	if handled:
 		get_viewport().set_input_as_handled()
+
+
+# --- Release confirmation modal --------------------------------------------
+
+func _open_release_modal() -> bool:
+	if _selected_id == 0:
+		return false
+	_modal_open = true
+	_modal_focus = MODAL_CANCEL
+	_pending_release_id = 0
+	_modal_title.text = _i18n.t("base.ui.settlement_editor.release.title", {
+		"id": _i18n.format_int(_selected_id),
+	})
+	_modal_body.text = _i18n.t("base.ui.settlement_editor.release.body")
+	_modal_error.text = ""
+	_modal_dim.visible = true
+	_refresh_accessibility()
+	_sync_focus_ring()
+	return true
+
+
+func _close_release_modal() -> void:
+	_modal_open = false
+	_modal_focus = MODAL_CANCEL
+	_pending_release_id = 0
+	if _modal_dim != null:
+		_modal_dim.visible = false
+	_refresh_accessibility()
+	_sync_focus_ring()
+
+
+## Confirm re-reads the revision through `_release(id, true)`. A rejection keeps
+## the modal open and fills the assertive error line; a success closes it.
+func _confirm_release_modal() -> Dictionary:
+	var id := _selected_id
+	if id == 0:
+		_close_release_modal()
+		return {}
+	var result := _release(id, true)
+	if bool(result.get("ok", false)):
+		_close_release_modal()
+	else:
+		_modal_error.text = _i18n.t("base.ui.settlement_editor.release.failed", {
+			"code": str(result.get("error_code", "error")),
+			"message": str(result.get("error", "")),
+		})
+		_refresh_accessibility()
+		_sync_focus_ring()
+	return result
+
+
+func _cycle_modal_focus(direction: int) -> void:
+	var index := MODAL_FOCUS_ORDER.find(_modal_focus_name())
+	if index < 0:
+		index = MODAL_CANCEL
+	index = posmod(index + direction, MODAL_FOCUS_ORDER.size())
+	_modal_focus = MODAL_CANCEL if str(MODAL_FOCUS_ORDER[index]) == "cancel" else MODAL_CONFIRM
+	_sync_focus_ring()
+	_refresh_accessibility()
+
+
+func _modal_focus_name() -> String:
+	return "cancel" if _modal_focus == MODAL_CANCEL else "confirm"
+
+
+func _activate_modal_focus() -> void:
+	if _modal_focus == MODAL_CONFIRM:
+		_confirm_release_modal()
+	else:
+		_close_release_modal()
+
+
+func _handle_modal_key(key: InputEventKey) -> void:
+	match key.keycode:
+		KEY_ESCAPE:
+			_close_release_modal()
+		KEY_TAB:
+			_cycle_modal_focus(-1 if key.shift_pressed else 1)
+		KEY_UP, KEY_LEFT:
+			_cycle_modal_focus(-1)
+		KEY_DOWN, KEY_RIGHT:
+			_cycle_modal_focus(1)
+		KEY_ENTER, KEY_KP_ENTER:
+			_activate_modal_focus()
+
+
+# --- Gamepad focus model ---------------------------------------------------
+
+func _process(_delta: float) -> void:
+	if _gamepad_active and _focus_ring != null and _focus_ring.visible:
+		_sync_focus_ring()
+
+
+## Live joypad events only. Keys are handled by `_unhandled_key_input`; both
+## paths reach `_dispatch_action`, so the headless smoke tests the same code.
+func _unhandled_input(event: InputEvent) -> void:
+	var action := _gamepad_action_for_event(event)
+	if action.is_empty():
+		return
+	if _dispatch_action(action, true):
+		get_viewport().set_input_as_handled()
+
+
+func _gamepad_action_for_event(event: InputEvent) -> String:
+	if event is InputEventJoypadButton:
+		var button := event as InputEventJoypadButton
+		if not button.pressed:
+			return ""
+		for action in GAMEPAD_ACTIONS:
+			if InputMap.event_is_action(button, action):
+				return action
+		match button.button_index:
+			JOY_BUTTON_A:
+				return "ui_accept"
+			JOY_BUTTON_B:
+				return "ui_cancel"
+			JOY_BUTTON_DPAD_UP:
+				return "ui_up"
+			JOY_BUTTON_DPAD_DOWN:
+				return "ui_down"
+			JOY_BUTTON_DPAD_LEFT:
+				return "ui_left"
+			JOY_BUTTON_DPAD_RIGHT:
+				return "ui_right"
+		return ""
+	if event is InputEventJoypadMotion:
+		var motion := event as InputEventJoypadMotion
+		if motion.axis != JOY_AXIS_LEFT_X and motion.axis != JOY_AXIS_LEFT_Y:
+			return ""
+		if absf(motion.axis_value) < STICK_DEADZONE:
+			_stick_held = false
+			return ""
+		if _stick_held:
+			return ""
+		_stick_held = true
+		if motion.axis == JOY_AXIS_LEFT_X:
+			return "ui_right" if motion.axis_value > 0.0 else "ui_left"
+		return "ui_down" if motion.axis_value > 0.0 else "ui_up"
+	return ""
+
+
+## Synthetic entry point used by the headless smoke; live joypad events call
+## the same dispatch. Unknown actions are ignored.
+func gamepad_action(action: String) -> Dictionary:
+	_dispatch_action(action, true)
+	return gamepad_snapshot()
+
+
+func gamepad_snapshot() -> Dictionary:
+	return {
+		"active": _gamepad_active,
+		"last_action": _last_action,
+		"group": _focus_group,
+		"selected": _selected_id,
+		"page": _page,
+		"toolbar": _focus_toolbar,
+		"paging": _focus_paging,
+		"action": _focus_action,
+		"modal": _modal_open,
+		"modal_focus": _modal_focus,
+	}
+
+
+func _dispatch_action(action: String, via_gamepad: bool) -> bool:
+	if not GAMEPAD_ACTIONS.has(action):
+		return false
+	if via_gamepad:
+		_gamepad_active = true
+		_last_action = action
+		_refresh_device_label()
+	if _modal_open:
+		return _dispatch_modal_gamepad(action)
+	var handled := false
+	match action:
+		"ui_up":
+			handled = _gamepad_vertical(-1)
+		"ui_down":
+			handled = _gamepad_vertical(1)
+		"ui_left":
+			handled = _gamepad_horizontal(-1)
+		"ui_right":
+			handled = _gamepad_horizontal(1)
+		"ui_accept":
+			handled = _activate_focus()
+		"ui_cancel":
+			handled = _handle_cancel()
+	if via_gamepad:
+		_sync_focus_ring()
+		_refresh_accessibility()
+	return handled
+
+
+func _dispatch_modal_gamepad(action: String) -> bool:
+	match action:
+		"ui_up", "ui_left":
+			_cycle_modal_focus(-1)
+		"ui_down", "ui_right":
+			_cycle_modal_focus(1)
+		"ui_accept":
+			_activate_modal_focus()
+		"ui_cancel":
+			_close_release_modal()
+		_:
+			return false
+	return true
+
+
+## Move within the focused group first; only at an edge move to the adjacent
+## group. This keeps row selection stable when crossing groups.
+func _gamepad_vertical(direction: int) -> bool:
+	var before := _focus_key()
+	if _focus_group == "rows":
+		_move_row(direction)
+	if _focus_key() != before:
+		_sync_focus_ring()
+		return true
+	return _gamepad_adjacent_group(direction)
+
+
+func _gamepad_horizontal(direction: int) -> bool:
+	match _focus_group:
+		"toolbar":
+			_focus_toolbar = clampi(
+				_focus_toolbar + direction, 0, TOOLBAR_ORDER.size() - 1
+			)
+		"paging":
+			_focus_paging = clampi(_focus_paging + direction, 0, 1)
+		"actions":
+			_focus_action = clampi(
+				_focus_action + direction, 0, ACTION_ORDER.size() - 1
+			)
+		"rows":
+			return _page_by(direction)
+		_:
+			return false
+	_sync_focus_ring()
+	return true
+
+
+func _gamepad_adjacent_group(direction: int) -> bool:
+	var start := FOCUS_GROUPS.find(_focus_group)
+	if start < 0:
+		start = 0
+	for step in range(1, FOCUS_GROUPS.size() + 1):
+		var index := posmod(start + direction * step, FOCUS_GROUPS.size())
+		if _focus_group_available(str(FOCUS_GROUPS[index])):
+			_focus_group = str(FOCUS_GROUPS[index])
+			_sync_focus_ring()
+			return true
+	return false
+
+
+func _focus_group_available(group: String) -> bool:
+	match group:
+		"rows":
+			return _list != null and _list.item_count > 0
+		"paging":
+			return _page_count > 1
+		_:
+			return true
+
+
+func _focus_key() -> String:
+	match _focus_group:
+		"toolbar":
+			return "toolbar:%d" % _focus_toolbar
+		"rows":
+			return "rows:%d" % _selected_id
+		"paging":
+			return "paging:%d" % _focus_paging
+		"actions":
+			return "actions:%d" % _focus_action
+	return _focus_group
+
+
+func _selected_row_index() -> int:
+	if _list == null:
+		return -1
+	for index in range(_list.item_count):
+		if int(_list.get_item_metadata(index)) == _selected_id:
+			return index
+	return -1
+
+
+func _move_row(direction: int) -> bool:
+	if _list == null or _list.item_count == 0:
+		return false
+	var index := _selected_row_index()
+	if index < 0:
+		index = -1 if direction > 0 else _list.item_count
+	var next := clampi(index + direction, 0, _list.item_count - 1)
+	if next == index:
+		return false
+	_select_visible_index(next)
+	return true
+
+
+func _activate_focus() -> bool:
+	match _focus_group:
+		"toolbar":
+			return _press_toolbar(str(TOOLBAR_ORDER[_focus_toolbar]))
+		"paging":
+			return _press_paging(_focus_paging)
+		"actions":
+			return _press_action(str(ACTION_ORDER[_focus_action]))
+		"rows":
+			var index := _selected_row_index()
+			if index < 0:
+				if _list == null or _list.item_count == 0:
+					return false
+				index = 0
+			_select_visible_index(index)
+			return true
+	return false
+
+
+func _press_toolbar(id: String) -> bool:
+	match id:
+		"found":
+			_on_found_pressed()
+		"fixture":
+			_on_fixture_pressed()
+		"refresh":
+			_on_refresh_pressed()
+		"new_session":
+			_on_new_session_pressed()
+		_:
+			return false
+	return true
+
+
+func _press_action(id: String) -> bool:
+	match id:
+		"claim":
+			_on_claim_pressed()
+		"rename":
+			_on_rename_pressed()
+		"transfer":
+			_on_transfer_pressed()
+		"invite":
+			_on_invite_pressed()
+		"set_role":
+			_on_set_role_pressed()
+		"remove_member":
+			_on_remove_member_pressed()
+		"set_tax":
+			_on_set_tax_pressed()
+		"release":
+			_on_release_pressed()
+		"register_player":
+			_on_register_player_pressed()
+		"cycle_target":
+			_on_cycle_target_pressed()
+		_:
+			return false
+	return true
+
+
+func _press_paging(index: int) -> bool:
+	return _page_by(-1 if index == 0 else 1)
+
+
+## Escape/B contract: close the modal, drop a pending release arm, then clear
+## the selection. A cancel never mutates the bridge.
+func _handle_cancel() -> bool:
+	if _modal_open:
+		_close_release_modal()
+		return true
+	if _pending_release_id != 0:
+		_pending_release_id = 0
+		_set_message(_i18n.t("base.ui.settlement_editor.release.canceled"), false)
+		return true
+	if _selected_id != 0:
+		_select(0)
+		return true
+	return false
+
+
+func _clear_gamepad_modality() -> void:
+	if not _gamepad_active:
+		return
+	_gamepad_active = false
+	_refresh_device_label()
+	_sync_focus_ring()
+	_refresh_accessibility()
+
+
+func _refresh_device_label() -> void:
+	if _device_label == null:
+		return
+	_device_label.text = _i18n.t(
+		"base.ui.settlement_editor.gamepad.pad"
+		if _gamepad_active
+		else "base.ui.settlement_editor.gamepad.keyboard"
+	)
+
+
+func _focus_control() -> Control:
+	if _modal_open:
+		return _modal_confirm if _modal_focus == MODAL_CONFIRM else _modal_cancel
+	match _focus_group:
+		"toolbar":
+			return _toolbar_buttons.get(str(TOOLBAR_ORDER[_focus_toolbar])) as Control
+		"paging":
+			return _page_prev if _focus_paging == 0 else _page_next
+		"actions":
+			return _action_buttons.get(str(ACTION_ORDER[_focus_action])) as Control
+		"rows":
+			return _list
+	return null
+
+
+## Moves the visible focus ring to the logical focus target. The ring is a
+## display aid only; `gamepad_snapshot()` owns the deterministic contract.
+func _sync_focus_ring() -> void:
+	if _focus_ring == null:
+		return
+	var target := _focus_control()
+	var show := (
+		_gamepad_active
+		and target != null
+		and target.is_inside_tree()
+		and target.is_visible_in_tree()
+	)
+	_focus_ring.visible = show
+	if not show:
+		return
+	var rect := target.get_global_rect()
+	var origin := get_global_rect().position
+	_focus_ring.position = rect.position - origin - Vector2(2, 2)
+	_focus_ring.size = rect.size + Vector2(4, 4)
+
+
+# --- Screen-reader semantics -----------------------------------------------
+
+func _a11y_entry(control: Control, role: String) -> Dictionary:
+	if control == null:
+		return {
+			"name": "",
+			"description": "",
+			"role": role,
+			"class": "",
+			"live": "off",
+			"visible": false,
+			"focus_mode": "none",
+			"reachable": false,
+		}
+	var live := "off"
+	if control.accessibility_live == A11Y_LIVE_POLITE:
+		live = "polite"
+	elif control.accessibility_live == A11Y_LIVE_ASSERTIVE:
+		live = "assertive"
+	var focus_mode := "none"
+	if control.focus_mode == Control.FOCUS_ALL:
+		focus_mode = "all"
+	elif control.focus_mode == Control.FOCUS_CLICK:
+		focus_mode = "click"
+	return {
+		"name": control.accessibility_name,
+		"description": control.accessibility_description,
+		"role": role,
+		"class": control.get_class(),
+		"live": live,
+		"visible": control.visible,
+		"focus_mode": focus_mode,
+		"reachable": (
+			control.is_inside_tree()
+			and control.visible
+			and control.focus_mode == Control.FOCUS_ALL
+		),
+	}
+
+
+func _action_label(id: String) -> String:
+	match id:
+		"found":
+			return _i18n.t("base.ui.settlement_editor.action.found")
+		"fixture":
+			return _i18n.t("base.ui.settlement_editor.button.fixture")
+		"refresh":
+			return _i18n.t("base.ui.settlement_editor.button.refresh")
+		"new_session":
+			return _i18n.t("base.ui.settlement_editor.button.new_session")
+		"claim":
+			return _i18n.t("base.ui.settlement_editor.action.claim")
+		"rename":
+			return _i18n.t("base.ui.settlement_editor.action.rename")
+		"transfer":
+			return _i18n.t("base.ui.settlement_editor.action.transfer")
+		"invite":
+			return _i18n.t("base.ui.settlement_editor.action.invite")
+		"set_role":
+			return _i18n.t("base.ui.settlement_editor.action.set_role")
+		"remove_member":
+			return _i18n.t("base.ui.settlement_editor.action.remove_member")
+		"set_tax":
+			return _i18n.t("base.ui.settlement_editor.action.set_tax")
+		"release":
+			return _i18n.t("base.ui.settlement_editor.button.release")
+		"register_player":
+			return _i18n.t("base.ui.settlement_editor.button.register_player")
+		"cycle_target":
+			return _i18n.t("base.ui.settlement_editor.button.next_target")
+	return id
+
+
+## Deterministic snapshot for the headless smoke: every labelled control, the
+## action/toolbar maps, current rows, live-region roles, and a label audit.
+func accessibility_snapshot() -> Dictionary:
+	var entries := {
+		"title": _a11y_entry(_title_label, "heading"),
+		"subtitle": _a11y_entry(_subtitle_label, "label"),
+		"state": _a11y_entry(_state_label, "status"),
+		"roster": _a11y_entry(_roster_label, "status"),
+		"target": _a11y_entry(_target_label, "status"),
+		"page": _a11y_entry(_page_label, "status"),
+		"paging_prev": _a11y_entry(_page_prev, "button"),
+		"paging_next": _a11y_entry(_page_next, "button"),
+		"list": _a11y_entry(_list, "list"),
+		"detail_title": _a11y_entry(_detail_title, "heading"),
+		"detail": _a11y_entry(_detail_label, "group"),
+		"form_title": _a11y_entry(_form_title, "heading"),
+		"field_name": _a11y_entry(_name_edit, "text_field"),
+		"field_center_x": _a11y_entry(_x_spin, "spin_box"),
+		"field_center_z": _a11y_entry(_z_spin, "spin_box"),
+		"field_radius": _a11y_entry(_radius_spin, "spin_box"),
+		"field_player": _a11y_entry(_player_spin, "spin_box"),
+		"field_role": _a11y_entry(_role_option, "option"),
+		"field_tax": _a11y_entry(_tax_spin, "spin_box"),
+		"message": _a11y_entry(_message_label, "status"),
+		"help": _a11y_entry(_help_label, "label"),
+		"device": _a11y_entry(_device_label, "label"),
+		"footer": _a11y_entry(_footer_label, "label"),
+		"release_title": _a11y_entry(_modal_title, "heading"),
+		"release_body": _a11y_entry(_modal_body, "status"),
+		"release_error": _a11y_entry(_modal_error, "status"),
+		"release_cancel": _a11y_entry(_modal_cancel, "button"),
+		"release_confirm": _a11y_entry(_modal_confirm, "button"),
+	}
+	var toolbar := {}
+	for id in TOOLBAR_ORDER:
+		toolbar[id] = _a11y_entry(_toolbar_buttons.get(id) as Control, "button")
+	var actions := {}
+	for id in ACTION_ORDER:
+		actions[id] = _a11y_entry(_action_buttons.get(id) as Control, "button")
+	var rows: Array = []
+	for index in range(_list.item_count if _list != null else 0):
+		rows.append(_list.get_item_text(index))
+	var total := entries.size() + toolbar.size() + actions.size()
+	var unlabelled: Array[String] = []
+	for key in entries.keys():
+		if not _a11y_labelled(entries[key]):
+			unlabelled.append(str(key))
+	for key in toolbar.keys():
+		if not _a11y_labelled(toolbar[key]):
+			unlabelled.append("toolbar.%s" % str(key))
+	for key in actions.keys():
+		if not _a11y_labelled(actions[key]):
+			unlabelled.append("action.%s" % str(key))
+	return {
+		"locale": _i18n.locale(),
+		"entries": entries,
+		"toolbar": toolbar,
+		"actions": actions,
+		"rows": rows,
+		"row_count": rows.size(),
+		"live": {
+			"list": str(entries["list"]["live"]),
+			"detail": str(entries["detail"]["live"]),
+			"message": str(entries["message"]["live"]),
+			"release_body": str(entries["release_body"]["live"]),
+			"release_error": str(entries["release_error"]["live"]),
+		},
+		"counts": {
+			"total": total,
+			"labelled": total - unlabelled.size(),
+			"unlabelled": unlabelled,
+		},
+		"has_modal": _modal_open,
+		"focus_group": _focus_group,
+		"modal_focus": _modal_focus_name(),
+	}
+
+
+func _a11y_labelled(entry: Dictionary) -> bool:
+	return not str(entry.get("name", "")).is_empty() and not str(
+		entry.get("description", "")
+	).is_empty()
+
+
+func _a11y_no_leak(a11y: Dictionary) -> bool:
+	for section in ["entries", "toolbar", "actions"]:
+		for key in (a11y[section] as Dictionary).keys():
+			var entry: Dictionary = (a11y[section] as Dictionary)[key]
+			for field in ["name", "description"]:
+				if str(entry[field]).contains("!base.ui."):
+					return false
+	return true
+
+
+## Localized names, descriptions, and live modes for every part of the page.
+## Closed modal controls are labelled too, so a label exists before it opens.
+func _refresh_accessibility() -> void:
+	if _i18n == null or _title_label == null:
+		return
+	_title_label.accessibility_name = _i18n.t("base.ui.settlement_editor.title")
+	_title_label.accessibility_description = _i18n.t(
+		"base.ui.settlement_editor.a11y.title_description"
+	)
+	if _subtitle_label != null:
+		_subtitle_label.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.subtitle"
+		)
+		_subtitle_label.accessibility_description = _subtitle_label.text
+	if _state_label != null:
+		_state_label.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.state"
+		)
+		_state_label.accessibility_description = _state_label.text
+	if _roster_label != null:
+		_roster_label.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.roster"
+		)
+		_roster_label.accessibility_description = (
+			_roster_label.text
+			if not _players.is_empty()
+			else _i18n.t("base.ui.settlement_editor.a11y.roster_empty")
+		)
+	if _target_label != null:
+		_target_label.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.target"
+		)
+		_target_label.accessibility_description = _target_label.text
+	if _page_label != null:
+		_page_label.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.page"
+		)
+		_page_label.accessibility_description = (
+			_page_label.text
+			if not _page_label.text.is_empty()
+			else _i18n.t("base.ui.settlement_editor.a11y.page_idle")
+		)
+	if _page_prev != null:
+		_page_prev.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.paging_prev"
+		)
+		_page_prev.accessibility_description = _i18n.t(
+			"base.ui.settlement_editor.a11y.paging_prev_hint"
+		)
+	if _page_next != null:
+		_page_next.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.paging_next"
+		)
+		_page_next.accessibility_description = _i18n.t(
+			"base.ui.settlement_editor.a11y.paging_next_hint"
+		)
+	if _list != null:
+		_list.accessibility_name = _i18n.t("base.ui.settlement_editor.a11y.list")
+		var record := _find_record(_selected_id)
+		_list.accessibility_description = (
+			_i18n.t(
+				"base.ui.settlement_editor.a11y.list_selected",
+				{"row": _row_text(record)}
+			)
+			if not record.is_empty()
+			else _i18n.t("base.ui.settlement_editor.a11y.list_description")
+		)
+		_list.accessibility_live = A11Y_LIVE_POLITE
+	if _detail_title != null:
+		_detail_title.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.detail_title"
+		)
+		_detail_title.accessibility_description = _i18n.t(
+			"base.ui.settlement_editor.a11y.detail"
+		)
+	if _detail_label != null:
+		_detail_label.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.detail"
+		)
+		_detail_label.accessibility_description = (
+			_detail_label.text
+			if not _find_record(_selected_id).is_empty()
+			else _i18n.t("base.ui.settlement_editor.a11y.detail_empty")
+		)
+		_detail_label.accessibility_live = A11Y_LIVE_POLITE
+	if _form_title != null:
+		_form_title.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.form_title"
+		)
+		_form_title.accessibility_description = (
+			_form_title.text
+			if _selected_id != 0
+			else _i18n.t("base.ui.settlement_editor.a11y.form_description")
+		)
+	var field_hint: String = _i18n.t("base.ui.settlement_editor.a11y.field_hint")
+	for pair in [
+		[_name_edit, "field_name"],
+		[_x_spin, "field_center_x"],
+		[_z_spin, "field_center_z"],
+		[_radius_spin, "field_radius"],
+		[_player_spin, "field_player"],
+		[_role_option, "field_role"],
+		[_tax_spin, "field_tax"],
+	]:
+		var control: Control = pair[0]
+		if control == null:
+			continue
+		control.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.%s" % str(pair[1])
+		)
+		control.accessibility_description = field_hint
+	for id in TOOLBAR_ORDER:
+		var toolbar_button: Button = _toolbar_buttons.get(id)
+		if toolbar_button == null:
+			continue
+		toolbar_button.accessibility_name = _action_label(str(id))
+		toolbar_button.accessibility_description = _i18n.t(
+			"base.ui.settlement_editor.a11y.action_hint",
+			{"action": _action_label(str(id))}
+		)
+	for id in ACTION_ORDER:
+		var action_button: Button = _action_buttons.get(id)
+		if action_button == null:
+			continue
+		action_button.accessibility_name = _action_label(str(id))
+		action_button.accessibility_description = _i18n.t(
+			"base.ui.settlement_editor.a11y.action_hint",
+			{"action": _action_label(str(id))}
+		)
+	if _message_label != null:
+		_message_label.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.message"
+		)
+		_message_label.accessibility_description = (
+			_message_label.text
+			if not _message_label.text.is_empty()
+			else _i18n.t("base.ui.settlement_editor.a11y.message_idle")
+		)
+		_message_label.accessibility_live = (
+			A11Y_LIVE_ASSERTIVE if _message_error else A11Y_LIVE_POLITE
+		)
+	if _help_label != null:
+		_help_label.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.help"
+		)
+		_help_label.accessibility_description = _help_label.text
+	if _device_label != null:
+		_device_label.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.device"
+		)
+		_device_label.accessibility_description = _device_label.text
+	if _footer_label != null:
+		_footer_label.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.footer"
+		)
+		_footer_label.accessibility_description = _footer_label.text
+	if _modal_title != null:
+		_modal_title.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.release_title"
+		)
+		_modal_title.accessibility_description = (
+			_modal_title.text
+			if _modal_open
+			else _i18n.t("base.ui.settlement_editor.a11y.release_hint")
+		)
+	if _modal_body != null:
+		_modal_body.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.release_body"
+		)
+		_modal_body.accessibility_description = (
+			_modal_body.text
+			if _modal_open
+			else _i18n.t("base.ui.settlement_editor.a11y.release_hint")
+		)
+		_modal_body.accessibility_live = A11Y_LIVE_POLITE
+	if _modal_error != null:
+		_modal_error.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.a11y.release_error"
+		)
+		_modal_error.accessibility_description = (
+			_modal_error.text
+			if not _modal_error.text.is_empty()
+			else _i18n.t("base.ui.settlement_editor.a11y.release_no_error")
+		)
+		_modal_error.accessibility_live = A11Y_LIVE_ASSERTIVE
+	if _modal_cancel != null:
+		_modal_cancel.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.release.cancel"
+		)
+		_modal_cancel.accessibility_description = _i18n.t(
+			"base.ui.settlement_editor.a11y.release_cancel_hint"
+		)
+	if _modal_confirm != null:
+		_modal_confirm.accessibility_name = _i18n.t(
+			"base.ui.settlement_editor.button.release"
+		)
+		_modal_confirm.accessibility_description = _i18n.t(
+			"base.ui.settlement_editor.a11y.release_confirm_hint"
+		)
 
 
 # --- Smoke -----------------------------------------------------------------
@@ -1179,6 +2121,286 @@ func _smoke_paging() -> void:
 	)
 
 
+func _a11y_expect(condition: bool, label: String) -> bool:
+	_a11y_checks += 1
+	if not condition:
+		_failures += 1
+		print("SETTLEMENT_EDITOR_A11Y_FAIL label=%s" % label)
+	return condition
+
+
+func _pad_expect(condition: bool, label: String) -> bool:
+	_gamepad_checks += 1
+	if not condition:
+		_failures += 1
+		print("SETTLEMENT_EDITOR_PAD_FAIL label=%s" % label)
+	return condition
+
+
+func _press_editor_key(keycode: int, shift := false) -> void:
+	var event := InputEventKey.new()
+	event.keycode = keycode
+	event.pressed = true
+	event.shift_pressed = shift
+	_unhandled_key_input(event)
+
+
+## Read-only screen-reader audit. It opens and closes the release modal without
+## confirming, so no bridge mutation and no pinned marker changes.
+func _run_a11y_checks() -> void:
+	var failures_before := _failures
+	_refresh_accessibility()
+	var initial_locale: String = _i18n.locale()
+	var snap := accessibility_snapshot()
+	var counts: Dictionary = snap["counts"]
+	_a11y_expect(int(counts["total"]) > 0, "counts_total")
+	_a11y_expect((counts["unlabelled"] as Array).is_empty(), "counts_unlabelled")
+	_a11y_expect(
+		int(counts["labelled"]) == int(counts["total"]), "counts_labelled"
+	)
+	_a11y_expect(_a11y_no_leak(snap), "no_leak")
+	for key in [
+		"title",
+		"subtitle",
+		"state",
+		"roster",
+		"target",
+		"page",
+		"paging_prev",
+		"paging_next",
+		"list",
+		"detail_title",
+		"detail",
+		"form_title",
+		"field_name",
+		"field_center_x",
+		"field_center_z",
+		"field_radius",
+		"field_player",
+		"field_role",
+		"field_tax",
+		"message",
+		"help",
+		"device",
+		"footer",
+		"release_title",
+		"release_body",
+		"release_error",
+		"release_cancel",
+		"release_confirm",
+	]:
+		_a11y_expect(
+			_a11y_labelled((snap["entries"] as Dictionary)[key]),
+			"entry_" + str(key)
+		)
+	for id in TOOLBAR_ORDER:
+		_a11y_expect(
+			_a11y_labelled((snap["toolbar"] as Dictionary)[id]),
+			"toolbar_" + str(id)
+		)
+	for id in ACTION_ORDER:
+		_a11y_expect(
+			_a11y_labelled((snap["actions"] as Dictionary)[id]),
+			"action_" + str(id)
+		)
+	var live: Dictionary = snap["live"]
+	_a11y_expect(str(live["list"]) == "polite", "live_list")
+	_a11y_expect(str(live["detail"]) == "polite", "live_detail")
+	_a11y_expect(
+		["polite", "assertive"].has(str(live["message"])), "live_message_valid"
+	)
+	_a11y_expect(str(live["release_error"]) == "assertive", "live_release_error")
+	_a11y_expect(int(snap["row_count"]) == _list.item_count, "rows_match_page")
+	if _list.item_count > 0:
+		_a11y_expect(
+			not str((snap["rows"] as Array)[0]).is_empty(), "row_text"
+		)
+	# The message live mode follows the error flag and is restored afterwards.
+	var saved_text := _message_label.text
+	var saved_error := _message_error
+	_message_label.text = "assertive probe"
+	_message_error = true
+	_refresh_accessibility()
+	_a11y_expect(
+		str((accessibility_snapshot()["live"] as Dictionary)["message"]) == "assertive",
+		"live_message_error"
+	)
+	_message_label.text = saved_text
+	_message_error = saved_error
+	_refresh_accessibility()
+	# Modal: labelled while closed, labelled and assertive once open.
+	_a11y_expect(not _modal_open, "modal_closed")
+	_on_release_pressed()
+	_a11y_expect(_modal_open, "modal_open")
+	snap = accessibility_snapshot()
+	_a11y_expect(bool(snap["has_modal"]), "modal_flag")
+	for key in [
+		"release_title", "release_body", "release_error",
+		"release_cancel", "release_confirm",
+	]:
+		_a11y_expect(
+			_a11y_labelled((snap["entries"] as Dictionary)[key]),
+			"modal_entry_" + str(key)
+		)
+	_a11y_expect(
+		str((snap["live"] as Dictionary)["release_error"]) == "assertive",
+		"modal_error_live"
+	)
+	_close_release_modal()
+	_a11y_expect(not _modal_open, "modal_closed_again")
+	# EN/DE switch proves localized names and no key leak, then restores locale.
+	_i18n.set_locale("en")
+	_refresh_accessibility()
+	var en_title := str(
+		(accessibility_snapshot()["entries"] as Dictionary)["title"]["name"]
+	)
+	_i18n.set_locale("de")
+	_refresh_accessibility()
+	var de_snap := accessibility_snapshot()
+	_a11y_expect(str(de_snap["locale"]) == "de", "de_locale")
+	_a11y_expect(_a11y_no_leak(de_snap), "de_no_leak")
+	_a11y_expect(
+		int((de_snap["counts"] as Dictionary)["labelled"])
+			== int((de_snap["counts"] as Dictionary)["total"]),
+		"de_labelled"
+	)
+	_a11y_expect(
+		str((de_snap["entries"] as Dictionary)["title"]["name"]) != en_title,
+		"de_title_switched"
+	)
+	_a11y_expect(
+		str((de_snap["entries"] as Dictionary)["title"]["name"])
+			== _i18n.t("base.ui.settlement_editor.title"),
+		"de_title_key"
+	)
+	_i18n.set_locale(initial_locale)
+	_refresh_accessibility()
+	_a11y_expect(
+		str(accessibility_snapshot()["locale"]) == initial_locale,
+		"locale_restored"
+	)
+	print("SETTLEMENT_EDITOR_A11Y status=%s checks=%d" % [
+		"ok" if _failures == failures_before else "failed", _a11y_checks
+	])
+
+
+## Deterministic gamepad walk over rows, paging, toolbar, actions, and the
+## modal focus trap. It ends with page 3 selected, and it never confirms a
+## release, so the bridge state and the pinned markers stay untouched.
+func _run_gamepad_checks() -> void:
+	var failures_before := _failures
+	_focus_group = "rows"
+	_focus_toolbar = 0
+	_focus_paging = 0
+	_focus_action = 0
+	_gamepad_active = false
+	_sync_focus_ring()
+	var pad := gamepad_snapshot()
+	_pad_expect(str(pad["group"]) == "rows", "start_rows")
+	_pad_expect(_page == 2 and _selected_id == 17, "start_page")
+	pad = gamepad_action("ui_down")
+	_pad_expect(_selected_id == 18 and str(pad["group"]) == "rows", "row_down")
+	pad = gamepad_action("ui_up")
+	_pad_expect(_selected_id == 17 and str(pad["group"]) == "rows", "row_up")
+	pad = gamepad_action("ui_up")
+	_pad_expect(str(pad["group"]) == "toolbar", "row_up_toolbar")
+	_pad_expect(bool(pad["active"]), "pad_active")
+	_pad_expect(str(pad["last_action"]) == "ui_up", "last_action")
+	pad = gamepad_action("ui_right")
+	_pad_expect(int(pad["toolbar"]) == 1, "toolbar_right")
+	pad = gamepad_action("ui_left")
+	_pad_expect(int(pad["toolbar"]) == 0, "toolbar_left")
+	pad = gamepad_action("ui_right")
+	pad = gamepad_action("ui_right")
+	_pad_expect(int(pad["toolbar"]) == 2, "toolbar_refresh_focus")
+	var count_before := _settlements.size()
+	pad = gamepad_action("ui_accept")
+	_pad_expect(
+		_settlements.size() == count_before and _selected_id == 17,
+		"toolbar_refresh_accept"
+	)
+	pad = gamepad_action("ui_down")
+	_pad_expect(str(pad["group"]) == "rows", "toolbar_down_rows")
+	for _step in range(7):
+		pad = gamepad_action("ui_down")
+	_pad_expect(str(pad["group"]) == "paging", "rows_edge_paging")
+	pad = gamepad_action("ui_right")
+	_pad_expect(int(pad["paging"]) == 1, "paging_next_focus")
+	pad = gamepad_action("ui_accept")
+	_pad_expect(_page == 2 and _selected_id == 23, "paging_clamp_end")
+	pad = gamepad_action("ui_left")
+	_pad_expect(int(pad["paging"]) == 0, "paging_prev_focus")
+	pad = gamepad_action("ui_accept")
+	_pad_expect(_page == 1 and _selected_id == 9, "paging_prev_page")
+	pad = gamepad_action("ui_up")
+	_pad_expect(str(pad["group"]) == "rows", "paging_up_rows")
+	pad = gamepad_action("ui_right")
+	_pad_expect(_page == 2 and _selected_id == 17, "rows_page_down")
+	pad = gamepad_action("ui_left")
+	_pad_expect(_page == 1 and _selected_id == 9, "rows_page_up")
+	for _step in range(9):
+		pad = gamepad_action("ui_down")
+	_pad_expect(str(pad["group"]) == "actions", "rows_to_actions")
+	pad = gamepad_action("ui_right")
+	_pad_expect(int(pad["action"]) == 1, "action_right")
+	pad = gamepad_action("ui_left")
+	_pad_expect(int(pad["action"]) == 0, "action_left")
+	for _step in range(9):
+		pad = gamepad_action("ui_right")
+	_pad_expect(int(pad["action"]) == 9, "action_target_focus")
+	var target_before := _target_player_id
+	pad = gamepad_action("ui_accept")
+	_pad_expect(
+		_target_player_id != target_before and str(pad["last_action"]) == "ui_accept",
+		"action_accept_target"
+	)
+	# Modal focus trap: rows stay selected, focus cycles inside the dialog.
+	_select(23)
+	_focus_group = "rows"
+	_gamepad_active = true
+	_on_release_pressed()
+	_pad_expect(_modal_open and _modal_focus == MODAL_CANCEL, "modal_open_cancel")
+	pad = gamepad_action("ui_right")
+	_pad_expect(int(pad["modal_focus"]) == MODAL_CONFIRM, "modal_right_confirm")
+	pad = gamepad_action("ui_left")
+	_pad_expect(int(pad["modal_focus"]) == MODAL_CANCEL, "modal_left_cancel")
+	pad = gamepad_action("ui_down")
+	_pad_expect(
+		int(pad["modal_focus"]) == MODAL_CONFIRM and str(pad["group"]) == "rows",
+		"modal_trap_group"
+	)
+	pad = gamepad_action("ui_accept")
+	_pad_expect(_modal_open, "modal_stays_on_rejection")
+	_pad_expect(
+		_modal_error.text.contains("settlement.unowned"), "modal_rejection_code"
+	)
+	pad = gamepad_action("ui_cancel")
+	_pad_expect(not _modal_open, "modal_cancel_closes")
+	# Keyboard nav clears the pad modality and keeps the logical focus model.
+	_press_editor_key(KEY_DOWN)
+	_pad_expect(not _gamepad_active, "keyboard_clears_pad")
+	_pad_expect(_focus_group == "paging", "keyboard_nav")
+	_pad_expect(
+		_device_label.text == _i18n.t("base.ui.settlement_editor.gamepad.keyboard"),
+		"device_keyboard"
+	)
+	_press_editor_key(KEY_UP)
+	_pad_expect(_focus_group == "rows", "keyboard_nav_rows")
+	gamepad_action("ui_down")
+	_pad_expect(
+		_device_label.text == _i18n.t("base.ui.settlement_editor.gamepad.pad"),
+		"device_pad"
+	)
+	var last_action := str(gamepad_snapshot()["last_action"])
+	gamepad_action("bogus")
+	_pad_expect(
+		str(gamepad_snapshot()["last_action"]) == last_action, "unknown_ignored"
+	)
+	print("SETTLEMENT_EDITOR_PAD status=%s checks=%d" % [
+		"ok" if _failures == failures_before else "failed", _gamepad_checks
+	])
+
+
 func _run_smoke() -> void:
 	print("SETTLEMENT_EDITOR_SMOKE start seed=%s" % _i18n.format_int(_seed))
 	_reset_session(true)
@@ -1378,6 +2600,11 @@ func _run_smoke() -> void:
 	# unaffected; `main_checksum` is captured before the throwaway probes. ---
 	_smoke_paging()
 
+	# Read-only screen-reader audit and the gamepad focus walk. Both use their
+	# own counters, so `SETTLEMENT_EDITOR status=ok actions=56` is unchanged.
+	_run_a11y_checks()
+	_run_gamepad_checks()
+
 	if _failures > 0:
 		print("SETTLEMENT_EDITOR status=failed actions=%s failures=%s checksum=%s" % [
 			_i18n.format_int(_actions),
@@ -1426,6 +2653,7 @@ func _build_ui() -> void:
 	subtitle.add_theme_font_size_override("font_size", 14)
 	subtitle.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	root.add_child(subtitle)
+	_subtitle_label = subtitle
 
 	root.add_child(_build_list_panel())
 
@@ -1445,17 +2673,31 @@ func _build_ui() -> void:
 	help.text = _i18n.t("base.ui.settlement_editor.help") + "\n" + \
 		"PageUp/PageDown page · " + \
 		"Players: N register · P cycle target · Shift+P set role · " + \
-		"Shift+X release (press twice) · Shift+N new session"
+		"Shift+X release (modal) · Shift+N new session"
 	help.add_theme_color_override("font_color", MUTED_COLOR)
 	help.add_theme_font_size_override("font_size", 13)
 	help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	root.add_child(help)
+	_help_label = help
 
 	var footer := Label.new()
 	footer.text = _i18n.t("base.ui.settlement_editor.footer")
 	footer.add_theme_color_override("font_color", MUTED_COLOR)
 	footer.add_theme_font_size_override("font_size", 12)
 	root.add_child(footer)
+	_footer_label = footer
+
+	_device_label = Label.new()
+	_device_label.text = _i18n.t("base.ui.settlement_editor.gamepad.keyboard")
+	_device_label.add_theme_color_override("font_color", MUTED_COLOR)
+	_device_label.add_theme_font_size_override("font_size", 12)
+	_device_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	root.add_child(_device_label)
+
+	_build_release_modal()
+	_focus_ring = _build_focus_ring()
+	_refresh_accessibility()
+	_sync_focus_ring()
 
 
 func _build_list_panel() -> Control:
@@ -1475,16 +2717,16 @@ func _build_list_panel() -> Control:
 	seed_label.add_theme_color_override("font_color", MUTED_COLOR)
 	toolbar.add_child(seed_label)
 
-	toolbar.add_child(_button("%s (F)" % _i18n.t(
+	toolbar.add_child(_toolbar_button("found", "%s (F)" % _i18n.t(
 		"base.ui.settlement_editor.action.found"
 	), _on_found_pressed))
-	toolbar.add_child(_button(_i18n.t(
+	toolbar.add_child(_toolbar_button("fixture", _i18n.t(
 		"base.ui.settlement_editor.button.fixture"
 	), _on_fixture_pressed))
-	toolbar.add_child(_button(_i18n.t(
+	toolbar.add_child(_toolbar_button("refresh", _i18n.t(
 		"base.ui.settlement_editor.button.refresh"
 	), _on_refresh_pressed))
-	toolbar.add_child(_button(_i18n.t(
+	toolbar.add_child(_toolbar_button("new_session", _i18n.t(
 		"base.ui.settlement_editor.button.new_session"
 	), _on_new_session_pressed))
 
@@ -1502,10 +2744,21 @@ func _build_list_panel() -> Control:
 	_target_label.add_theme_color_override("font_color", MUTED_COLOR)
 	registry_row.add_child(_target_label)
 
+	var paging_row := HBoxContainer.new()
+	paging_row.add_theme_constant_override("separation", 8)
+	panel.add_child(paging_row)
+	_page_prev = _button(_i18n.t("base.ui.settlement_editor.button.prev_page"),
+		_on_page_prev_pressed)
+	_page_prev.visible = false
+	paging_row.add_child(_page_prev)
 	_page_label = Label.new()
 	_page_label.add_theme_color_override("font_color", MUTED_COLOR)
 	_page_label.visible = false
-	panel.add_child(_page_label)
+	paging_row.add_child(_page_label)
+	_page_next = _button(_i18n.t("base.ui.settlement_editor.button.next_page"),
+		_on_page_next_pressed)
+	_page_next.visible = false
+	paging_row.add_child(_page_next)
 
 	_list = ItemList.new()
 	_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -1524,6 +2777,7 @@ func _build_detail_panel() -> Control:
 	title.text = _i18n.t("base.ui.settlement_editor.selected_record")
 	title.add_theme_font_size_override("font_size", 20)
 	panel.add_child(title)
+	_detail_title = title
 
 	_detail_label = Label.new()
 	_detail_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -1583,42 +2837,52 @@ func _build_form_panel() -> Control:
 	var actions := HBoxContainer.new()
 	actions.add_theme_constant_override("separation", 6)
 	panel.add_child(actions)
-	actions.add_child(_button("%s (C)" % _i18n.t(
+	actions.add_child(_action_button("claim", "%s (C)" % _i18n.t(
 		"base.ui.settlement_editor.action.claim"
 	), _on_claim_pressed))
-	actions.add_child(_button("%s (R)" % _i18n.t(
+	actions.add_child(_action_button("rename", "%s (R)" % _i18n.t(
 		"base.ui.settlement_editor.action.rename"
 	), _on_rename_pressed))
-	actions.add_child(_button("%s (T)" % _i18n.t(
+	actions.add_child(_action_button("transfer", "%s (T)" % _i18n.t(
 		"base.ui.settlement_editor.action.transfer"
 	), _on_transfer_pressed))
 
 	var actions_two := HBoxContainer.new()
 	actions_two.add_theme_constant_override("separation", 6)
 	panel.add_child(actions_two)
-	actions_two.add_child(_button("%s (I)" % _i18n.t(
+	actions_two.add_child(_action_button("invite", "%s (I)" % _i18n.t(
 		"base.ui.settlement_editor.action.invite"
 	), _on_invite_pressed))
-	actions_two.add_child(_button("%s (P)" % _i18n.t(
+	actions_two.add_child(_action_button("set_role", "%s (P)" % _i18n.t(
 		"base.ui.settlement_editor.action.set_role"
 	), _on_set_role_pressed))
-	actions_two.add_child(_button("%s (X)" % _i18n.t(
+	actions_two.add_child(_action_button("remove_member", "%s (X)" % _i18n.t(
 		"base.ui.settlement_editor.action.remove_member"
 	), _on_remove_member_pressed))
-	actions_two.add_child(_button("%s (M)" % _i18n.t(
+	actions_two.add_child(_action_button("set_tax", "%s (M)" % _i18n.t(
 		"base.ui.settlement_editor.action.set_tax"
 	), _on_set_tax_pressed))
 
 	var actions_three := HBoxContainer.new()
 	actions_three.add_theme_constant_override("separation", 6)
 	panel.add_child(actions_three)
-	actions_three.add_child(_button("Release (Shift+X)", _on_release_pressed))
+	actions_three.add_child(_action_button("release", "%s (Shift+X)" % _i18n.t(
+		"base.ui.settlement_editor.button.release"
+	), _on_release_pressed))
 
 	var registry_actions := HBoxContainer.new()
 	registry_actions.add_theme_constant_override("separation", 6)
 	panel.add_child(registry_actions)
-	registry_actions.add_child(_button("Register player (N)", _on_register_player_pressed))
-	registry_actions.add_child(_button("Next target (P)", _on_cycle_target_pressed))
+	registry_actions.add_child(_action_button(
+		"register_player",
+		"%s (N)" % _i18n.t("base.ui.settlement_editor.button.register_player"),
+		_on_register_player_pressed
+	))
+	registry_actions.add_child(_action_button(
+		"cycle_target",
+		"%s (P)" % _i18n.t("base.ui.settlement_editor.button.next_target"),
+		_on_cycle_target_pressed
+	))
 
 	var note := Label.new()
 	note.text = _i18n.t("base.ui.settlement_editor.note")
@@ -1634,6 +2898,99 @@ func _button(text: String, callback: Callable) -> Button:
 	button.text = text
 	button.pressed.connect(callback)
 	return button
+
+
+func _toolbar_button(id: String, text: String, callback: Callable) -> Button:
+	var button := _button(text, callback)
+	_toolbar_buttons[id] = button
+	return button
+
+
+func _action_button(id: String, text: String, callback: Callable) -> Button:
+	var button := _button(text, callback)
+	_action_buttons[id] = button
+	return button
+
+
+func _on_page_prev_pressed() -> void:
+	_focus_group = "paging"
+	_focus_paging = 0
+	_page_by(-1)
+
+
+func _on_page_next_pressed() -> void:
+	_focus_group = "paging"
+	_focus_paging = 1
+	_page_by(1)
+
+
+## Dimmed, centered confirmation surface. Its controls are labelled before the
+## modal ever opens so screen readers always have a name and description.
+func _build_release_modal() -> void:
+	_modal_dim = ColorRect.new()
+	_modal_dim.color = Color(0.02, 0.025, 0.035, 0.72)
+	_modal_dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_modal_dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	_modal_dim.visible = false
+	add_child(_modal_dim)
+
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_modal_dim.add_child(center)
+
+	var panel := PanelContainer.new()
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.09, 0.105, 0.13)
+	style.border_color = Color(0.30, 0.36, 0.45)
+	style.set_border_width_all(2)
+	style.set_corner_radius_all(6)
+	style.set_content_margin_all(18)
+	panel.add_theme_stylebox_override("panel", style)
+	panel.custom_minimum_size = Vector2(420, 0)
+	center.add_child(panel)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 10)
+	panel.add_child(box)
+
+	_modal_title = Label.new()
+	_modal_title.add_theme_font_size_override("font_size", 22)
+	box.add_child(_modal_title)
+
+	_modal_body = Label.new()
+	_modal_body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(_modal_body)
+
+	_modal_error = Label.new()
+	_modal_error.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_modal_error.add_theme_color_override("font_color", ERROR_COLOR)
+	box.add_child(_modal_error)
+
+	var buttons := HBoxContainer.new()
+	buttons.add_theme_constant_override("separation", 8)
+	buttons.alignment = BoxContainer.ALIGNMENT_END
+	box.add_child(buttons)
+	_modal_cancel = _button(_i18n.t("base.ui.settlement_editor.release.cancel"),
+		_close_release_modal)
+	buttons.add_child(_modal_cancel)
+	_modal_confirm = _button(_i18n.t("base.ui.settlement_editor.button.release"),
+		_confirm_release_modal)
+	buttons.add_child(_modal_confirm)
+
+
+## Border-only overlay that marks the logical gamepad focus target.
+func _build_focus_ring() -> Panel:
+	var ring := Panel.new()
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0, 0, 0, 0)
+	style.border_color = Color(0.40, 0.78, 1.0)
+	style.set_border_width_all(2)
+	style.set_corner_radius_all(3)
+	ring.add_theme_stylebox_override("panel", style)
+	ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ring.visible = false
+	add_child(ring)
+	return ring
 
 
 func _label(text: String) -> Label:
