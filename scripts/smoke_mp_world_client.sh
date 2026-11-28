@@ -11,6 +11,7 @@ set -euo pipefail
 #   MP_WORLD_CLIENT status=ok tick=6 population=3277 balance=100000 \
 #     roads=6 buildings=4 truncated=false buildings_truncated=false \
 #     checksum=<16 hex> road_checksum=<16 hex> building_checksum=<16 hex> ...
+#   MP_WORLD_PAUSE status=ok checks=6 paused=false
 #   MP_WORLD_CLIENT_ZERO status=ok ... roads=0 buildings=0 ...
 #   MP_WORLD_CLIENT_DONE status=ok ... frames_sent=10 frames_received=12
 #
@@ -141,6 +142,7 @@ run_block() {
 	local godot_status
 	local main_line
 	local zero_line
+	local pause_line
 	local done_line
 	local main_checksum
 	local zero_checksum
@@ -164,14 +166,19 @@ run_block() {
 
 	main_line="$(grep '^MP_WORLD_CLIENT status=ok ' <<<"$output" | tail -1 || true)"
 	zero_line="$(grep '^MP_WORLD_CLIENT_ZERO status=ok ' <<<"$output" | tail -1 || true)"
+	pause_line="$(grep '^MP_WORLD_PAUSE status=ok ' <<<"$output" | tail -1 || true)"
 	done_line="$(grep '^MP_WORLD_CLIENT_DONE status=ok ' <<<"$output" | tail -1 || true)"
 
 	if grep -q '^MP_WORLD_CLIENT status=fail ' <<<"$output"; then
 		echo "3D world client smoke ($name) failed: client reported a failure" >&2
 		exit 1
 	fi
-	if [[ -z "$main_line" || -z "$zero_line" || -z "$done_line" ]]; then
-		echo "3D world client smoke ($name) failed: missing main, zero, or done marker" >&2
+	if [[ -z "$main_line" || -z "$zero_line" || -z "$pause_line" || -z "$done_line" ]]; then
+		echo "3D world client smoke ($name) failed: missing main, zero, pause, or done marker" >&2
+		exit 1
+	fi
+	if [[ "$(grep -c '^MP_WORLD_PAUSE status=ok ' <<<"$output" || true)" -ne 1 ]]; then
+		echo "3D world client smoke ($name) failed: expected exactly one MP_WORLD_PAUSE marker" >&2
 		exit 1
 	fi
 
@@ -181,6 +188,10 @@ run_block() {
 	fi
 	if [[ ! "$zero_line" =~ ^MP_WORLD_CLIENT_ZERO\ status=ok\ tick=6\ population=3277\ balance=100000\ roads=0\ buildings=0\ truncated=false\ buildings_truncated=false\ checksum=[0-9a-f]{16}\ rendered_roads=0\ rendered_buildings=0\ center=32\.0,32\.0\ radius=16\.0$ ]]; then
 		echo "3D world client smoke ($name) zero marker mismatch: $zero_line" >&2
+		exit 1
+	fi
+	if [[ ! "$pause_line" =~ ^MP_WORLD_PAUSE\ status=ok\ checks=6\ paused=false$ ]]; then
+		echo "3D world client smoke ($name) pause marker mismatch: $pause_line" >&2
 		exit 1
 	fi
 	if [[ ! "$done_line" =~ ^MP_WORLD_CLIENT_DONE\ status=ok\ session=session-[0-9a-f]{16}\ tick=6\ frames_sent=10\ frames_received=12$ ]]; then
@@ -205,6 +216,7 @@ run_block() {
 	grep '^MP_WORLD_CLIENT' <<<"$output" >"$prefix.txt"
 	printf '%s\n' "$main_line" >"$prefix.main"
 	printf '%s\n' "$zero_line" >"$prefix.zero"
+	printf '%s\n' "$pause_line" >"$prefix.pause"
 	printf '%s\n' "$main_checksum" >"$prefix.checksum"
 
 	# The server reports the accepted session and command count after the
@@ -241,6 +253,10 @@ if ! diff -u "$SMOKE_DIR/first.main" "$SMOKE_DIR/second.main"; then
 fi
 if ! diff -u "$SMOKE_DIR/first.zero" "$SMOKE_DIR/second.zero"; then
 	echo "3D world client smoke failed: zero-view markers differ between runs" >&2
+	exit 1
+fi
+if ! diff -u "$SMOKE_DIR/first.pause" "$SMOKE_DIR/second.pause"; then
+	echo "3D world client smoke failed: pause markers differ between runs" >&2
 	exit 1
 fi
 if ! diff -u "$SMOKE_DIR/first.txt" "$SMOKE_DIR/second.txt"; then

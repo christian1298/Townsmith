@@ -167,6 +167,16 @@ func set_status(status: Dictionary) -> void:
 	_refresh()
 
 
+## Override only the authoritative pause flag, preserving every other status
+## field. The owning client feeds this from the same `snapshot.paused` value it
+## renders, so the panel cannot show a stale or locally guessed time state.
+## This method never emits a vote command.
+func set_paused(value: bool) -> void:
+	_status["paused"] = value
+	if _has_status:
+		_refresh()
+
+
 ## Show a stable, code-keyed error line. The server message is only a fallback
 ## for a code the panel does not know.
 func set_error(code: String, message: String) -> void:
