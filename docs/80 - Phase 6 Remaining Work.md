@@ -13,7 +13,7 @@ tags:
 # Phase 6 Remaining Work
 
 > [!abstract] Purpose
-> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `b3fb9b9` (2026-11-28). It is a plan, not an implementation claim.
+> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `a0763b6` (2026-11-28). It is a plan, not an implementation claim.
 
 Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/D-032/D-033/D-035/D-038/D-039/D-040/D-041/D-042, [[09 - Open Questions]] Q-101/Q-117/Q-119/Q-120/Q-121/Q-122/Q-123/Q-124/Q-125/Q-126/Q-127/Q-128, [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]], [[81 - Settlement Tax Composition]], [[82 - Journal and Rollback]], [[83 - Remote Transport and Authentication]], [[84 - Content Registry Modes]].
 
@@ -55,6 +55,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 | ✅ Done | Pause restart semantics, status/district/editor a11y, settlement confirmation modal, start-menu volume settings | #521–#526 |
 | ✅ Done | 3D HUD and start-menu screen-reader semantics | #528–#529 |
 | ✅ Done | Settlement stale-revision badge, retry, and keyboard/gamepad reachability | #531/#533 |
+| ✅ Done | Bounded four-player soak and placement-lock accessibility | #535/#536 |
 | ✅ Done | Pause in snapshot/status and clients, start menu, chat a11y, segmented transport, roster picker, paused wire pins, time-vote/settlement a11y, step-count latency proxy | #506–#519 |
 | ✅ Done | Production settlement shell, local/connected mutations, shared-core embedding, gamepad navigation | #449/#454/#465/#472/#488/#497 |
 | ✅ Done | Four-player checksum/save exit script (CI), concurrent status-watch load, lock-lease override | #493/#494/#496 |
