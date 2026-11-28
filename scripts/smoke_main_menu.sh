@@ -34,12 +34,13 @@ fi
 
 MENU_CONTRACT='^MAIN_MENU status=ok buttons=6 focus=new_city checks=[0-9]+ checksum=[0-9a-f]{8}$'
 SETTINGS_CONTRACT='^MAIN_MENU_SETTINGS status=ok volume=[0-9]+ muted=(true|false) checks=[0-9]+$'
+A11Y_CONTRACT='^MAIN_MENU_A11Y status=ok checks=[0-9]+$'
 
-# Run the menu smoke once and echo its marker on stdout. Diagnostics go to
-# stderr so the caller can compare the two markers as plain strings.
+# Run the menu smoke once and echo its markers on stdout. Diagnostics go to
+# stderr so the caller can compare the markers as plain strings.
 run_menu() {
 	local label="$1"
-	local output godot_status marker settings
+	local output godot_status marker settings a11y
 
 	set +e
 	output="$(timeout 60s "$GODOT_BIN" --headless --path "$ROOT/godot" -- --menu-smoke 2>&1)"
@@ -74,15 +75,26 @@ run_menu() {
 		echo "Main menu settings contract mismatch ($label): $settings" >&2
 		exit 1
 	fi
-	printf '%s\n%s\n' "$marker" "$settings"
+	a11y="$(grep '^MAIN_MENU_A11Y status=' <<<"$output" | tail -1 || true)"
+	if [[ -z "$a11y" ]]; then
+		echo "Main menu smoke failed ($label): no MAIN_MENU_A11Y marker" >&2
+		exit 1
+	fi
+	if [[ ! "$a11y" =~ $A11Y_CONTRACT ]]; then
+		echo "Main menu accessibility contract mismatch ($label): $a11y" >&2
+		exit 1
+	fi
+	printf '%s\n%s\n%s\n' "$marker" "$settings" "$a11y"
 }
 
 FIRST_ALL="$(run_menu first)"
 FIRST="$(sed -n '1p' <<<"$FIRST_ALL")"
 FIRST_SETTINGS="$(sed -n '2p' <<<"$FIRST_ALL")"
+FIRST_A11Y="$(sed -n '3p' <<<"$FIRST_ALL")"
 SECOND_ALL="$(run_menu second)"
 SECOND="$(sed -n '1p' <<<"$SECOND_ALL")"
 SECOND_SETTINGS="$(sed -n '2p' <<<"$SECOND_ALL")"
+SECOND_A11Y="$(sed -n '3p' <<<"$SECOND_ALL")"
 
 if [[ "$FIRST" != "$SECOND" ]]; then
 	echo "Main menu smoke is not deterministic:" >&2
