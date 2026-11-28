@@ -5,7 +5,9 @@ extends Node
 ## Covers idle, open -> yes -> passed, open -> no -> failed, admin cancel,
 ## cooldown, role-disabled controls, duplicate-ballot suppression, every stable
 ## `vote.*` / `vote.unavailable` error line, the EN/DE table, and the exact wire
-## dictionaries. It never opens a socket and never starts a server.
+## dictionaries. It never opens a socket and never starts a server. The
+## screen-reader block runs after every render stage and prints
+## `TIME_VOTE_A11Y status=ok checks=N`.
 ##
 ## Run:
 ##   godot --headless --path godot res://time_vote_panel_smoke.tscn
@@ -15,6 +17,25 @@ extends Node
 
 const PanelScene := preload("res://time_vote_panel.tscn")
 const EXPECTED_COMMANDS := 5
+
+const A11Y_PARTS := [
+	"title",
+	"state",
+	"result",
+	"clock",
+	"question",
+	"initiator",
+	"tally",
+	"window",
+	"cooldown",
+	"call_pause",
+	"call_resume",
+	"yes",
+	"no",
+	"cancel",
+	"status",
+]
+const A11Y_BUTTONS := ["call_pause", "call_resume", "yes", "no", "cancel"]
 
 var _panel
 var _commands: Array = []
@@ -329,6 +350,201 @@ func _run() -> void:
 	_check(snap["error_code"] == "" and snap["error_line"] == "", "error_cleared.empty")
 
 	_expect_silent("final.no_commands")
+
+	_run_a11y()
+
+
+func _run_a11y() -> void:
+	var failures_before := _failures
+	var checks_before := _checks
+
+	# Idle: every label and button carries a name and description, the state and
+	# tally regions are polite, and the status line is assertive.
+	_panel.set_locale("en")
+	_panel.clear_error()
+	_panel.set_permissions(true, false)
+	_panel.set_status(_status({}))
+	var a11y: Dictionary = _panel.accessibility_snapshot()
+	_check(str(a11y["locale"]) == "en", "a11y.locale_en", str(a11y["locale"]))
+	_check(_a11y_labelled(a11y), "a11y.idle.labelled")
+	_check(_a11y_buttons_labelled(a11y), "a11y.buttons.labelled", JSON.stringify(a11y))
+	_check(str(a11y["title"]["name"]) == "Time vote", "a11y.title.name", str(a11y["title"]["name"]))
+	_check(str(a11y["title"]["role"]) == "heading", "a11y.title.role", str(a11y["title"]["role"]))
+	_check(str(a11y["state"]["description"]) == "No vote yet", "a11y.idle.state", str(a11y["state"]["description"]))
+	_check(str(a11y["state"]["role"]) == "status", "a11y.state.role", str(a11y["state"]["role"]))
+	_check(str(a11y["state"]["live"]) == "polite", "a11y.state.live", str(a11y["state"]["live"]))
+	_check(str(a11y["result"]["live"]) == "polite", "a11y.result.live", str(a11y["result"]["live"]))
+	_check(str(a11y["tally"]["role"]) == "status", "a11y.tally.role", str(a11y["tally"]["role"]))
+	_check(str(a11y["tally"]["live"]) == "polite", "a11y.tally.live", str(a11y["tally"]["live"]))
+	_check(str(a11y["clock"]["live"]) == "off", "a11y.clock.live", str(a11y["clock"]["live"]))
+	_check(str(a11y["status"]["role"]) == "status", "a11y.status.role", str(a11y["status"]["role"]))
+	_check(str(a11y["status"]["live"]) == "assertive", "a11y.status.live", str(a11y["status"]["live"]))
+	_check(str(a11y["status"]["description"]) == "No error.", "a11y.status.idle", str(a11y["status"]["description"]))
+	_check(str(a11y["question"]["description"]) == "Vote target: none.", "a11y.idle.question", str(a11y["question"]["description"]))
+	_check(str(a11y["clock"]["description"]) == "Clock 0 s | Paused: no", "a11y.idle.clock", str(a11y["clock"]["description"]))
+	_check(str(a11y["tally"]["description"]) == "Yes 0 / No 0 / Online 2", "a11y.idle.tally", str(a11y["tally"]["description"]))
+	_check(bool(a11y["call_pause"]["enabled"]) and bool(a11y["call_resume"]["enabled"]), "a11y.idle.calls_enabled")
+	_check(not bool(a11y["yes"]["enabled"]) and not bool(a11y["no"]["enabled"]), "a11y.idle.ballots_disabled")
+	_check(not bool(a11y["cancel"]["enabled"]), "a11y.idle.cancel_disabled")
+	_check(_a11y_all_reachable(a11y), "a11y.idle.reachable", JSON.stringify(a11y))
+
+	# Vote open: question, tally, initiator, and clock descriptions follow status.
+	_panel.set_status(_status({
+		"vote_id": 7,
+		"state": "open",
+		"action": "pause",
+		"initiator": "alice",
+		"yes": 1,
+		"no": 0,
+		"online": 2,
+		"started_tick": 10,
+		"ends_tick": 70,
+		"cooldown_until": 0,
+		"paused": false,
+		"clock": 10,
+		"checksum": "aaaaaaaaaaaaaaaa",
+	}))
+	a11y = _panel.accessibility_snapshot()
+	_check(str(a11y["state"]["description"]) == "Vote open", "a11y.open.state", str(a11y["state"]["description"]))
+	_check(str(a11y["question"]["description"]) == "Vote target: pause.", "a11y.open.question", str(a11y["question"]["description"]))
+	_check(str(a11y["tally"]["description"]) == "Yes 1 / No 0 / Online 2", "a11y.open.tally", str(a11y["tally"]["description"]))
+	_check(str(a11y["initiator"]["description"]) == "alice", "a11y.open.initiator", str(a11y["initiator"]["description"]))
+	_check(str(a11y["clock"]["description"]) == "Clock 10 s | Paused: no", "a11y.open.clock", str(a11y["clock"]["description"]))
+	_check(
+		not bool(a11y["call_pause"]["enabled"])
+		and not bool(a11y["call_resume"]["enabled"])
+		and bool(a11y["yes"]["enabled"])
+		and bool(a11y["no"]["enabled"]),
+		"a11y.open.enablement",
+		JSON.stringify(a11y)
+	)
+	_check(_a11y_labelled(a11y), "a11y.open.labelled")
+
+	# Pass: the state line doubles as the polite result announcement.
+	_panel.set_status(_status({
+		"vote_id": 7,
+		"state": "passed",
+		"action": "pause",
+		"initiator": "alice",
+		"yes": 2,
+		"no": 0,
+		"online": 2,
+		"started_tick": 10,
+		"ends_tick": 70,
+		"cooldown_until": 190,
+		"paused": true,
+		"clock": 12,
+		"checksum": "bbbbbbbbbbbbbbbb",
+	}))
+	a11y = _panel.accessibility_snapshot()
+	_check(str(a11y["state"]["description"]) == "Vote passed", "a11y.passed.state", str(a11y["state"]["description"]))
+	_check(str(a11y["result"]["description"]) == "Vote passed", "a11y.passed.result", str(a11y["result"]["description"]))
+	_check(str(a11y["clock"]["description"]) == "Clock 12 s | Paused: yes", "a11y.passed.clock", str(a11y["clock"]["description"]))
+	_check(str(a11y["tally"]["description"]) == "Yes 2 / No 0 / Online 2", "a11y.passed.tally", str(a11y["tally"]["description"]))
+	_check(
+		not bool(a11y["call_pause"]["enabled"])
+		and not bool(a11y["yes"]["enabled"])
+		and not bool(a11y["cancel"]["enabled"]),
+		"a11y.passed.disabled",
+		JSON.stringify(a11y)
+	)
+
+	# Fail: the same polite result region reports the failed outcome.
+	_panel.set_status(_status({
+		"vote_id": 8,
+		"state": "failed",
+		"action": "resume",
+		"initiator": "bob",
+		"yes": 1,
+		"no": 2,
+		"online": 3,
+		"started_tick": 100,
+		"ends_tick": 160,
+		"cooldown_until": 460,
+		"paused": true,
+		"clock": 160,
+		"checksum": "cccccccccccccccc",
+	}))
+	a11y = _panel.accessibility_snapshot()
+	_check(str(a11y["state"]["description"]) == "Vote failed", "a11y.failed.state", str(a11y["state"]["description"]))
+	_check(str(a11y["result"]["description"]) == "Vote failed", "a11y.failed.result", str(a11y["result"]["description"]))
+	_check(str(a11y["tally"]["description"]) == "Yes 1 / No 2 / Online 3", "a11y.failed.tally", str(a11y["tally"]["description"]))
+
+	# Error: assertive announcement with the stable code-keyed line.
+	_panel.set_error("vote.cooldown", "server detail")
+	a11y = _panel.accessibility_snapshot()
+	_check(str(a11y["status"]["live"]) == "assertive", "a11y.error.live", str(a11y["status"]["live"]))
+	_check(bool(a11y["status"]["visible"]), "a11y.error.visible")
+	_check(
+		str(a11y["status"]["description"]) == "Error: Time votes are cooling down. (vote.cooldown)",
+		"a11y.error.description",
+		str(a11y["status"]["description"])
+	)
+	_panel.clear_error()
+	a11y = _panel.accessibility_snapshot()
+	_check(str(a11y["status"]["description"]) == "No error.", "a11y.error.cleared", str(a11y["status"]["description"]))
+
+	# German table resolves the same semantic slots; no key falls through.
+	_panel.set_locale("de")
+	_panel.set_error("vote.open", "")
+	a11y = _panel.accessibility_snapshot()
+	_check(str(a11y["locale"]) == "de", "a11y.locale_de", str(a11y["locale"]))
+	_check(str(a11y["title"]["name"]) == "Zeitabstimmung", "a11y.de.title", str(a11y["title"]["name"]))
+	_check(str(a11y["state"]["name"]) == "Abstimmungsstatus", "a11y.de.state_name", str(a11y["state"]["name"]))
+	_check(str(a11y["question"]["description"]) == "Abstimmungsziel: resume.", "a11y.de.question", str(a11y["question"]["description"]))
+	_check(str(a11y["status"]["description"]).begins_with("Fehler: "), "a11y.de.error", str(a11y["status"]["description"]))
+	_check(_a11y_labelled(a11y), "a11y.de.labelled", JSON.stringify(a11y))
+	_check(_a11y_no_leak(a11y), "a11y.de.no_missing_keys", JSON.stringify(a11y))
+
+	_panel.set_locale("en")
+	_panel.clear_error()
+	a11y = _panel.accessibility_snapshot()
+	_check(str(a11y["title"]["name"]) == "Time vote", "a11y.en.restored", str(a11y["title"]["name"]))
+
+	if _failures == failures_before:
+		print("TIME_VOTE_A11Y status=ok checks=%d" % (_checks - checks_before))
+	else:
+		print("TIME_VOTE_A11Y status=fail checks=%d errors=%d" % [
+			_checks - checks_before, _failures - failures_before,
+		])
+
+
+## Every entry in the snapshot carries a non-empty name and description.
+func _a11y_labelled(a11y: Dictionary) -> bool:
+	for part in A11Y_PARTS:
+		var entry: Dictionary = a11y[part]
+		if str(entry["name"]).is_empty() or str(entry["description"]).is_empty():
+			return false
+	return true
+
+
+## Every interactive control is exposed as a labelled button.
+func _a11y_buttons_labelled(a11y: Dictionary) -> bool:
+	for part in A11Y_BUTTONS:
+		var entry: Dictionary = a11y[part]
+		if str(entry["role"]) != "button":
+			return false
+		if str(entry["name"]).is_empty() or str(entry["description"]).is_empty():
+			return false
+	return true
+
+
+## All five buttons are structurally reachable by keyboard focus.
+func _a11y_all_reachable(a11y: Dictionary) -> bool:
+	for part in A11Y_BUTTONS:
+		if not bool(a11y[part]["reachable"]):
+			return false
+	return true
+
+
+## No untranslated key leaked into a name or description.
+func _a11y_no_leak(a11y: Dictionary) -> bool:
+	for part in A11Y_PARTS:
+		var entry: Dictionary = a11y[part]
+		for field in ["name", "description"]:
+			if str(entry[field]).contains("a11y_"):
+				return false
+	return true
 
 
 func _status(overrides: Dictionary) -> Dictionary:

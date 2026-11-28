@@ -17,10 +17,22 @@ extends PanelContainer
 ## developer panel only (`set_locale`); the surrounding `mp_client.gd` remains
 ## raw English. Error lines are keyed by the stable protocol code rather than the
 ## server message, so the same code always renders the same line.
+##
+## Screen-reader semantics: every label and button carries an
+## `accessibility_name`/`accessibility_description`; the state and tally lines
+## are polite live regions so vote transitions are announced, and the error
+## line is assertive so a rejection interrupts. `accessibility_snapshot()`
+## exposes the property state for the headless smoke.
 
 signal command_issued(command: Dictionary)
 
 const ACTIONS := ["pause", "resume"]
+
+## `Control.accessibility_live` values (Godot 4.7 exposes the property but not
+## named enum constants). State/tally are polite; the error line is assertive.
+const A11Y_LIVE_OFF := 0
+const A11Y_LIVE_POLITE := 1
+const A11Y_LIVE_ASSERTIVE := 2
 
 const ERROR_CODES := [
 	"vote.open",
@@ -75,6 +87,22 @@ const TEXT := {
 		"err_vote_action_required": "Choose pause or resume before calling a vote.",
 		"err_role_forbidden": "Your role cannot do that.",
 		"err_unknown": "Unexpected vote error.",
+		"a11y_title_desc": "Pause or resume the shared clock through a peer vote (D-021).",
+		"a11y_state_name": "Vote state",
+		"a11y_clock_name": "Clock",
+		"a11y_question_name": "Vote question",
+		"a11y_question_desc": "Vote target: %s.",
+		"a11y_initiator_name": "Started by",
+		"a11y_tally_name": "Vote tally",
+		"a11y_window_name": "Vote window",
+		"a11y_cooldown_name": "Cooldown",
+		"a11y_status_name": "Time vote status",
+		"a11y_status_idle": "No error.",
+		"a11y_call_pause_desc": "Ask the server to vote on pausing the clock. Unavailable while a vote is open or cooling down.",
+		"a11y_call_resume_desc": "Ask the server to vote on resuming the clock. Unavailable while a vote is open or cooling down.",
+		"a11y_yes_desc": "Vote yes in the open time vote. Disabled after you vote.",
+		"a11y_no_desc": "Vote no in the open time vote. Disabled after you vote.",
+		"a11y_cancel_desc": "Cancel the open time vote. Requires the admin role.",
 	},
 	"de": {
 		"title": "Zeitabstimmung",
@@ -115,6 +143,22 @@ const TEXT := {
 		"err_vote_action_required": "Wähle vor dem Start Pause oder Fortsetzen.",
 		"err_role_forbidden": "Deine Rolle darf das nicht.",
 		"err_unknown": "Unerwarteter Abstimmungsfehler.",
+		"a11y_title_desc": "Pausiert oder setzt die gemeinsame Uhr per Spielerabstimmung fort (D-021).",
+		"a11y_state_name": "Abstimmungsstatus",
+		"a11y_clock_name": "Uhr",
+		"a11y_question_name": "Abstimmungsfrage",
+		"a11y_question_desc": "Abstimmungsziel: %s.",
+		"a11y_initiator_name": "Gestartet von",
+		"a11y_tally_name": "Stimmenauszählung",
+		"a11y_window_name": "Abstimmungszeitfenster",
+		"a11y_cooldown_name": "Abklingzeit",
+		"a11y_status_name": "Zeitabstimmungsstatus",
+		"a11y_status_idle": "Kein Fehler.",
+		"a11y_call_pause_desc": "Fordert eine Abstimmung zum Pausieren der Uhr an. Nicht verfügbar, solange eine Abstimmung offen ist oder abklingt.",
+		"a11y_call_resume_desc": "Fordert eine Abstimmung zum Fortsetzen der Uhr an. Nicht verfügbar, solange eine Abstimmung offen ist oder abklingt.",
+		"a11y_yes_desc": "Stimme mit Ja in der offenen Zeitabstimmung. Nach der Stimmabgabe deaktiviert.",
+		"a11y_no_desc": "Stimme mit Nein in der offenen Zeitabstimmung. Nach der Stimmabgabe deaktiviert.",
+		"a11y_cancel_desc": "Bricht die offene Zeitabstimmung ab. Erfordert die Admin-Rolle.",
 	},
 }
 
@@ -264,6 +308,32 @@ func snapshot() -> Dictionary:
 	}
 
 
+## Screen-reader semantics for the deterministic smoke. Names and descriptions
+## resolve through the panel's EN/DE table; live modes are stable strings and
+## the role is derived from each control's job in this panel. `result` is the
+## same state line viewed as the final outcome announcement, so pass/fail/
+## cancel transitions are announced by the polite state region.
+func accessibility_snapshot() -> Dictionary:
+	return {
+		"locale": locale,
+		"title": _a11y_entry(_title, "heading"),
+		"state": _a11y_entry(_state_label, "status"),
+		"result": _a11y_entry(_state_label, "status"),
+		"clock": _a11y_entry(_clock_label, "status"),
+		"question": _a11y_entry(_target_label, "label"),
+		"initiator": _a11y_entry(_initiator_label, "label"),
+		"tally": _a11y_entry(_tally_label, "status"),
+		"window": _a11y_entry(_window_label, "label"),
+		"cooldown": _a11y_entry(_cooldown_label, "label"),
+		"call_pause": _a11y_entry(_call_pause, "button"),
+		"call_resume": _a11y_entry(_call_resume, "button"),
+		"yes": _a11y_entry(_yes, "button"),
+		"no": _a11y_entry(_no, "button"),
+		"cancel": _a11y_entry(_cancel, "button"),
+		"status": _a11y_entry(_error_label, "status"),
+	}
+
+
 func _build_ui() -> void:
 	custom_minimum_size = Vector2(360, 0)
 
@@ -349,6 +419,65 @@ func _refresh() -> void:
 	_yes.disabled = not _ballot_allowed()
 	_no.disabled = not _ballot_allowed()
 	_cancel.disabled = not _cancel_allowed()
+
+	_refresh_accessibility()
+
+
+## Localized screen-reader names and descriptions for every visible part. The
+## state and tally lines are polite live regions; the error line is assertive.
+## `result` in `accessibility_snapshot()` aliases the state line.
+func _refresh_accessibility() -> void:
+	if _title != null:
+		_title.accessibility_name = _tr("title")
+		_title.accessibility_description = _tr("a11y_title_desc")
+	if _state_label != null:
+		_state_label.accessibility_name = _tr("a11y_state_name")
+		_state_label.accessibility_description = _state_text()
+		_state_label.accessibility_live = A11Y_LIVE_POLITE
+	if _clock_label != null:
+		_clock_label.accessibility_name = _tr("a11y_clock_name")
+		_clock_label.accessibility_description = _clock_text()
+	if _target_label != null:
+		_target_label.accessibility_name = _tr("a11y_question_name")
+		_target_label.accessibility_description = (
+			_tr("a11y_question_desc") % _target_display()
+		)
+	if _initiator_label != null:
+		_initiator_label.accessibility_name = _tr("a11y_initiator_name")
+		_initiator_label.accessibility_description = _initiator_display()
+	if _tally_label != null:
+		_tally_label.accessibility_name = _tr("a11y_tally_name")
+		_tally_label.accessibility_description = (
+			_tr("label_tally") % [_yes_count(), _no_count(), _online_count()]
+		)
+		_tally_label.accessibility_live = A11Y_LIVE_POLITE
+	if _window_label != null:
+		_window_label.accessibility_name = _tr("a11y_window_name")
+		_window_label.accessibility_description = _window_text()
+	if _cooldown_label != null:
+		_cooldown_label.accessibility_name = _tr("a11y_cooldown_name")
+		_cooldown_label.accessibility_description = _cooldown_text()
+	if _call_pause != null:
+		_call_pause.accessibility_name = _tr("call_pause")
+		_call_pause.accessibility_description = _tr("a11y_call_pause_desc")
+	if _call_resume != null:
+		_call_resume.accessibility_name = _tr("call_resume")
+		_call_resume.accessibility_description = _tr("a11y_call_resume_desc")
+	if _yes != null:
+		_yes.accessibility_name = _tr("vote_yes")
+		_yes.accessibility_description = _tr("a11y_yes_desc")
+	if _no != null:
+		_no.accessibility_name = _tr("vote_no")
+		_no.accessibility_description = _tr("a11y_no_desc")
+	if _cancel != null:
+		_cancel.accessibility_name = _tr("cancel")
+		_cancel.accessibility_description = _tr("a11y_cancel_desc")
+	if _error_label != null:
+		_error_label.accessibility_name = _tr("a11y_status_name")
+		_error_label.accessibility_description = (
+			_error_text() if _error_code != "" else _tr("a11y_status_idle")
+		)
+		_error_label.accessibility_live = A11Y_LIVE_ASSERTIVE
 
 
 func _call_allowed() -> bool:
@@ -538,6 +667,49 @@ func _canonical_render() -> String:
 		"error=" + _error_text(),
 		"buttons=" + buttons,
 	])
+
+
+func _a11y_entry(control: Control, role: String) -> Dictionary:
+	if control == null:
+		return {
+			"name": "",
+			"description": "",
+			"role": role,
+			"class": "",
+			"live": "off",
+			"visible": false,
+			"focus_mode": "none",
+			"enabled": false,
+			"reachable": false,
+		}
+	var live := "off"
+	if control.accessibility_live == A11Y_LIVE_POLITE:
+		live = "polite"
+	elif control.accessibility_live == A11Y_LIVE_ASSERTIVE:
+		live = "assertive"
+	var focus_mode := "none"
+	if control.focus_mode == Control.FOCUS_ALL:
+		focus_mode = "all"
+	elif control.focus_mode == Control.FOCUS_CLICK:
+		focus_mode = "click"
+	var enabled := true
+	if control is BaseButton:
+		enabled = not (control as BaseButton).disabled
+	return {
+		"name": control.accessibility_name,
+		"description": control.accessibility_description,
+		"role": role,
+		"class": control.get_class(),
+		"live": live,
+		"visible": control.visible,
+		"focus_mode": focus_mode,
+		"enabled": enabled,
+		"reachable": (
+			control.is_inside_tree()
+			and control.visible
+			and control.focus_mode == Control.FOCUS_ALL
+		),
+	}
 
 
 func _fnv32(text: String) -> String:

@@ -2,8 +2,9 @@
 # Headless synthetic smoke for the developer time-vote panel.
 #
 # Runs `godot/time_vote_panel_smoke.tscn` twice, requires the synthetic contract
-# marker, and diffs the stable `TIME_VOTE_UI` lines. No server, display, or
-# human input is required; the panel is client-only and this script does not
+# marker and the screen-reader marker `TIME_VOTE_A11Y status=ok checks=N`, and
+# diffs the stable `TIME_VOTE_UI` / `TIME_VOTE_A11Y` lines. No server, display,
+# or human input is required; the panel is client-only and this script does not
 # touch the Rust crates.
 set -euo pipefail
 
@@ -43,7 +44,7 @@ run_once() {
 		exit 1
 	fi
 
-	grep '^TIME_VOTE_UI' "$log" || true
+	grep -E '^TIME_VOTE_(UI|A11Y)' "$log" || true
 }
 
 FIRST="$(run_once "$SMOKE_DIR/run1.log")"
@@ -61,12 +62,25 @@ fi
 
 LINE="$(grep '^TIME_VOTE_UI mode=synthetic ' <<<"$FIRST" | tail -1 || true)"
 CONTRACT='^TIME_VOTE_UI mode=synthetic status=ok cases=[0-9]+ checks=[0-9]+ commands=5 errors=0 checksum=[0-9a-f]{8}$'
+# Screen-reader checks run after every render stage, so the synthetic cases and
+# their checksum stay pinned; only the check count moves with the a11y block.
+A11Y_CONTRACT='^TIME_VOTE_A11Y status=ok checks=49$'
 if [[ -z "$LINE" ]]; then
 	echo "Time-vote panel smoke failed: no final synthetic marker" >&2
 	exit 1
 fi
 if [[ ! "$LINE" =~ $CONTRACT ]]; then
 	echo "Time-vote panel smoke contract mismatch: $LINE" >&2
+	exit 1
+fi
+
+A11Y_LINE="$(grep '^TIME_VOTE_A11Y status=' <<<"$FIRST" | tail -1 || true)"
+if [[ -z "$A11Y_LINE" ]]; then
+	echo "Time-vote panel smoke failed: no screen-reader marker" >&2
+	exit 1
+fi
+if [[ ! "$A11Y_LINE" =~ $A11Y_CONTRACT ]]; then
+	echo "Time-vote panel smoke screen-reader contract mismatch: $A11Y_LINE" >&2
 	exit 1
 fi
 
