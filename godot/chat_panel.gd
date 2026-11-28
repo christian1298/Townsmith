@@ -34,6 +34,13 @@ const UNREAD_DISPLAY_MAX := 99
 const DEFAULT_LOCALE := "en"
 const SUPPORTED_LOCALES := ["en", "de"]
 
+## `Control.accessibility_live` values (Godot 4.7 exposes the property but not
+## named enum constants). The transcript is polite so pushed lines are
+## announced; the status/error line is assertive so a rejection is immediate.
+const A11Y_LIVE_OFF := 0
+const A11Y_LIVE_POLITE := 1
+const A11Y_LIVE_ASSERTIVE := 2
+
 ## Deterministic keyboard focus order. The unread badge is display-only and
 ## stays out of the tab cycle; the status line is the last stop.
 const FOCUS_ORDER := ["draft", "send", "transcript", "status"]
@@ -402,6 +409,25 @@ func snapshot() -> Dictionary:
 	}
 
 
+## Screen-reader semantics for the deterministic smoke. Names and descriptions
+## resolve through `WorldI18n`; live modes are reported as stable strings and
+## the semantic role is derived from the control's job in this panel.
+func accessibility_snapshot() -> Dictionary:
+	return {
+		"locale": _i18n.locale(),
+		"title": _a11y_entry(_title, "heading"),
+		"transcript": _a11y_entry(_transcript, "log"),
+		"draft": _a11y_entry(_draft_edit, "text_field"),
+		"send": _a11y_entry(_send_button, "button"),
+		"counter": _a11y_entry(_counter_label, "label"),
+		"badge": _a11y_entry(_badge, "status"),
+		"help": _a11y_entry(_help_label, "label"),
+		"gamepad": _a11y_entry(_gamepad_label, "label"),
+		"status": _a11y_entry(_status_label, "status"),
+		"tab_order": FOCUS_ORDER.duplicate(),
+	}
+
+
 ## Keyboard focus contract, independent of the engine focus owner. Synthetic
 ## mode moves `focus` logically, so the smoke needs no display or focus calls.
 func focus_snapshot() -> Dictionary:
@@ -606,6 +632,57 @@ func _local_fallback_label(action: String) -> String:
 	if glyphs.is_empty():
 		return action
 	return "%s (%s)" % [action, "/".join(glyphs)]
+
+
+func _a11y_entry(control: Control, role: String) -> Dictionary:
+	if control == null:
+		return {
+			"name": "",
+			"description": "",
+			"role": role,
+			"class": "",
+			"live": "off",
+			"visible": false,
+			"focus_mode": "none",
+			"reachable": false,
+		}
+	var live := "off"
+	if control.accessibility_live == A11Y_LIVE_POLITE:
+		live = "polite"
+	elif control.accessibility_live == A11Y_LIVE_ASSERTIVE:
+		live = "assertive"
+	var focus_mode := "none"
+	if control.focus_mode == Control.FOCUS_ALL:
+		focus_mode = "all"
+	elif control.focus_mode == Control.FOCUS_CLICK:
+		focus_mode = "click"
+	return {
+		"name": control.accessibility_name,
+		"description": control.accessibility_description,
+		"role": role,
+		"class": control.get_class(),
+		"live": live,
+		"visible": control.visible,
+		"focus_mode": focus_mode,
+		"reachable": (
+			control.is_inside_tree()
+			and control.visible
+			and control.focus_mode == Control.FOCUS_ALL
+		),
+	}
+
+
+## Whether every localized name/description resolved (no `!base.ui.*!` fallback
+## leaked from `WorldI18n`). Shared by the EN and DE smoke assertions.
+func _a11y_no_leak(a11y: Dictionary) -> bool:
+	for part in [
+		"title", "transcript", "draft", "send", "counter", "badge", "help", "gamepad", "status",
+	]:
+		var entry: Dictionary = a11y[part]
+		for field in ["name", "description"]:
+			if str(entry[field]).contains("!base.ui."):
+				return false
+	return true
 
 
 func _focus_control(target: String) -> Control:
@@ -896,6 +973,50 @@ func _refresh_labels() -> void:
 		_gamepad_label.text = _gamepad_footer_text()
 	_refresh_counter()
 	_refresh()
+	_refresh_accessibility()
+
+
+## Localized screen-reader names and descriptions for every visible part. The
+## unread badge announces its compact text ("42" or "99+") only while visible;
+## the status line announces the active status or the localized error.
+func _refresh_accessibility() -> void:
+	if _title != null:
+		_title.accessibility_name = _i18n.t("base.ui.chat.title")
+		_title.accessibility_description = _i18n.t("base.ui.chat.panel_description")
+	if _transcript != null:
+		_transcript.accessibility_name = _i18n.t("base.ui.chat.transcript")
+		_transcript.accessibility_description = _i18n.t(
+			"base.ui.chat.transcript_description"
+		)
+		_transcript.accessibility_live = A11Y_LIVE_POLITE
+	if _draft_edit != null:
+		_draft_edit.accessibility_name = _i18n.t("base.ui.chat.draft")
+		_draft_edit.accessibility_description = _i18n.t(
+			"base.ui.chat.placeholder", {"max": MAX_CHAT_CHARS}
+		)
+	if _send_button != null:
+		_send_button.accessibility_name = _i18n.t("base.ui.chat.send")
+		_send_button.accessibility_description = _i18n.t("base.ui.chat.send_hint")
+	if _counter_label != null:
+		_counter_label.accessibility_name = _i18n.t("base.ui.chat.char_counter_name")
+		_counter_label.accessibility_description = _counter_label.text
+	if _badge != null:
+		_badge.accessibility_name = _i18n.t("base.ui.chat.unread_badge")
+		_badge.accessibility_description = (
+			_i18n.t("base.ui.chat.unread_announcement", {"count": _badge.text})
+			if _badge.visible
+			else ""
+		)
+	if _help_label != null:
+		_help_label.accessibility_name = _i18n.t("base.ui.chat.help_name")
+		_help_label.accessibility_description = _i18n.t("base.ui.chat.help")
+	if _gamepad_label != null:
+		_gamepad_label.accessibility_name = _i18n.t("base.ui.chat.gamepad_help")
+		_gamepad_label.accessibility_description = _gamepad_label.text
+	if _status_label != null:
+		_status_label.accessibility_name = _i18n.t("base.ui.chat.status")
+		_status_label.accessibility_description = _status_line()
+		_status_label.accessibility_live = A11Y_LIVE_ASSERTIVE
 
 
 func _refresh_counter() -> void:
@@ -905,6 +1026,7 @@ func _refresh_counter() -> void:
 		"base.ui.chat.char_counter",
 		{"count": _draft_edit.text.length(), "max": MAX_CHAT_CHARS}
 	)
+	_refresh_accessibility()
 
 
 func _refresh_unread() -> void:
@@ -912,6 +1034,7 @@ func _refresh_unread() -> void:
 		return
 	_badge.text = _unread_text(_unread)
 	_badge.visible = _unread > 0
+	_refresh_accessibility()
 
 
 func _unread_text(count: int) -> String:
@@ -940,6 +1063,7 @@ func _refresh() -> void:
 		"font_color",
 		Color(0.96, 0.42, 0.38) if has_error else Color(0.78, 0.82, 0.88)
 	)
+	_refresh_accessibility()
 
 
 func _on_draft_changed(_text: String) -> void:
@@ -1875,6 +1999,70 @@ func _run_smoke() -> void:
 	_check(_commands.size() == 4, "final.command_count", str(_commands.size()))
 	_check(_same_command(_commands[-1], {"type": "chat", "text": "vk send"}), "final.last_payload", JSON.stringify(_commands[-1]))
 	_check(_same_command(_commands[0], {"type": "chat", "text": "hello world"}), "final.first_payload", JSON.stringify(_commands[0]))
+
+	# --- Screen-reader semantics (no render case, no checksum weight) ---
+	# Every check runs after the final render stage, so the transcript, status,
+	# and locale changes here cannot move the pinned `CHAT_PANEL` checksum.
+	var a11y_failures := _failures
+	var a11y_checks_before := _checks
+	_draft_edit.text = ""
+	_refresh_counter()
+	set_unread(42)
+	var a11y := accessibility_snapshot()
+	_check(str(a11y["locale"]) == "en", "a11y.locale_en", str(a11y["locale"]))
+	for part in [
+		"title", "transcript", "draft", "send", "counter", "badge", "help", "gamepad", "status",
+	]:
+		var entry: Dictionary = a11y[part]
+		_check(not str(entry["name"]).is_empty(), "a11y.%s.name" % part, str(entry["name"]))
+		_check(
+			not str(entry["description"]).is_empty(),
+			"a11y.%s.description" % part,
+			str(entry["description"])
+		)
+	_check(str(a11y["transcript"]["live"]) == "polite", "a11y.transcript.live", str(a11y["transcript"]["live"]))
+	_check(str(a11y["status"]["live"]) == "assertive", "a11y.status.live", str(a11y["status"]["live"]))
+	_check(bool(a11y["draft"]["reachable"]), "a11y.draft.reachable", JSON.stringify(a11y["draft"]))
+	_check(bool(a11y["send"]["reachable"]), "a11y.send.reachable", JSON.stringify(a11y["send"]))
+	_check(str(a11y["draft"]["role"]) == "text_field", "a11y.draft.role", str(a11y["draft"]["role"]))
+	_check(str(a11y["send"]["role"]) == "button", "a11y.send.role", str(a11y["send"]["role"]))
+	_check(
+		str(a11y["badge"]["description"]).contains(badge_text()),
+		"a11y.badge.announced",
+		str(a11y["badge"]["description"])
+	)
+	_check(_a11y_no_leak(a11y), "a11y.en.no_missing_keys", JSON.stringify(a11y))
+	_check(str(a11y["title"]["name"]) == "Chat (developer panel)", "a11y.en.title", str(a11y["title"]["name"]))
+
+	var en_title := str(a11y["title"]["name"])
+	var en_transcript := str(a11y["transcript"]["name"])
+	_check(set_locale("de") == "de", "a11y.locale_de")
+	a11y = accessibility_snapshot()
+	_check(str(a11y["title"]["name"]) == "Chat (Entwicklerpanel)", "a11y.de.title", str(a11y["title"]["name"]))
+	_check(str(a11y["transcript"]["name"]) == "Chatnachrichten", "a11y.de.transcript", str(a11y["transcript"]["name"]))
+	_check(str(a11y["send"]["name"]) == "Senden", "a11y.de.send", str(a11y["send"]["name"]))
+	_check(str(a11y["title"]["name"]) != en_title, "a11y.de.title_switched")
+	_check(str(a11y["transcript"]["name"]) != en_transcript, "a11y.de.transcript_switched")
+	_check(_a11y_no_leak(a11y), "a11y.de.no_missing_keys", JSON.stringify(a11y))
+	_check(set_locale("en") == "en", "a11y.locale_en_restored")
+	_check(str(accessibility_snapshot()["title"]["name"]) == en_title, "a11y.en.title_restored")
+	set_error("chat.empty", "")
+	a11y = accessibility_snapshot()
+	_check(str(a11y["status"]["live"]) == "assertive", "a11y.status.error_live", str(a11y["status"]["live"]))
+	_check(
+		str(a11y["status"]["description"]).contains("Error:"),
+		"a11y.status.error_description",
+		str(a11y["status"]["description"])
+	)
+	clear_error()
+	set_unread(0)
+
+	if _failures == a11y_failures:
+		print("CHAT_PANEL_A11Y status=ok checks=%d" % (_checks - a11y_checks_before))
+	else:
+		print("CHAT_PANEL_A11Y status=fail checks=%d errors=%d" % [
+			_checks - a11y_checks_before, _failures - a11y_failures,
+		])
 
 	var checksum := _fnv32("\n".join(_stages))
 	if _failures == 0 and _commands.size() == 4:

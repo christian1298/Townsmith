@@ -2,7 +2,7 @@
 title: Multiplayer
 project: Townsmith
 status: proposed
-updated: 2026-11-27
+updated: 2026-11-28
 tags:
   - townsmith
   - multiplayer
@@ -719,7 +719,9 @@ The deterministic `--smoke` mode uses a fixed identity, fixed entries, both reje
 
 Under gamepad modality the panel navigates with `ui_up` / `ui_down` / `ui_accept` / `ui_cancel` plus the transcript page actions, and moving gamepad focus to the draft (or a rejected `ui_accept` that keeps it open) raises the platform virtual keyboard; a successful send, focus loss, panel hide, or a cancel that releases focus clears it. `focus_snapshot()` reports `vk_requested`, `vk_requests`, and `vk_clears`, so the headless smoke asserts request/clear intent deterministically, while `DisplayServer.virtual_keyboard_show` / `hide` are called only when the feature exists and the server is not headless. Keyboard and mouse focus never request the keyboard, and the panel's render logic is unchanged. The smoke's final checksum returns to the pre-gamepad baseline (`06986775`) because the VK block's successful send clears the empty-send error recorded by the earlier gamepad accept check.
 
-Limits: the panel is not wired into `mp_client.gd`, has no push/notification path, no autocomplete or moderation, and does not persist drafts or the transcript across reconnects. The virtual-keyboard path is intent-tested only: no headless run exercises a real platform keyboard, and no on-screen keyboard geometry, IME composition, or per-platform text input is validated.
+The panel also carries screen-reader semantics: title, transcript, draft, send, counter, unread badge, help, gamepad footer, and status each expose `accessibility_name`/`accessibility_description`; the transcript is a polite live region and the status/error line is assertive. `accessibility_snapshot()` exposes those names, live modes, roles, and reachability for the headless smoke, which asserts EN/DE switching and no key leaks.
+
+Limits: the panel is not wired into `mp_client.gd`, has no push/notification path, no autocomplete or moderation, and does not persist drafts or the transcript across reconnects. The virtual-keyboard path is intent-tested only: no headless run exercises a real platform keyboard, and no on-screen keyboard geometry, IME composition, or per-platform text input is validated. Accessibility semantics are property-tested headlessly; no platform screen reader or announcement throttling is exercised.
 
 ### Interest filtering v1
 
