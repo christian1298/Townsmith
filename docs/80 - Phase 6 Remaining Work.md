@@ -186,6 +186,8 @@ Prove, on reference hardware and with four players:
 3. A client disconnects mid-edit and reconnects without losing the city or the lock (or gets a clear lease-expired path).
 4. The dedicated server restarts and reloads the save with identical checksums.
 5. Time pause/resume/fast-forward works via admin and vote; Mode B does not pause the server.
+
+`crates/server/tests/four_player_soak.rs` runs a bounded four-client tape (40 rounds, one mid-run disconnect/resume, autosave every tick) over the production listener and pins tick `157`, checksum `a868a06a9f14416d`, roads `157`, sessions `5`, commands `641`; it also reloads the save and requires a byte-identical re-save. The one-hour human proof and the reference-hardware timing/bandwidth matrix remain external.
 6. While paused, placement/removal/edits work and construction resumes correctly.
 7. Bandwidth and tick time stay within target on the reference matrix.
 8. A missing/mismatched content pack fails closed with the documented read-only or blocked path.
