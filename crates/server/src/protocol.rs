@@ -3276,13 +3276,29 @@ mod tests {
 
     #[test]
     fn transport_snapshot_is_never_paused() {
-        let session = Session::new(LOOPBACK_SEED);
-        match session.snapshot() {
-            ServerMessage::Snapshot { paused, .. } => {
-                assert!(!paused, "the transport session has no time control");
+        let mut paused_session = Session::new(LOOPBACK_SEED);
+        // Even with the internal bit set, the transport snapshot reports the
+        // wire contract: there is no authoritative time control here.
+        paused_session.paused = true;
+        for session in [Session::new(LOOPBACK_SEED), paused_session] {
+            match session.snapshot() {
+                ServerMessage::Snapshot { paused, .. } => {
+                    assert!(!paused, "the transport session has no time control");
+                }
+                other => panic!("expected snapshot, got {other:?}"),
             }
-            other => panic!("expected snapshot, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn transport_checksum_covers_the_pause_bit() {
+        // The authoritative world checksum deliberately excludes `paused`,
+        // but the transport-only session mixes it in. Set the field directly
+        // so tick and speed match and only the pause bit can move the digest.
+        let unpaused = Session::new(LOOPBACK_SEED);
+        let mut paused = Session::new(LOOPBACK_SEED);
+        paused.paused = true;
+        assert_ne!(unpaused.checksum(), paused.checksum());
     }
 
     #[test]

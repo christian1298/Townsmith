@@ -650,6 +650,10 @@ No production change was required. Duplicate non-tag fields are currently collap
 
 A second command-level corpus (`crates/server/src/protocol_command_faults.rs`) covers the newer v1 commands: `player_list`, `settlement_list` paging, `settlement_at`, `server_status`, `audit_log` filters, the advisory lock commands, `chat`/`chat_since`, `found_settlement`, and the settlement mutations. It asserts stable decode/field codes, role/transport gates, paging clamps, extra-field tolerance, and unchanged tick/checksums/stores on rejection. It is in-memory and test-only.
 
+### Additive-field compatibility corpus (2026-11-28)
+
+`crates/server/tests/paused_compat.rs` pins the additive `paused` field on `snapshot` and `server_status`: payloads written before the field decode as `false`, encoding always carries the field, unknown sibling fields are ignored, and `null`, string, number, array, and object values fail closed rather than coercing. Old and new payloads also pass through the real length-prefixed frame reader, with no sockets, sleeps, or wall clock. The authoritative world checksum still excludes the flag (only the transport-only session checksum mixes it in), so pause/resume continues not to move world goldens.
+
 ## 13. Open questions
 
 - **Q-002:** Target player count and server type? Affects bandwidth, AOI, and simulation budgets.
