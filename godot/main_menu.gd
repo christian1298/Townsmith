@@ -3,8 +3,10 @@ extends Control
 ## Minimal front-end shell for the Godot project (docs/86).
 ##
 ## `main_menu.tscn` is the project's `run/main_scene`. It is presentation only:
-## no save slots, no profile, no settings persistence. Every entry opens an
-## existing scene and nothing here reads or writes game state.
+## no save slots and no profile. Every entry opens an existing scene. The one
+## thing it persists is the master-volume settings overlay
+## (`user://settings.cfg`, see `menu_settings.gd`); everything else is read
+## only.
 ##
 ## Forwarding: the existing scene smokes run `godot --path godot -- --smoke`
 ## and rely on `main.tscn` being the entry point. When the user args contain
@@ -16,23 +18,30 @@ extends Control
 ##   Blueprint Editor-> editor.tscn
 ##   Terrain Preview -> main.tscn (Phase 0 terrain demo)
 ##   Multiplayer     -> mp_world_client.tscn (needs a running server)
-##   Settings        -> placeholder overlay
+##   Settings        -> master-volume and mute overlay
 ##   Quit            -> closes the game
 ##
-## Controls: Up/Down or D-pad move focus, Enter/A activates, Esc/B closes the
-## settings overlay or returns focus to the first item. A visible ring marks
-## the focused control.
+## Controls: Up/Down or D-pad moves focus, Left/Right (or the left stick, or
+## the mouse) changes the volume, Enter/A activates, Esc/B cancels and closes
+## the settings overlay or returns focus to the first item. A visible ring
+## marks the focused control.
 ##
 ## Run:
 ##   godot --path godot
 ##   godot --headless --path godot -- --menu-smoke
 ##
-## `--menu-smoke` prints one deterministic line and quits:
-##   MAIN_MENU status=ok buttons=6 focus=new_city checks=12 checksum=<8 hex>
+## `--menu-smoke` prints deterministic lines and quits:
+##   MAIN_MENU status=ok buttons=6 focus=new_city checks=N checksum=<8 hex>
+##   MAIN_MENU_SETTINGS status=ok volume=55 muted=true checks=N
+##
+## The settings line is printed against an isolated
+## `user://settings_smoke.cfg`, so a developer's real settings never move the
+## marker and the file is removed again before quitting.
 ##
 ## See docs/86.
 
 const WorldI18n = preload("res://world_i18n.gd")
+const MenuSettings = preload("res://menu_settings.gd")
 
 const MAIN_SCENE := "res://main.tscn"
 ## User args that must keep starting the terrain/placement scene directly.
@@ -84,9 +93,13 @@ const ACCENT_COLOR := Color(0.98, 0.78, 0.25)
 const BACKGROUND_COLOR := Color(0.06, 0.08, 0.11)
 const BUTTON_WIDTH := 460.0
 const BUTTON_HEIGHT := 46.0
+const SETTINGS_WIDTH := 440.0
 
 var _i18n
 var _smoke_mode := false
+var _settings_path := MenuSettings.SETTINGS_PATH
+var _volume := MenuSettings.DEFAULT_VOLUME
+var _muted := MenuSettings.DEFAULT_MUTED
 
 var _title_label: Label
 var _subtitle_label: Label
@@ -98,7 +111,16 @@ var _ids := PackedStringArray()
 var _settings_overlay: Control
 var _settings_title: Label
 var _settings_body: Label
-var _settings_close: Button
+var _settings_volume_label: Label
+var _settings_volume_value: Label
+var _settings_slider: HSlider
+var _settings_mute: CheckButton
+var _settings_save: Button
+var _settings_cancel: Button
+var _settings_status: Label
+var _open_volume := MenuSettings.DEFAULT_VOLUME
+var _open_muted := MenuSettings.DEFAULT_MUTED
+var _applying_settings := false
 
 var _focus_ring: Panel
 var _ring_target: Control
@@ -107,6 +129,7 @@ var _focus_index := 0
 
 func _ready() -> void:
 	_i18n = WorldI18n.new()
+	_load_settings()
 	_build_ui()
 	_apply_locale(_i18n.locale())
 	resized.connect(_update_focus_ring)
@@ -312,24 +335,109 @@ func _build_settings_overlay() -> void:
 
 	_settings_body = Label.new()
 	_settings_body.name = "SettingsBody"
-	_settings_body.custom_minimum_size = Vector2(420, 0)
+	_settings_body.custom_minimum_size = Vector2(SETTINGS_WIDTH, 0)
 	_settings_body.add_theme_font_size_override("font_size", 14)
-	_settings_body.add_theme_color_override("font_color", TEXT_COLOR)
+	_settings_body.add_theme_color_override("font_color", MUTED_COLOR)
 	_settings_body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	column.add_child(_settings_body)
 
-	_settings_close = Button.new()
-	_settings_close.name = "SettingsClose"
-	_settings_close.custom_minimum_size = Vector2(140, 40)
-	_settings_close.focus_mode = Control.FOCUS_ALL
-	_settings_close.add_theme_font_size_override("font_size", 16)
-	_settings_close.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
-	_settings_close.add_theme_stylebox_override("normal", _button_style(Color(0.13, 0.16, 0.21)))
-	_settings_close.add_theme_stylebox_override("hover", _button_style(Color(0.18, 0.23, 0.3)))
-	_settings_close.add_theme_stylebox_override("pressed", _button_style(Color(0.2, 0.26, 0.34)))
-	_settings_close.focus_entered.connect(_on_overlay_focus)
-	_settings_close.pressed.connect(_close_settings)
-	column.add_child(_settings_close)
+	var volume_row := HBoxContainer.new()
+	volume_row.name = "VolumeRow"
+	volume_row.custom_minimum_size = Vector2(SETTINGS_WIDTH, 0)
+	column.add_child(volume_row)
+
+	_settings_volume_label = Label.new()
+	_settings_volume_label.name = "VolumeLabel"
+	_settings_volume_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_settings_volume_label.add_theme_font_size_override("font_size", 16)
+	_settings_volume_label.add_theme_color_override("font_color", TEXT_COLOR)
+	volume_row.add_child(_settings_volume_label)
+
+	_settings_volume_value = Label.new()
+	_settings_volume_value.name = "VolumeValue"
+	_settings_volume_value.add_theme_font_size_override("font_size", 16)
+	_settings_volume_value.add_theme_color_override("font_color", ACCENT_COLOR)
+	_settings_volume_value.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	volume_row.add_child(_settings_volume_value)
+
+	_settings_slider = HSlider.new()
+	_settings_slider.name = "VolumeSlider"
+	_settings_slider.custom_minimum_size = Vector2(SETTINGS_WIDTH, 26)
+	_settings_slider.min_value = MenuSettings.MIN_VOLUME
+	_settings_slider.max_value = MenuSettings.MAX_VOLUME
+	_settings_slider.step = 1
+	_settings_slider.value = _volume
+	_settings_slider.focus_mode = Control.FOCUS_ALL
+	_settings_slider.focus_entered.connect(_on_overlay_focus.bind(_settings_slider))
+	_settings_slider.value_changed.connect(_on_volume_changed)
+	column.add_child(_settings_slider)
+
+	_settings_mute = CheckButton.new()
+	_settings_mute.name = "Mute"
+	_settings_mute.button_pressed = _muted
+	_settings_mute.focus_mode = Control.FOCUS_ALL
+	_settings_mute.add_theme_font_size_override("font_size", 16)
+	_settings_mute.add_theme_color_override("font_color", TEXT_COLOR)
+	_settings_mute.add_theme_color_override("font_hover_color", TITLE_COLOR)
+	_settings_mute.add_theme_color_override("font_focus_color", TITLE_COLOR)
+	_settings_mute.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	_settings_mute.focus_entered.connect(_on_overlay_focus.bind(_settings_mute))
+	_settings_mute.toggled.connect(_on_muted_toggled)
+	column.add_child(_settings_mute)
+
+	_settings_status = Label.new()
+	_settings_status.name = "SettingsStatus"
+	_settings_status.custom_minimum_size = Vector2(SETTINGS_WIDTH, 18)
+	_settings_status.add_theme_font_size_override("font_size", 12)
+	_settings_status.add_theme_color_override("font_color", ACCENT_COLOR)
+	_settings_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	column.add_child(_settings_status)
+
+	var buttons_row := HBoxContainer.new()
+	buttons_row.name = "SettingsButtons"
+	buttons_row.alignment = BoxContainer.ALIGNMENT_END
+	buttons_row.add_theme_constant_override("separation", 10)
+	column.add_child(buttons_row)
+
+	_settings_cancel = _settings_button("SettingsCancel")
+	_settings_cancel.pressed.connect(_on_settings_cancel)
+	buttons_row.add_child(_settings_cancel)
+
+	_settings_save = _settings_button("SettingsSave")
+	_settings_save.pressed.connect(_on_settings_save)
+	buttons_row.add_child(_settings_save)
+
+	# Focus wraps inside the overlay so D-pad cannot fall through to the menu
+	# behind the dim layer. The slider keeps Left/Right for its own value.
+	_settings_slider.focus_neighbor_top = _settings_cancel.get_path()
+	_settings_slider.focus_neighbor_bottom = _settings_mute.get_path()
+	_settings_mute.focus_neighbor_top = _settings_slider.get_path()
+	_settings_mute.focus_neighbor_bottom = _settings_cancel.get_path()
+	_settings_cancel.focus_neighbor_top = _settings_mute.get_path()
+	_settings_cancel.focus_neighbor_bottom = _settings_save.get_path()
+	_settings_cancel.focus_neighbor_left = _settings_save.get_path()
+	_settings_cancel.focus_neighbor_right = _settings_save.get_path()
+	_settings_save.focus_neighbor_top = _settings_cancel.get_path()
+	_settings_save.focus_neighbor_bottom = _settings_slider.get_path()
+	_settings_save.focus_neighbor_left = _settings_cancel.get_path()
+	_settings_save.focus_neighbor_right = _settings_cancel.get_path()
+
+
+func _settings_button(node_name: String) -> Button:
+	var button := Button.new()
+	button.name = node_name
+	button.custom_minimum_size = Vector2(140, 40)
+	button.focus_mode = Control.FOCUS_ALL
+	button.add_theme_font_size_override("font_size", 16)
+	button.add_theme_color_override("font_color", TEXT_COLOR)
+	button.add_theme_color_override("font_hover_color", TITLE_COLOR)
+	button.add_theme_color_override("font_focus_color", TITLE_COLOR)
+	button.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	button.add_theme_stylebox_override("normal", _button_style(Color(0.13, 0.16, 0.21)))
+	button.add_theme_stylebox_override("hover", _button_style(Color(0.18, 0.23, 0.3)))
+	button.add_theme_stylebox_override("pressed", _button_style(Color(0.2, 0.26, 0.34)))
+	button.focus_entered.connect(_on_overlay_focus.bind(button))
+	return button
 
 
 func _panel_style() -> StyleBoxFlat:
@@ -370,7 +478,13 @@ func _apply_locale(locale: String) -> String:
 		_buttons[index].text = _i18n.t(str(ITEMS[index]["label"]))
 	_settings_title.text = _i18n.t("base.ui.menu.settings.title")
 	_settings_body.text = _i18n.t("base.ui.menu.settings.body")
-	_settings_close.text = _i18n.t("base.ui.menu.settings.close")
+	_settings_volume_label.text = _i18n.t("base.ui.menu.settings.volume")
+	_settings_mute.text = _i18n.t("base.ui.menu.settings.mute")
+	_settings_save.text = _i18n.t("base.ui.menu.settings.save")
+	_settings_cancel.text = _i18n.t("base.ui.menu.settings.cancel")
+	if not _settings_status.text.is_empty():
+		_settings_status.text = _i18n.t("base.ui.menu.settings.save_failed")
+	_update_volume_value()
 	_footer_label.text = _i18n.t("base.ui.menu.footer")
 	_refresh_hint()
 	return resolved
@@ -411,8 +525,8 @@ func _on_button_focus(index: int) -> void:
 	_update_focus_ring()
 
 
-func _on_overlay_focus() -> void:
-	_ring_target = _settings_close
+func _on_overlay_focus(control: Control) -> void:
+	_ring_target = control
 	_update_focus_ring()
 
 
@@ -433,12 +547,56 @@ func _on_button_pressed(item_id: String) -> void:
 		push_error("main_menu: could not open %s (error %d)" % [scene, error])
 
 
+func _load_settings() -> void:
+	var state := MenuSettings.load_from(_settings_path)
+	_volume = int(state["volume"])
+	_muted = bool(state["muted"])
+	MenuSettings.apply(_volume, _muted)
+
+
+func _set_menu_focusable(enabled: bool) -> void:
+	for button in _buttons:
+		button.focus_mode = Control.FOCUS_ALL if enabled else Control.FOCUS_NONE
+
+
+func _update_volume_value() -> void:
+	if _settings_volume_value == null:
+		return
+	_settings_volume_value.text = _i18n.t(
+		"base.ui.menu.settings.volume_value", {"value": _i18n.format_int(_volume)}
+	)
+
+
+func _on_volume_changed(value: float) -> void:
+	_volume = MenuSettings.sanitize_volume(value)
+	_update_volume_value()
+	if _applying_settings:
+		return
+	MenuSettings.apply(_volume, _muted)
+
+
+func _on_muted_toggled(pressed: bool) -> void:
+	_muted = pressed
+	if _applying_settings:
+		return
+	MenuSettings.apply(_volume, _muted)
+
+
 func _open_settings() -> void:
 	if _settings_overlay == null:
 		return
+	_open_volume = _volume
+	_open_muted = _muted
+	_applying_settings = true
+	_settings_slider.value = _volume
+	_settings_mute.button_pressed = _muted
+	_applying_settings = false
+	_settings_status.text = ""
+	_update_volume_value()
 	_settings_overlay.visible = true
-	_ring_target = _settings_close
-	_settings_close.grab_focus()
+	_set_menu_focusable(false)
+	_ring_target = _settings_slider
+	_settings_slider.grab_focus()
 	_update_focus_ring()
 	call_deferred("_update_focus_ring")
 
@@ -447,14 +605,33 @@ func _close_settings() -> void:
 	if _settings_overlay == null:
 		return
 	_settings_overlay.visible = false
+	_set_menu_focusable(true)
 	_set_focus(_index_of("settings"))
 
 
-## Esc / B: close the overlay, otherwise return focus to the first item. The
-## menu is the root of the scene stack, so there is no scene to go back to.
+func _on_settings_save() -> void:
+	var error := MenuSettings.save_to(_settings_path, _volume, _muted)
+	if error != OK:
+		_settings_status.text = _i18n.t("base.ui.menu.settings.save_failed")
+		return
+	_close_settings()
+
+
+## Cancel restores the values snapshotted when the overlay opened, including
+## the live preview, then leaves the menu exactly where it was.
+func _on_settings_cancel() -> void:
+	_volume = _open_volume
+	_muted = _open_muted
+	MenuSettings.apply(_volume, _muted)
+	_close_settings()
+
+
+## Esc / B: cancel the settings overlay, otherwise return focus to the first
+## item. The menu is the root of the scene stack, so there is no scene to go
+## back to.
 func _back() -> void:
 	if _settings_overlay != null and _settings_overlay.visible:
-		_close_settings()
+		_on_settings_cancel()
 		return
 	_set_focus(0)
 
@@ -569,22 +746,53 @@ func _run_smoke() -> void:
 		failures
 	)
 
-	# Settings is a placeholder overlay; Esc closes it and restores focus.
+	# Settings overlay: slider default, live preview, cancel restores, save
+	# persists, and the values clamp.
+	_settings_path = "user://settings_smoke.cfg"
+	var absolute_settings := ProjectSettings.globalize_path(_settings_path)
+	if FileAccess.file_exists(_settings_path):
+		DirAccess.remove_absolute(absolute_settings)
+	_load_settings()
 	_open_settings()
 	var opened := (
 		_settings_overlay.visible
-		and _ring_target == _settings_close
+		and _ring_target == _settings_slider
 		and _focus_ring.visible
+		and _settings_slider.value == 100.0
 	)
-	_back()
+	checks += _smoke_check(opened, "settings_open", failures)
+	_settings_slider.value = 37.0
+	_settings_mute.button_pressed = true
+	_on_settings_save()
 	checks += _smoke_check(
-		opened
-		and not _settings_overlay.visible
+		not _settings_overlay.visible
 		and _focus_index == _index_of("settings")
-		and _ring_target == _buttons[_index_of("settings")],
-		"settings_overlay",
+		and _volume == 37
+		and _muted,
+		"settings_save",
 		failures
 	)
+	_open_settings()
+	_settings_slider.value = 88.0
+	_back()
+	checks += _smoke_check(
+		not _settings_overlay.visible and _volume == 37 and _muted,
+		"settings_cancel",
+		failures
+	)
+	_load_settings()
+	checks += _smoke_check(
+		_volume == 37 and _muted and MenuSettings.sanitize_volume(150) == 100
+		and MenuSettings.sanitize_volume(-10) == 0
+		and MenuSettings.sanitize_volume(37.6) == 38,
+		"settings_load_clamp",
+		failures
+	)
+	if FileAccess.file_exists(_settings_path):
+		DirAccess.remove_absolute(absolute_settings)
+	print("MAIN_MENU_SETTINGS status=ok volume=%d muted=%s checks=9" % [
+		_volume, "true" if _muted else "false",
+	])
 
 	# Every menu string is keyed in both launch locales.
 	_apply_locale("en")
@@ -642,7 +850,11 @@ func _menu_keys() -> PackedStringArray:
 		"base.ui.menu.subtitle",
 		"base.ui.menu.settings.title",
 		"base.ui.menu.settings.body",
-		"base.ui.menu.settings.close",
+		"base.ui.menu.settings.volume",
+		"base.ui.menu.settings.volume_value",
+		"base.ui.menu.settings.mute",
+		"base.ui.menu.settings.save",
+		"base.ui.menu.settings.cancel",
 		"base.ui.menu.footer",
 	])
 	for item in ITEMS:

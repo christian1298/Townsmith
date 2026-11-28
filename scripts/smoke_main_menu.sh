@@ -33,12 +33,13 @@ if ! "$GODOT_BIN" --headless --path "$ROOT/godot" --import >/dev/null 2>&1; then
 fi
 
 MENU_CONTRACT='^MAIN_MENU status=ok buttons=6 focus=new_city checks=[0-9]+ checksum=[0-9a-f]{8}$'
+SETTINGS_CONTRACT='^MAIN_MENU_SETTINGS status=ok volume=[0-9]+ muted=(true|false) checks=[0-9]+$'
 
 # Run the menu smoke once and echo its marker on stdout. Diagnostics go to
 # stderr so the caller can compare the two markers as plain strings.
 run_menu() {
 	local label="$1"
-	local output godot_status marker
+	local output godot_status marker settings
 
 	set +e
 	output="$(timeout 60s "$GODOT_BIN" --headless --path "$ROOT/godot" -- --menu-smoke 2>&1)"
@@ -64,12 +65,24 @@ run_menu() {
 		echo "Main menu smoke failed ($label): a failed marker was printed" >&2
 		exit 1
 	fi
-
-	printf '%s\n' "$marker"
+	settings="$(grep '^MAIN_MENU_SETTINGS status=' <<<"$output" | tail -1 || true)"
+	if [[ -z "$settings" ]]; then
+		echo "Main menu smoke failed ($label): no MAIN_MENU_SETTINGS marker" >&2
+		exit 1
+	fi
+	if [[ ! "$settings" =~ $SETTINGS_CONTRACT ]]; then
+		echo "Main menu settings contract mismatch ($label): $settings" >&2
+		exit 1
+	fi
+	printf '%s\n%s\n' "$marker" "$settings"
 }
 
-FIRST="$(run_menu first)"
-SECOND="$(run_menu second)"
+FIRST_ALL="$(run_menu first)"
+FIRST="$(sed -n '1p' <<<"$FIRST_ALL")"
+FIRST_SETTINGS="$(sed -n '2p' <<<"$FIRST_ALL")"
+SECOND_ALL="$(run_menu second)"
+SECOND="$(sed -n '1p' <<<"$SECOND_ALL")"
+SECOND_SETTINGS="$(sed -n '2p' <<<"$SECOND_ALL")"
 
 if [[ "$FIRST" != "$SECOND" ]]; then
 	echo "Main menu smoke is not deterministic:" >&2
@@ -77,6 +90,13 @@ if [[ "$FIRST" != "$SECOND" ]]; then
 	echo "  second: $SECOND" >&2
 	exit 1
 fi
+if [[ "$FIRST_SETTINGS" != "$SECOND_SETTINGS" ]]; then
+	echo "Main menu settings are not deterministic:" >&2
+	echo "  first:  $FIRST_SETTINGS" >&2
+	echo "  second: $SECOND_SETTINGS" >&2
+	exit 1
+fi
+echo "MAIN_MENU_SETTINGS_SMOKE runs=2 ${FIRST_SETTINGS#MAIN_MENU_SETTINGS }"
 echo "MAIN_MENU_SMOKE runs=2 ${FIRST#MAIN_MENU }"
 
 # Forwarding: the old `-- --smoke` entry point must still reach main.tscn.
