@@ -216,6 +216,11 @@ const A11Y_KEYS := [
 	"chat_unread",
 	"error",
 ]
+# Placement-UI lock block (`--place-ui` only): field completeness, badge state,
+# list state, quiet error, probed lock error, and restore. Its own marker keeps
+# `MP_WORLD_A11Y` and the base checksum/frame contract unchanged.
+const LOCK_A11Y_CHECKS := 6
+const A11Y_LOCK_KEYS := ["badge", "list", "error"]
 # Same 64-character placeholder hash the Rust loopback harness uses.
 const CONTENT_HASH := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -363,6 +368,11 @@ var _a11y_rendered: Label
 var _a11y_checksum: Label
 var _a11y_render_checksums: Label
 var _a11y_placement: Label
+# Placement-UI lock block (`--place-ui` only). Badge and list announce normal
+# lock state politely; the error proxy is assertive.
+var _a11y_lock_badge: Label
+var _a11y_lock_list: Label
+var _a11y_lock_error: Label
 # Optional developer time-vote panel. It is never created or mounted by this
 # client: an owning scene may attach one, and every accepted snapshot then
 # pushes the authoritative `paused` value into it. No vote command is sent.
@@ -440,6 +450,9 @@ var _ui_locks := {}
 var _ui_own_locks := {}
 var _ui_lock_checksum := ""
 var _ui_lock_pending_hash := ""
+# Last lock/unlock failure code (never a placement reject). Drives the lock
+# block's assertive error proxy; cleared by a successful lock or unlock.
+var _ui_lock_error := ""
 var _ui_locks_taken := 0
 var _ui_locks_released := 0
 # First `blueprint_locks` of the connection. It is requested once per welcome
@@ -2283,6 +2296,7 @@ func _on_blueprint_lock_result(message: Dictionary) -> void:
 	_ui_lock_checksum = checksum
 	_ui_locks_taken += 1
 	_ui_lock_pending_hash = ""
+	_ui_lock_error = ""
 	_last_tick = tick
 	_ui_checksum_stale = true
 	print((
@@ -2325,6 +2339,7 @@ func _on_blueprint_unlock_result(message: Dictionary) -> void:
 	_ui_lock_checksum = checksum
 	_ui_locks_released += 1
 	_ui_lock_pending_hash = ""
+	_ui_lock_error = ""
 	_last_tick = tick
 	_ui_checksum_stale = true
 	print((
@@ -2543,6 +2558,7 @@ func _ui_toggle_lock() -> void:
 
 func _ui_local_locked(hash: String, lock: Dictionary) -> void:
 	_ui_last_error = "blueprint.locked"
+	_ui_lock_error = "blueprint.locked"
 	_set_status("Blueprint locked by player #%d." % int(lock.get("player_id", 0)))
 	print((
 		"MP_PLACE_UI_LOCK_LOCAL status=ok selected=%d hash=%s player_id=%d"
@@ -2552,6 +2568,7 @@ func _ui_local_locked(hash: String, lock: Dictionary) -> void:
 
 func _ui_send_lock(hash: String) -> bool:
 	_ui_lock_pending_hash = hash
+	_ui_lock_error = ""
 	_set_status("Requesting blueprint lock...")
 	if not _send({"type": "blueprint_lock", "hash": hash}):
 		return false
@@ -2561,6 +2578,7 @@ func _ui_send_lock(hash: String) -> bool:
 
 func _ui_send_unlock(hash: String) -> bool:
 	_ui_lock_pending_hash = hash
+	_ui_lock_error = ""
 	_set_status("Requesting blueprint unlock...")
 	if not _send({"type": "blueprint_unlock", "hash": hash}):
 		return false
@@ -2570,8 +2588,11 @@ func _ui_send_unlock(hash: String) -> bool:
 
 func _on_ui_reject(message: Dictionary) -> void:
 	var code := str(message.get("code", "missing"))
+	var lock_pending := not _ui_lock_pending_hash.is_empty()
 	_ui_rejected += 1
 	_ui_last_error = code
+	if lock_pending:
+		_ui_lock_error = code
 	_ui_lock_pending_hash = ""
 	print("MP_PLACE_UI_REJECT status=ok index=%d code=%s" % [_ui_selected, code])
 	_set_status("Rejected: %s" % code)
@@ -2582,6 +2603,8 @@ func _on_ui_reject(message: Dictionary) -> void:
 ## Print the terminal marker, then leave the session cleanly.
 func _ui_finish() -> void:
 	if _finished:
+		return
+	if _smoke and not _run_lock_a11y_checks():
 		return
 	print((
 		"MP_PLACE_UI_DONE status=ok mode=ui actions=%d accepted=%d rejected=%d"
@@ -3497,6 +3520,121 @@ func _run_a11y_checks() -> bool:
 	print("MP_WORLD_A11Y status=ok checks=%d" % checks)
 	return true
 
+## Deterministic smoke coverage for the placement-UI lock block only. Proves the
+## badge, compact list, and error semantics against the authoritative table,
+## probes one assertive error locally, restores it, and sends nothing. Gated to
+## `--place-ui` smoke runs; the marker is printed from `_ui_finish`.
+func _run_lock_a11y_checks() -> bool:
+	if not _place_ui:
+		return true
+	var live_error := _ui_lock_error
+	var checks := 0
+
+	var snapshot := placement_lock_accessibility_snapshot()
+	if not _lock_a11y_entries_valid(snapshot):
+		_fail("lock_a11y_fields")
+		return false
+	checks += 1
+
+	var hash := _ui_selected_hash()
+	var short := hash.substr(BLUEPRINT_HASH_PREFIX.length(), 8)
+	var badge := str(snapshot["badge"]["description"])
+	if _ui_locks.has(hash):
+		var holder := (
+			"you" if _ui_own_locks.has(hash)
+			else "player %d" % int(_ui_locks[hash].get("player_id", 0))
+		)
+		if not badge.begins_with("Blueprint %s locked by %s;" % [short, holder]):
+			_fail("lock_a11y_badge_holder")
+			return false
+		if not badge.contains("ticks remaining") and not badge.contains("lease expires at tick"):
+			_fail("lock_a11y_badge_lease")
+			return false
+	else:
+		if badge != "Blueprint %s is free to lock." % short:
+			_fail("lock_a11y_badge_free")
+			return false
+	if str(snapshot["badge"]["live"]) != "polite":
+		_fail("lock_a11y_badge_live")
+		return false
+	checks += 1
+
+	var list_text := str(snapshot["list"]["description"])
+	var list_entry: Dictionary = snapshot["list"]
+	if _ui_locks.is_empty():
+		if list_text != "No blueprint locks." or bool(list_entry["visible"]):
+			_fail("lock_a11y_list_empty")
+			return false
+	else:
+		var hashes: Array = _ui_locks.keys()
+		hashes.sort()
+		var first_hash := str(hashes[0])
+		var first_lock: Dictionary = _ui_locks[first_hash]
+		var expected_row := "%s held by %s, %d ticks remaining." % [
+			first_hash.substr(BLUEPRINT_HASH_PREFIX.length(), 8),
+			"you" if _ui_own_locks.has(first_hash)
+			else "player %d" % int(first_lock.get("player_id", 0)),
+			maxi(0, int(first_lock.get("expires_tick", 0)) - maxi(_last_tick, 0)),
+		]
+		if not list_text.begins_with("%d blueprint lock" % hashes.size()) or not list_text.contains(expected_row):
+			_fail("lock_a11y_list_rows")
+			return false
+		if not bool(list_entry["visible"]):
+			_fail("lock_a11y_list_hidden")
+			return false
+	if str(list_entry["live"]) != "polite":
+		_fail("lock_a11y_list_live")
+		return false
+	checks += 1
+
+	if live_error.is_empty():
+		if str(snapshot["error"]["description"]) != "No blueprint lock error.":
+			_fail("lock_a11y_error_quiet")
+			return false
+	elif not str(snapshot["error"]["description"]).contains(live_error):
+		_fail("lock_a11y_error_state")
+		return false
+	if str(snapshot["error"]["live"]) != "assertive":
+		_fail("lock_a11y_error_live")
+		return false
+	checks += 1
+
+	_ui_lock_error = "blueprint.locked"
+	_refresh_hud()
+	snapshot = placement_lock_accessibility_snapshot()
+	if not str(snapshot["error"]["description"]).contains("blueprint.locked"):
+		_fail("lock_a11y_error_probe")
+		return false
+	if str(snapshot["error"]["live"]) != "assertive":
+		_fail("lock_a11y_error_probe_live")
+		return false
+	checks += 1
+
+	_ui_lock_error = live_error
+	_refresh_hud()
+	snapshot = placement_lock_accessibility_snapshot()
+	if str(snapshot["error"]["description"]) != _lock_error_a11y_text():
+		_fail("lock_a11y_error_restore")
+		return false
+	checks += 1
+
+	if checks != LOCK_A11Y_CHECKS:
+		_fail("lock_a11y_check_count_%d" % checks)
+		return false
+	print("MP_PLACEMENT_LOCK_A11Y status=ok checks=%d" % checks)
+	return true
+
+## Every lock-block entry must carry a non-empty name and a bounded sentence.
+func _lock_a11y_entries_valid(snapshot: Dictionary) -> bool:
+	for key in A11Y_LOCK_KEYS:
+		var entry: Dictionary = snapshot.get(key, {})
+		if str(entry.get("name", "")).strip_edges().is_empty():
+			return false
+		var description := str(entry.get("description", "")).strip_edges()
+		if description.is_empty() or description.length() > A11Y_MAX_DESCRIPTION:
+			return false
+	return true
+
 ## Read-only screen-reader contract: every persistent HUD field's name,
 ## description, live mode, role, and structural reachability. `pause` aliases the
 ## authoritative state line and `error` aliases the status/error line.
@@ -3514,8 +3652,20 @@ func accessibility_snapshot() -> Dictionary:
 		"checksum": _a11y_entry(_a11y_checksum, "status"),
 		"render_checksums": _a11y_entry(_a11y_render_checksums, "status"),
 		"placement": _a11y_entry(_a11y_placement, "status"),
+		"lock_badge": _a11y_entry(_a11y_lock_badge, "status"),
+		"lock_list": _a11y_entry(_a11y_lock_list, "status"),
+		"lock_error": _a11y_entry(_a11y_lock_error, "status"),
 		"chat_unread": _a11y_entry(_chat_unread_label, "status"),
 		"error": _a11y_entry(_a11y_status, "status"),
+	}
+
+## Placement-UI lock block contract (`--place-ui` only): badge, compact list,
+## and error entries. Same shape as `accessibility_snapshot()` entries.
+func placement_lock_accessibility_snapshot() -> Dictionary:
+	return {
+		"badge": _a11y_entry(_a11y_lock_badge, "status"),
+		"list": _a11y_entry(_a11y_lock_list, "status"),
+		"error": _a11y_entry(_a11y_lock_error, "status"),
 	}
 
 ## English screen-reader copy for every persistent field. The visible block stays
@@ -3604,6 +3754,21 @@ func _refresh_accessibility() -> void:
 	if _a11y_placement != null:
 		_a11y_placement.accessibility_name = "Placement details"
 		_a11y_placement.accessibility_description = _placement_a11y_text()
+	if _a11y_lock_badge != null:
+		_a11y_lock_badge.accessibility_name = "Blueprint lock"
+		_a11y_lock_badge.accessibility_description = _lock_badge_a11y_text()
+		_a11y_lock_badge.accessibility_live = A11Y_LIVE_POLITE
+		_a11y_lock_badge.visible = _place_ui
+	if _a11y_lock_list != null:
+		_a11y_lock_list.accessibility_name = "Blueprint locks"
+		_a11y_lock_list.accessibility_description = _lock_list_a11y_text()
+		_a11y_lock_list.accessibility_live = A11Y_LIVE_POLITE
+		_a11y_lock_list.visible = _place_ui and not _ui_locks.is_empty()
+	if _a11y_lock_error != null:
+		_a11y_lock_error.accessibility_name = "Blueprint lock status"
+		_a11y_lock_error.accessibility_description = _lock_error_a11y_text()
+		_a11y_lock_error.accessibility_live = A11Y_LIVE_ASSERTIVE
+		_a11y_lock_error.visible = _place_ui
 
 func _expected_state_description() -> String:
 	if _last_tick < 0:
@@ -3632,6 +3797,65 @@ func _placement_a11y_text() -> String:
 			% [_ui_entries.size(), _ui_accepted, _ui_rejected]
 		)
 	return "No placement details."
+
+## Badge copy for the selected blueprint: free, held by this session, or held by
+## another player, always with the lease. Kept to one bounded sentence.
+func _lock_badge_a11y_text() -> String:
+	if not _place_ui:
+		return "No blueprint lock state."
+	var hash := _ui_selected_hash()
+	if hash.is_empty():
+		return "No blueprint selected."
+	var short := hash.substr(BLUEPRINT_HASH_PREFIX.length(), 8)
+	var lock: Dictionary = _ui_locks.get(hash, {})
+	if lock.is_empty():
+		return "Blueprint %s is free to lock." % short
+	var holder := (
+		"you" if _ui_own_locks.has(hash)
+		else "player %d" % int(lock.get("player_id", 0))
+	)
+	var remaining := _ui_lock_remaining(lock)
+	if remaining < 0:
+		return _bounded_description(
+			"Blueprint %s locked by %s; lease expires at tick %d."
+			% [short, holder, int(lock.get("expires_tick", 0))]
+		)
+	return _bounded_description(
+		"Blueprint %s locked by %s; %d ticks remaining." % [short, holder, remaining]
+	)
+
+## Compact lock-list copy: count, then the same hash/`#<holder>`/expiry rows the
+## HUD shows, bounded to `A11Y_MAX_DESCRIPTION` so the announcement stays short.
+func _lock_list_a11y_text() -> String:
+	if not _place_ui or _ui_locks.is_empty():
+		return "No blueprint locks."
+	var hashes: Array = _ui_locks.keys()
+	hashes.sort()
+	var parts := PackedStringArray()
+	parts.append(
+		"%d blueprint lock%s." % [hashes.size(), "" if hashes.size() == 1 else "s"]
+	)
+	var rows := mini(hashes.size(), UI_LOCK_ROWS_MAX)
+	parts.append(
+		"%s held by %s, %d ticks remaining."
+		% [
+			str(hashes[0]).substr(BLUEPRINT_HASH_PREFIX.length(), 8),
+			"you" if _ui_own_locks.has(hashes[0])
+			else "player %d" % int(_ui_locks[hashes[0]].get("player_id", 0)),
+			maxi(0, int(_ui_locks[hashes[0]].get("expires_tick", 0)) - maxi(_last_tick, 0)),
+		]
+	)
+	if rows > 1:
+		parts.append("%d further locks." % (rows - 1))
+	if hashes.size() > rows:
+		parts.append("%d more not listed." % (hashes.size() - rows))
+	return _bounded_description(" ".join(parts))
+
+## Lock/unlock error copy only; placement rejects keep their own HUD error line.
+func _lock_error_a11y_text() -> String:
+	if _ui_lock_error.is_empty():
+		return "No blueprint lock error."
+	return _bounded_description("Blueprint lock error: %s." % _ui_lock_error)
 
 func _bounded_description(text: String) -> String:
 	var trimmed := text.strip_edges()
@@ -4430,6 +4654,9 @@ func _build_a11y_proxies() -> void:
 	_a11y_checksum = _make_a11y_proxy("WorldClientA11yChecksum")
 	_a11y_render_checksums = _make_a11y_proxy("WorldClientA11yRenderChecksums")
 	_a11y_placement = _make_a11y_proxy("WorldClientA11yPlacement")
+	_a11y_lock_badge = _make_a11y_proxy("WorldClientA11yLockBadge")
+	_a11y_lock_list = _make_a11y_proxy("WorldClientA11yLockList")
+	_a11y_lock_error = _make_a11y_proxy("WorldClientA11yLockError")
 
 func _make_a11y_proxy(node_name: String) -> Label:
 	var label := Label.new()

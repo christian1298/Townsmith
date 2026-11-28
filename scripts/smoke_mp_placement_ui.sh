@@ -212,12 +212,19 @@ run_retained_block() {
 	local client_done_b
 	local lock_count
 	local retained_count
+	local retained_a11y
+	local b_a11y
 	local -a b_lock_lines=()
 
 	start_retained_server "$port"
 
 	run_retained_client "$name-a" "$port" "lock:$FIXTURE_HASH"
 	output_a="$CLIENT_OUTPUT"
+	if [[ "$(grep -c '^MP_PLACEMENT_LOCK_A11Y status=ok checks=6$' <<<"$output_a" || true)" != "1" ]]; then
+		echo "placement-UI smoke ($name) failed: client A lock a11y marker mismatch" >&2
+		exit 1
+	fi
+	retained_a11y="$(grep '^MP_PLACEMENT_LOCK_A11Y status=ok checks=6$' <<<"$output_a")"
 	lock_count="$(grep -c '^MP_PLACE_UI_LOCK status=ok ' <<<"$output_a" || true)"
 	if [[ "$lock_count" != "1" ]]; then
 		echo "placement-UI smoke ($name) failed: client A sent $lock_count lock commands" >&2
@@ -254,6 +261,11 @@ run_retained_block() {
 
 	run_retained_client "$name-b" "$port" "$RETAIN_CHECK_SCRIPT" 1
 	output_b="$CLIENT_OUTPUT"
+	if [[ "$(grep -c '^MP_PLACEMENT_LOCK_A11Y status=ok checks=6$' <<<"$output_b" || true)" != "1" ]]; then
+		echo "placement-UI smoke ($name) failed: client B lock a11y marker mismatch" >&2
+		exit 1
+	fi
+	b_a11y="$(grep '^MP_PLACEMENT_LOCK_A11Y status=ok checks=6$' <<<"$output_b")"
 	retained_count="$(grep -c '^MP_PLACE_UI_LOCKS_RETAINED ' <<<"$output_b" || true)"
 	if [[ "$retained_count" != "1" ]]; then
 		echo "placement-UI smoke ($name) failed: client B printed $retained_count retained markers" >&2
@@ -329,6 +341,8 @@ run_retained_block() {
 	printf '%s\n' "${b_lock_lines[3]}" >"$prefix.locks_final_b"
 	printf '%s\n' "$done_b" >"$prefix.done_b"
 	printf '%s\n' "$client_done_b" >"$prefix.client_done_b"
+	printf '%s\n' "$retained_a11y" >"$prefix.lock_a11y_a"
+	printf '%s\n' "$b_a11y" >"$prefix.lock_a11y_b"
 }
 
 run_block() {
@@ -371,7 +385,9 @@ run_block() {
 	local reject_line
 	local done_line
 	local client_done
+	local lock_a11y_line
 	ui_line="$(grep '^MP_PLACE_UI status=ok ' <<<"$output" | tail -1 || true)"
+	lock_a11y_line="$(grep '^MP_PLACEMENT_LOCK_A11Y status=ok ' <<<"$output" | tail -1 || true)"
 	mapfile -t LOCK_LINES < <(grep '^MP_PLACE_UI_LOCKS status=ok ' <<<"$output")
 	locks_line="${LOCK_LINES[0]:-}"
 	locks_after_lock="${LOCK_LINES[2]:-}"
@@ -382,8 +398,12 @@ run_block() {
 	reject_line="$(grep '^MP_PLACE_UI_REJECT status=ok ' <<<"$output" | tail -1 || true)"
 	done_line="$(grep '^MP_PLACE_UI_DONE status=ok ' <<<"$output" | tail -1 || true)"
 	client_done="$(grep '^MP_WORLD_CLIENT_DONE status=ok ' <<<"$output" | tail -1 || true)"
-	if [[ ${#LOCK_LINES[@]} -ne 4 || -z "$ui_line" || -z "$locks_line" || -z "$locks_after_lock" || -z "$locks_after_unlock" || -z "$lock_line" || -z "$unlock_line" || -z "$place_line" || -z "$reject_line" || -z "$done_line" || -z "$client_done" ]]; then
+	if [[ ${#LOCK_LINES[@]} -ne 4 || -z "$ui_line" || -z "$locks_line" || -z "$locks_after_lock" || -z "$locks_after_unlock" || -z "$lock_line" || -z "$unlock_line" || -z "$place_line" || -z "$reject_line" || -z "$done_line" || -z "$client_done" || -z "$lock_a11y_line" ]]; then
 		echo "placement-UI smoke ($name) failed: missing UI markers" >&2
+		exit 1
+	fi
+	if [[ "$(grep -c '^MP_PLACEMENT_LOCK_A11Y status=ok ' <<<"$output" || true)" != "1" || "$lock_a11y_line" != "MP_PLACEMENT_LOCK_A11Y status=ok checks=6" ]]; then
+		echo "placement-UI smoke ($name) failed: lock a11y marker mismatch: $lock_a11y_line" >&2
 		exit 1
 	fi
 
@@ -436,6 +456,7 @@ run_block() {
 	printf '%s\n' "$reject_line" >"$prefix.reject"
 	printf '%s\n' "$done_line" >"$prefix.done"
 	printf '%s\n' "$client_done" >"$prefix.client_done"
+	printf '%s\n' "$lock_a11y_line" >"$prefix.lock_a11y"
 
 	wait_for_log "$SERVER_LOG" "$SERVER_PID" "SERVER_LISTEN status=ok sessions=1 commands=18 " 10
 	wait_for_exit "$SERVER_PID" 10
