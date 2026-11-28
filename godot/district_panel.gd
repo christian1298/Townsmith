@@ -25,6 +25,11 @@ extends Control
 ## state without logging a push_error. Final marker:
 ##   DISTRICT_PANEL status=ok settlements=2 selected=1 population=0 policy=1 checksum=<8 hex>
 ##
+## The smoke also audits screen-reader semantics and the deterministic gamepad
+## focus model without touching the bridge or the panel digest:
+##   DISTRICT_PANEL_A11Y status=ok checks=<n>
+##   DISTRICT_PANEL_GAMEPAD status=ok checks=<n>
+##
 ## `--empty` prints the empty contract:
 ##   DISTRICT_PANEL status=ok settlements=0 selected=none population=0 policy=none checksum=<8 hex>
 ##
@@ -99,6 +104,31 @@ const ERROR_COLOR := Color(0.96, 0.42, 0.38)
 const MUTED_COLOR := Color(0.66, 0.71, 0.78)
 const TEXT_COLOR := Color(0.88, 0.91, 0.95)
 
+## `Control.accessibility_live` values (Godot 4.7 exposes the property but not
+## named enum constants). The settlement list and selection are polite so a row
+## change is announced; the footer status is assertive only for errors.
+const A11Y_LIVE_OFF := 0
+const A11Y_LIVE_POLITE := 1
+const A11Y_LIVE_ASSERTIVE := 2
+
+## Deterministic gamepad actions. Up/Down step the settlement selection in id
+## order (the list's own keyboard behavior), Left/Right move between the
+## Previous/Next paging buttons, Accept presses the focused paging button or
+## re-reads the current row, and Cancel releases the gamepad focus. None of
+## these mutate the bridge: they only re-read the same three bridge calls.
+const GAMEPAD_ACTIONS := [
+	"ui_up",
+	"ui_down",
+	"ui_left",
+	"ui_right",
+	"ui_accept",
+	"ui_cancel",
+]
+const STICK_DEADZONE := 0.5
+## Logical gamepad focus. `list` owns row selection; `previous` / `next` are the
+## two read-only paging buttons inside the toolbar.
+const GAMEPAD_OVERFLOW_FOCUS := ["previous", "next"]
+
 var smoke_mode := false
 var fixture_mode := false
 var empty_mode := false
@@ -118,8 +148,27 @@ var _policies: Array = []
 var _policy_checksum := ""
 var _policy_error := ""
 var _syncing_list := false
+var _message_is_error := false
 
+## Whether the last handled navigation came from a gamepad action. Keyboard,
+## mouse, and API focus moves clear it; a handled gamepad action sets it.
+var _gamepad_active := false
+## Last accepted gamepad action name. Diagnostic only.
+var _last_action := ""
+## Logical gamepad focus target: `list`, `previous`, or `next`.
+var _gamepad_focus := "list"
+var _stick_held := false
+## Live counters for the two smoke markers; each counted expectation increments
+## its counter even when it fails.
+var _a11y_checks := 0
+var _gamepad_checks := 0
+
+var _title_label: Label
 var _seed_edit: LineEdit
+var _apply_button: Button
+var _refresh_button: Button
+var _previous_button: Button
+var _next_button: Button
 var _state_label: Label
 var _message_label: Label
 var _list: ItemList
@@ -707,13 +756,16 @@ func _refresh_state_label() -> void:
 		policy_text,
 		_panel_checksum(_selected_id, _district_checksum(), policy_id),
 	]
+	_refresh_accessibility()
 
 
 func _set_message(text: String, is_error: bool) -> void:
 	if _message_label == null:
 		return
+	_message_is_error = is_error
 	_message_label.text = text
 	_message_label.add_theme_color_override("font_color", ERROR_COLOR if is_error else OK_COLOR)
+	_refresh_accessibility()
 
 
 func _step_selection(step: int) -> void:
@@ -729,6 +781,413 @@ func _step_selection(step: int) -> void:
 	else:
 		index = posmod(index + step, ids.size())
 	_select_settlement(ids[index])
+
+
+# --- Screen-reader semantics -----------------------------------------------
+
+## One control's semantic entry. The district chrome stays English-only, so
+## names/descriptions are literal developer text; readout descriptions mirror
+## the visible line (which already follows the EN/DE number and member rules).
+func _a11y_entry(control: Control, role: String) -> Dictionary:
+	if control == null:
+		return {
+			"name": "",
+			"description": "",
+			"role": role,
+			"class": "",
+			"live": "off",
+			"visible": false,
+			"focus_mode": "none",
+			"reachable": false,
+		}
+	var live := "off"
+	if control.accessibility_live == A11Y_LIVE_POLITE:
+		live = "polite"
+	elif control.accessibility_live == A11Y_LIVE_ASSERTIVE:
+		live = "assertive"
+	var focus_mode := "none"
+	if control.focus_mode == Control.FOCUS_ALL:
+		focus_mode = "all"
+	elif control.focus_mode == Control.FOCUS_CLICK:
+		focus_mode = "click"
+	return {
+		"name": control.accessibility_name,
+		"description": control.accessibility_description,
+		"role": role,
+		"class": control.get_class(),
+		"live": live,
+		"visible": control.visible,
+		"focus_mode": focus_mode,
+		"reachable": (
+			control.is_inside_tree()
+			and control.visible
+			and control.focus_mode == Control.FOCUS_ALL
+		),
+	}
+
+
+## Deterministic read-only snapshot: every labelled control, live-region modes,
+## the selected row text, and a labelled/unlabelled count for the smoke.
+func accessibility_snapshot() -> Dictionary:
+	var entries := {
+		"title": _a11y_entry(_title_label, "heading"),
+		"list": _a11y_entry(_list, "list"),
+		"selection": _a11y_entry(_summary_title, "heading"),
+		"settlement": _a11y_entry(_settlement_line, "label"),
+		"membership": _a11y_entry(_membership_line, "label"),
+		"members": _a11y_entry(_members_box, "group"),
+		"district": _a11y_entry(_district_line, "status"),
+		"jobs": _a11y_entry(_jobs_line, "status"),
+		"needs": _a11y_entry(_needs_line, "status"),
+		"build": _a11y_entry(_build_line, "status"),
+		"policy_heading": _a11y_entry(_policy_title, "heading"),
+		"policy": _a11y_entry(_policy_line, "status"),
+		"checksum": _a11y_entry(_checksum_line, "status"),
+		"state": _a11y_entry(_state_label, "status"),
+		"seed": _a11y_entry(_seed_edit, "text_field"),
+		"apply_seed": _a11y_entry(_apply_button, "button"),
+		"refresh": _a11y_entry(_refresh_button, "button"),
+		"previous": _a11y_entry(_previous_button, "button"),
+		"next": _a11y_entry(_next_button, "button"),
+		"empty": _a11y_entry(_empty_label, "status"),
+		"message": _a11y_entry(_message_label, "status"),
+	}
+	var unlabelled: Array[String] = []
+	for key in entries.keys():
+		if not _a11y_labelled(entries[key]):
+			unlabelled.append(str(key))
+	return {
+		"locale": _i18n.locale(),
+		"entries": entries,
+		"rows": _row_texts(),
+		"selected": _selected_id,
+		"live": {
+			"list": str((entries["list"] as Dictionary)["live"]),
+			"selection": str((entries["selection"] as Dictionary)["live"]),
+			"empty": str((entries["empty"] as Dictionary)["live"]),
+			"message": str((entries["message"] as Dictionary)["live"]),
+		},
+		"counts": {
+			"total": entries.size(),
+			"labelled": entries.size() - unlabelled.size(),
+			"unlabelled": unlabelled,
+		},
+	}
+
+
+func _a11y_labelled(entry: Dictionary) -> bool:
+	return not str(entry.get("name", "")).is_empty() and not str(
+		entry.get("description", "")
+	).is_empty()
+
+
+## Whether every name/description stayed free of `WorldI18n`'s `!key!` fallback.
+func _a11y_no_leak(a11y: Dictionary) -> bool:
+	for key in (a11y["entries"] as Dictionary).keys():
+		var entry: Dictionary = (a11y["entries"] as Dictionary)[key]
+		for field in ["name", "description"]:
+			if str(entry[field]).contains("!base.ui.") or str(entry[field]).begins_with("!"):
+				return false
+	return true
+
+
+func _row_texts() -> Array:
+	var rows: Array = []
+	if _list == null:
+		return rows
+	for index in _list.item_count:
+		rows.append(_list.get_item_text(index))
+	return rows
+
+
+## Localized numbers are already baked into each label; this only copies the
+## current line into the semantic description and sets the live mode.
+func _refresh_accessibility() -> void:
+	if _title_label == null:
+		return
+	_title_label.accessibility_name = "District overview"
+	_title_label.accessibility_description = (
+		"Read-only settlements list, one 256 m district summary, and the "
+		+ "smallest-id containing policy. Nothing is saved, loaded, or applied."
+	)
+	if _list != null:
+		_list.accessibility_name = "Settlements"
+		var selected_row := _selected_row_text()
+		_list.accessibility_description = (
+			"%s · %s settlements · Up/Down steps in id order" % [
+				selected_row if not selected_row.is_empty() else "No row selected",
+				_i18n.format_int(_settlements.size()),
+			]
+			if not _settlements.is_empty()
+			else "No settlements in this session."
+		)
+		_list.accessibility_live = A11Y_LIVE_POLITE
+	if _summary_title != null:
+		_summary_title.accessibility_name = "Selected settlement"
+		_summary_title.accessibility_description = _summary_title.text
+		_summary_title.accessibility_live = A11Y_LIVE_POLITE
+	if _settlement_line != null:
+		_set_a11y_text(
+			_settlement_line,
+			"Settlement details and tax",
+			"Settlement id, name, owner, centre, radius, and tax rate."
+		)
+	if _membership_line != null:
+		_set_a11y_text(
+			_membership_line,
+			"Membership and tax",
+			"Owner, member count, role counts, membership revision, and tax rate."
+		)
+	if _members_box != null:
+		var member_text := _member_block_text()
+		_set_a11y_text(
+			_members_box,
+			"Members",
+			member_text if not member_text.is_empty() else "—"
+		)
+	if _district_line != null:
+		_set_a11y_text(
+			_district_line,
+			"District population and housing",
+			"Population, housing capacity, vacancies, and households within 256 m."
+		)
+	if _jobs_line != null:
+		_set_a11y_text(
+			_jobs_line, "District jobs", "Jobs, employed, and unemployed counts."
+		)
+	if _needs_line != null:
+		_set_a11y_text(
+			_needs_line,
+			"District happiness and needs",
+			"Happiness, food, water, rest, and average commute."
+		)
+	if _build_line != null:
+		_set_a11y_text(
+			_build_line,
+			"District buildings",
+			"Completed buildings, construction sites, and query radius."
+		)
+	if _policy_title != null:
+		_policy_title.accessibility_name = "Containing policy"
+		_policy_title.accessibility_description = (
+			"The smallest-id policy whose circle contains the settlement centre."
+		)
+	if _policy_line != null:
+		_set_a11y_text(
+			_policy_line,
+			"Containing policy, tax, and service funding",
+			"Policy id, name, centre, radius, tax multiplier, service funding, "
+			+ "and construction switch. No policy value is applied here."
+		)
+	if _checksum_line != null:
+		_set_a11y_text(
+			_checksum_line, "Bridge checksums", "Settlement, district, and policy checksums."
+		)
+	if _state_label != null:
+		_set_a11y_text(
+			_state_label,
+			"Panel state",
+			"Seed, settlement count, selection, containing policy, and panel digest."
+		)
+	if _seed_edit != null:
+		_seed_edit.accessibility_name = "Seed"
+		_seed_edit.accessibility_description = (
+			"World seed for the next session. Apply seed starts a new read-only session."
+		)
+	if _apply_button != null:
+		_apply_button.accessibility_name = "Apply seed (new session)"
+		_apply_button.accessibility_description = (
+			"Starts a new in-memory read-only session for the typed seed. "
+			+ "Nothing is saved or loaded."
+		)
+	if _refresh_button != null:
+		_refresh_button.accessibility_name = "Refresh"
+		_refresh_button.accessibility_description = (
+			"Re-reads the settlement list, district summary, and policy state. "
+			+ "No data is changed."
+		)
+	if _previous_button != null:
+		_previous_button.accessibility_name = "Previous settlement"
+		_previous_button.accessibility_description = (
+			"Selects the previous settlement in ascending id order, wrapping."
+		)
+	if _next_button != null:
+		_next_button.accessibility_name = "Next settlement"
+		_next_button.accessibility_description = (
+			"Selects the next settlement in ascending id order, wrapping."
+		)
+	if _empty_label != null:
+		_empty_label.accessibility_name = "Settlement list status"
+		_empty_label.accessibility_description = _empty_label.text
+		_empty_label.accessibility_live = A11Y_LIVE_POLITE
+	if _message_label != null:
+		_message_label.accessibility_name = "Panel status"
+		_message_label.accessibility_description = _message_label.text
+		_message_label.accessibility_live = (
+			A11Y_LIVE_ASSERTIVE if _message_is_error else A11Y_LIVE_POLITE
+		)
+
+
+func _set_a11y_text(control: Control, name: String, fallback: String) -> void:
+	control.accessibility_name = name
+	var text := ""
+	if control is Label:
+		text = (control as Label).text.strip_edges()
+	elif control is Button:
+		text = (control as Button).text.strip_edges()
+	control.accessibility_description = text if not text.is_empty() else fallback
+
+
+## Row text for the currently selected id, or an empty string when absent.
+func _selected_row_text() -> String:
+	if _list == null:
+		return ""
+	for index in _list.item_count:
+		if int(_list.get_item_metadata(index)) == _selected_id:
+			return _list.get_item_text(index)
+	return ""
+
+
+# --- Gamepad navigation ----------------------------------------------------
+
+## Apply one named gamepad action and return the resulting snapshot. Unknown
+## actions are ignored and leave the last action unchanged. This is the
+## synthetic entry point used by the headless smoke; live joypad events call the
+## same dispatch through `_unhandled_input`.
+func gamepad_action(action: String) -> Dictionary:
+	_dispatch_gamepad(action)
+	return gamepad_snapshot()
+
+
+func gamepad_snapshot() -> Dictionary:
+	return {
+		"active": _gamepad_active,
+		"last_action": _last_action,
+		"focus": _gamepad_focus,
+		"selected": _selected_id,
+		"settlements": _settlements.size(),
+		"policy": _contained_policy_id(),
+		"checksum": _panel_checksum(
+			_selected_id, _district_checksum(), _contained_policy_id()
+		),
+	}
+
+
+func _dispatch_gamepad(action: String) -> bool:
+	if not GAMEPAD_ACTIONS.has(action):
+		return false
+	var handled := false
+	match action:
+		"ui_up":
+			handled = _gamepad_step(-1)
+		"ui_down":
+			handled = _gamepad_step(1)
+		"ui_left":
+			handled = _gamepad_focus_move(-1)
+		"ui_right":
+			handled = _gamepad_focus_move(1)
+		"ui_accept":
+			handled = _gamepad_accept()
+		"ui_cancel":
+			handled = _gamepad_cancel()
+	if not handled:
+		return false
+	_gamepad_active = action != "ui_cancel"
+	_last_action = action
+	return true
+
+
+## Up/Down own the row selection, matching the list's keyboard arrows and the
+## Previous/Next buttons, which step the same ascending-id order with wrap.
+func _gamepad_step(step: int) -> bool:
+	if _settlements.is_empty():
+		return false
+	_gamepad_focus = "list"
+	_step_selection(step)
+	return true
+
+
+## Left/Right move the logical focus onto the two read-only paging buttons.
+func _gamepad_focus_move(direction: int) -> bool:
+	_gamepad_focus = "previous" if direction < 0 else "next"
+	return true
+
+
+## Accept presses the focused paging button, or re-reads the selected row when
+## focus is on the list. Every branch is a read: no bridge mutation.
+func _gamepad_accept() -> bool:
+	match _gamepad_focus:
+		"previous":
+			if _settlements.is_empty():
+				return false
+			_on_previous_pressed()
+			return true
+		"next":
+			if _settlements.is_empty():
+				return false
+			_on_next_pressed()
+			return true
+		"list":
+			if _settlements.is_empty():
+				return false
+			_select_settlement(_selected_id)
+			return true
+	return false
+
+
+## Cancel releases the gamepad focus; selection, bridge state, and the panel
+## digest stay exactly as they were.
+func _gamepad_cancel() -> bool:
+	_gamepad_focus = "list"
+	return true
+
+
+## Process one live joypad event. Keys keep their native focus/list behavior;
+## this only consumes pad buttons and the left stick.
+func _unhandled_input(event: InputEvent) -> void:
+	var action := _gamepad_action_for_event(event)
+	if action.is_empty():
+		return
+	if _dispatch_gamepad(action):
+		get_viewport().set_input_as_handled()
+
+
+func _gamepad_action_for_event(event: InputEvent) -> String:
+	if event is InputEventJoypadButton:
+		var button := event as InputEventJoypadButton
+		if not button.pressed:
+			return ""
+		for action in GAMEPAD_ACTIONS:
+			if InputMap.event_is_action(button, action):
+				return action
+		match button.button_index:
+			JOY_BUTTON_A:
+				return "ui_accept"
+			JOY_BUTTON_B:
+				return "ui_cancel"
+			JOY_BUTTON_DPAD_UP:
+				return "ui_up"
+			JOY_BUTTON_DPAD_DOWN:
+				return "ui_down"
+			JOY_BUTTON_DPAD_LEFT:
+				return "ui_left"
+			JOY_BUTTON_DPAD_RIGHT:
+				return "ui_right"
+		return ""
+	if event is InputEventJoypadMotion:
+		var motion := event as InputEventJoypadMotion
+		if motion.axis != JOY_AXIS_LEFT_X and motion.axis != JOY_AXIS_LEFT_Y:
+			return ""
+		if absf(motion.axis_value) < STICK_DEADZONE:
+			_stick_held = false
+			return ""
+		if _stick_held:
+			return ""
+		_stick_held = true
+		if motion.axis == JOY_AXIS_LEFT_X:
+			return "ui_right" if motion.axis_value > 0.0 else "ui_left"
+		return "ui_down" if motion.axis_value > 0.0 else "ui_up"
+	return ""
 
 
 # --- UI --------------------------------------------------------------------
@@ -752,11 +1211,11 @@ func _build_ui() -> void:
 	root.add_theme_constant_override("separation", 10)
 	margin.add_child(root)
 
-	var title := Label.new()
-	title.text = "District Overview"
-	title.add_theme_font_size_override("font_size", 24)
-	title.add_theme_color_override("font_color", TEXT_COLOR)
-	root.add_child(title)
+	_title_label = Label.new()
+	_title_label.text = "District Overview"
+	_title_label.add_theme_font_size_override("font_size", 24)
+	_title_label.add_theme_color_override("font_color", TEXT_COLOR)
+	root.add_child(_title_label)
 
 	var subtitle := Label.new()
 	subtitle.text = (
@@ -813,25 +1272,25 @@ func _build_toolbar() -> Control:
 	_seed_edit.custom_minimum_size = Vector2(110.0, 0.0)
 	row.add_child(_seed_edit)
 
-	var apply_seed := Button.new()
-	apply_seed.text = "Apply seed (new session)"
-	apply_seed.pressed.connect(_on_apply_seed_pressed)
-	row.add_child(apply_seed)
+	_apply_button = Button.new()
+	_apply_button.text = "Apply seed (new session)"
+	_apply_button.pressed.connect(_on_apply_seed_pressed)
+	row.add_child(_apply_button)
 
-	var refresh_button := Button.new()
-	refresh_button.text = "Refresh"
-	refresh_button.pressed.connect(_on_refresh_pressed)
-	row.add_child(refresh_button)
+	_refresh_button = Button.new()
+	_refresh_button.text = "Refresh"
+	_refresh_button.pressed.connect(_on_refresh_pressed)
+	row.add_child(_refresh_button)
 
-	var previous := Button.new()
-	previous.text = "Previous"
-	previous.pressed.connect(_on_previous_pressed)
-	row.add_child(previous)
+	_previous_button = Button.new()
+	_previous_button.text = "Previous"
+	_previous_button.pressed.connect(_on_previous_pressed)
+	row.add_child(_previous_button)
 
-	var next := Button.new()
-	next.text = "Next"
-	next.pressed.connect(_on_next_pressed)
-	row.add_child(next)
+	_next_button = Button.new()
+	_next_button.text = "Next"
+	_next_button.pressed.connect(_on_next_pressed)
+	row.add_child(_next_button)
 
 	_state_label = Label.new()
 	_state_label.add_theme_color_override("font_color", TEXT_COLOR)
@@ -1356,6 +1815,88 @@ func _run_smoke() -> void:
 			status = "settlement_checksum_unstable"
 		elif first_policies != _policy_checksum:
 			status = "policy_checksum_unstable"
+
+	# 9. Accessibility model: every entry is labelled, nothing leaks an i18n
+	# fallback, and the live regions stay polite except an error message.
+	var a11y_checks := 0
+	var a11y_status := "ok"
+	var a11y: Dictionary = accessibility_snapshot()
+	a11y_checks += 1
+	if int((a11y["counts"] as Dictionary)["unlabelled"].size()) != 0:
+		a11y_status = "unlabelled"
+	a11y_checks += 1
+	if not _a11y_no_leak(a11y):
+		a11y_status = "leak"
+	var live: Dictionary = a11y["live"]
+	for key in ["list", "selection", "empty"]:
+		a11y_checks += 1
+		if str(live[key]) != "polite":
+			a11y_status = "live_" + str(key)
+	a11y_checks += 1
+	if str(live["message"]) != "polite":
+		a11y_status = "live_message"
+	_set_message("Read-only district.", true)
+	a11y_checks += 1
+	if str((accessibility_snapshot()["live"] as Dictionary)["message"]) != "assertive":
+		a11y_status = "assertive_error"
+	_set_message("Read-only district.", false)
+	a11y_checks += 1
+	if str((accessibility_snapshot()["live"] as Dictionary)["message"]) != "polite":
+		a11y_status = "restore_polite"
+	print("DISTRICT_PANEL_A11Y status=%s checks=%d" % [a11y_status, a11y_checks])
+	if a11y_status != "ok" and status == "ok":
+		status = "a11y_" + a11y_status
+
+	# 10. Gamepad navigation is selection/paging only; no bridge mutation.
+	var gamepad_checks := 0
+	var gamepad_status := "ok"
+	_select_settlement(1)
+	var gamepad_settlements := _settlement_checksum
+	var gamepad_district := _district_checksum()
+	var gamepad_policy := _policy_checksum
+	var pad: Dictionary = gamepad_action("ui_down")
+	gamepad_checks += 1
+	if int(pad["selected"]) != 2 or str(pad["focus"]) != "list":
+		gamepad_status = "down"
+	pad = gamepad_action("ui_down")
+	gamepad_checks += 1
+	if int(pad["selected"]) != 1:
+		gamepad_status = "wrap_down"
+	pad = gamepad_action("ui_up")
+	gamepad_checks += 1
+	if int(pad["selected"]) != 2:
+		gamepad_status = "wrap_up"
+	pad = gamepad_action("ui_left")
+	gamepad_checks += 1
+	if str(pad["focus"]) != "previous":
+		gamepad_status = "left"
+	pad = gamepad_action("ui_accept")
+	gamepad_checks += 1
+	if int(pad["selected"]) != 1:
+		gamepad_status = "accept_previous"
+	pad = gamepad_action("ui_right")
+	gamepad_checks += 1
+	if str(pad["focus"]) != "next":
+		gamepad_status = "right"
+	pad = gamepad_action("ui_accept")
+	gamepad_checks += 1
+	if int(pad["selected"]) != 2:
+		gamepad_status = "accept_next"
+	pad = gamepad_action("ui_cancel")
+	gamepad_checks += 1
+	if str(pad["focus"]) != "list" or int(pad["selected"]) != 2 or bool(pad["active"]):
+		gamepad_status = "cancel"
+	gamepad_checks += 1
+	if (
+		_settlement_checksum != gamepad_settlements
+		or _district_checksum() != gamepad_district
+		or _policy_checksum != gamepad_policy
+	):
+		gamepad_status = "checksum"
+	print("DISTRICT_PANEL_GAMEPAD status=%s checks=%d" % [gamepad_status, gamepad_checks])
+	if gamepad_status != "ok" and status == "ok":
+		status = "gamepad_" + gamepad_status
+	_select_settlement(1)
 
 	selected_id = _selected_id
 	contained_id = _contained_policy_id()

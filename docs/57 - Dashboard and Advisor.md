@@ -239,6 +239,8 @@ The final checksum is the empty-registry checksum after the walkthrough (seed pl
 - **States.** A failed read is displayed in the footer and summary with the bridge code instead of a `push_error` or a retry. A foreign seed is the same read-only `seed_mismatch` path for both the district and the policy state, and the next refresh recovers. Empty and unavailable states never abort the scene.
 - **Digest.** The toolbar prints `Seed … · N settlements · selected … · policy … · checksum …`. The 8-hex panel digest is presentation-only FNV-1a over the seed, settlement checksum, selected id, district checksum, and containing policy id; it never enters saves, networking, or simulation.
 - **Numbers and strings.** Display numbers use `WorldI18n.format_int`/`format_float`; developer labels and console text stay English. Settlement names, owners, bridge error codes, and policy ids stay verbatim.
+- **Accessibility.** Every visible block has an `accessibility_name` and a bounded `accessibility_description`; list, selection, empty state, and status are live regions (polite for reads, assertive for errors). `accessibility_snapshot()` mirrors the model, and `DISTRICT_PANEL_A11Y status=ok checks=8` is printed by the smoke.
+- **Gamepad.** Up/Down step the settlement list in id order with wrap, Left/Right focus the Previous/Next paging buttons, Accept presses the focused control (or re-reads the selected row), and Cancel releases pad focus. Every branch is read-only; `DISTRICT_PANEL_GAMEPAD status=ok checks=9` pins the walk and the unchanged bridge checksums.
 
 Run:
 
@@ -268,9 +270,9 @@ Markers (seed 2026, current deterministic walkthrough):
 
 ```text
 DISTRICT_PANEL_STATE seed=2026 settlements=2 policies=2 selected=1 centre=(0,0) district=8df352d4f9fa3add policy=1 reject=empty_name unavailable=seed_mismatch
-DISTRICT_PANEL status=ok settlements=2 selected=1 population=0 policy=1 checksum=fe2c5d32
+DISTRICT_PANEL status=ok settlements=2 selected=1 population=0 policy=1 checksum=aa4860c5
 DISTRICT_PANEL status=ok settlements=0 selected=none population=0 policy=none checksum=c85a90eb
-DISTRICT_PANEL_SMOKE OK status=ok settlements=2 selected=1 population=0 policy=1 checksum=fe2c5d32
+DISTRICT_PANEL_SMOKE OK status=ok settlements=2 selected=1 population=0 policy=1 checksum=aa4860c5
 ```
 
 The panel digest is not the settlement, district, or policy checksum; the district checksum is the derived `district_summary` value and the empty marker is the zero-data digest. The script requires `settlements=2 selected=1 population=0 policy=1` for `--smoke` and `settlements=0 selected=none population=0 policy=none` for `--empty`, each with an 8-hex checksum.
@@ -501,12 +503,12 @@ POLICY_EDITOR status=ok policies=0 checksum=8cc529a07d1c924f
 POLICY_EDITOR_SMOKE OK status=ok policies=0 checksum=8cc529a07d1c924f
 ```
 
-`smoke_district_panel.sh` is a separate smoke for the standalone §4.3 scene; it does not run the world scene or the policy editor. It builds the debug extension, imports once with a single retry, runs `--smoke` twice, requires every `DISTRICT_PANEL*` line and the panel checksum to match between the two runs, then runs `--empty` and requires the empty-session marker. It checks the closed settlement layer, the blank-name rejection, the two-settlement/two-policy fixture, the 256 m district summary, the smallest-id containing policy, selection stepping and wrapping, the read-only `seed_mismatch` unavailable state and recovery, and stable repeated refreshes. Markers:
+`smoke_district_panel.sh` is a separate smoke for the standalone §4.3 scene; it does not run the world scene or the policy editor. It builds the debug extension, imports once with a single retry, runs `--smoke` twice, requires every `DISTRICT_PANEL*` line and the panel checksum to match between the two runs, then runs `--empty` and requires the empty-session marker. It checks the closed settlement layer, the blank-name rejection, the two-settlement/two-policy fixture, the 256 m district summary, the smallest-id containing policy, selection stepping and wrapping, the read-only `seed_mismatch` unavailable state and recovery, and stable repeated refreshes. It also requires `DISTRICT_PANEL_A11Y` and `DISTRICT_PANEL_GAMEPAD` status markers. Markers:
 
 ```text
-DISTRICT_PANEL status=ok settlements=2 selected=1 population=0 policy=1 checksum=fe2c5d32
+DISTRICT_PANEL status=ok settlements=2 selected=1 population=0 policy=1 checksum=aa4860c5
 DISTRICT_PANEL status=ok settlements=0 selected=none population=0 policy=none checksum=c85a90eb
-DISTRICT_PANEL_SMOKE OK status=ok settlements=2 selected=1 population=0 policy=1 checksum=fe2c5d32
+DISTRICT_PANEL_SMOKE OK status=ok settlements=2 selected=1 population=0 policy=1 checksum=aa4860c5
 ```
 
 The script requires `settlements=2 selected=1 population=0 policy=1` for `--smoke` and `settlements=0 selected=none population=0 policy=none` for `--empty`, each with an 8-hex checksum.

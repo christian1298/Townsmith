@@ -33,6 +33,8 @@ trap 'rm -rf "$SMOKE_DIR"' EXIT
 PANEL_CONTRACT='^DISTRICT_PANEL\ status=ok\ settlements=2\ selected=1\ population=0\ policy=1\ checksum=[0-9a-f]{8}$'
 EMPTY_CONTRACT='^DISTRICT_PANEL\ status=ok\ settlements=0\ selected=none\ population=0\ policy=none\ checksum=[0-9a-f]{8}$'
 TAX_CONTRACT='^DISTRICT_TAX\ alpha=0%\ beta=0%\ selected=0%$'
+A11Y_CONTRACT='^DISTRICT_PANEL_A11Y\ status=ok\ checks=[0-9]+$'
+GAMEPAD_CONTRACT='^DISTRICT_PANEL_GAMEPAD\ status=ok\ checks=[0-9]+$'
 
 run_panel() {
 	local mode="$1"
@@ -79,6 +81,20 @@ run_panel() {
 			echo "District panel smoke tax contract mismatch ($mode): $tax_marker" >&2
 			exit 1
 		fi
+		for pair in "DISTRICT_PANEL_A11Y:$A11Y_CONTRACT" "DISTRICT_PANEL_GAMEPAD:$GAMEPAD_CONTRACT"; do
+			local prefix="${pair%%:*}"
+			local contract="${pair#*:}"
+			local line
+			line="$(grep "^${prefix} " <<<"$output" | tail -1 || true)"
+			if [[ -z "$line" ]]; then
+				echo "District panel smoke failed ($mode): no $prefix marker" >&2
+				exit 1
+			fi
+			if [[ ! "$line" =~ $contract ]]; then
+				echo "District panel smoke $prefix contract mismatch ($mode): $line" >&2
+				exit 1
+			fi
+		done
 
 		local member_marker
 		member_marker="$(grep '^DISTRICT_MEMBERS ' <<<"$output" || true)"
