@@ -563,6 +563,8 @@ These are planning targets. The Phase 0 spike and a network test must measure th
 
 > [!info] Server save v1
 > `crates/server/src/save.rs` implements the first server-world save: a deterministic `ServerSave` v1 JSON containing seed, tick, population/employment/building counts, paused state, economy, and roads. `save_to` writes `<path>.tmp`, fsyncs, renames, syncs the parent directory on Unix, and rotates a valid primary to `<path>.bak`. `load_from` falls back to the backup when the primary is missing/corrupt and rejects when both are corrupt. `crates/server/src/listen.rs` saves on disconnect/EOF/reset/idle timeout and optionally autosaves every N ticks. CLI: `--listen PORT --save PATH --load PATH [--autosave-ticks N] [--sessions N] [--retain-locks]` and `--save-load-smoke`; `--once` is the `--sessions 1` shorthand. Limits: one world file, no journal, compression, remote storage, or authentication. Resume windows and tokens are process-local and are **not** part of `ServerSave`, so a restarted server always needs a fresh `hello`.
+>
+> Pause is persisted in `ServerSave` but excluded from `ServerWorld::checksum`: a paused world reloads paused at the same tick and checksum, with no auto-resume and no catch-up economy loop. While paused, `advance_day` is a no-op; resuming advances exactly one day per accepted tick, so a restart neither skips nor duplicates an economy day. `crates/server/tests/pause_restart.rs` pins the reload, no-op, resume, and byte-identical two-cycle behavior.
 
 - **Save format:** world seed + terrain/resource deltas + SQLite for world state + binary blueprint files (see [[03 - Voxel and Scale]] and [[12 - Technical Architecture]]).
 - **Autosave:** every 5–10 minutes, atomic (temp file → fsync → rename), with rotating backups.
