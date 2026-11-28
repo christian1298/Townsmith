@@ -26,6 +26,13 @@ extends Control
 ## the settings overlay or returns focus to the first item. A visible ring
 ## marks the focused control.
 ##
+## Screen reader: every title, subtitle, menu button, hint, footer, and
+## settings control gets a localized `accessibility_name` and a bounded
+## `accessibility_description`. The hint label is a polite live region (it
+## changes with focus); the settings status line is assertive (a save failure
+## must be announced immediately). Semantics are presentation only: they add
+## no control, no focus stop, and no visual element.
+##
 ## Run:
 ##   godot --path godot
 ##   godot --headless --path godot -- --menu-smoke
@@ -33,10 +40,13 @@ extends Control
 ## `--menu-smoke` prints deterministic lines and quits:
 ##   MAIN_MENU status=ok buttons=6 focus=new_city checks=N checksum=<8 hex>
 ##   MAIN_MENU_SETTINGS status=ok volume=55 muted=true checks=N
+##   MAIN_MENU_A11Y status=ok checks=N
 ##
 ## The settings line is printed against an isolated
 ## `user://settings_smoke.cfg`, so a developer's real settings never move the
-## marker and the file is removed again before quitting.
+## marker and the file is removed again before quitting. The accessibility
+## checks have their own counter, so the menu and settings markers (including
+## the pinned `checksum=3d4a58ba`) do not move.
 ##
 ## See docs/86.
 
@@ -85,6 +95,17 @@ const ITEMS := [
 		"scene": "",
 	},
 ]
+
+## `Control.accessibility_live` values (Godot 4.7 exposes the property but not
+## named enum constants). The hint line is polite so focus changes announce
+## the new destination; the settings status is assertive so a save failure is
+## immediate.
+const A11Y_LIVE_OFF := 0
+const A11Y_LIVE_POLITE := 1
+const A11Y_LIVE_ASSERTIVE := 2
+## Descriptions are summaries, not transcripts: bound them so a long localized
+## string never turns into a wall of speech.
+const A11Y_DESCRIPTION_MAX := 160
 
 const TITLE_COLOR := Color(0.92, 0.95, 1.0)
 const TEXT_COLOR := Color(0.86, 0.9, 0.95)
@@ -494,6 +515,221 @@ func _refresh_hint() -> void:
 	if _hint_label == null or _focus_index < 0 or _focus_index >= ITEMS.size():
 		return
 	_hint_label.text = _i18n.t(str(ITEMS[_focus_index]["hint"]))
+	_refresh_accessibility()
+
+
+## Localized screen-reader names, bounded descriptions, and live modes for
+## every visible part of the menu and its settings overlay. The overlay is
+## labelled even while closed, so the semantics are ready before it opens.
+func _refresh_accessibility() -> void:
+	if _title_label == null or _i18n == null:
+		return
+	_a11y_set(_title_label, _i18n.t("base.ui.menu.title"), _i18n.t("base.ui.menu.a11y.menu"))
+	_a11y_set(
+		_subtitle_label,
+		_i18n.t("base.ui.menu.subtitle"),
+		_i18n.t("base.ui.menu.a11y.menu")
+	)
+	for index in _buttons.size():
+		var item: Dictionary = ITEMS[index]
+		_a11y_set(
+			_buttons[index],
+			_buttons[index].text,
+			_i18n.t(str(item["hint"]))
+		)
+	_a11y_set(
+		_hint_label,
+		_i18n.t("base.ui.menu.a11y.hint"),
+		_hint_label.text
+	)
+	_hint_label.accessibility_live = A11Y_LIVE_POLITE
+	_a11y_set(
+		_footer_label,
+		_i18n.t("base.ui.menu.a11y.footer"),
+		_footer_label.text
+	)
+
+	if _settings_title == null:
+		return
+	_a11y_set(
+		_settings_title,
+		_i18n.t("base.ui.menu.settings.title"),
+		_settings_body.text
+	)
+	_a11y_set(
+		_settings_body,
+		_i18n.t("base.ui.menu.a11y.settings_body"),
+		_settings_body.text
+	)
+	_a11y_set(
+		_settings_volume_label,
+		_settings_volume_label.text,
+		_i18n.t("base.ui.menu.a11y.volume_hint")
+	)
+	_a11y_set(
+		_settings_volume_value,
+		_i18n.t("base.ui.menu.a11y.volume_value"),
+		_settings_volume_value.text
+	)
+	_a11y_set(
+		_settings_slider,
+		_settings_volume_label.text,
+		_i18n.t("base.ui.menu.a11y.volume_hint")
+	)
+	_a11y_set(
+		_settings_mute,
+		_settings_mute.text,
+		_i18n.t("base.ui.menu.a11y.mute_hint")
+	)
+	_a11y_set(
+		_settings_save,
+		_settings_save.text,
+		_i18n.t("base.ui.menu.a11y.save_hint")
+	)
+	_a11y_set(
+		_settings_cancel,
+		_settings_cancel.text,
+		_i18n.t("base.ui.menu.a11y.cancel_hint")
+	)
+	_a11y_set(
+		_settings_status,
+		_i18n.t("base.ui.menu.a11y.status"),
+		(
+			_settings_status.text
+			if not _settings_status.text.is_empty()
+			else _i18n.t("base.ui.menu.a11y.status_idle")
+		)
+	)
+	_settings_status.accessibility_live = A11Y_LIVE_ASSERTIVE
+
+
+## Assign a bounded name/description pair. Null controls are ignored so the
+## helper is safe during construction order changes.
+func _a11y_set(control: Control, name_text: String, description_text: String) -> void:
+	if control == null:
+		return
+	control.accessibility_name = _a11y_clamp(name_text)
+	control.accessibility_description = _a11y_clamp(description_text)
+
+
+func _a11y_clamp(text: String) -> String:
+	var trimmed := text.strip_edges()
+	if trimmed.length() <= A11Y_DESCRIPTION_MAX:
+		return trimmed
+	return trimmed.substr(0, A11Y_DESCRIPTION_MAX).strip_edges()
+
+
+## Read-only screen-reader model for the headless smoke. Entries carry the
+## same name/description/role/live/reachable shape as the other UI slices.
+func accessibility_snapshot() -> Dictionary:
+	var buttons: Array = []
+	for index in _buttons.size():
+		var entry := _a11y_entry(_buttons[index], "button")
+		entry["id"] = _ids[index]
+		buttons.append(entry)
+	return {
+		"locale": _i18n.locale() if _i18n != null else "",
+		"title": _a11y_entry(_title_label, "heading"),
+		"subtitle": _a11y_entry(_subtitle_label, "label"),
+		"buttons": buttons,
+		"hint": _a11y_entry(_hint_label, "status"),
+		"footer": _a11y_entry(_footer_label, "label"),
+		"settings": {
+			"title": _a11y_entry(_settings_title, "heading"),
+			"body": _a11y_entry(_settings_body, "group"),
+			"volume_label": _a11y_entry(_settings_volume_label, "label"),
+			"volume_value": _a11y_entry(_settings_volume_value, "status"),
+			"slider": _a11y_entry(_settings_slider, "slider"),
+			"mute": _a11y_entry(_settings_mute, "checkbox"),
+			"save": _a11y_entry(_settings_save, "button"),
+			"cancel": _a11y_entry(_settings_cancel, "button"),
+			"status": _a11y_entry(_settings_status, "status"),
+		},
+		"live": {
+			"hint": _a11y_live_name(_hint_label),
+			"settings_status": _a11y_live_name(_settings_status),
+		},
+		"menu_order": _ids.duplicate(),
+	}
+
+
+func _a11y_entry(control: Control, role: String) -> Dictionary:
+	if control == null:
+		return {
+			"name": "",
+			"description": "",
+			"role": role,
+			"class": "",
+			"live": "off",
+			"visible": false,
+			"focus_mode": "none",
+			"reachable": false,
+		}
+	var focus_mode := "none"
+	if control.focus_mode == Control.FOCUS_ALL:
+		focus_mode = "all"
+	elif control.focus_mode == Control.FOCUS_CLICK:
+		focus_mode = "click"
+	return {
+		"name": control.accessibility_name,
+		"description": control.accessibility_description,
+		"role": role,
+		"class": control.get_class(),
+		"live": _a11y_live_name(control),
+		"visible": control.visible,
+		"focus_mode": focus_mode,
+		"reachable": (
+			control.is_inside_tree()
+			and control.visible
+			and control.focus_mode == Control.FOCUS_ALL
+		),
+	}
+
+
+func _a11y_live_name(control: Control) -> String:
+	if control == null:
+		return "off"
+	if control.accessibility_live == A11Y_LIVE_POLITE:
+		return "polite"
+	if control.accessibility_live == A11Y_LIVE_ASSERTIVE:
+		return "assertive"
+	return "off"
+
+
+## Whether every name/description resolved and none leaked a raw
+## `!base.ui.*!` fallback. Walks the nested snapshot.
+func _a11y_no_leak(value) -> bool:
+	if value is Array:
+		for child in value:
+			if not _a11y_no_leak(child):
+				return false
+		return true
+	if value is Dictionary:
+		for key in value:
+			if str(key) == "name" or str(key) == "description":
+				if str(value[key]).contains("!base.ui."):
+					return false
+			elif not _a11y_no_leak(value[key]):
+				return false
+		return true
+	return true
+
+
+func _a11y_descriptions_bounded(value) -> bool:
+	if value is Array:
+		for child in value:
+			if not _a11y_descriptions_bounded(child):
+				return false
+		return true
+	if value is Dictionary:
+		for key in value:
+			if str(key) == "description":
+				if str(value[key]).length() > A11Y_DESCRIPTION_MAX:
+					return false
+			elif not _a11y_descriptions_bounded(value[key]):
+				return false
+		return true
+	return true
 
 
 func _target_scene(item_id: String) -> String:
@@ -565,6 +801,7 @@ func _update_volume_value() -> void:
 	_settings_volume_value.text = _i18n.t(
 		"base.ui.menu.settings.volume_value", {"value": _i18n.format_int(_volume)}
 	)
+	_refresh_accessibility()
 
 
 func _on_volume_changed(value: float) -> void:
@@ -593,6 +830,7 @@ func _open_settings() -> void:
 	_applying_settings = false
 	_settings_status.text = ""
 	_update_volume_value()
+	_refresh_accessibility()
 	_settings_overlay.visible = true
 	_set_menu_focusable(false)
 	_ring_target = _settings_slider
@@ -613,6 +851,7 @@ func _on_settings_save() -> void:
 	var error := MenuSettings.save_to(_settings_path, _volume, _muted)
 	if error != OK:
 		_settings_status.text = _i18n.t("base.ui.menu.settings.save_failed")
+		_refresh_accessibility()
 		return
 	_close_settings()
 
@@ -815,6 +1054,135 @@ func _run_smoke() -> void:
 		failures
 	)
 
+	# --- Screen-reader semantics (own counter; markers stay pinned) ---
+	# These checks run after the menu/settings markers are printed, so the
+	# locale switches and overlay error state cannot move `checksum=3d4a58ba`
+	# or `MAIN_MENU_SETTINGS checks=9`.
+	var a11y_checks := 0
+	var a11y_failures := PackedStringArray()
+	_apply_locale("en")
+	_set_focus(0)
+	var a11y := accessibility_snapshot()
+
+	var parts_ok := true
+	for part in ["title", "subtitle", "hint", "footer"]:
+		var part_entry: Dictionary = a11y[part]
+		if str(part_entry["name"]).is_empty() or str(part_entry["description"]).is_empty():
+			parts_ok = false
+	a11y_checks += _smoke_check(parts_ok, "a11y.parts", a11y_failures)
+
+	var button_entries: Array = a11y["buttons"]
+	var buttons_ok: bool = button_entries.size() == ITEMS.size()
+	for entry in button_entries:
+		if str(entry["name"]).is_empty() or str(entry["description"]).is_empty():
+			buttons_ok = false
+	a11y_checks += _smoke_check(buttons_ok, "a11y.buttons", a11y_failures)
+	a11y_checks += _smoke_check(
+		str(a11y["title"]["role"]) == "heading"
+		and str(a11y["subtitle"]["role"]) == "label"
+		and str(a11y["hint"]["role"]) == "status"
+		and str(a11y["footer"]["role"]) == "label"
+		and str(a11y["buttons"][0]["role"]) == "button"
+		and str(a11y["menu_order"]) == str(_ids),
+		"a11y.roles",
+		a11y_failures
+	)
+
+	var settings_ok := true
+	for part in [
+		"title", "body", "volume_label", "volume_value",
+		"slider", "mute", "save", "cancel", "status",
+	]:
+		var setting_entry: Dictionary = a11y["settings"][part]
+		if str(setting_entry["name"]).is_empty() or str(setting_entry["description"]).is_empty():
+			settings_ok = false
+	a11y_checks += _smoke_check(settings_ok, "a11y.settings", a11y_failures)
+	a11y_checks += _smoke_check(
+		str(a11y["settings"]["slider"]["role"]) == "slider"
+		and str(a11y["settings"]["mute"]["role"]) == "checkbox"
+		and str(a11y["settings"]["save"]["role"]) == "button"
+		and str(a11y["settings"]["cancel"]["role"]) == "button"
+		and str(a11y["settings"]["status"]["role"]) == "status",
+		"a11y.settings_roles",
+		a11y_failures
+	)
+	a11y_checks += _smoke_check(
+		str(a11y["live"]["hint"]) == "polite"
+		and str(a11y["live"]["settings_status"]) == "assertive",
+		"a11y.live",
+		a11y_failures
+	)
+	a11y_checks += _smoke_check(
+		_a11y_descriptions_bounded(a11y),
+		"a11y.bounded",
+		a11y_failures
+	)
+	a11y_checks += _smoke_check(_a11y_no_leak(a11y), "a11y.en.no_missing_keys", a11y_failures)
+	a11y_checks += _smoke_check(
+		str(a11y["settings"]["slider"]["name"]) == "Master volume"
+		and str((a11y["buttons"] as Array)[4]["name"]) == "Settings",
+		"a11y.en.names",
+		a11y_failures
+	)
+
+	# The hint is a polite live region: focus changes announce the new hint.
+	_set_focus(_index_of("multiplayer"))
+	a11y = accessibility_snapshot()
+	a11y_checks += _smoke_check(
+		str(a11y["hint"]["description"]).contains("server")
+		and str(a11y["hint"]["description"]).contains("listen")
+		and str(a11y["hint"]["live"]) == "polite",
+		"a11y.hint_live",
+		a11y_failures
+	)
+	_set_focus(0)
+
+	# DE switches the announced names without changing the controls.
+	_apply_locale("de")
+	var de_a11y := accessibility_snapshot()
+	a11y_checks += _smoke_check(
+		str(de_a11y["locale"]) == "de"
+		and str((de_a11y["buttons"] as Array)[0]["name"]) == "Neue Stadt"
+		and str(de_a11y["settings"]["volume_label"]["name"]) == "Gesamtlautstärke",
+		"a11y.de.names",
+		a11y_failures
+	)
+	a11y_checks += _smoke_check(_a11y_no_leak(de_a11y), "a11y.de.no_missing_keys", a11y_failures)
+	_apply_locale("en")
+
+	# A failed save stays in the overlay and announces the localized error.
+	_settings_path = ""
+	_open_settings()
+	_on_settings_save()
+	a11y = accessibility_snapshot()
+	a11y_checks += _smoke_check(
+		_settings_overlay.visible
+		and str(a11y["live"]["settings_status"]) == "assertive"
+		and str(a11y["settings"]["status"]["description"])
+			== _i18n.t("base.ui.menu.settings.save_failed"),
+		"a11y.settings_save_error",
+		a11y_failures
+	)
+	_back()
+	_settings_path = "user://settings_smoke.cfg"
+
+	# Semantics add no focus stop and no new navigation.
+	a11y_checks += _smoke_check(
+		_buttons[0].focus_mode == Control.FOCUS_ALL
+		and _settings_slider.focus_mode == Control.FOCUS_ALL
+		and _settings_mute.focus_mode == Control.FOCUS_ALL
+		and _settings_save.focus_mode == Control.FOCUS_ALL
+		and _settings_cancel.focus_mode == Control.FOCUS_ALL
+		and str(accessibility_snapshot()["menu_order"]) == str(_ids),
+		"a11y.no_navigation_change",
+		a11y_failures
+	)
+	print("MAIN_MENU_A11Y status=%s checks=%d" % [
+		"ok" if a11y_failures.is_empty() else "fail",
+		a11y_checks,
+	])
+	failures.append_array(a11y_failures)
+
 	# The marker line is deterministic: English labels, first item focused.
 	_set_focus(0)
 	var parts := PackedStringArray()
@@ -856,6 +1224,18 @@ func _menu_keys() -> PackedStringArray:
 		"base.ui.menu.settings.save",
 		"base.ui.menu.settings.cancel",
 		"base.ui.menu.footer",
+		"base.ui.menu.settings.save_failed",
+		"base.ui.menu.a11y.menu",
+		"base.ui.menu.a11y.hint",
+		"base.ui.menu.a11y.footer",
+		"base.ui.menu.a11y.settings_body",
+		"base.ui.menu.a11y.volume_hint",
+		"base.ui.menu.a11y.volume_value",
+		"base.ui.menu.a11y.mute_hint",
+		"base.ui.menu.a11y.save_hint",
+		"base.ui.menu.a11y.cancel_hint",
+		"base.ui.menu.a11y.status",
+		"base.ui.menu.a11y.status_idle",
 	])
 	for item in ITEMS:
 		keys.append(str(item["label"]))

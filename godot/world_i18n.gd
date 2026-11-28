@@ -736,6 +736,18 @@ const TABLES := {
 		"base.ui.menu.settings.cancel": "Cancel",
 		"base.ui.menu.settings.save_failed": "Could not save settings.",
 		"base.ui.menu.footer": "Up/Down or D-pad: focus · Enter/A: open · Esc/B: back",
+		# Screen-reader names and bounded descriptions (docs/86 §5).
+		"base.ui.menu.a11y.menu": "Main menu",
+		"base.ui.menu.a11y.hint": "Selected item help",
+		"base.ui.menu.a11y.footer": "Controls",
+		"base.ui.menu.a11y.settings_body": "Settings details",
+		"base.ui.menu.a11y.volume_hint": "Master volume, 0 to 100 percent",
+		"base.ui.menu.a11y.volume_value": "Master volume value",
+		"base.ui.menu.a11y.mute_hint": "Silences all game audio",
+		"base.ui.menu.a11y.save_hint": "Saves volume and mute, then closes settings",
+		"base.ui.menu.a11y.cancel_hint": "Discards changes and closes settings",
+		"base.ui.menu.a11y.status": "Settings status",
+		"base.ui.menu.a11y.status_idle": "No error",
 	},
 	"de": {
 		# Bürgerpanel.
@@ -1442,6 +1454,18 @@ const TABLES := {
 		"base.ui.menu.settings.cancel": "Abbrechen",
 		"base.ui.menu.settings.save_failed": "Einstellungen konnten nicht gespeichert werden.",
 		"base.ui.menu.footer": "Hoch/Runter oder Steuerkreuz: Fokus · Enter/A: öffnen · Esc/B: zurück",
+		# Bildschirmleser-Namen und begrenzte Beschreibungen (docs/86 §5).
+		"base.ui.menu.a11y.menu": "Hauptmenü",
+		"base.ui.menu.a11y.hint": "Hilfe zum ausgewählten Eintrag",
+		"base.ui.menu.a11y.footer": "Steuerung",
+		"base.ui.menu.a11y.settings_body": "Einstellungsdetails",
+		"base.ui.menu.a11y.volume_hint": "Gesamtlautstärke, 0 bis 100 Prozent",
+		"base.ui.menu.a11y.volume_value": "Wert der Gesamtlautstärke",
+		"base.ui.menu.a11y.mute_hint": "Schaltet sämtliches Spielaudio stumm",
+		"base.ui.menu.a11y.save_hint": "Speichert Lautstärke und Stummschaltung und schließt die Einstellungen",
+		"base.ui.menu.a11y.cancel_hint": "Verwirft Änderungen und schließt die Einstellungen",
+		"base.ui.menu.a11y.status": "Einstellungsstatus",
+		"base.ui.menu.a11y.status_idle": "Kein Fehler",
 	},
 }
 

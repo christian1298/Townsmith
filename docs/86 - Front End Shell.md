@@ -52,6 +52,10 @@ The script builds the debug extension, imports with one retry, runs the menu twi
 ```text
 MAIN_MENU status=ok buttons=6 focus=new_city checks=N checksum=3d4a58ba
 MAIN_MENU_SETTINGS status=ok volume=37 muted=true checks=9
+### Accessibility
+
+The menu and Settings overlay expose `accessibility_name`/bounded descriptions for the title, subtitle, every button, the hint/footer, and each settings control. Hint changes are a polite live region; settings save failures are assertive. `accessibility_snapshot()` mirrors the model, and the smoke prints `MAIN_MENU_A11Y status=ok checks=14` without changing `MAIN_MENU checksum=3d4a58ba` or the settings marker. Locale keys are 660.
+
 MAIN_MENU_SMOKE runs=2 status=ok ...
 MAIN_MENU_FORWARD --smoke chunks=9 status=ok
 ```
