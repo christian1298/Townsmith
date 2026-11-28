@@ -13,7 +13,9 @@ extends Control
 ##     --smoke --port 47015
 ##
 ## `--smoke` prints one `SERVER_STATUS_PANEL` marker. A success prints
-## `status=ok ...` and exits 0. A failure prints `status=fail code=<stable>` and
+## `status=ok ...` and exits 0; the one-shot path also prints one
+## `SERVER_STATUS_PANEL_PAUSED status=ok paused=<bool> running=<bool>` line for
+## the "Time" row. A failure prints `status=fail code=<stable>` and
 ## exits 1, where the stable code is one of:
 ##   status.connect  connection refused, lost while connecting, or a timeout
 ##   status.frame    malformed frame (length, JSON, or unexpected message)
@@ -24,6 +26,11 @@ extends Control
 ## and still prints the fail marker; a mismatch exits 1.
 ## `--fixture-json PATH` skips TCP and feeds one `server_status` object through
 ## the same parse/render path, so shape checks need no server.
+##
+## The additive `paused` field is optional: an older server that omits it
+## decodes as running (`false`), and a non-boolean value is `status.shape`.
+## `paused` is rendered only; it is not an integer counter and is not part of
+## the watch checksum.
 ##
 ## Opt-in watch mode keeps the one connection open and polls `server_status`
 ## repeatedly, updating the labels in place:
@@ -53,6 +60,12 @@ extends Control
 ## `checksum` is the first 16 hex characters of the SHA-256 over the ascending
 ## `tick|population|settlements|checksum` lines (one LF per line). The one-shot
 ## `SERVER_STATUS_PANEL` marker is unchanged.
+##
+## The panel also prints the rendered pause state once per one-shot or fixture
+## status:
+##   SERVER_STATUS_PANEL_PAUSED status=ok paused=<true|false> running=<...>
+## Watch mode never prints that line; the watch checksum excludes `paused`, so
+## the aggregate marker never moves when the world pauses or resumes.
 ## `scripts/smoke_server_status_panel.sh` covers the valid path twice plus the
 ## connect/reject/shape fixtures and a two-run watch pass/fail matrix.
 
@@ -123,6 +136,7 @@ var _frames_sent := 0
 var _frames_received := 0
 var _status: Dictionary = {}
 var _checksum := ""
+var _paused := false
 
 var _status_label: Label
 var _value_labels: Dictionary = {}
@@ -358,6 +372,13 @@ func _on_server_status(message: Dictionary) -> void:
 				_checksum,
 			]
 		)
+		print(
+			"SERVER_STATUS_PANEL_PAUSED status=ok paused=%s running=%s"
+			% [
+				"true" if _paused else "false",
+				"false" if _paused else "true",
+			]
+		)
 	if _fixture_mode:
 		_finish_ok()
 		return
@@ -489,8 +510,19 @@ func _read_status(message: Dictionary) -> String:
 	if typeof(checksum_value) != TYPE_STRING or not _is_hex16(str(checksum_value)):
 		return "status.shape"
 
+	# `paused` is additive and optional: a missing key is a pre-pause server and
+	# decodes as running. A present value must be a JSON boolean, so it never
+	# enters the integer counter loop above.
+	var paused := false
+	if message.has("paused"):
+		var paused_value: Variant = message["paused"]
+		if typeof(paused_value) != TYPE_BOOL:
+			return "status.shape"
+		paused = bool(paused_value)
+
 	_status = status
 	_checksum = str(checksum_value)
+	_paused = paused
 	return ""
 
 func _on_goodbye() -> void:
@@ -633,6 +665,7 @@ func _build_ui() -> void:
 		["Online", "Online"],
 		["Chat seq", "Chat seq"],
 		["Locks", "Locks"],
+		["Time", "Time"],
 		["Checksum", "Checksum"],
 	]:
 		var label := Label.new()
@@ -660,6 +693,9 @@ func _refresh_ui() -> void:
 	for entry in keys:
 		if _value_labels.has(entry[0]) and _status.has(entry[1]):
 			_value_labels[entry[0]].text = str(_status[entry[1]])
+	if _value_labels.has("Time"):
+		# The panel is English-only (no locale table), so keep the row literal.
+		_value_labels["Time"].text = "Paused" if _paused else "Running"
 	if _value_labels.has("Checksum"):
 		_value_labels["Checksum"].text = _checksum
 
