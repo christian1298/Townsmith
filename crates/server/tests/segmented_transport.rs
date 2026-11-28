@@ -224,6 +224,7 @@ fn assert_status_matches_reference(actual: &ServerMessage, reference: &ServerMes
                 chat_seq,
                 locks,
                 checksum,
+                ..
             },
             ServerMessage::ServerStatus {
                 tick: ref_tick,
@@ -237,6 +238,7 @@ fn assert_status_matches_reference(actual: &ServerMessage, reference: &ServerMes
                 chat_seq: ref_chat_seq,
                 locks: ref_locks,
                 checksum: ref_checksum,
+                ..
             },
         ) => {
             assert_eq!(tick, ref_tick);
