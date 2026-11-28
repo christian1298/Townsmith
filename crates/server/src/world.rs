@@ -1684,6 +1684,7 @@ impl ServerWorld {
             interest_radius_m: self.interest_radius_m,
             visible_roads: self.visible_roads(),
             chat_seq: self.chat_seq,
+            paused: self.paused,
         }
     }
 
@@ -2838,6 +2839,7 @@ impl ServerWorld {
             online: count(self.online.len()),
             chat_seq: self.chat_seq,
             locks: count(self.blueprint_locks.len()),
+            paused: self.paused,
             checksum: self.checksum(),
         })
     }
@@ -5842,6 +5844,7 @@ mod tests {
                 interest_radius_m: DEFAULT_INTEREST_RADIUS_M as f32,
                 visible_roads: 0,
                 chat_seq: 0,
+                paused: false,
             }
         );
     }
@@ -6967,6 +6970,7 @@ mod tests {
                 online,
                 chat_seq,
                 locks,
+                paused,
                 checksum,
             } => {
                 assert_eq!(tick, 0, "status does not advance the tick");
@@ -6979,12 +6983,52 @@ mod tests {
                 assert_eq!(online, 1, "the sender is online");
                 assert_eq!(chat_seq, 0);
                 assert_eq!(locks, 0);
+                assert!(!paused);
                 assert_eq!(checksum, expected_checksum);
             }
             other => panic!("expected server status, got {other:?}"),
         }
         assert_eq!(world.tick, 0);
         assert_eq!(world.checksum(), expected_checksum);
+    }
+
+    #[test]
+    fn pause_state_is_visible_in_snapshot_and_status() {
+        fn snapshot_paused(message: &ServerMessage) -> bool {
+            match message {
+                ServerMessage::Snapshot { paused, .. } => *paused,
+                other => panic!("expected snapshot, got {other:?}"),
+            }
+        }
+        fn status_paused(message: &ServerMessage) -> bool {
+            match message {
+                ServerMessage::ServerStatus { paused, .. } => *paused,
+                other => panic!("expected server_status, got {other:?}"),
+            }
+        }
+
+        let mut world = ServerWorld::with_role(SEED, ClientRole::Admin);
+        assert!(matches!(
+            world.apply(&hello()),
+            ServerMessage::Welcome { .. }
+        ));
+        assert!(!snapshot_paused(&world.snapshot()), "starts unpaused");
+        assert!(!status_paused(&world.apply(&ClientCommand::ServerStatus)));
+
+        let paused = world.apply(&ClientCommand::TimeControl {
+            action: TimeAction::Pause,
+        });
+        assert!(snapshot_paused(&paused), "pause is visible in the snapshot");
+        assert!(status_paused(&world.apply(&ClientCommand::ServerStatus)));
+
+        let resumed = world.apply(&ClientCommand::TimeControl {
+            action: TimeAction::Resume,
+        });
+        assert!(
+            !snapshot_paused(&resumed),
+            "resume is visible in the snapshot"
+        );
+        assert!(!status_paused(&world.apply(&ClientCommand::ServerStatus)));
     }
 
     #[test]

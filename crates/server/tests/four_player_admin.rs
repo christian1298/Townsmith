@@ -26,14 +26,11 @@
 //!
 //! # Observability limits (v0)
 //!
-//! `paused` is not a field of `snapshot` or `server_status`; in protocol v0 the
-//! only wire message that carries it is `time_vote_status`. This test therefore
-//! asserts the accepted `time_control` responses (which echo an unchanged tick
-//! and world checksum) and the reloaded `paused == false` after the final
-//! resume, rather than sampling `paused == true` mid-run. The pause flag itself
-//! is unit-tested in `world.rs`. The audit ring is per-session, so each client
-//! only sees its own commands; the test queries each session's ring
-//! deliberately.
+//! `paused` is carried by `snapshot` and `server_status`, so the test samples it
+//! while the world is paused and after the final resume; the accepted
+//! `time_control` responses also echo an unchanged tick and world checksum. The
+//! audit ring is per-session, so each client only sees its own commands; the
+//! test queries each session's ring deliberately.
 //!
 //! Everything is response-driven; there are no sleeps. The world is Admin for
 //! the whole process, so this is a command-surface test, not per-player role
@@ -171,8 +168,8 @@ fn player_id(client: &mut Client, name: &str) -> u64 {
     }
 }
 
-/// `(tick, checksum, roads, settlements, placements, online)`
-fn status_of(message: ServerMessage) -> (u64, String, u32, u32, u32, u32) {
+/// `(tick, checksum, roads, settlements, placements, online, paused)`
+fn status_of(message: ServerMessage) -> (u64, String, u32, u32, u32, u32, bool) {
     match message {
         ServerMessage::ServerStatus {
             tick,
@@ -181,8 +178,17 @@ fn status_of(message: ServerMessage) -> (u64, String, u32, u32, u32, u32) {
             settlements,
             placements,
             online,
+            paused,
             ..
-        } => (tick, checksum, roads, settlements, placements, online),
+        } => (
+            tick,
+            checksum,
+            roads,
+            settlements,
+            placements,
+            online,
+            paused,
+        ),
         other => panic!("expected server_status, got {other:?}"),
     }
 }
@@ -230,8 +236,16 @@ fn four_player_admin_command_surface() {
 
     // Baseline: two online sessions and an empty world.
     alice.send(&ClientCommand::ServerStatus);
-    let (baseline_tick, baseline_checksum, baseline_roads, baseline_settlements, _, online) =
-        status_of(alice.recv_skip_chat());
+    let (
+        baseline_tick,
+        baseline_checksum,
+        baseline_roads,
+        baseline_settlements,
+        _,
+        online,
+        baseline_paused,
+    ) = status_of(alice.recv_skip_chat());
+    assert!(!baseline_paused, "the world starts unpaused");
     assert_eq!(online, 2);
     assert_eq!(baseline_settlements, 0);
 
@@ -259,7 +273,9 @@ fn four_player_admin_command_surface() {
         "a road edit while paused must be accepted and advance the tick"
     );
     bravo.send(&ClientCommand::ServerStatus);
-    let (_, _, roads_after_edit, settlements_after_edit, _, _) = status_of(bravo.recv_skip_chat());
+    let (_, _, roads_after_edit, settlements_after_edit, _, _, paused_while_editing) =
+        status_of(bravo.recv_skip_chat());
+    assert!(paused_while_editing, "pause is wire-visible while editing");
     assert!(
         roads_after_edit > baseline_roads,
         "the accepted road edit must add road segments"
@@ -274,6 +290,9 @@ fn four_player_admin_command_surface() {
         resumed_tick, edited_tick,
         "an admin resume must not advance the tick"
     );
+    alice.send(&ClientCommand::ServerStatus);
+    let (_, _, _, _, _, _, resumed_paused) = status_of(alice.recv_skip_chat());
+    assert!(!resumed_paused, "resume is wire-visible");
 
     // 2. Settlement release: found as alice, force-release at revision 1.
     alice.send(&ClientCommand::FoundSettlement {
@@ -314,7 +333,7 @@ fn four_player_admin_command_surface() {
     // 3. Validation still runs under Admin: an unknown settlement rejects and
     //    leaves the authoritative state untouched.
     alice.send(&ClientCommand::ServerStatus);
-    let (before_reject_tick, before_reject_checksum, before_roads, before_settlements, _, _) =
+    let (before_reject_tick, before_reject_checksum, before_roads, before_settlements, _, _, _) =
         status_of(alice.recv_skip_chat());
 
     bravo.send(&ClientCommand::SettlementRelease {
@@ -341,7 +360,7 @@ fn four_player_admin_command_surface() {
     }
 
     alice.send(&ClientCommand::ServerStatus);
-    let (after_reject_tick, after_reject_checksum, after_roads, after_settlements, _, _) =
+    let (after_reject_tick, after_reject_checksum, after_roads, after_settlements, _, _, _) =
         status_of(alice.recv_skip_chat());
     assert_eq!(
         (
@@ -452,7 +471,7 @@ fn four_player_admin_command_surface() {
 
     // 7. Read-only tail, clean close, and the final listen report.
     alice.send(&ClientCommand::ServerStatus);
-    let (final_tick, final_checksum, final_roads, final_settlements, final_placements, _) =
+    let (final_tick, final_checksum, final_roads, final_settlements, final_placements, _, _) =
         status_of(alice.recv_skip_chat());
     assert_eq!(final_roads, roads_after_edit);
     assert_eq!(final_settlements, 1);

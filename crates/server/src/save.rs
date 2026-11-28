@@ -968,6 +968,10 @@ mod tests {
         let loaded = ServerWorld::from_save_json(&json).expect("load");
         assert!(loaded.paused);
         assert_eq!(loaded.checksum(), world.checksum());
+        match loaded.snapshot() {
+            ServerMessage::Snapshot { paused, .. } => assert!(paused),
+            other => panic!("expected snapshot, got {other:?}"),
+        }
     }
 
     fn placement_and_site_stores() -> (PlacementStore, ConstructionStore) {
