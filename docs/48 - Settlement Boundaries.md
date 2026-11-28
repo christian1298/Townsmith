@@ -99,13 +99,17 @@ Enforcement points and the full claim/transfer rules are in [[10 - Decisions]] D
 
 `godot/settlement_editor.tscn` is a developer-only scene for local settlement write actions. Like the policy editor, it owns one `TownsmithCore` instance and never talks to a server. It calls only the local bridge mutations (`settlement_found`, `settlement_claim`, `settlement_rename`, `settlement_transfer`, `settlement_invite`, `settlement_set_role`, `settlement_remove_member`, `settlement_set_tax`, `settlement_release`) and `settlements()` reads. It is not the in-game dashboard, not the read-only district overview, and adds no protocol, simulation, treasury, or save-envelope fields. The actor for owner-gated calls is the record's current `owner_id`, so the core `manage`/`tax`/`members` checks still apply; a claim takes an explicit positive player id.
 
-The editor also uses the local bridge player registry (`players_register`, `players_list`, `players_find`) for name-to-id selection: the header shows the roster, `N` registers the next deterministic `Player <n>` name, and `P` cycles the pending invite/transfer target, while remaining developer-only/local and not server authentication. `Shift+X` is the Admin release override: the first press arms the selected record, the second clears owner and members without an actor, and a stale revision is rejected. Release is local/developer-only and is not a server authentication claim.
+The editor also uses the local bridge player registry (`players_register`, `players_list`, `players_find`) for name-to-id selection: the header shows the roster, `N` registers the next deterministic `Player <n>` name, and `P` cycles the pending invite/transfer target, while remaining developer-only/local and not server authentication. `Shift+X` is the Admin release override: it opens a focused confirmation modal with Cancel as the default, confirming clears owner and members without an actor, and a stale revision is rejected. Release is local/developer-only and is not a server authentication claim.
 
 The page lists records in id order, eight per page, and shows the selected record's name, id, owned flag, owner id (and legacy owner label), membership revision, tax rate, and members, plus the last result or bridge `error_code`. Client-side paging (`PageUp`/`PageDown`) is display-only state so the D-033 1,000-settlement cap stays usable; number keys and mutations apply to the visible page, and paging never calls the bridge, persists, or changes the protocol. It re-reads `membership_revision` before every mutation, re-reads `settlements()` after success, and leaves local state untouched on failure. The `--smoke` path seeds two deterministic settlements (one unowned, one claimed by player 1 with a manager and a builder), runs every mutation plus rejection cases, then pages 23 throwaway records, and prints:
 
 ```text
 SETTLEMENT_EDITOR status=ok actions=<n> checksum=<16 hex>
+SETTLEMENT_EDITOR_A11Y status=ok checks=69
+SETTLEMENT_EDITOR_PAD status=ok checks=38
 ```
+
+Every editor block has an `accessibility_name`/bounded description and `accessibility_snapshot()`; list and detail are polite live regions, while the message line and modal error are assertive. Gamepad navigation covers the toolbar, row list, paging, action buttons, and the release modal, with Up/Down group-adjacent movement, Left/Right paging/actions, Accept, and Cancel; the walk is read-only and the pinned `SETTLEMENT_EDITOR` actions/checksum stay unchanged.
 
 `scripts/smoke_settlement_editor.sh --smoke` runs the scene headless twice and requires identical marker lines and checksums.
 
