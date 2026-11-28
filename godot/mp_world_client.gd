@@ -24,8 +24,13 @@ extends Node3D
 ## interest ring, one flat box per road, and one box per bounded building
 ## record. Roads are 6 m wide and 0.24 m thick at their centreline; building
 ## boxes use the server's `radius_m` render hint as a footprint diameter (not an
-## authoritative footprint). A HUD shows tick, population, balance, road and
-## building counts, both truncation flags, and the server checksum.
+## authoritative footprint). A HUD shows tick, population, balance, the
+## authoritative time state (`RUNNING`/`PAUSED`), road and building counts, both
+## truncation flags, and the server checksum. The time state comes from the
+## additive `paused` field on every `snapshot` (missing means `false`; a non-bool
+## value fails with the stable `snapshot_paused_type` code). A time-vote panel,
+## when one is attached, receives the same value through `set_paused`, so the
+## panel and the HUD cannot disagree; this client adds no vote command path.
 ##
 ## Placement is opt-in: only `--place-hash <blake3:…|64 hex>` sends the D-032
 ## command after the zero-view probe. The box uses the authoritative
@@ -165,6 +170,12 @@ const DEFAULT_PORT := 47015
 const DEFAULT_NAME := "mp-world-client"
 const CONNECT_TIMEOUT_MS := 5000
 const STEP_TIMEOUT_MS := 5000
+# Stable failure code for a `snapshot.paused` value that is present but not a
+# JSON boolean. A missing field is legacy `false`, never an error.
+const SNAPSHOT_PAUSED_TYPE := "snapshot_paused_type"
+# Number of deterministic pause checks the smoke covers: live HUD, paused true,
+# paused false, legacy missing field, wrong type, and the panel mirror.
+const PAUSE_CHECKS := 6
 # Same 64-character placeholder hash the Rust loopback harness uses.
 const CONTENT_HASH := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -288,11 +299,18 @@ var _last_tick := -1
 var _last_population := -1
 var _last_balance := 0
 var _last_checksum := ""
+# Authoritative pause flag from the latest `snapshot` envelope. Legacy payloads
+# without the field leave this `false`; only `SNAPSHOT_PAUSED_TYPE` rejects.
+var _last_paused := false
 var _visible_roads := -1
 
 var _container: Node3D
 var _hud_layer: CanvasLayer
 var _hud_label: Label
+# Optional developer time-vote panel. It is never created or mounted by this
+# client: an owning scene may attach one, and every accepted snapshot then
+# pushes the authoritative `paused` value into it. No vote command is sent.
+var _time_vote_panel = null
 var _camera: Camera3D
 var _road_multimesh: MultiMesh
 var _building_multimesh: MultiMesh
@@ -1121,12 +1139,19 @@ func _on_snapshot(message: Dictionary) -> void:
 	if tick < 0 or population < 1 or not _is_hex16(checksum):
 		_fail("snapshot_fields")
 		return
+	var paused_value := _read_paused(message)
+	if not bool(paused_value.get("ok", false)):
+		_fail(str(paused_value.get("error", SNAPSHOT_PAUSED_TYPE)))
+		return
+	var paused := bool(paused_value.get("value", false))
+	_last_paused = paused
+	_sync_time_vote_paused()
 
 	if _phase == Phase.CHAT_RESUME_SNAPSHOT_WAIT:
 		if tick < _last_tick:
 			_fail("chat_resume_snapshot_tick_%d" % tick)
 			return
-		_store_snapshot(tick, population, balance, checksum)
+		_store_snapshot(tick, population, balance, checksum, paused)
 		# `after: 0` is deliberate: the chat seq is fresh and starts at 1, so
 		# asking for everything avoids guessing whether the pre-resume line is
 		# above or below a resume checkpoint. The handler asserts the returned
@@ -1143,7 +1168,7 @@ func _on_snapshot(message: Dictionary) -> void:
 		if tick != _last_tick + 1:
 			_fail("road_tick_%d_after_%d" % [tick, _last_tick])
 			return
-		_store_snapshot(tick, population, balance, checksum)
+		_store_snapshot(tick, population, balance, checksum, paused)
 		_road_index += 1
 		_send_next_road()
 		return
@@ -1155,7 +1180,7 @@ func _on_snapshot(message: Dictionary) -> void:
 		if _visible_roads != ROAD_PLAN.size():
 			_fail("interest_visible_roads_%d" % _visible_roads)
 			return
-		_store_snapshot(tick, population, balance, checksum)
+		_store_snapshot(tick, population, balance, checksum, paused)
 		_set_status("Interest snapshot received; awaiting the detail view.")
 		_refresh_hud()
 		_phase = Phase.INTEREST_VIEW_WAIT
@@ -1169,7 +1194,7 @@ func _on_snapshot(message: Dictionary) -> void:
 		if _visible_roads != 0:
 			_fail("zero_visible_roads_%d" % _visible_roads)
 			return
-		_store_snapshot(tick, population, balance, checksum)
+		_store_snapshot(tick, population, balance, checksum, paused)
 		_set_status("Zero-viewport snapshot received; awaiting the detail view.")
 		_refresh_hud()
 		_phase = Phase.ZERO_VIEW_WAIT
@@ -1183,7 +1208,7 @@ func _on_snapshot(message: Dictionary) -> void:
 		if _visible_roads <= 0:
 			_fail("ui_visible_roads_%d" % _visible_roads)
 			return
-		_store_snapshot(tick, population, balance, checksum)
+		_store_snapshot(tick, population, balance, checksum, paused)
 		_set_status("Placement refresh snapshot received; awaiting the detail view.")
 		_ui_checksum_stale = false
 		_refresh_hud()
@@ -1304,6 +1329,8 @@ func _on_interest_view(message: Dictionary) -> void:
 				_chat_begin()
 			return
 		if _smoke:
+			if not _run_pause_checks():
+				return
 			_set_status("Main view rendered; probing the zero-viewport case.")
 			if not _send({
 				"type": "set_interest",
@@ -3163,11 +3190,125 @@ func _fail(reason: String) -> void:
 	if _smoke:
 		get_tree().quit(1)
 
-func _store_snapshot(tick: int, population: int, balance: int, checksum: String) -> void:
+func _store_snapshot(
+	tick: int,
+	population: int,
+	balance: int,
+	checksum: String,
+	paused_value: Variant = null,
+) -> void:
 	_last_tick = tick
 	_last_population = population
 	_last_balance = balance
 	_last_checksum = checksum
+	if paused_value != null:
+		_last_paused = bool(paused_value)
+		_sync_time_vote_paused()
+
+## Read the additive `paused` envelope field. A missing field is the protocol's
+## legacy `false`; only a present non-bool value is an error, reported with the
+## stable `SNAPSHOT_PAUSED_TYPE` code so the smoke can pin it.
+func _read_paused(message: Dictionary) -> Dictionary:
+	if not message.has("paused"):
+		return {"ok": true, "value": false}
+	var value: Variant = message["paused"]
+	if typeof(value) != TYPE_BOOL:
+		return {"ok": false, "value": false, "error": SNAPSHOT_PAUSED_TYPE}
+	return {"ok": true, "value": value}
+
+## Keep an attached developer time-vote panel on the same authoritative value.
+## No vote command is composed or emitted here.
+func attach_time_vote_panel(panel) -> void:
+	_time_vote_panel = panel
+	_sync_time_vote_paused()
+
+func _sync_time_vote_paused() -> void:
+	if _time_vote_panel == null:
+		return
+	_time_vote_panel.set_paused(_last_paused)
+
+func _pause_text() -> String:
+	return "PAUSED" if _last_paused else "RUNNING"
+
+## Deterministic smoke coverage for the authoritative pause field. The live HUD
+## must agree with the last snapshot, the parser must accept `true`/`false` and
+## a legacy field-free payload, reject a non-bool with the stable code, and an
+## attached developer panel must mirror the same value in both directions.
+func _run_pause_checks() -> bool:
+	var live := _last_paused
+	var checks := 0
+	if not _hud_label.text.contains("state=%s" % _pause_text()):
+		_fail("pause_check_live")
+		return false
+	checks += 1
+
+	var true_result := _read_paused({"paused": true})
+	if not bool(true_result.get("ok", false)) or not bool(true_result.get("value", false)):
+		_fail("pause_check_true_parse")
+		return false
+	_last_paused = true
+	_refresh_hud()
+	if not _hud_label.text.contains("state=PAUSED"):
+		_fail("pause_check_true_hud")
+		return false
+	checks += 1
+
+	var false_result := _read_paused({"paused": false})
+	if not bool(false_result.get("ok", false)) or bool(false_result.get("value", true)):
+		_fail("pause_check_false_parse")
+		return false
+	_last_paused = false
+	_refresh_hud()
+	if not _hud_label.text.contains("state=RUNNING"):
+		_fail("pause_check_false_hud")
+		return false
+	checks += 1
+
+	var legacy := _read_paused({"tick": 0})
+	if not bool(legacy.get("ok", false)) or bool(legacy.get("value", true)):
+		_fail("pause_check_legacy")
+		return false
+	checks += 1
+
+	var invalid := _read_paused({"paused": "true"})
+	if bool(invalid.get("ok", true)) or str(invalid.get("error", "")) != SNAPSHOT_PAUSED_TYPE:
+		_fail("pause_check_invalid")
+		return false
+	checks += 1
+
+	var panel = load("res://time_vote_panel.tscn").instantiate()
+	panel.visible = false
+	_hud_layer.add_child(panel)
+	panel.set_status({"state": "idle", "paused": false})
+	attach_time_vote_panel(panel)
+	_last_paused = true
+	_sync_time_vote_paused()
+	if not bool(panel.snapshot().get("paused", false)):
+		_fail("pause_check_panel_true")
+		return false
+	_last_paused = false
+	_sync_time_vote_paused()
+	if bool(panel.snapshot().get("paused", true)):
+		_fail("pause_check_panel_false")
+		return false
+	checks += 1
+	attach_time_vote_panel(null)
+	_hud_layer.remove_child(panel)
+	panel.free()
+
+	_last_paused = live
+	_refresh_hud()
+	if checks != PAUSE_CHECKS:
+		_fail("pause_check_count_%d" % checks)
+		return false
+	if not _hud_label.text.contains("state=%s" % _pause_text()):
+		_fail("pause_check_restore")
+		return false
+	print("MP_WORLD_PAUSE status=ok checks=%d paused=%s" % [
+		checks,
+		"true" if live else "false",
+	])
+	return true
 
 ## Validate and build the scene from one interest view. Returns false after
 ## calling `_fail` on an invalid viewport or render setup.
@@ -3778,6 +3919,7 @@ func _assert_hud_fields() -> bool:
 		"tick=%d" % _last_tick,
 		"population=%d" % _last_population,
 		"balance=%d" % _last_balance,
+		"state=%s" % _pause_text(),
 		"roads=%d" % _roads.size(),
 		"buildings=%d" % _buildings.size(),
 		"truncated=%s" % str(_truncated),
@@ -3901,6 +4043,7 @@ func _refresh_hud() -> void:
 	var tick_text := str(_last_tick) if _last_tick >= 0 else "-"
 	var population_text := str(_last_population) if _last_population >= 0 else "-"
 	var balance_text := str(_last_balance) if _last_tick >= 0 else "-"
+	var state_text := _pause_text() if _last_tick >= 0 else "-"
 	var roads_text := str(_roads.size()) if _has_view else "-"
 	var buildings_text := str(_buildings.size()) if _has_view else "-"
 	var truncated_text := str(_truncated) if _has_view else "-"
@@ -3910,7 +4053,7 @@ func _refresh_hud() -> void:
 		"3D multiplayer world client (debug)\n"
 		+ "status: %s\n"
 		+ "session: %s\n"
-		+ "tick=%s population=%s balance=%s\n"
+		+ "tick=%s population=%s balance=%s state=%s\n"
 		+ "interest: center=(%.1f, %.1f) radius=%.1f m\n"
 		+ "roads=%s buildings=%s truncated=%s buildings_truncated=%s\n"
 		+ "rendered: roads=%d buildings=%d grid_lines=%d camera=%s\n"
@@ -3922,6 +4065,7 @@ func _refresh_hud() -> void:
 		tick_text,
 		population_text,
 		balance_text,
+		state_text,
 		_view_center.x,
 		_view_center.y,
 		_view_radius_m,

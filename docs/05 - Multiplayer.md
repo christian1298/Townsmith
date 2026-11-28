@@ -763,6 +763,8 @@ The Godot client draws the `interest_view` road list in a flat top-down `Control
 
 **Render.** A ground plane, a world-aligned 16 m grid, X/Y/Z axis lines through the world origin, the interest ring, and a centre marker make the frame legible. Roads become one flat `MultiMesh` box each at the segment midpoint (width from `width_m`, length from the endpoint distance); building records become one box each at their centre with a footprint of `2 * radius_m` and a height derived from that render hint. The HUD reports tick, population, balance, road/building counts, both truncation flags, the server checksum, the road and building checksums, and the rendered instance counts. Out-of-view roads or buildings are still drawn in warning colours, so a filter regression is visible instead of hidden.
 
+**Pause state.** Every `snapshot` carries the additive `paused` flag. The HUD renders it as `state=RUNNING` or `state=PAUSED` beside tick, population, and balance. A missing field is decoded as `false` for older servers; a non-boolean value fails the run with `snapshot_paused_type` rather than being coerced. When a `time_vote_panel` is attached, `set_paused()` mirrors the same authoritative value for display only; the panel still sends votes through its existing commands, and the client adds no vote path. The base smoke prints `MP_WORLD_PAUSE status=ok checks=6 paused=<live>` after the main marker and covers live, synthetic true/false, legacy-missing, non-boolean, and panel-mirror cases.
+
 **Smoke.** `scripts/smoke_mp_world_client.sh` starts a fresh server per run, runs the scene headlessly, and requires two identical runs (including all `MP_WORLD_CLIENT*` lines):
 
 ```bash
