@@ -705,9 +705,11 @@ The panel is a developer debug tool. Labels live in a small EN/DE table inside t
 GODOT=/path/to/godot bash scripts/smoke_time_vote_ui.sh
 ```
 
-The synthetic smoke covers idle, open → yes → passed, open → no → failed, admin cancel, cooldown, role-disabled controls, duplicate-ballot suppression, exact emitted payloads, and every stable error line. It runs the scene twice and diffs the `TIME_VOTE_UI` markers.
+The synthetic smoke covers idle, open → yes → passed, open → no → failed, admin cancel, cooldown, role-disabled controls, duplicate-ballot suppression, exact emitted payloads, and every stable error line. It runs the scene twice and diffs the `TIME_VOTE_UI` and `TIME_VOTE_A11Y` markers.
 
-Real server wiring is a follow-up: the `--listen` loop now serves concurrent sessions, but the vote panel is not connected to a live client, and a one-player vote is rejected with `vote.min_online`.
+The panel also carries screen-reader semantics: the title, clock/pause state, vote question, initiator, tally, window, cooldown, all five buttons, and the status/error line each expose `accessibility_name`/`accessibility_description`. The state/result line and the tally are polite live regions, so open/pass/fail/cancel transitions and count changes are announced; the error line is assertive so a rejection interrupts; the clock stays silent because it advances every tick. `accessibility_snapshot()` exposes names, descriptions, live modes, roles, enablement, and structural reachability for the headless smoke. That block runs after every render stage and prints `TIME_VOTE_A11Y status=ok checks=49`, asserting the idle, vote-open, passed, failed, and error states plus EN/DE switching; the 19 `TIME_VOTE_UI` cases and their `73233a80` checksum do not move.
+
+Real server wiring is a follow-up: the `--listen` loop now serves concurrent sessions, but the vote panel is not connected to a live client, and a one-player vote is rejected with `vote.min_online`. Accessibility semantics are property-tested headlessly; no platform screen reader, announcement throttling, or live-region priority is exercised.
 
 ### Chat panel (developer)
 
