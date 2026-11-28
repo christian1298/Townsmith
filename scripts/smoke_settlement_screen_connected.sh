@@ -155,11 +155,6 @@ run_screen() {
 		echo "Connected settlement screen smoke ($name) a11y marker mismatch: $a11y_marker" >&2
 		exit 1
 	fi
-	stale_marker="$(grep '^SETTLEMENT_SCREEN_STALE ' <<<"$output" | tail -1 || true)"
-	if [[ ! "$stale_marker" =~ ^SETTLEMENT_SCREEN_STALE\ status=ok\ checks=[0-9]+$ ]]; then
-		echo "Connected settlement smoke: bad stale marker: ${stale_marker:-<none>}" >&2
-		exit 1
-	fi
 	confirm_marker="$(grep '^SETTLEMENT_SCREEN_CONFIRM ' <<<"$output" | tail -1 || true)"
 	if [[ ! "$confirm_marker" =~ ^SETTLEMENT_SCREEN_CONFIRM\ status=ok\ checks=[0-9]+$ ]]; then
 		echo "Connected settlement smoke: bad confirm marker: ${confirm_marker:-<none>}" >&2

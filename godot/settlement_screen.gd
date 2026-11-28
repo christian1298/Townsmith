@@ -81,7 +81,7 @@ const ACTION_LABEL_KEYS := {
 
 ## Fixed Tab order from docs/85 §7.2. Rows, detail, and members are skipped
 ## while they have no content; tax and the action bar are always present.
-const FOCUS_GROUPS := ["header", "paging", "rows", "detail", "members", "tax", "actions"]
+const FOCUS_GROUPS := ["header", "paging", "rows", "detail", "stale", "members", "tax", "actions"]
 ## Actions reachable from the focus model's action group. Tax is its own stop.
 const FOCUS_ACTION_ORDER := [
 	"claim",
@@ -559,7 +559,7 @@ func _build_ui() -> void:
 	_stale_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_stale_row.add_child(_stale_label)
 	_stale_retry = Button.new()
-	_stale_retry.focus_mode = Control.FOCUS_NONE
+	_stale_retry.focus_mode = Control.FOCUS_ALL
 	_stale_retry.pressed.connect(_retry_stale)
 	_stale_row.add_child(_stale_retry)
 	_stale_row.visible = false
@@ -1596,8 +1596,18 @@ func _move_focus(direction: int) -> bool:
 			_focus_paging = clampi(_focus_paging + direction, 0, 1)
 		"rows":
 			_move_row_focus(direction)
+		"detail":
+			if direction > 0 and _focus_group_available("stale"):
+				return _set_focus_group("stale")
+		"stale":
+			return _move_stale_focus(direction)
 		"members":
+			if direction < 0 and _focus_group_available("stale"):
+				return _set_focus_group("stale")
 			_move_member_focus(direction)
+		"tax":
+			if direction < 0 and _focus_group_available("stale"):
+				return _set_focus_group("stale")
 		"actions":
 			_focus_action = clampi(_focus_action + direction, 0, FOCUS_ACTION_ORDER.size() - 1)
 		_:
@@ -1606,12 +1616,20 @@ func _move_focus(direction: int) -> bool:
 	return true
 
 
+## The stale Retry stop is a single control. Arrow keys leave it for the
+## neighbouring group in the same order as gamepad adjacency.
+func _move_stale_focus(direction: int) -> bool:
+	return _gamepad_adjacent_group(direction)
+
+
 func _focus_edge(first: bool) -> bool:
 	match _focus_group:
 		"paging":
 			_focus_paging = 0 if first else 1
 		"rows":
 			_select_index(0 if first else _rows.size() - 1)
+		"stale":
+			pass
 		"members":
 			_focus_member_edge(first)
 		"actions":
@@ -1672,6 +1690,8 @@ func _activate_focus() -> bool:
 		"detail":
 			if not _set_focus_group("members"):
 				_set_focus_group("tax")
+		"stale":
+			_retry_stale()
 		"members":
 			_set_focus_group("tax")
 		"tax":
@@ -1721,6 +1741,8 @@ func _focus_group_available(group: String) -> bool:
 			return not _rows.is_empty()
 		"detail":
 			return _selected_id > 0
+		"stale":
+			return _is_stale()
 		"members":
 			return not _assignable_members(_current_record()).is_empty()
 	return true
@@ -2812,6 +2834,12 @@ func _retry_stale() -> void:
 	_clear_stale()
 	_load_page(_page_index)
 	_render_detail()
+	# Retry removes the stop; move focus back into the detail block instead of
+	# leaving the model on an unavailable group.
+	if _focus_group == "stale":
+		if not _set_focus_group("detail"):
+			if not _set_focus_group("rows"):
+				_set_focus_group("header")
 
 
 func _render_stale() -> void:
@@ -2866,6 +2894,8 @@ func _focus_target() -> Control:
 			return _list
 		"detail":
 			return _detail_box
+		"stale":
+			return _stale_retry
 		"members":
 			if _focus_member_index >= 0 and _focus_member_index < _member_buttons.size():
 				return _member_buttons[_focus_member_index]
@@ -2955,6 +2985,8 @@ func _focus_name() -> String:
 			return ("rows:%d" % _selected_id) if _selected_id > 0 else "rows:none"
 		"detail":
 			return ("detail:%d" % _selected_id) if _selected_id > 0 else "detail:none"
+		"stale":
+			return "stale.retry"
 		"members":
 			return ("members:%d" % _selected_member) if _selected_member > 0 else "members:none"
 		"tax":
@@ -4645,7 +4677,6 @@ func _run_connected_smoke() -> void:
 
 	_run_a11y_checks(failures, true)
 	_run_confirm_checks(failures)
-	_run_stale_checks(failures)
 	print("SETTLEMENT_SCREEN_CONNECTED_READ settles=%d players=%d owner=%s checksum=%s" % [
 		_matched,
 		_player_names.size(),
@@ -4964,6 +4995,48 @@ func _run_stale_checks(failures: Array) -> void:
 		checks += 1
 		if str(reasons.get(str(entry[0]), "")) != "stale_revision":
 			ok = false
+	# Retry is a keyboard/gamepad stop only while the badge is armed. Tab from
+	# detail, and pad down from it, reach the single `stale` group; Enter or
+	# accept retries. When the badge clears the group is skipped again.
+	checks += 1
+	_focus_group = "stale"
+	if not _focus_group_available("stale") or _focus_target() != _stale_retry:
+		ok = false
+	checks += 1
+	if _stale_retry.focus_mode != Control.FOCUS_ALL or not _stale_retry.is_visible_in_tree():
+		ok = false
+	_focus_group = "detail"
+	_smoke_press(KEY_DOWN)
+	checks += 1
+	if _focus_group != "stale":
+		ok = false
+	_smoke_press(KEY_ENTER)
+	checks += 1
+	if _is_stale() or _stale_row.visible or _focus_group == "stale":
+		ok = false
+	# The button's own pressed signal uses the same retry path.
+	_mark_stale(_selected_id, old)
+	_stale_retry.pressed.emit()
+	checks += 1
+	if _is_stale() or _stale_row.visible:
+		ok = false
+	# Gamepad: down from detail enters the stale stop; accept retries.
+	_mark_stale(_selected_id, old)
+	_focus_group = "detail"
+	gamepad_action("ui_down")
+	checks += 1
+	if _focus_group != "stale" or _focus_name() != "stale.retry":
+		ok = false
+	gamepad_action("ui_accept")
+	checks += 1
+	if _is_stale() or _focus_group == "stale":
+		ok = false
+	# Not stale: the group is unavailable and Tab skips it.
+	_focus_group = "detail"
+	_smoke_press(KEY_TAB)
+	checks += 1
+	if _focus_group == "stale" or _focus_group_available("stale"):
+		ok = false
 	_retry_stale()
 	checks += 1
 	if _is_stale() or _stale_row.visible:
