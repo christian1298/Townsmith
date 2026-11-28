@@ -2,7 +2,7 @@
 title: Phase 6 Remaining Work
 project: Townsmith
 status: proposed
-updated: 2026-11-27
+updated: 2026-11-28
 tags:
   - townsmith
   - multiplayer
@@ -13,7 +13,7 @@ tags:
 # Phase 6 Remaining Work
 
 > [!abstract] Purpose
-> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `d859057` (2026-11-27). It is a plan, not an implementation claim.
+> This is the dependency-ordered remainder of **Phase 6 — Multiplayer**. It replaces the stale Phase 6 checklist in [[08 - Roadmap]] with the actual code, gaps, acceptance criteria, and cut lines at master `2d0b085` (2026-11-27). It is a plan, not an implementation claim.
 
 Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/D-032/D-033/D-035/D-038/D-039/D-040/D-041/D-042, [[09 - Open Questions]] Q-101/Q-117/Q-119/Q-120/Q-121/Q-122/Q-123/Q-124/Q-125/Q-126/Q-127/Q-128, [[12 - Technical Architecture]], [[42 - World Placement Bridge]], [[48 - Settlement Boundaries]], [[79 - Voxel Edit Sync]], [[81 - Settlement Tax Composition]], [[82 - Journal and Rollback]], [[83 - Remote Transport and Authentication]], [[84 - Content Registry Modes]].
 
@@ -113,7 +113,7 @@ Related: [[05 - Multiplayer]], [[08 - Roadmap]], [[10 - Decisions]] D-004/D-021/
 
 ### 3.4 Concurrent listeners and outbound queue
 
-**Scope.** #373 adds a bounded `OutboundQueue`; #383 wires a per-connection writer thread; #389 runs every accepted socket on its own session thread against the shared world and closes only a backpressured recipient; #395/#402 add the stress matrix (fan-out, sustained load, shutdown with queued writes, ordering); #493 adds four concurrent status watchers under chat traffic with an unchanged checksum. #500 adds a stalled/non-reading watcher that queues frames below the cap while healthy clients complete; remaining: remote-load tuning with injected latency, and more local cases only where they cover a distinct failure.
+**Scope.** #373 adds a bounded `OutboundQueue`; #383 wires a per-connection writer thread; #389 runs every accepted socket on its own session thread against the shared world and closes only a backpressured recipient; #395/#402 add the stress matrix (fan-out, sustained load, shutdown with queued writes, ordering); #493 adds four concurrent status watchers under chat traffic with an unchanged checksum. #500 adds a stalled/non-reading watcher that queues frames below the cap while healthy clients complete, and #509 adds a deterministic byte-fragmented proxy with direct/proxied peers, resume, and truncated-frame coverage. Remaining: wall-clock latency injection, and more local cases only where they cover a distinct failure.
 
 **Protocol/save.** No wire-shape change. Add backpressure/closure codes and a bounded queue metric.
 
@@ -224,7 +224,7 @@ Prove, on reference hardware and with four players:
 ## 7. Immediate order
 
 1. Tax consumer after D-039 acceptance (§3.2).
-2. Concurrent listener remote-load tuning with injected latency (§3.4); the status-watch and stalled-watcher paths are covered.
+2. Concurrent listener remote-load tuning with wall-clock latency injection (§3.4); the status-watch, stalled-watcher, and segmented-transport paths are covered.
 3. Resource-pack registry policy after D-042/Q-127/Q-128 (§3.5/§3.9); the parser, opt-in server manifest path, and bridge reader exist.
 4. Accept or revise D-038; answer Q-119/Q-120; then voxel edit v1 (§3.6).
 5. Journal after D-040/Q-123/Q-124 (§3.7), remote auth after D-041 (§3.9); the wired-schema version matrix is done in #502, while the edit/journal freeze waits on those schemas.
