@@ -309,6 +309,12 @@ var _detail_owner: Label
 var _detail_tax: Label
 var _detail_revision: Label
 var _projection_label: Label
+var _stale_row: HBoxContainer
+var _stale_label: Label
+var _stale_retry: Button
+var _stale_id := 0
+var _stale_old_revision := 0
+var _stale_fresh_revision := 0
 var _members_title: Label
 var _members_box: VBoxContainer
 var _member_buttons: Array[Button] = []
@@ -546,6 +552,18 @@ func _build_ui() -> void:
 	_detail_revision = _detail_label(_detail_box)
 	_projection_label = _detail_label(_detail_box)
 	_projection_label.add_theme_color_override("font_color", MUTED_COLOR)
+	_stale_row = HBoxContainer.new()
+	_stale_row.add_theme_constant_override("separation", 8)
+	_stale_label = Label.new()
+	_stale_label.add_theme_color_override("font_color", Color(0.95, 0.55, 0.48))
+	_stale_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_stale_row.add_child(_stale_label)
+	_stale_retry = Button.new()
+	_stale_retry.focus_mode = Control.FOCUS_NONE
+	_stale_retry.pressed.connect(_retry_stale)
+	_stale_row.add_child(_stale_retry)
+	_stale_row.visible = false
+	_detail_box.add_child(_stale_row)
 	_members_title = _detail_label(right)
 	_members_title.add_theme_color_override("font_color", MUTED_COLOR)
 
@@ -2768,6 +2786,61 @@ func _refresh_accessibility() -> void:
 		)
 
 
+func _is_stale() -> bool:
+	return _stale_id != 0
+
+
+func _mark_stale(id: int, old_revision: int) -> void:
+	var fresh: Dictionary = _fresh_record(id)
+	_stale_id = id
+	_stale_old_revision = old_revision
+	_stale_fresh_revision = int(fresh.get("membership_revision", old_revision))
+	_render_stale()
+	_update_action_bar(_rows[_selected_index] if _selected_index >= 0 and _selected_index < _rows.size() else {})
+	_refresh_accessibility()
+
+
+func _clear_stale() -> void:
+	_stale_id = 0
+	_stale_old_revision = 0
+	_stale_fresh_revision = 0
+	if _stale_row != null:
+		_stale_row.visible = false
+
+
+func _retry_stale() -> void:
+	_clear_stale()
+	_load_page(_page_index)
+	_render_detail()
+
+
+func _render_stale() -> void:
+	if _stale_row == null:
+		return
+	var stale := (
+		_is_stale()
+		and _selected_index >= 0
+		and _selected_index < _rows.size()
+		and int(_rows[_selected_index].get("id", 0)) == _stale_id
+	)
+	_stale_row.visible = stale
+	if not stale:
+		return
+	_stale_label.text = _i18n.t(
+		"base.ui.settlement_screen.stale.badge",
+		{
+			"old": _i18n.format_int(_stale_old_revision),
+			"fresh": _i18n.format_int(_stale_fresh_revision),
+		}
+	)
+	_stale_label.accessibility_name = _stale_label.text
+	_stale_label.accessibility_description = _i18n.t("base.ui.settlement_screen.stale.a11y")
+	_stale_label.accessibility_live = A11Y_LIVE_ASSERTIVE
+	_stale_retry.text = _i18n.t("base.ui.settlement_screen.stale.retry")
+	_stale_retry.accessibility_name = _stale_retry.text
+	_stale_retry.accessibility_description = _i18n.t("base.ui.settlement_screen.stale.hint")
+
+
 func _sync_focus_ring() -> void:
 	if _focus_ring != null:
 		_focus_ring.queue_redraw()
@@ -3168,6 +3241,8 @@ func _finish_action(action: String, result: Dictionary, revision: int) -> Dictio
 		# Re-read the visible page in place; selection stays by id.
 		_load_page(_page_index)
 	else:
+		if code == "settlement.revision_conflict":
+			_mark_stale(_selected_id, revision)
 		var code_text := code
 		if action == "rename":
 			code_text = _rename_error_text(code)
@@ -3612,6 +3687,10 @@ func _availability(settlement: Dictionary) -> Dictionary:
 	var reasons: Dictionary = {}
 	for entry in ACTION_ORDER:
 		reasons[str(entry[0])] = ""
+	if _is_stale():
+		for entry in ACTION_ORDER:
+			reasons[str(entry[0])] = "stale_revision"
+		return reasons
 	if _connected_mode:
 		if _net == null:
 			for entry in ACTION_ORDER:
@@ -3789,6 +3868,7 @@ func _render_detail() -> void:
 		_detail_tax.text = ""
 		_detail_revision.text = ""
 		_projection_label.text = ""
+		_clear_stale()
 		_members_title.text = ""
 		_detail_empty.text = _i18n.t("base.ui.settlement_screen.detail_empty")
 		_detail_empty.visible = true
@@ -3835,6 +3915,7 @@ func _render_detail() -> void:
 		{"revision": _i18n.format_int(int(settlement.get("membership_revision", 0)))}
 	)
 	_projection_label.text = _projection_text(tax)
+	_render_stale()
 
 	var members = settlement.get("members", [])
 	var member_rows: Array = members if members is Array else []
@@ -4327,6 +4408,7 @@ func _run_smoke() -> void:
 
 	_run_a11y_checks(failures, false)
 	_run_confirm_checks(failures)
+	_run_stale_checks(failures)
 	print("SETTLEMENT_SCREEN_GAMEPAD status=ok checks=%d" % _gamepad_checks)
 	print("SETTLEMENT_SCREEN_FOCUS group=rows tab=paging shift=ok arrows=ok modal=trap esc=detail")
 	print("SETTLEMENT_SCREEN_PAGES sizes=8/8/7 selected_last=23")
@@ -4563,6 +4645,7 @@ func _run_connected_smoke() -> void:
 
 	_run_a11y_checks(failures, true)
 	_run_confirm_checks(failures)
+	_run_stale_checks(failures)
 	print("SETTLEMENT_SCREEN_CONNECTED_READ settles=%d players=%d owner=%s checksum=%s" % [
 		_matched,
 		_player_names.size(),
@@ -4852,6 +4935,45 @@ func _run_confirm_checks(failures: Array) -> void:
 	print(confirm_line)
 	if not ok:
 		failures.append("confirm")
+
+
+## Visible stale badge/retry audit. Uses the same state transition as a real
+## `settlement.revision_conflict`; no mutation is sent and no checksum moves.
+func _run_stale_checks(failures: Array) -> void:
+	_load_page(0)
+	var before_selected := _selected_id
+	_select_page_number(2)
+	if _current_record().is_empty():
+		_select_page_number(1)
+	var record := _current_record()
+	var old := _revision(record) + 3
+	_mark_stale(_selected_id, old)
+	var checks := 0
+	var ok := true
+	checks += 1
+	if not _stale_row.visible or _stale_id != _selected_id:
+		ok = false
+	checks += 1
+	if not _stale_label.text.contains(str(old)) or _stale_label.text.is_empty():
+		ok = false
+	checks += 1
+	if not _stale_retry.text.is_empty() and _stale_retry.text.length() < 2:
+		ok = false
+	var reasons := _availability(record)
+	for entry in ACTION_ORDER:
+		checks += 1
+		if str(reasons.get(str(entry[0]), "")) != "stale_revision":
+			ok = false
+	_retry_stale()
+	checks += 1
+	if _is_stale() or _stale_row.visible:
+		ok = false
+	checks += 1
+	if not _rows.is_empty() and _selected_id != before_selected:
+		ok = false
+	print("SETTLEMENT_SCREEN_STALE status=%s checks=%d" % ["ok" if ok else "failed", checks])
+	if not ok:
+		failures.append("stale")
 
 
 func _run_a11y_checks(failures: Array, with_picker: bool) -> void:
