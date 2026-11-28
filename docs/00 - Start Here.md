@@ -265,3 +265,4 @@ These block or shape the next phase. Full list and assumptions: [[09 - Open Ques
 | [[83 - Remote Transport and Authentication]] | Proposed TLS/account identity, session tokens, bans, and remote exposure | You work on remote servers, auth, or TLS |
 | [[84 - Content Registry Modes]] | Proposed server registry kinds, checksums, mods/resource packs, CLI/manifest | You work on server content, mods, or pack dependencies |
 | [[85 - Connected Settlement Surface]] | Connected client settlement readout, planned mutation actions, markers, limits | You work on the settlement client probe |
+| [[86 - Front End Shell]] | Start menu, scene map, controls, smoke, limits | You work on the first-run shell or scene navigation |
