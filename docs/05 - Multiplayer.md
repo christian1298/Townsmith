@@ -723,6 +723,20 @@ The panel also carries screen-reader semantics: title, transcript, draft, send, 
 
 Limits: the panel is not wired into `mp_client.gd`, has no push/notification path, no autocomplete or moderation, and does not persist drafts or the transcript across reconnects. The virtual-keyboard path is intent-tested only: no headless run exercises a real platform keyboard, and no on-screen keyboard geometry, IME composition, or per-platform text input is validated. Accessibility semantics are property-tested headlessly; no platform screen reader or announcement throttling is exercised.
 
+### Server status panel (developer)
+
+`godot/server_status_panel.tscn` (script `godot/server_status_panel.gd`) is a standalone read-only developer panel. It connects to `townsmith-server --listen PORT`, completes the v1 `hello`/`welcome` handshake, sends one `server_status` as a Viewer, renders the authoritative counters, sends `disconnect`, and exits. It never mutates the world, saves, locks, or the protocol. `--watch` keeps one connection open and polls on an interval; `--fixture-json PATH` feeds one status object through the same parse/render path without a socket.
+
+The panel renders the additive `paused` field as a **Time** row: `Paused` or `Running`. `paused` is optional on the wire (a pre-pause server omits it) and decodes as running, so old payloads keep working; a present non-boolean value is a `status.shape` failure. It is not one of the integer status counters and is excluded from the watch checksum, which still hashes only `tick|population|settlements|checksum`; pause/resume never moves that aggregate marker. The panel is English-only (it has no locale table), so the Time row stays a literal like its other labels.
+
+```bash
+GODOT=/path/to/godot ./scripts/smoke_server_status_panel.sh
+```
+
+The smoke keeps `SERVER_STATUS_PANEL status=ok rendered=true` (and the one-shot `SERVER_STATUS_PANEL status=ok tick=…` line) unchanged and adds `SERVER_STATUS_PANEL_PAUSED status=ok paused=true running=false`, plus its `paused=false running=true` counterpart. It covers paused `true`, paused `false`, and a legacy payload with no `paused` on both the fixture path and the live wire path (the real server reports `false`; one-shot stubs serve `true`, `false`, and the pre-pause shape), rejects a non-boolean `paused` with `status.shape`, and compares two steady watch stubs whose counters are identical and whose `paused` flips versus stays false: the aggregate lines must match, and watch mode must never print the one-shot pause marker.
+
+Limits: read-only developer tool. It has no reconnect, write path, or typed per-field model beyond the status shape checks; it is not wired into `mp_client.gd` and is not a benchmark gate.
+
 ### Interest filtering v1
 
 `set_interest {center_x, center_z, radius_m}` is a per-session viewport. The executor stores `interest_center: [f32; 2]` (default `[0, 0]`) and `interest_radius_m` (default **2,048 m**, the cap). A successful command answers with **two** messages: the current `snapshot`, then an `interest_view`. The snapshot reports `interest_center`, `interest_radius_m`, and `visible_roads`; the view carries `tick`, `center`, `radius_m`, up to **64** `RoadView { id, start, end, width_m }` entries with `truncated`, and up to **64** `BuildingView { id, center, radius_m }` entries with `buildings_truncated`.

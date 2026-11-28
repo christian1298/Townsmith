@@ -42,6 +42,15 @@ set -euo pipefail
 #   - a fixture with an unknown field -> tolerated (status=ok)
 #   - a fixture with valid zero counters -> status=ok tick=0 population=0 ...
 #
+# Pause state (additive `paused`, D-021):
+#   - real server one-shot path reports paused=false -> running=true
+#   - wire stubs report paused true, paused false, and a legacy payload with no
+#     `paused` (old server) -> the same ok marker plus the matching
+#     SERVER_STATUS_PANEL_PAUSED line
+#   - fixtures cover paused true, false, missing, and a non-bool -> status.shape
+#   - two watch stubs with identical counters and flipped vs constant `paused`
+#     must print the same aggregate checksum (pause is not in the checksum)
+#
 # Readiness and completion are bounded polls of the server/stub log. The
 # server, stub, and kill proxy are all killed on exit.
 
@@ -187,7 +196,8 @@ start_server() {
 # Minimal protocol-v0 peer. MODE chooses the fault:
 #   close-after-one, close-before-answer, advance, malformed-json,
 #   partial-frame, missing-field, wrong-type, silent-status, silent-hello,
-#   exit-after-one, regress.
+#   exit-after-one, regress, pause-flip, pause-constant, legacy-no-paused,
+#   paused-true, paused-false.
 # Every mode accepts exactly one connection and closes the listener, so a panel
 # that reconnected would fail anyway. Completion is logged as
 # `STUB_DONE mode=<mode> requests=<n> accepts=1`.
@@ -329,10 +339,48 @@ if mode == "advance":
     done()
     sys.exit(0)
 
+# Same counters every poll, only `paused` differs. Both modes must produce the
+# same aggregate checksum: the watch checksum covers counters, never pause.
+if mode in ("pause-flip", "pause-constant"):
+    flips = (True, False, True) if mode == "pause-flip" else (False, False, False)
+    for paused in flips:
+        request = read_frame(conn)
+        if request is None or request.get("type") != "server_status":
+            error("expected=server_status")
+        requests += 1
+        status = make_status(tick=7, checksum="0000000000000007")
+        status["paused"] = paused
+        send(conn, status)
+    request = read_frame(conn)
+    if request is None or request.get("type") != "disconnect":
+        error("expected=disconnect")
+    send(conn, {"type": "goodbye", "reason": "client_disconnect"})
+    conn.close()
+    done()
+    sys.exit(0)
+
 request = read_frame(conn)
 if request is None or request.get("type") != "server_status":
     error("expected=server_status")
 requests = 1
+
+if mode in ("legacy-no-paused", "paused-true", "paused-false"):
+    # One-shot status then a normal disconnect/goodbye. The legacy mode omits
+    # `paused` exactly like a pre-pause server; the panel must read it as
+    # running instead of failing the shape check.
+    status = make_status()
+    if mode == "paused-true":
+        status["paused"] = True
+    elif mode == "paused-false":
+        status["paused"] = False
+    send(conn, status)
+    request = read_frame(conn)
+    if request is None or request.get("type") != "disconnect":
+        error("expected=disconnect")
+    send(conn, {"type": "goodbye", "reason": "client_disconnect"})
+    conn.close()
+    done()
+    sys.exit(0)
 
 if mode == "close-before-answer":
     conn.close()
@@ -524,6 +572,10 @@ marker_line() {
 	grep "^SERVER_STATUS_PANEL " <<<"$OUTPUT" | tail -1 || true
 }
 
+paused_marker_line() {
+	grep "^SERVER_STATUS_PANEL_PAUSED " <<<"$OUTPUT" | tail -1 || true
+}
+
 watch_marker_line() {
 	grep "^SERVER_STATUS_WATCH " <<<"$OUTPUT" | tail -1 || true
 }
@@ -536,6 +588,17 @@ assert_ok_marker() {
 	fi
 	if [[ ! "$line" =~ ^SERVER_STATUS_PANEL\ status=ok\ tick=[0-9]+\ population=[0-9]+\ settlements=[0-9]+\ checksum=[0-9a-f]{16}$ ]]; then
 		fail "$label" "bad marker: $line"
+	fi
+}
+
+assert_paused_marker() {
+	local label="$1"
+	local line="$2"
+	if [[ -z "$line" ]]; then
+		fail "$label" "no SERVER_STATUS_PANEL_PAUSED marker"
+	fi
+	if [[ ! "$line" =~ ^SERVER_STATUS_PANEL_PAUSED\ status=ok\ paused=(true|false)\ running=(true|false)$ ]]; then
+		fail "$label" "bad paused marker: $line"
 	fi
 }
 
@@ -579,11 +642,12 @@ expect_watch_fail() {
 	printf '%s\n' "$line"
 }
 
-# expect_fixture_ok LABEL PATH EXPECTED_MARKER
+# expect_fixture_ok LABEL PATH EXPECTED_MARKER [EXPECTED_PAUSED_MARKER]
 expect_fixture_ok() {
 	local label="$1"
 	local path="$2"
 	local expected="$3"
+	local expected_paused="${4:-}"
 	run_godot "$label" --smoke --fixture-json "$path"
 	if [[ $GODOT_STATUS -ne 0 ]]; then
 		fail "$label" "Godot exited with status $GODOT_STATUS"
@@ -593,6 +657,75 @@ expect_fixture_ok() {
 	if [[ "$line" != "$expected" ]]; then
 		fail "$label" "expected '$expected', got: ${line:-<no marker>}"
 	fi
+	if [[ -n "$expected_paused" ]]; then
+		local paused_line
+		paused_line="$(paused_marker_line)"
+		if [[ "$paused_line" != "$expected_paused" ]]; then
+			fail "$label" "expected paused '$expected_paused', got: ${paused_line:-<no marker>}"
+		fi
+	fi
+}
+
+# run_status_stub LABEL MODE EXPECTED_PAUSED_MARKER
+#
+# One-shot stub status. Asserts the unchanged ok marker plus the exact paused
+# marker, then waits for the stub to finish on its own. Prints the paused line.
+run_status_stub() {
+	local label="$1"
+	local mode="$2"
+	local expected_paused="$3"
+	local port
+	port="$(pick_port)"
+
+	start_stub "$mode" "$port"
+	run_godot "$label" --smoke --host 127.0.0.1 --port "$port" \
+		--name status-panel --timeout-ms 5000
+	if [[ $GODOT_STATUS -ne 0 ]]; then
+		fail "$label" "Godot exited with status $GODOT_STATUS"
+	fi
+	assert_ok_marker "$label" "$(marker_line)"
+	local paused_line
+	paused_line="$(paused_marker_line)"
+	if [[ "$paused_line" != "$expected_paused" ]]; then
+		fail "$label" "expected paused '$expected_paused', got: ${paused_line:-<no marker>}"
+	fi
+	wait_for_log "$STUB_LOG" "$STUB_PID" "STUB_DONE mode=$mode requests=1 accepts=1" 10
+	wait_for_exit "$STUB_PID" 10
+	stop_stub
+	if grep -q "STUB_ERROR" "$STUB_LOG"; then
+		fail "$label" "stub protocol error"
+	fi
+	printf '%s\n' "$paused_line"
+}
+
+# run_watch_stub_steady LABEL MODE
+#
+# Three constant-counter polls from a stub whose `paused` either flips or stays
+# false. Returns the aggregate marker so callers can compare checksums.
+run_watch_stub_steady() {
+	local label="$1"
+	local mode="$2"
+	local port
+	port="$(pick_port)"
+
+	start_stub "$mode" "$port"
+	run_godot "$label" --smoke --watch --iterations 3 --interval-ms 50 \
+		--host 127.0.0.1 --port "$port" --name status-panel --timeout-ms 500
+	if [[ $GODOT_STATUS -ne 0 ]]; then
+		fail "$label" "Godot exited with status $GODOT_STATUS"
+	fi
+	local line
+	line="$(watch_marker_line)"
+	if [[ ! "$line" =~ ^SERVER_STATUS_WATCH\ status=ok\ iterations=3\ checksum=[0-9a-f]{16}\ tick_first=7\ tick_last=7$ ]]; then
+		fail "$label" "bad steady marker: ${line:-<no marker>}"
+	fi
+	if grep -q "^SERVER_STATUS_PANEL_PAUSED " <<<"$OUTPUT"; then
+		fail "$label" "watch mode must not print the one-shot pause marker"
+	fi
+	wait_for_log "$STUB_LOG" "$STUB_PID" "STUB_DONE mode=$mode requests=3 accepts=1" 10
+	wait_for_exit "$STUB_PID" 10
+	stop_stub
+	printf '%s\n' "$line"
 }
 
 # Valid path: each run gets its own server process, port, and in-memory world,
@@ -612,6 +745,13 @@ run_panel() {
 	local line
 	line="$(marker_line)"
 	assert_ok_marker "$label" "$line"
+	local paused_line
+	paused_line="$(paused_marker_line)"
+	assert_paused_marker "$label" "$paused_line"
+	# A fresh in-memory world is never paused.
+	if [[ "$paused_line" != "SERVER_STATUS_PANEL_PAUSED status=ok paused=false running=true" ]]; then
+		fail "$label" "expected a running server, got: ${paused_line:-<no marker>}"
+	fi
 
 	# A requested disconnect is visible in the server report; wait for it so
 	# the process exits on its own rather than relying on cleanup.
@@ -665,6 +805,9 @@ run_watch() {
 	fi
 	if [[ -z "$first" || -z "$last" || "$last" -lt "$first" ]]; then
 		fail "$label" "tick moved backwards during watch: first=$first last=$last"
+	fi
+	if [[ -n "$(paused_marker_line)" ]]; then
+		fail "$label" "watch mode must not print the one-shot pause marker"
 	fi
 
 	wait_for_log "$SERVER_LOG" "$SERVER_PID" "SERVER_LISTEN status=ok sessions=1 " 10
@@ -844,6 +987,23 @@ extra = dict(base)
 extra["future_field"] = {"nested": True}
 write("extra_field.json", extra)
 
+# `paused` is additive and optional. `zero.json` above omits it (a pre-pause
+# server), so it doubles as the legacy/missing case.
+paused_true = dict(base)
+paused_true["paused"] = True
+write("paused_true.json", paused_true)
+
+paused_false = dict(base)
+paused_false["paused"] = False
+write("paused_false.json", paused_false)
+
+legacy_no_paused = dict(base)
+write("legacy_no_paused.json", legacy_no_paused)
+
+paused_wrong_type = dict(base)
+paused_wrong_type["paused"] = "true"
+write("paused_wrong_type.json", paused_wrong_type)
+
 (root / "malformed.json").write_text('{"type": "server_status",\n', encoding="utf-8")
 PY
 
@@ -977,16 +1137,46 @@ expect_fail "fixture-missing-tick" "status.shape" \
 	--smoke --fixture-json "$FIXTURE_DIR/missing_tick.json"
 expect_fail "fixture-wrong-type" "status.shape" \
 	--smoke --fixture-json "$FIXTURE_DIR/wrong_type.json"
+expect_fail "fixture-paused-wrong-type" "status.shape" \
+	--smoke --fixture-json "$FIXTURE_DIR/paused_wrong_type.json"
 expect_fail "fixture-malformed" "status.frame" \
 	--smoke --fixture-json "$FIXTURE_DIR/malformed.json"
 
 # Zero values are valid and extras are ignored by the protocol; both must
-# render the same authoritative marker.
+# render the same authoritative marker. The additive `paused` field renders as
+# the Time row and never enters the integer marker.
 ZERO_MARKER="SERVER_STATUS_PANEL status=ok tick=0 population=0 settlements=0 checksum=0000000000000000"
-expect_fixture_ok "fixture-zero" "$FIXTURE_DIR/zero.json" "$ZERO_MARKER"
-expect_fixture_ok "fixture-extra-field" "$FIXTURE_DIR/extra_field.json" "$ZERO_MARKER"
+PAUSED_TRUE_MARKER="SERVER_STATUS_PANEL_PAUSED status=ok paused=true running=false"
+PAUSED_FALSE_MARKER="SERVER_STATUS_PANEL_PAUSED status=ok paused=false running=true"
+expect_fixture_ok "fixture-zero" "$FIXTURE_DIR/zero.json" "$ZERO_MARKER" "$PAUSED_FALSE_MARKER"
+expect_fixture_ok "fixture-extra-field" "$FIXTURE_DIR/extra_field.json" "$ZERO_MARKER" "$PAUSED_FALSE_MARKER"
+expect_fixture_ok "fixture-paused-true" "$FIXTURE_DIR/paused_true.json" "$ZERO_MARKER" "$PAUSED_TRUE_MARKER"
+expect_fixture_ok "fixture-paused-false" "$FIXTURE_DIR/paused_false.json" "$ZERO_MARKER" "$PAUSED_FALSE_MARKER"
+expect_fixture_ok "fixture-legacy-no-paused" "$FIXTURE_DIR/legacy_no_paused.json" "$ZERO_MARKER" "$PAUSED_FALSE_MARKER"
 
-echo "SERVER_STATUS_PANEL_FAULTS status=ok connect=1 reject=1 shape=2 frame=1 fixture_ok=2"
+# One-shot wire path: stubs serve paused true, paused false, and the legacy
+# payload with no `paused` (an old server). The ok marker is unchanged.
+WIRE_PAUSED_TRUE="$(run_status_stub "wire-paused-true" "paused-true" "$PAUSED_TRUE_MARKER")"
+run_status_stub "wire-paused-false" "paused-false" "$PAUSED_FALSE_MARKER" >/dev/null
+run_status_stub "wire-legacy-no-paused" "legacy-no-paused" "$PAUSED_FALSE_MARKER" >/dev/null
+
+# Pause state must stay out of the watch checksum: two stubs with identical
+# counters, one flipping `paused` every poll and one constant, must print the
+# same aggregate line.
+WATCH_PAUSE_FLIP="$(run_watch_stub_steady "watch-pause-flip" "pause-flip")"
+WATCH_PAUSE_CONSTANT="$(run_watch_stub_steady "watch-pause-constant" "pause-constant")"
+if [[ "$WATCH_PAUSE_FLIP" != "$WATCH_PAUSE_CONSTANT" ]]; then
+	echo "Server status panel smoke failed: pause moved the watch checksum" >&2
+	echo "  flipped:  $WATCH_PAUSE_FLIP" >&2
+	echo "  constant: $WATCH_PAUSE_CONSTANT" >&2
+	exit 1
+fi
+
+echo "SERVER_STATUS_PANEL_FAULTS status=ok connect=1 reject=1 shape=3 frame=1 fixture_ok=5"
+echo "SERVER_STATUS_PANEL_PAUSED_WIRE status=ok cases=3 paused_true=1 paused_false=1 legacy=1"
+echo "SERVER_STATUS_PANEL_PAUSED_FIXTURES status=ok cases=4 paused_true=1 paused_false=1 legacy=1 shape=1"
+echo "$WIRE_PAUSED_TRUE"
+echo "SERVER_STATUS_PANEL_PAUSE_WATCH status=ok cases=2 flip_ignored=true $WATCH_PAUSE_FLIP"
 echo "SERVER_STATUS_WATCH_SMOKE status=ok runs=2 $WATCH_FIRST_LINE"
 echo "SERVER_STATUS_WATCH_SINGLE status=ok $WATCH_SINGLE_LINE"
 echo "SERVER_STATUS_WATCH_ADVANCE status=ok runs=2 $WATCH_ADVANCE_FIRST"
