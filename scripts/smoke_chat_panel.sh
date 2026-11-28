@@ -4,6 +4,7 @@
 # Runs `godot/chat_panel.tscn -- --smoke` twice, requires the synthetic contract
 # marker `CHAT_PANEL status=ok cases=N checks=N checksum=<8 hex>`, the
 # deterministic keyboard focus marker `CHAT_PANEL_FOCUS status=ok checks=N`,
+# the screen-reader marker `CHAT_PANEL_A11Y status=ok checks=N`,
 # plus the reconnect merge marker `MP_CHAT_CATCHUP status=ok added=N skipped=N
 # last_seq=N unread=N`, and diffs every `CHAT_PANEL*` / `MP_CHAT_CATCHUP` line
 # between the two processes. It also probes the panel headlessly *without*
@@ -37,7 +38,7 @@ fi
 SMOKE_DIR="$(mktemp -d)"
 trap 'rm -rf "$SMOKE_DIR"' EXIT
 
-CONTRACT='^CHAT_PANEL status=ok cases=23 checks=241 checksum=06986775$'
+CONTRACT='^CHAT_PANEL status=ok cases=23 checks=280 checksum=06986775$'
 CATCHUP_CONTRACT='^MP_CHAT_CATCHUP status=ok added=[1-9][0-9]* skipped=[1-9][0-9]* last_seq=[0-9]+ unread=[0-9]+$'
 # Focus checks run after every render stage, so the 23 render cases and their
 # checksum stay at the pre-focus baseline; the focus block adds 47 checks.
@@ -49,6 +50,11 @@ GAMEPAD_CONTRACT='^CHAT_PANEL_GAMEPAD status=ok checks=14$'
 # returns to the pre-gamepad baseline: the VK block's successful send clears
 # the empty-send error recorded by the earlier gamepad accept check.
 VK_CONTRACT='^CHAT_PANEL_VK status=ok checks=28$'
+# Screen-reader semantics run after the final render stage: 39 checks cover the
+# localized names/descriptions, transcript/status live modes, focus reachability,
+# badge announcement, EN/DE switching, and missing-key leaks. The render
+# checksum stays 06986775 because no render case or state is added before it.
+A11Y_CONTRACT='^CHAT_PANEL_A11Y status=ok checks=39$'
 
 run_usage_probe() {
 	local log="$1"
@@ -154,6 +160,16 @@ if [[ -z "$VK_LINE" ]]; then
 fi
 if [[ ! "$VK_LINE" =~ $VK_CONTRACT ]]; then
 	echo "Chat panel smoke virtual-keyboard contract mismatch: $VK_LINE" >&2
+	exit 1
+fi
+
+A11Y_LINE="$(grep '^CHAT_PANEL_A11Y status=' <<<"$FIRST" | tail -1 || true)"
+if [[ -z "$A11Y_LINE" ]]; then
+	echo "Chat panel smoke failed: no screen-reader marker" >&2
+	exit 1
+fi
+if [[ ! "$A11Y_LINE" =~ $A11Y_CONTRACT ]]; then
+	echo "Chat panel smoke screen-reader contract mismatch: $A11Y_LINE" >&2
 	exit 1
 fi
 
